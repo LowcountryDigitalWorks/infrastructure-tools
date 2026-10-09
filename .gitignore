@@ -1,0 +1,19 @@
+# .NET and Visual Studio build output
+.vs/
+bin/
+obj/
+*.user
+*.suo
+
+# Machine-local configuration and credentials
+.env
+.env.*
+*.Local.json
+*.pfx
+*.p12
+*.key
+*.pem
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
