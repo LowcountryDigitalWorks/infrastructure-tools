@@ -1,0 +1,25 @@
+{
+  "deviceDisplayName": "Local Windows host",
+  "desktopCommander": {
+    "scheduledTaskName": "<owner-scoped-background-task-name>"
+  },
+  "wsl": {
+    "distroName": "Ubuntu",
+    "cursorWorkerService": "<cursor-worker-systemd-unit>"
+  },
+  "linuxNode": {
+    "displayName": "Linux CI node",
+    "host": "<existing-host-or-name>",
+    "port": 22,
+    "user": "<existing-ssh-user>",
+    "identityFile": "<absolute-existing-private-key-path>",
+    "knownHostsFile": "<absolute-existing-known-hosts-path>",
+    "hostKeyAlias": "<existing-trusted-host-key-alias-if-used>",
+    "runnerService": "<github-runner-systemd-unit>"
+  },
+  "gitHubRunner": {
+    "displayName": "GitHub Runner",
+    "repository": "<owner/repository>",
+    "runnerId": 0
+  }
+}

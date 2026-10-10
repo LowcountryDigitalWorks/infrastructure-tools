@@ -1,4 +1,4 @@
-using System.Globalization;
+using System.Text;
 using LDW.HostAgent.Core;
 
 namespace LDW.HostAgent.Windows;
@@ -8,12 +8,14 @@ internal sealed class HostAgentContext : ApplicationContext
     private readonly NotifyIcon _trayIcon;
     private readonly ToolStripMenuItem _summaryItem;
     private readonly System.Windows.Forms.Timer _timer;
-    private readonly WindowsSystemProbe _probe = new();
+    private readonly SemaphoreSlim _refreshGate = new(1, 1);
+    private readonly HostAgentLiveSnapshotProvider _provider;
     private StatusForm? _statusForm;
-    private SystemTelemetry? _lastTelemetry;
+    private HostAgentLiveSnapshot? _lastSnapshot;
 
     public HostAgentContext()
     {
+        _provider = new HostAgentLiveSnapshotProvider(HostAgentSettingsLoader.Load());
         var menu = new ContextMenuStrip();
         menu.Items.Add("Open Status", null, (_, _) => ShowStatus());
         menu.Items.Add("Refresh Now", null, async (_, _) => await RefreshAsync());
@@ -39,26 +41,24 @@ internal sealed class HostAgentContext : ApplicationContext
 
     private async Task RefreshAsync()
     {
+        if (!await _refreshGate.WaitAsync(0))
+            return;
         try
         {
-            _lastTelemetry = await _probe.ObserveAsync(CancellationToken.None);
-            var pressure = MemoryPressureEvaluator.Evaluate(_lastTelemetry);
-            var level = pressure switch
-            {
-                MemoryPressureLevel.Normal => "Healthy",
-                MemoryPressureLevel.Elevated => "Attention",
-                MemoryPressureLevel.Severe => "High pressure",
-                _ => "Unknown"
-            };
-            _summaryItem.Text = $"Memory: {level}";
-            _trayIcon.Text = $"LDW Host Agent — {level}";
-            _statusForm?.UpdateTelemetry(Environment.MachineName, _lastTelemetry, pressure);
+            _lastSnapshot = await _provider.ObserveAsync(CancellationToken.None);
+            _summaryItem.Text = $"{_lastSnapshot.Snapshot.Color}: {_lastSnapshot.Snapshot.Health}";
+            _trayIcon.Text = LimitTrayText($"LDW Host Agent — {_lastSnapshot.Snapshot.Color} — {_lastSnapshot.Snapshot.Health}");
+            _statusForm?.UpdateSnapshot(_lastSnapshot);
         }
-        catch (Exception ex)
+        catch
         {
             _summaryItem.Text = "Status unavailable";
             _trayIcon.Text = "LDW Host Agent — status unavailable";
-            _statusForm?.ShowError(ex.Message);
+            _statusForm?.ShowError("Status refresh failed.");
+        }
+        finally
+        {
+            _refreshGate.Release();
         }
     }
 
@@ -66,31 +66,37 @@ internal sealed class HostAgentContext : ApplicationContext
     {
         _statusForm ??= new StatusForm();
         _statusForm.FormClosed += (_, _) => _statusForm = null;
-        if (_lastTelemetry is not null)
-            _statusForm.UpdateTelemetry(Environment.MachineName, _lastTelemetry, MemoryPressureEvaluator.Evaluate(_lastTelemetry));
+        if (_lastSnapshot is not null)
+            _statusForm.UpdateSnapshot(_lastSnapshot);
         _statusForm.Show();
         _statusForm.Activate();
     }
 
     private void CopyDiagnostics()
     {
-        if (_lastTelemetry is null)
+        if (_lastSnapshot is null)
         {
-            Clipboard.SetText("LDW Host Agent: no telemetry sample available.");
+            Clipboard.SetText("LDW Host Agent: no sanitized telemetry sample available.");
             return;
         }
-        var t = _lastTelemetry;
-        Clipboard.SetText(string.Join(Environment.NewLine,
-            "LDW Host Agent local diagnostic snapshot",
-            $"Device: {Environment.MachineName}",
-            $"Observed (UTC): {t.ObservedAt:O}",
-            $"Available memory: {FormatBytes(t.AvailablePhysicalBytes)} / {FormatBytes(t.TotalPhysicalBytes)} ({t.AvailablePercent:F1}% available)",
-            $"CPU busy: {(t.CpuBusyPercent.HasValue ? t.CpuBusyPercent.Value.ToString("F1", CultureInfo.InvariantCulture) + "%" : "unknown")}",
-            $"Pressure: {MemoryPressureEvaluator.Evaluate(t)} — {t.MemoryPressure.Summary}",
-            $"Fixed disks: {t.Disks.Count}"));
+
+        var builder = new StringBuilder();
+        builder.AppendLine("LDW Host Agent sanitized diagnostic snapshot");
+        builder.AppendLine($"Observed (UTC): {_lastSnapshot.Snapshot.ObservedAt:O}");
+        builder.AppendLine($"Overall: {_lastSnapshot.Snapshot.Color} / {_lastSnapshot.Snapshot.Health} — {_lastSnapshot.Snapshot.Summary}");
+        builder.AppendLine($"Owner session: {_lastSnapshot.RuntimeContext.OwnerSession}");
+        builder.AppendLine($"Configuration: {_lastSnapshot.Configuration.Summary}");
+        foreach (var observation in _lastSnapshot.Snapshot.Components)
+            builder.AppendLine($"{observation.ComponentId}: {observation.Color} / {observation.State} / {observation.Health} — {observation.Summary}");
+        if (_lastSnapshot.LinuxTelemetry is { } linux)
+            builder.AppendLine($"linux: kernel={linux.Kernel}; uptimeHours={linux.Uptime.TotalHours:F1}; load1={linux.Load1:F2}; memoryAvailableBytes={linux.MemoryAvailableBytes}; swapUsedBytes={linux.SwapUsedBytes}; cpuPsiKnown={linux.CpuPsiSomeAverage10.HasValue}; memoryPsiKnown={linux.MemoryPsiSomeAverage10.HasValue}; updates={(linux.UpdatesAvailable.HasValue ? linux.UpdatesAvailable.Value.ToString() : "unknown")}; rebootRequired={linux.RebootRequired}");
+        if (_lastSnapshot.GitHubRunnerTelemetry is { } runner)
+            builder.AppendLine($"github-runner: idPresent={runner.Id > 0}; online={runner.Online}; busy={runner.Busy}; labelCount={runner.Labels.Count}");
+        builder.AppendLine("Machine-local addresses, SSH targets/paths, credentials, GitHub auth, and raw adapter output are intentionally omitted.");
+        Clipboard.SetText(builder.ToString());
     }
 
-    private static string FormatBytes(ulong bytes) => $"{bytes / 1024d / 1024 / 1024:F2} GiB";
+    private static string LimitTrayText(string value) => value.Length <= 63 ? value : value[..63];
 
     protected override void ExitThreadCore()
     {
@@ -99,6 +105,7 @@ internal sealed class HostAgentContext : ApplicationContext
         _trayIcon.Visible = false;
         _trayIcon.Dispose();
         _statusForm?.Close();
+        _refreshGate.Dispose();
         base.ExitThreadCore();
     }
 }

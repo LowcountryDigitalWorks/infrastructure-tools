@@ -4,7 +4,7 @@ Reusable LDW-owned utilities for local computers, CI runners, and Linux nodes. T
 
 ## Current tools
 
-- [LDW Host Agent](host-agent/README.md) — the device-first Windows tray/status foundation and shared Linux/off-site node contracts. It runs unelevated and reports state; V0.1 does not mutate services or machine power state.
+- [LDW Host Agent](host-agent/README.md) — the device-first, unelevated Windows tray/status surface with read-only local adapters plus strict-SSH Linux/off-site node contracts. The current slice reports state only and does not mutate services, VMs, runner registration, CI profiles, or machine power.
 - [CI runner benchmarks](benchmarks/README.md) and [profiles](profiles/README.md) — reusable capacity evidence and profile documentation.
 - [Architecture and operations docs](docs/README.md).
 
