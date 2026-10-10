@@ -73,7 +73,8 @@ public sealed record LinuxNodeTelemetry(
     double? MemoryPsiFullAverage10,
     IReadOnlyDictionary<string, ObservedState> SystemdUnits,
     bool RebootRequired,
-    bool Reachable);
+    bool Reachable,
+    int? UpdatesAvailable = null);
 
 public interface IStrictSshTransport
 {

@@ -8,6 +8,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LDW.HostAgent.Windows", "sr
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LDW.HostAgent.Core.Tests", "tests\LDW.HostAgent.Core.Tests\LDW.HostAgent.Core.Tests.csproj", "{82D32172-180D-41D0-AC13-59FE1E987C56}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LDW.HostAgent.LiveProbe", "tools\LDW.HostAgent.LiveProbe\LDW.HostAgent.LiveProbe.csproj", "{744F69E8-0260-44A8-9436-D544AA819D30}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -26,5 +28,9 @@ Global
 		{A3FCF3A0-B92C-421F-BCE7-5B93AC5ADFB5}.Release|Any CPU.Build.0 = Release|Any CPU
 		{82D32172-180D-41D0-AC13-59FE1E987C56}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{82D32172-180D-41D0-AC13-59FE1E987C56}.Release|Any CPU.Build.0 = Release|Any CPU
+		{744F69E8-0260-44A8-9436-D544AA819D30}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{744F69E8-0260-44A8-9436-D544AA819D30}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{744F69E8-0260-44A8-9436-D544AA819D30}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{744F69E8-0260-44A8-9436-D544AA819D30}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal

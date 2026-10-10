@@ -114,6 +114,14 @@ public static class DeviceHealthAggregator
             if (own is HealthState.Failed or HealthState.Degraded or HealthState.Initializing or HealthState.Unknown)
                 return own;
 
+            // Dependencies only need to be available while this component is itself expected to be active.
+            // This prevents an intentionally inactive pre-login/on-demand component from failing solely because
+            // its dependency is also intentionally inactive, while preserving dependency checks for active work.
+            if (observation is not null
+                && observation.State is ObservedState.Stopped or ObservedState.Disabled
+                && c.DesiredState is DesiredState.Stopped or DesiredState.Disabled or DesiredState.OnDemand or DesiredState.RunningAfterLogin)
+                return own;
+
             foreach (var dependencyId in c.DependsOn ?? [])
             {
                 if (!byId.TryGetValue(dependencyId, out var dependency))
