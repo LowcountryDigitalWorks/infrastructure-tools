@@ -8,11 +8,16 @@ internal sealed partial class StrictSshLinuxNodeProbe
 {
     private readonly ReadOnlyCommandRunner _commands;
     private readonly LinuxNodeSettings _settings;
+    private readonly IHyperVObservationClient _hyperVObserver;
 
-    public StrictSshLinuxNodeProbe(ReadOnlyCommandRunner commands, LinuxNodeSettings settings)
+    public StrictSshLinuxNodeProbe(
+        ReadOnlyCommandRunner commands,
+        LinuxNodeSettings settings,
+        IHyperVObservationClient? hyperVObserver = null)
     {
         _commands = commands;
         _settings = settings;
+        _hyperVObserver = hyperVObserver ?? new HyperVObservationClient();
     }
 
     public async ValueTask<LinuxNodeTelemetry?> ObserveAsync(CancellationToken cancellationToken)
@@ -24,7 +29,37 @@ internal sealed partial class StrictSshLinuxNodeProbe
             _settings.KnownHostsFile!, _settings.IdentityFile!, true, true, true);
         policy.Validate();
 
-        var target = $"{_settings.User}@{_settings.Host}";
+        var targets = await ResolveTargetsAsync(cancellationToken);
+        if (targets.Count == 0)
+            return null;
+
+        foreach (var targetHost in targets.Take(HyperVObserverContract.MaximumSshCandidates))
+        {
+            var telemetry = await ObserveTargetAsync(targetHost, cancellationToken);
+            if (telemetry is not null)
+                return telemetry;
+        }
+
+        return null;
+    }
+
+    private async ValueTask<IReadOnlyList<string>> ResolveTargetsAsync(CancellationToken cancellationToken)
+    {
+        if (!_settings.UseHyperVObserver)
+            return string.IsNullOrWhiteSpace(_settings.Host) ? [] : [_settings.Host];
+
+        var observation = await _hyperVObserver.ObserveAsync(cancellationToken);
+        return observation is null
+            ? []
+            : HyperVObserverContract.SelectSshCandidates(observation);
+    }
+
+    private async ValueTask<LinuxNodeTelemetry?> ObserveTargetAsync(string host, CancellationToken cancellationToken)
+    {
+        if (!SafeSshHostRegex().IsMatch(host))
+            return null;
+
+        var target = $"{_settings.User}@{host}";
         var probe = BuildProbeCommand(_settings.RunnerService!);
         string[] arguments =
         [
@@ -58,8 +93,7 @@ internal sealed partial class StrictSshLinuxNodeProbe
 
     private bool TryValidateLocalConfiguration()
     {
-        if (string.IsNullOrWhiteSpace(_settings.Host)
-            || string.IsNullOrWhiteSpace(_settings.User)
+        if (string.IsNullOrWhiteSpace(_settings.User)
             || string.IsNullOrWhiteSpace(_settings.IdentityFile)
             || string.IsNullOrWhiteSpace(_settings.KnownHostsFile)
             || string.IsNullOrWhiteSpace(_settings.RunnerService))
@@ -70,10 +104,19 @@ internal sealed partial class StrictSshLinuxNodeProbe
             return false;
         if (new FileInfo(_settings.KnownHostsFile).Length == 0)
             return false;
-        return SafeSshHostRegex().IsMatch(_settings.Host)
-            && (string.IsNullOrWhiteSpace(_settings.HostKeyAlias) || SafeSshHostRegex().IsMatch(_settings.HostKeyAlias))
-            && SafeSshUserRegex().IsMatch(_settings.User)
-            && SafeSystemdUnitRegex().IsMatch(_settings.RunnerService);
+        if (!SafeSshUserRegex().IsMatch(_settings.User)
+            || !SafeSystemdUnitRegex().IsMatch(_settings.RunnerService))
+            return false;
+
+        if (_settings.UseHyperVObserver)
+        {
+            return !string.IsNullOrWhiteSpace(_settings.HostKeyAlias)
+                && SafeSshHostRegex().IsMatch(_settings.HostKeyAlias);
+        }
+
+        return !string.IsNullOrWhiteSpace(_settings.Host)
+            && SafeSshHostRegex().IsMatch(_settings.Host)
+            && (string.IsNullOrWhiteSpace(_settings.HostKeyAlias) || SafeSshHostRegex().IsMatch(_settings.HostKeyAlias));
     }
 
     private static string BuildProbeCommand(string runnerService)

@@ -26,6 +26,7 @@ internal sealed record LinuxNodeSettings
 {
     public string DisplayName { get; init; } = "Linux CI node";
     public string? Host { get; init; }
+    public bool UseHyperVObserver { get; init; }
     public int? Port { get; init; }
     public string? User { get; init; }
     public string? IdentityFile { get; init; }

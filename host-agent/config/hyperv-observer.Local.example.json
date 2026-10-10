@@ -1,0 +1,5 @@
+{
+  "permittedCallerSids": [
+    "<explicit-owner-user-sid>"
+  ]
+}
