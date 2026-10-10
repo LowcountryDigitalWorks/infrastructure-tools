@@ -10,6 +10,7 @@
   "linuxNode": {
     "displayName": "Linux CI node",
     "host": "<existing-host-or-name>",
+    "useHyperVObserver": false,
     "port": 22,
     "user": "<existing-ssh-user>",
     "identityFile": "<absolute-existing-private-key-path>",

@@ -32,7 +32,7 @@ Dependency health is availability-aware while the dependent component is expecte
 
 The Windows adapter observes available/total physical memory, commit headroom, fixed-disk free space, and a short CPU sample. Memory pressure is evaluated separately from percent-used. A single short CPU sample is informational and does not create a failure alarm. Disk capacity below 10% free is currently mapped to Yellow/attention rather than Red/failure.
 
-No Hyper-V query is made by the normal-user tray. If future Hyper-V telemetry cannot be observed without elevation, expose it only through a separately reviewed narrow helper rather than elevating the tray.
+The normal-user tray never queries Hyper-V directly. Privileged Hyper-V observation is isolated behind the separately built read-only helper described below.
 
 ## Owner-session observation
 
@@ -56,21 +56,47 @@ The adapter observes only a machine-local configured scheduled-task name and use
 
 `wsl --list --verbose` is the only command used to determine distro presence/running state, so a stopped distro is never started merely for observation. If the configured distro is already Running, the Cursor Worker adapter may execute read-only `systemctl is-active <configured-unit>` inside that existing distro. Cursor Worker remains `RunningAfterLogin`; stopped post-login is a failure/degraded state according to requiredness.
 
+## Hyper-V observer helper
+
+The privileged boundary is intentionally narrower than the Host Agent tray:
+
+- `LDW.HostAgent.HyperVObserver` must itself be elevated; the tray remains normal-user and continues to refuse elevated execution.
+- The helper exposes one local named pipe created through `CreateNamedPipe` with a protected explicit DACL. LocalSystem and Administrators receive administrative pipe access and only configured explicit owner-user SIDs receive read/write access. `PIPE_REJECT_REMOTE_CLIENTS` rejects remote named-pipe connections.
+- Pipe ACL access alone is insufficient: after connect, the server identifies the caller SID with `RunAsClient` and authorizes only an explicitly configured safe user SID. Everyone, Interactive, Authenticated Users, and Builtin Users are rejected by contract policy.
+- The tray client requests `TokenImpersonationLevel.Identification`. It also resolves the connected pipe server PID, opens that process token read-only, and accepts the server only when the token is elevated and belongs to LocalSystem or the tray's same explicit user SID. A non-elevated or unexpected-user server fails closed before any request is sent.
+- The only accepted request is the exact versioned `observe-ci-runner-001` operation. There is no VM-name, command-line, script, method, or free-form argument field in the request.
+- The allowlisted VM literal is `CI-RUNNER-001`; the helper does not enumerate arbitrary VMs.
+- Hyper-V observation is a fixed in-code PowerShell script using only `Get-VM -Name 'CI-RUNNER-001'` and `Get-VMNetworkAdapter -VMName 'CI-RUNNER-001'`. No caller value is interpolated into the script or command line.
+- The helper captures bounded stdout/stderr but never returns or logs raw command output. Its response is limited to protocol version, authorization state, VM existence, state/running state, filtered address candidates, and a non-sensitive error code.
+- Address policy rejects invalid/empty values, IPv4 0/8, loopback, APIPA/link-local, multicast/broadcast, IPv6 unspecified/loopback/link-local/multicast, and duplicates. SSH selection is additionally capped to four candidates.
+- No TCP/HTTP/network listener exists. The named pipe is local IPC only.
+
+Helper authorization is machine-local. The default file is `%ProgramData%\LowcountryDigitalWorks\HostAgent\hyperv-observer.Local.json`; `--config <local-path>` may be used for a reviewed local configuration. Only one to four explicit `S-1-5-21-...` user SIDs survive parsing; broad group SIDs are discarded. Real SIDs are never committed.
+
+This slice contains no Hyper-V mutation request or implementation: no start/stop/restart/reset, configuration/profile/Dynamic Memory changes, checkpoints, network changes, or generic elevated command execution. It also does not install a persistent elevated service/task before exact-candidate review. If the helper is absent, not elevated, missing/invalid local authorization, inaccessible, fails server-identity verification, or returns no safe observation, Host Agent remains fail-closed.
+
 ## Linux node / strict SSH
 
-The Linux-node adapter requires machine-local values for target, user, existing identity file, existing non-empty known-hosts file, and runner systemd unit. An optional validated TCP port may be supplied when the accepted SSH path does not use port 22. When the accepted trust record uses one, an existing `HostKeyAlias` is also supplied from machine-local configuration. Public code never supplies a real host/address/identity.
+The Linux-node adapter always requires machine-local values for user, existing identity file, existing non-empty known-hosts file, and runner systemd unit. An optional validated TCP port may be supplied when the accepted SSH path does not use port 22.
+
+Two target modes are supported:
+
+1. **Static target:** `linuxNode.host` supplies the syntax-validated connection target. An optional existing `HostKeyAlias` may preserve an accepted trust identity.
+2. **Hyper-V observer:** `linuxNode.useHyperVObserver=true` ignores any configured `host` value. Current guest address candidates come only from the authenticated local helper. This mode requires an existing validated `HostKeyAlias` so a changing network address never becomes the SSH trust identity.
 
 SSH is invoked with all of:
 
 - explicit `-i <identity>`;
 - explicit `UserKnownHostsFile=<known-hosts>`;
-- optional explicit `HostKeyAlias=<existing-alias>` when the accepted trust path uses one;
+- required explicit `HostKeyAlias=<existing-alias>` in dynamic Hyper-V mode, or optional alias in static mode;
 - `StrictHostKeyChecking=yes`;
 - `IdentitiesOnly=yes`;
 - `BatchMode=yes`;
 - bounded connect/probe timeout.
 
-The remote command is fixed/read-only and does not use `sudo`. It reports kernel, uptime, load1, MemAvailable, swap used, root-disk total/free, CPU/memory PSI when supported, locally cached upgradable-package count, reboot-required marker, and the configured GitHub Runner systemd service state. The configured host/user/unit are syntax-validated before use. If strict configuration is absent/invalid, SSH cannot be trusted, or output cannot be parsed, report Unknown rather than fabricate node failure/readiness. Dynamic Hyper-V guest addressing that cannot be resolved from the unelevated owner context likewise remains Unknown; do not elevate the tray or rebuild SSH trust merely to observe it. If needed, a separately reviewed narrow read-only helper may later supply current guest addressing/Hyper-V telemetry.
+The remote command is fixed/read-only and does not use `sudo`. It reports kernel, uptime, load1, MemAvailable, swap used, root-disk total/free, CPU/memory PSI when supported, locally cached upgradable-package count, reboot-required marker, and the configured GitHub Runner systemd service state. The configured user/unit and each candidate target are syntax-validated before use.
+
+When dynamic addressing is enabled, only helper-authorized/VM-present/running responses are eligible for SSH target selection, no more than four filtered candidates are attempted, and no candidate is persisted. If configuration is absent/invalid, helper authorization/observation fails, no safe candidate exists, SSH trust fails, or telemetry cannot be parsed, report Unknown rather than scan the network, regenerate trust, or fabricate failure/readiness.
 
 ## GitHub Runner
 
@@ -78,12 +104,16 @@ Runner control-plane status is a separate read-only source. Host Agent invokes e
 
 ## Machine-local configuration
 
-Public template: `config/host-agent.Local.example.json`.
+Public templates: `config/host-agent.Local.example.json` and `config/hyperv-observer.Local.example.json`.
 
-Actual machine-specific configuration must stay local/gitignored. Lookup order is explicit `LDW_HOST_AGENT_CONFIG`, `%LOCALAPPDATA%\LowcountryDigitalWorks\HostAgent\host-agent.Local.json`, then an adjacent `host-agent.Local.json`. Configuration errors are summarized without echoing the path or content.
+Actual machine-specific configuration must stay local/gitignored. Host Agent lookup order is explicit `LDW_HOST_AGENT_CONFIG`, `%LOCALAPPDATA%\LowcountryDigitalWorks\HostAgent\host-agent.Local.json`, then an adjacent `host-agent.Local.json`. Helper authorization defaults to `%ProgramData%\LowcountryDigitalWorks\HostAgent\hyperv-observer.Local.json` unless `--config <local-path>` is supplied. Configuration errors are handled without echoing path content, SIDs, or secrets into normal Host Agent diagnostics.
+
+Guest address candidates received from the helper are runtime-only values. They must never be copied back into machine-local configuration or exposed through routine diagnostics/logging.
 
 ## Privilege and mutation boundary
 
-The tray/UI and ordinary probes run as the owner and explicitly refuse elevated execution. No manifest requests elevation. This slice includes no privileged helper, service restart/control, VM action, CI Normal/Boost mutation, reboot/shutdown, listener, remote push control, or runner mutation.
+The tray/UI and ordinary probes run as the owner and explicitly refuse elevated execution. No tray manifest requests elevation. The Hyper-V observer is a separate executable and cannot turn the tray into a privileged process.
 
-A future privileged helper, if justified, must be a separately reviewed process with authenticated local IPC, narrow allowlists, and read telemetry separated from mutation. Host Agent must remain useful when privileged telemetry is unavailable by reporting Unknown/Degraded rather than elevating the whole application.
+The helper is read-only and local-only. It has no service control, VM control, CI Normal/Boost mutation, reboot/shutdown, runner mutation, TCP/HTTP listener, remote push control, arbitrary shell request, or generic elevated command surface.
+
+Persistent installation remains separately gated. Before exact-candidate acceptance, validation may build/test the helper and prove that it refuses unelevated execution, but it must not register/start a persistent privileged service/task merely to obtain live Hyper-V evidence. An eventual live end-to-end proof requires an owner-approved UAC/elevated helper launch with a protected machine-local explicit-user allowlist; persistent scheduling/service installation remains a later ORCH01 gate.
