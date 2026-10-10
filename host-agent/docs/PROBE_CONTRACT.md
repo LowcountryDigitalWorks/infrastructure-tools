@@ -8,16 +8,27 @@ Each record uses a stable local identifier, display name, platform, component ty
 
 ## Desired state and color meaning
 
-- **Green / Healthy:** observation matches the declared desired state.
-- **Blue / Expected inactive:** stopped, disabled, or on-demand by design; this is not a failure.
-- **Purple / Resource workload:** a known CI/build workload is active; report its resource telemetry separately from health.
+Health and CI activity are distinct signals. Health determines whether the component matches desired state; CI activity may change the healthy presentation color without changing health.
+
+- **Green / Healthy:** observation matches the declared desired state, including intentionally stopped, disabled, or inactive on-demand components.
+- **Blue / Active CI job:** a CI job is actively running while health remains otherwise healthy. Blue is reserved for this meaning.
+- **Purple / CI Boost enabled:** CI Boost is enabled while health remains otherwise healthy. Purple is reserved for this meaning and takes presentation priority over Blue when both are true.
 - **Yellow / Degraded:** stale observation, partial telemetry, or a non-critical threshold needs attention.
-- **Red / Failed:** a required component is unavailable or an observed failure is confirmed.
-- **Gray / Initializing or unknown:** no valid observation is available yet.
+- **Red / Failed:** a required component is unavailable or an observed failure is confirmed. Failure presentation overrides CI activity.
+- **Gray / Initializing or unknown:** no valid observation or required runtime context is available yet.
 
-Every status includes text and reason; color is never the only signal. Optional components and explicitly off-site nodes do not make their parent device red when absent. A dependency affects aggregate status only when its declared desired state is required.
+Every status includes text and reason; color is never the only signal. Optional components and explicitly off-site nodes do not make their parent device red when absent.
 
-Desired states are `Running`, `Stopped`, `Disabled`, `OnDemand`, `RunningAfterLogin`, and `Reachable`. `RunningAfterLogin` is not unhealthy before the owner session exists. `OnDemand` is healthy while inactive and is expected to become active only after an explicit local request.
+Desired states are `Running`, `Stopped`, `Disabled`, `OnDemand`, `RunningAfterLogin`, and `Reachable`. `Stopped`, `Disabled`, and inactive `OnDemand` components are healthy when that state matches configuration. `OnDemand` may also be healthy while running after an explicit request.
+
+`RunningAfterLogin` requires explicit platform-neutral runtime context for whether the owner session is active. The evaluator must produce these deterministic outcomes:
+
+1. owner session inactive + component stopped/disabled -> healthy / intentionally inactive;
+2. owner session active + component running -> healthy;
+3. owner session active + component stopped/disabled -> failed when required, degraded when optional;
+4. owner session unknown + component stopped/disabled -> unknown rather than silently healthy.
+
+Dependency health remains availability-aware. A component can be healthy for its own desired state while intentionally inactive, but if a required active component declares that inactive component as a dependency, the dependent aggregate fails because the dependency is not currently available.
 
 ## LDW01 Windows telemetry
 

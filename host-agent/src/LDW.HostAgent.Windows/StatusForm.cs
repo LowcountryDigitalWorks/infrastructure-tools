@@ -8,6 +8,12 @@ internal sealed class StatusForm : Form
     private readonly Label _memory = new() { AutoSize = true };
     private readonly Label _cpu = new() { AutoSize = true };
     private readonly Label _pressure = new() { AutoSize = true };
+    private readonly Label _statusLegend = new()
+    {
+        AutoSize = true,
+        MaximumSize = new Size(520, 0),
+        Text = "Status semantics: Green = desired state met; Blue = active CI job; Purple = CI Boost enabled; Yellow = degraded/attention; Red = confirmed failure/down; Gray = unknown/initializing. Status text and reason remain available so color is never the only signal."
+    };
     private readonly Label _integrations = new()
     {
         AutoSize = true,
@@ -19,11 +25,11 @@ internal sealed class StatusForm : Form
     {
         Text = "LDW Host Agent — Status";
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(560, 280);
+        ClientSize = new Size(560, 330);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         var layout = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, Padding = new Padding(20), WrapContents = false, AutoScroll = true };
-        layout.Controls.AddRange([_device, _memory, _cpu, _pressure, _integrations]);
+        layout.Controls.AddRange([_device, _memory, _cpu, _pressure, _statusLegend, _integrations]);
         Controls.Add(layout);
     }
 

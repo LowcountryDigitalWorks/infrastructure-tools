@@ -3,13 +3,17 @@ namespace LDW.HostAgent.Core;
 public enum DevicePlatform { Windows, Linux, Unknown }
 public enum DesiredState { Running, Stopped, Disabled, OnDemand, RunningAfterLogin, Reachable }
 public enum ObservedState { Running, Stopped, Disabled, Unavailable, Unknown }
-public enum HealthState { Healthy, ExpectedInactive, ResourceWorkload, Degraded, Failed, Initializing, Unknown }
+public enum HealthState { Healthy, Degraded, Failed, Initializing, Unknown }
+public enum ActivityState { None, ActiveCiJob, CiBoostEnabled }
+public enum OwnerSessionState { Unknown, Inactive, Active }
 public enum StatusColor { Green, Blue, Purple, Yellow, Red, Gray }
 public enum ComponentKind
 {
     OperatingSystem, Memory, Disk, Cpu, Tailscale, RustDesk, DesktopCommander,
     WslUbuntu, CursorWorker, LinuxNode, HyperV, GithubRunner, Custom
 }
+
+public sealed record RuntimeContext(OwnerSessionState OwnerSession);
 
 public sealed record DeviceDefinition(
     string Id,
@@ -33,16 +37,20 @@ public sealed record ComponentObservation(
     HealthState Health,
     DateTimeOffset ObservedAt,
     string Summary,
-    string? Evidence = null)
+    string? Evidence = null,
+    ActivityState Activity = ActivityState.None)
 {
     public StatusColor Color => Health switch
     {
-        HealthState.Healthy => StatusColor.Green,
-        HealthState.ExpectedInactive => StatusColor.Blue,
-        HealthState.ResourceWorkload => StatusColor.Purple,
-        HealthState.Degraded => StatusColor.Yellow,
         HealthState.Failed => StatusColor.Red,
-        _ => StatusColor.Gray
+        HealthState.Degraded => StatusColor.Yellow,
+        HealthState.Initializing or HealthState.Unknown => StatusColor.Gray,
+        _ => Activity switch
+        {
+            ActivityState.CiBoostEnabled => StatusColor.Purple,
+            ActivityState.ActiveCiJob => StatusColor.Blue,
+            _ => StatusColor.Green
+        }
     };
 }
 
@@ -56,17 +64,34 @@ public sealed record DeviceSnapshot(
 
 public static class DesiredStateEvaluator
 {
-    public static HealthState Evaluate(ComponentDefinition component, ObservedState observed)
+    public static HealthState Evaluate(ComponentDefinition component, ObservedState observed, RuntimeContext runtime)
     {
         if (observed == ObservedState.Unknown)
             return HealthState.Unknown;
 
+        if (component.DesiredState == DesiredState.RunningAfterLogin)
+        {
+            if (observed == ObservedState.Running)
+                return HealthState.Healthy;
+
+            if (observed is ObservedState.Stopped or ObservedState.Disabled)
+            {
+                return runtime.OwnerSession switch
+                {
+                    OwnerSessionState.Inactive => HealthState.Healthy,
+                    OwnerSessionState.Unknown => HealthState.Unknown,
+                    _ => component.Required ? HealthState.Failed : HealthState.Degraded
+                };
+            }
+
+            return component.Required ? HealthState.Failed : HealthState.Degraded;
+        }
+
         return component.DesiredState switch
         {
             DesiredState.Running or DesiredState.Reachable when observed == ObservedState.Running => HealthState.Healthy,
-            DesiredState.Stopped or DesiredState.Disabled when observed is ObservedState.Stopped or ObservedState.Disabled => HealthState.ExpectedInactive,
-            DesiredState.OnDemand when observed is ObservedState.Stopped or ObservedState.Disabled => HealthState.ExpectedInactive,
-            DesiredState.RunningAfterLogin when observed is ObservedState.Stopped or ObservedState.Disabled => HealthState.ExpectedInactive,
+            DesiredState.Stopped or DesiredState.Disabled when observed is ObservedState.Stopped or ObservedState.Disabled => HealthState.Healthy,
+            DesiredState.OnDemand when observed is ObservedState.Running or ObservedState.Stopped or ObservedState.Disabled => HealthState.Healthy,
             _ => component.Required ? HealthState.Failed : HealthState.Degraded
         };
     }
@@ -80,7 +105,7 @@ public static class DeviceHealthAggregator
     {
         var required = device.Environments.SelectMany(e => e.Components).Where(c => c.Required).ToArray();
         if (required.Length == 0)
-            return (HealthState.Healthy, StatusColor.Green, "No required components are configured.");
+            return (HealthState.Healthy, ResolveHealthyColor(observations), ResolveHealthySummary(observations, "No required components are configured."));
 
         var byId = observations.ToDictionary(o => o.ComponentId, StringComparer.OrdinalIgnoreCase);
         var health = required.Select(c =>
@@ -88,43 +113,63 @@ public static class DeviceHealthAggregator
             var own = byId.TryGetValue(c.Id, out var observation) ? observation.Health : HealthState.Initializing;
             if (own is HealthState.Failed or HealthState.Degraded or HealthState.Initializing or HealthState.Unknown)
                 return own;
+
             foreach (var dependencyId in c.DependsOn ?? [])
             {
                 if (!byId.TryGetValue(dependencyId, out var dependency))
                     return HealthState.Initializing;
-                if (dependency.Health is HealthState.Failed or HealthState.ExpectedInactive)
+                if (dependency.Health == HealthState.Failed)
                     return HealthState.Failed;
                 if (dependency.Health is HealthState.Degraded or HealthState.Initializing or HealthState.Unknown)
                     return dependency.Health;
+                if (dependency.State != ObservedState.Running)
+                    return HealthState.Failed;
             }
+
             return own;
         }).ToArray();
+
         var aggregate = health.Contains(HealthState.Failed) ? HealthState.Failed
             : health.Contains(HealthState.Degraded) ? HealthState.Degraded
             : health.Contains(HealthState.Initializing) ? HealthState.Initializing
             : health.Contains(HealthState.Unknown) ? HealthState.Unknown
-            : health.Contains(HealthState.ResourceWorkload) ? HealthState.ResourceWorkload
-            : health.Contains(HealthState.ExpectedInactive) ? HealthState.ExpectedInactive
             : HealthState.Healthy;
+
         var color = aggregate switch
         {
-            HealthState.Healthy => StatusColor.Green,
-            HealthState.ExpectedInactive => StatusColor.Blue,
-            HealthState.ResourceWorkload => StatusColor.Purple,
-            HealthState.Degraded => StatusColor.Yellow,
             HealthState.Failed => StatusColor.Red,
-            _ => StatusColor.Gray
+            HealthState.Degraded => StatusColor.Yellow,
+            HealthState.Initializing or HealthState.Unknown => StatusColor.Gray,
+            _ => ResolveHealthyColor(observations)
         };
+
         var summary = aggregate switch
         {
-            HealthState.Healthy => "All required components match their desired state.",
-            HealthState.ExpectedInactive => "A required component is intentionally inactive.",
-            HealthState.ResourceWorkload => "A known resource workload is active.",
+            HealthState.Healthy => ResolveHealthySummary(observations, "All required components match their desired state."),
             HealthState.Degraded => "A required component needs attention.",
             HealthState.Failed => "A required component is unavailable or failed.",
             HealthState.Unknown => "Required component status is not yet known.",
             _ => "Host Agent is collecting its first observations."
         };
+
         return (aggregate, color, summary);
+    }
+
+    private static StatusColor ResolveHealthyColor(IReadOnlyCollection<ComponentObservation> observations)
+    {
+        if (observations.Any(o => o.Activity == ActivityState.CiBoostEnabled))
+            return StatusColor.Purple;
+        if (observations.Any(o => o.Activity == ActivityState.ActiveCiJob))
+            return StatusColor.Blue;
+        return StatusColor.Green;
+    }
+
+    private static string ResolveHealthySummary(IReadOnlyCollection<ComponentObservation> observations, string fallback)
+    {
+        if (observations.Any(o => o.Activity == ActivityState.CiBoostEnabled))
+            return "CI Boost is enabled; required components remain healthy for their desired state.";
+        if (observations.Any(o => o.Activity == ActivityState.ActiveCiJob))
+            return "A CI job is active; required components remain healthy for their desired state.";
+        return fallback;
     }
 }
