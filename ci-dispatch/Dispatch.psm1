@@ -230,6 +230,22 @@ function Get-Ci10ControllerGate {
     } finally { if ($lock) { $lock.Dispose() } }
 }
 
+function Get-Ci10StaleRunIds {
+    param([string]$ControllerRoot, [object]$Profile)
+    $lock = Enter-Ci7ControllerLock $ControllerRoot
+    try {
+        foreach ($directory in @(Get-ChildItem -LiteralPath (Join-Path $ControllerRoot 'runs') -Directory -Force | Sort-Object Name)) {
+            Assert-Ci7Path $ControllerRoot $directory.FullName
+            $state = Get-Content -LiteralPath (Join-Path $directory.FullName 'state.json') -Raw | ConvertFrom-Json
+            Assert-Ci7State $state $ControllerRoot
+            if ($directory.Name -cne $state.RunId -or $state.Configuration.Repository -cne $Profile.repository -or
+                $state.Configuration.WorkflowPath -cne $Profile.workflowPath -or $state.Configuration.ExpectedSha -cne $Profile.headSha -or
+                -not $state.Configuration.PublicSyntheticProof) { throw 'STALE_PROFILE_OWNERSHIP_REFUSED' }
+            $state.RunId
+        }
+    } finally { $lock.Dispose() }
+}
+
 function Write-Ci10Log {
     param([string]$Root, [ValidateSet('start','stop','poll-pass','poll-fail','busy','capacity','idle','selected','discovery-only',
         'controller-start','controller-pass','controller-fail','reap-pass','reap-fail')][string]$Classification,
@@ -250,15 +266,17 @@ function Write-Ci10Log {
 }
 
 function Start-Ci10Controller {
-    param([string]$BundleRoot, [string]$ControllerRoot, [object]$Candidate, [switch]$Reap)
+    param([string]$BundleRoot, [string]$ControllerRoot, [object]$Candidate,
+        [ValidatePattern('^[a-f0-9]{32}$')][string]$CleanupRunId)
     # A child survives dispatcher interruption. Never terminate it from dispatcher finally.
     # Controller owns its global/per-run locks, exact API checks, cleanup and sanitized evidence.
     $info = [Diagnostics.ProcessStartInfo]::new((Get-Command pwsh).Source)
     $info.UseShellExecute = $false; $info.CreateNoWindow = $true
     $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
     foreach ($arg in @('-NoLogo','-NoProfile','-NonInteractive','-File',(Join-Path $BundleRoot 'ci-runner/Invoke-IsolatedRunner.ps1'),
-        '-Mode',$(if ($Reap) { 'Reap' } else { 'Run' }),'-Root',$ControllerRoot)) { $info.ArgumentList.Add($arg) }
-    if (-not $Reap) {
+        '-Mode',$(if ($CleanupRunId) { 'Cleanup' } else { 'Run' }),'-Root',$ControllerRoot)) { $info.ArgumentList.Add($arg) }
+    if ($CleanupRunId) { $info.ArgumentList.Add('-LocalRunId'); $info.ArgumentList.Add($CleanupRunId) }
+    else {
         foreach ($arg in @('-Repository',$Candidate.Profile.repository,'-WorkflowRunId',[string]$Candidate.RunId,
             '-ExpectedSha',$Candidate.Sha,'-AllowPublicSyntheticProof','-MemoryMiB',[string]$Candidate.Profile.memoryMiB,
             '-CpuCount',[string]$Candidate.Profile.cpu,'-TimeoutMinutes',[string]$Candidate.Profile.timeoutMinutes)) { $info.ArgumentList.Add($arg) }

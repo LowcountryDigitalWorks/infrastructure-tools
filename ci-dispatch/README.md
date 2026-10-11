@@ -66,14 +66,16 @@ lock without a second guest. A busy controller or unavailable capacity leaves
 eligible jobs queued. Maximum active disposable guests is one.
 
 The dispatcher refuses orphan `ci7-` VMs/runners or ambiguous state. It delegates
-conclusively owned stale synthetic state to accepted `Reap`; it does not implement
-prefix-only deletion. Nonprofile stale state is refused. The accepted Reap may
+conclusively owned stale synthetic state to accepted per-run `Cleanup`; it does not implement
+prefix-only deletion. Nonprofile stale state is refused. A fresh locked snapshot
+supplies exact local run IDs to Cleanup, so a different workload appearing after
+the probe cannot enter a root-wide Reap operation. The accepted Cleanup may
 cancel only the exact interrupted owned job as part of its cleanup; the dispatcher
 itself has only GET API operations. Cleanup must complete before another launch.
 
 The controller is a separate hidden child process. Dispatcher interruption does
 not intentionally stop it. A new dispatcher respects its global/per-run lock.
-If the controller was interrupted, accepted state/ownership checks and Reap
+If the controller was interrupted, accepted state/ownership checks and Cleanup
 reconcile the guest, runner, disk, media and JIT material before discovery resumes.
 `-Mode Recover` performs only reconciliation and never selects or launches a job.
 Ambiguous cleanup blocks subsequent dispatch and preserves authoritative state.

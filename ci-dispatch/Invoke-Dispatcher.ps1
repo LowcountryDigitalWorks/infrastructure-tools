@@ -39,8 +39,10 @@ try {
         $null = Assert-Ci10Bundle $bundle $ManifestSha $Commit $Tree
         $gate = Get-Ci10ControllerGate $controllerRoot $profiles[0]
         if ($gate -eq 'STALE') {
-            # Reap is the accepted primitive, never a prefix-only deletion implementation.
-            Start-Ci10Controller $bundle $controllerRoot -Reap
+            # Select exact validated state IDs. Root-wide Reap could include another workload appearing after the probe.
+            foreach ($runId in @(Get-Ci10StaleRunIds $controllerRoot $profiles[0])) {
+                Start-Ci10Controller $bundle $controllerRoot -CleanupRunId $runId
+            }
             Write-Ci10Log $dispatchRoot reap-pass
             $gate = Get-Ci10ControllerGate $controllerRoot $profiles[0]
         }

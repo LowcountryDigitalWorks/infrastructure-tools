@@ -152,6 +152,7 @@ try {
     $null=New-Item -ItemType Directory -Path $state.Directory
     Save-Ci7State $state
     Check 'strict accepted stale state classified for Reap' {Assert ((Get-Ci10ControllerGate $controllerRoot $profile) -ceq 'STALE')}
+    Check 'cleanup snapshots only exact reviewed stale run IDs' {Assert (@(Get-Ci10StaleRunIds $controllerRoot $profile)[0] -ceq ('c'*32))}
     Check 'active per-run lock refuses recovery race' {
         $held=[IO.File]::Open((Join-Path $state.Directory 'controller.lock'),'OpenOrCreate','ReadWrite','None')
         try {Assert ((Get-Ci10ControllerGate $controllerRoot $profile) -ceq 'BUSY')} finally {$held.Dispose()}
@@ -159,6 +160,7 @@ try {
     Check 'stale other profile refused' {
         $bad=Clone $state;$bad.Configuration.ExpectedSha='a'*40;Save-Ci7State $bad
         Refuses {Get-Ci10ControllerGate $controllerRoot $profile} 'STALE_PROFILE_OWNERSHIP_REFUSED'
+        Refuses {Get-Ci10StaleRunIds $controllerRoot $profile} 'STALE_PROFILE_OWNERSHIP_REFUSED'
         Save-Ci7State $state
     }
     Check 'ambiguous stale marker refused' {
@@ -267,6 +269,13 @@ try {
         Assert ($source.Contains('[ValidateRange(0,30)][int]$DiscoverHoldSeconds = 0'))
         Assert ($source.Contains("throw 'DISCOVERY_HOLD_REQUIRES_DISCOVER_MODE'"))
         Assert ($source.Contains('if ($Mode -eq ''Discover'')'))
+    }
+    Check 'recovery delegates exact IDs to accepted Cleanup, never root-wide Reap' {
+        $entry=Get-Content -LiteralPath (Join-Path $PSScriptRoot '../Invoke-Dispatcher.ps1') -Raw
+        $moduleSource=Get-Content -LiteralPath (Join-Path $PSScriptRoot '../Dispatch.psm1') -Raw
+        Assert ($entry.Contains('-CleanupRunId $runId'))
+        Assert ($moduleSource.Contains("`$info.ArgumentList.Add('-LocalRunId')"))
+        Assert (-not $entry.Contains('-Reap'))
     }
     'NEW_DISPATCHER_TESTS=PASS';'NEW_TEST_COUNT='+$total
 } catch {
