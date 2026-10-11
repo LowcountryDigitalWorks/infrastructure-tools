@@ -5,7 +5,8 @@ param(
     [Parameter(Mandatory)][ValidatePattern('^[a-f0-9]{40}$')][string]$Tree,
     [ValidateSet('Once','Discover','Poll','Recover')][string]$Mode = 'Once',
     [ValidateRange(1,60)][int]$PollCount = 1,
-    [ValidateRange(15,300)][int]$PollSeconds = 30
+    [ValidateRange(15,300)][int]$PollSeconds = 30,
+    [ValidateRange(0,30)][int]$DiscoverHoldSeconds = 0
 )
 $ErrorActionPreference = 'Stop'
 $bundle = Split-Path $PSScriptRoot -Parent
@@ -28,6 +29,7 @@ try {
     Import-Module (Join-Path $PSScriptRoot 'Dispatch.psm1') -Force
     $null = Assert-Ci10Bundle $bundle $ManifestSha $Commit $Tree
     $verified = $true
+    if ($DiscoverHoldSeconds -and $Mode -cne 'Discover') { throw 'DISCOVERY_HOLD_REQUIRES_DISCOVER_MODE' }
     Import-Module (Join-Path $bundle 'ci-runner/CiRunner.psm1') -Force
     Assert-Ci7Elevated
     $profiles = @(Read-Ci10Profiles (Join-Path $PSScriptRoot 'profiles.json'))
@@ -61,6 +63,8 @@ try {
                 Write-Ci10Log $dispatchRoot selected -RunId $candidate.RunId
                 if ($Mode -eq 'Discover') {
                     Write-Ci10Log $dispatchRoot discovery-only -RunId $candidate.RunId
+                    # Bounded manual interruption seam: this mode can never launch a controller.
+                    if ($DiscoverHoldSeconds) { Start-Sleep -Seconds $DiscoverHoldSeconds }
                     'DISPATCHER_RESULT=DISCOVERED'
                     'DISCOVERED_RUN_ID=' + $candidate.RunId
                     'DISCOVERED_JOB_ID=' + $candidate.JobId

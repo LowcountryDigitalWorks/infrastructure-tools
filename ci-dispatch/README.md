@@ -78,7 +78,10 @@ reconcile the guest, runner, disk, media and JIT material before discovery resum
 `-Mode Recover` performs only reconciliation and never selects or launches a job.
 Ambiguous cleanup blocks subsequent dispatch and preserves authoritative state.
 
-`Discover` selects and revalidates without creating JIT/VM resources. `Once` makes
+`Discover` selects and revalidates without creating JIT/VM resources. Its optional
+0–30 second `DiscoverHoldSeconds` permits a bounded interruption proof while
+holding only the dispatcher lock; the parameter is refused in every other mode.
+`Once` makes
 one bounded poll/dispatch. `Poll` permits 1–60 polls, separated by 15–300 seconds;
 it is synchronous and never launches a second job before first cleanup completes.
 There is no hosted/persistent fallback and incremental cash remains `$0`.

@@ -262,6 +262,12 @@ try {
         Assert ($source.Contains('-Mode Recover'))
         Assert (-not ($source -match 'Password|GH_TOKEN|GITHUB_TOKEN|auth token|Export-Clixml'))
     }
+    Check 'interruption hold is bounded and discovery-only' {
+        $source=Get-Content -LiteralPath (Join-Path $PSScriptRoot '../Invoke-Dispatcher.ps1') -Raw
+        Assert ($source.Contains('[ValidateRange(0,30)][int]$DiscoverHoldSeconds = 0'))
+        Assert ($source.Contains("throw 'DISCOVERY_HOLD_REQUIRES_DISCOVER_MODE'"))
+        Assert ($source.Contains('if ($Mode -eq ''Discover'')'))
+    }
     'NEW_DISPATCHER_TESTS=PASS';'NEW_TEST_COUNT='+$total
 } catch {
     'NEW_DISPATCHER_TESTS=FAIL';'NEW_TEST_COUNT='+$total
