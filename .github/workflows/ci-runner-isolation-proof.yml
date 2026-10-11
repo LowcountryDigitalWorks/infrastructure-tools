@@ -13,7 +13,18 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Assert fresh guest boundary
         shell: bash
         run: bash ci-runner/guest/proof.sh
+      - name: Replay pinned Betterleaks contract and runtime canaries
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CALLER_SHA: ${{ github.sha }}
+        run: |
+          python3 -B ci-runner/tests/test_contract_replay.py
+          python3 -B ci-runner/guest/prove-betterleaks.py

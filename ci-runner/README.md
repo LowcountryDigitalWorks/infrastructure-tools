@@ -158,3 +158,27 @@ isolation class and the workflow-specific proof gate before daily use. A trusted
 bounded queued-job poller could later invoke this controller from the host using
 existing owner authentication; long-lived runner administration credentials must
 never move into a candidate job or disposable guest.
+
+## Betterleaks proof scope
+
+After the synthetic boundary proof passes, the same one-job workflow replays the
+six original Bash blocks from the exact reusable-workflow commit currently pinned
+by the private caller: `d8a2f4ed8a7a56b996c2e6c99cdde9fcf39bb744`. The fetched
+workflow bytes must match SHA-256
+`e87c43b9811e443a4697d70e28a84797b8f602dc9674eee126aebfc988001608`.
+The replay verifies the checkout and permission contract, preserves Betterleaks
+`1.7.4` and its accepted archive hash, enables all runtime canaries, and executes
+the original revision resolution, history scan, and candidate-tree scan scripts.
+It emits only fixed proof classifications and discards all script/tool output.
+There is no durable copy of scanner logic in this repository.
+
+This replay uses this public synthetic caller's full Git history. It demonstrates
+scanner semantics and isolation; it does not demonstrate a private
+`business-operations` check or its actual PR base/head history. That target remains
+`PARTIAL` until the owning workflow workstream supplies a bounded routing proof.
+The smallest proposed next gate is an optional execution-target input on the
+shared workflow, preserving its GitHub-hosted public default, plus an explicit
+private caller selection of the accepted isolated labels and per-run correlation
+label. The caller must pin the reviewed shared-workflow change. ORCH01 and the
+owning workflow workstream retain acceptance and migration authority; PR #559
+is outside this implementation.
