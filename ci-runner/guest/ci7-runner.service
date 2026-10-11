@@ -1,0 +1,20 @@
+[Unit]
+Description=One-job disposable CI runner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ldw-runner
+Group=ldw-runner
+WorkingDirectory=/opt/actions-runner
+ExecStart=/usr/local/lib/ci7/run-one.sh
+ExecStopPost=+/bin/sh -c 'rm -f /run/ci7/jit; systemctl poweroff'
+Restart=no
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+StandardOutput=null
+StandardError=null

@@ -1,0 +1,329 @@
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$script:SafeLabels = @('self-hosted', 'Linux', 'X64', 'ldw01', 'ldw-ephemeral', 'ldw-isolated', 'security-isolated')
+$script:Marker = 'CI-RUNNER-EPHEMERAL-001'
+
+function Assert-Ci7Elevated {
+    $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'ELEVATED_CONTROLLER_REQUIRED' }
+}
+
+function Assert-Ci7Path {
+    param([string]$Root, [string]$Path)
+    $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    if (-not $fullPath.StartsWith($fullRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'PATH_OUTSIDE_OWNED_ROOT' }
+    $cursor = $fullPath
+    while ($cursor) {
+        if ((Test-Path -LiteralPath $cursor) -and ((Get-Item -LiteralPath $cursor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'REPARSE_PATH_REFUSED' }
+        $parent = [IO.Path]::GetDirectoryName($cursor)
+        if ($parent -eq $cursor) { break }
+        $cursor = $parent
+    }
+}
+
+function Initialize-Ci7Root {
+    param([string]$Root)
+    # Dedicated storage only, never a drive root or an existing VM/workspace directory.
+    if ([IO.Path]::GetFileName($Root.TrimEnd('\', '/')) -cne 'CiRunnerEphemeral') { throw 'DEDICATED_ROOT_REQUIRED' }
+    Assert-Ci7Path ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Root))) $Root
+    [void](New-Item -ItemType Directory -Path $Root -Force)
+    $acl = [Security.AccessControl.DirectorySecurity]::new()
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+        $acl.AddAccessRule($rule)
+    }
+    Set-Acl -LiteralPath $Root -AclObject $acl
+    foreach ($child in @('runs', 'evidence')) { [void](New-Item -ItemType Directory -Path (Join-Path $Root $child) -Force) }
+}
+
+function Assert-Ci7Base {
+    param([string]$Root)
+    $base = Join-Path $Root 'base/ubuntu-noble-20260926.vhdx'
+    $manifest = Join-Path $Root 'base/provenance.json'
+    Assert-Ci7Path $Root $base
+    Assert-Ci7Path $Root $manifest
+    if (-not (Test-Path -LiteralPath $base) -or -not (Test-Path -LiteralPath $manifest)) { throw 'VERIFIED_BASE_REQUIRED' }
+    $contract = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
+    if ($contract.Schema -ne 1 -or $contract.Release -cne 'noble-20260926' -or
+        $contract.SourceSha256 -cne '6a81c37564db9b1ee84e141922625e1d7c5b389b99bb3c572e0243607d5bb4d2' -or
+        $contract.BaseSha256 -notmatch '^[0-9a-f]{64}$' -or -not (Get-Item -LiteralPath $base).IsReadOnly) { throw 'BASE_CONTRACT_INVALID' }
+    if ((Get-FileHash -LiteralPath $base -Algorithm SHA256).Hash.ToLowerInvariant() -cne $contract.BaseSha256) { throw 'BASE_DISK_HASH_MISMATCH' }
+    $info = Get-VHD -Path $base -ErrorAction Stop
+    if ($info.VhdType -ne 'Dynamic' -or $info.ParentPath -or $info.Size -ne $contract.VirtualSize) { throw 'BASE_DISK_CONTRACT_MISMATCH' }
+}
+
+function New-Ci7Configuration {
+    param([string]$Repository, [long]$WorkflowRunId, [string]$ExpectedSha, [string]$Root,
+        [string[]]$ApprovedRepositories = @('LowcountryDigitalWorks/business-operations'),
+        [switch]$AllowPublicSyntheticProof, [int]$MemoryMiB = 2048, [int]$CpuCount = 2, [int]$TimeoutMinutes = 20)
+    if ($ExpectedSha -notmatch '^[0-9a-f]{40}$' -or $WorkflowRunId -le 0) { throw 'EXACT_JOB_REFERENCE_REQUIRED' }
+    if ($MemoryMiB -lt 2048 -or $MemoryMiB -gt 4096 -or $CpuCount -lt 1 -or $CpuCount -gt 2 -or $TimeoutMinutes -lt 5 -or $TimeoutMinutes -gt 30) { throw 'RESOURCE_BOUNDS_INVALID' }
+    $proof = $AllowPublicSyntheticProof -and $Repository -ceq 'LowcountryDigitalWorks/infrastructure-tools'
+    if (-not $proof -and ($Repository -cnotin $ApprovedRepositories -or $Repository -cnotmatch '^LowcountryDigitalWorks/[a-z0-9-]+$')) { throw 'REPOSITORY_NOT_APPROVED' }
+    if ($AllowPublicSyntheticProof -and -not $proof) { throw 'PUBLIC_PROOF_EXCEPTION_INVALID' }
+    [pscustomobject]@{ Repository = $Repository; WorkflowRunId = $WorkflowRunId; ExpectedSha = $ExpectedSha;
+        Root = [IO.Path]::GetFullPath($Root); ApprovedRepositories = @($ApprovedRepositories); PublicSyntheticProof = [bool]$proof; MemoryMiB = $MemoryMiB; CpuCount = $CpuCount;
+        TimeoutMinutes = $TimeoutMinutes; WorkflowPath = if ($proof) { '.github/workflows/ci-runner-isolation-proof.yml' } else { '.github/workflows/security-secrets.yml' } }
+}
+
+function Get-Ci7Labels {
+    param([long]$WorkflowRunId)
+    if ($WorkflowRunId -le 0) { throw 'WORKFLOW_RUN_ID_INVALID' }
+    @($script:SafeLabels) + @('ci7-run-' + $WorkflowRunId)
+}
+
+function Invoke-Ci7Api {
+    param([string]$Path, [ValidateSet('GET', 'POST', 'DELETE')][string]$Method = 'GET', [object]$Body)
+    if ($Path -notmatch '^repos/LowcountryDigitalWorks/[a-z0-9-]+(/|$)') { throw 'API_TARGET_NOT_APPROVED' }
+    $raw = if ($null -ne $Body) {
+        $Body | ConvertTo-Json -Depth 12 -Compress | & gh api --method $Method $Path --input - 2>$null
+    } else { & gh api --method $Method $Path 2>$null }
+    if ($LASTEXITCODE -ne 0) { throw ('GITHUB_API_' + $Method + '_FAILED') }
+    if ($Method -ne 'DELETE' -and $raw) { $raw | ConvertFrom-Json }
+}
+
+function Get-Ci7ExpectedJob {
+    param([object]$Configuration, [switch]$RequireQueued)
+    $repo = Invoke-Ci7Api ('repos/' + $Configuration.Repository)
+    if (-not $repo.private -and -not $Configuration.PublicSyntheticProof) { throw 'PRIVATE_REPOSITORY_REQUIRED' }
+    $run = Invoke-Ci7Api ('repos/' + $Configuration.Repository + '/actions/runs/' + $Configuration.WorkflowRunId)
+    if ($run.head_sha -cne $Configuration.ExpectedSha -or $run.path -cne $Configuration.WorkflowPath -or
+        $run.head_repository.full_name -cne $Configuration.Repository -or $run.event -cnotin @('push', 'pull_request', 'workflow_dispatch')) { throw 'WORKFLOW_IDENTITY_MISMATCH' }
+    if ($Configuration.PublicSyntheticProof -and ($run.head_branch -cne 'feat/ci-runner-ephemeral-001' -or $run.event -cne 'push')) { throw 'PUBLIC_PROOF_TRIGGER_REFUSED' }
+    $response = Invoke-Ci7Api ('repos/' + $Configuration.Repository + '/actions/runs/' + $Configuration.WorkflowRunId + '/jobs?filter=latest&per_page=100')
+    if ($response.total_count -ne 1 -or @($response.jobs).Count -ne 1) { throw 'EXACTLY_ONE_JOB_REQUIRED' }
+    $job = $response.jobs[0]
+    $expected = @(Get-Ci7Labels $Configuration.WorkflowRunId)
+    if (@($job.labels).Count -ne $expected.Count -or @(Compare-Object $expected @($job.labels) -CaseSensitive).Count -ne 0) { throw 'ISOLATED_JOB_LABELS_REQUIRED' }
+    if ($RequireQueued -and ($job.status -cne 'queued' -or $job.runner_id)) { throw 'UNASSIGNED_QUEUED_JOB_REQUIRED' }
+    $job
+}
+
+function Assert-Ci7Capacity {
+    param([object]$Configuration)
+    $os = Get-CimInstance Win32_OperatingSystem
+    $cpu = Get-CimInstance Win32_Processor
+    if ($os.FreePhysicalMemory * 1024 -lt ($Configuration.MemoryMiB * 1MB + 4GB)) { throw 'CAPACITY_RAM_RESERVE_4GIB_REQUIRED' }
+    if (($cpu | Measure-Object NumberOfLogicalProcessors -Sum).Sum -lt $Configuration.CpuCount + 2) { throw 'CAPACITY_CPU_RESERVE_REQUIRED' }
+    if (($cpu | Measure-Object LoadPercentage -Average).Average -gt 70) { throw 'CAPACITY_CPU_LOAD_TOO_HIGH' }
+    $driveRoot = [IO.Path]::GetPathRoot($Configuration.Root)
+    $drive = [IO.DriveInfo]::new($driveRoot)
+    if ($drive.AvailableFreeSpace -lt 40GB) { throw 'CAPACITY_DISK_RESERVE_40GIB_REQUIRED' }
+    $switch = @(Get-VMSwitch | Where-Object { $_.Name -ceq 'Default Switch' -and $_.SwitchType -eq 'Internal' })
+    if ($switch.Count -ne 1) { throw 'DEFAULT_NAT_SWITCH_REQUIRED' }
+}
+
+function New-Ci7State {
+    param([object]$Configuration, [string]$RunId = ([guid]::NewGuid().ToString('N')))
+    if ($RunId -cnotmatch '^[0-9a-f]{32}$') { throw 'LOCAL_RUN_ID_INVALID' }
+    $runDirectory = Join-Path $Configuration.Root ('runs/' + $RunId)
+    [pscustomobject]@{ Schema = 1; Marker = $script:Marker; RunId = $RunId; Name = 'ci7-' + $RunId;
+        Phase = 'Planned'; CreatedUtc = [DateTime]::UtcNow.ToString('o'); Configuration = $Configuration;
+        Directory = $runDirectory; Disk = Join-Path $runDirectory 'disk.vhdx'; Seed = Join-Path $runDirectory 'seed.iso';
+        VMId = $null; RunnerId = $null; JobId = $null; PersistentBaseline = $null }
+}
+
+function Assert-Ci7State {
+    param([object]$State, [string]$Root)
+    if ($State.Schema -ne 1 -or $State.Marker -cne $script:Marker -or $State.RunId -cnotmatch '^[0-9a-f]{32}$' -or
+        $State.Name -cne ('ci7-' + $State.RunId) -or $State.Configuration.Root -cne [IO.Path]::GetFullPath($Root)) { throw 'RESOURCE_OWNERSHIP_AMBIGUOUS' }
+    $expected = Join-Path ([IO.Path]::GetFullPath($Root)) ('runs/' + $State.RunId)
+    foreach ($pair in @(@($State.Directory, $expected), @($State.Disk, (Join-Path $expected 'disk.vhdx')), @($State.Seed, (Join-Path $expected 'seed.iso')))) {
+        if ([IO.Path]::GetFullPath($pair[0]) -cne [IO.Path]::GetFullPath($pair[1])) { throw 'RESOURCE_PATH_OWNERSHIP_MISMATCH' }
+        Assert-Ci7Path $Root $pair[0]
+    }
+    if ($State.RunnerId -and [long]$State.RunnerId -le 0) { throw 'RUNNER_ID_INVALID' }
+    if ($State.Configuration.PublicSyntheticProof) {
+        if ($State.Configuration.Repository -cne 'LowcountryDigitalWorks/infrastructure-tools') { throw 'PUBLIC_PROOF_EXCEPTION_INVALID' }
+    } elseif ($State.Configuration.Repository -cnotin $State.Configuration.ApprovedRepositories -or
+        $State.Configuration.Repository -cnotmatch '^LowcountryDigitalWorks/[a-z0-9-]+$') { throw 'STALE_REPOSITORY_NOT_APPROVED' }
+}
+
+function Assert-Ci7OwnedVm {
+    param([object]$State, [object]$VM)
+    Assert-Ci7State $State $State.Configuration.Root
+    if (-not $State.VMId -or [string]$VM.VMId -cne [string]$State.VMId -or $VM.Name -cne $State.Name -or
+        $VM.Notes -cne ($script:Marker + ':' + $State.RunId)) { throw 'VM_NOT_CONCLUSIVELY_OWNED' }
+}
+
+function Save-Ci7State {
+    param([object]$State)
+    Assert-Ci7State $State $State.Configuration.Root
+    $temp = Join-Path $State.Directory 'state.pending'
+    $State | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $temp -Encoding utf8NoBOM
+    Move-Item -LiteralPath $temp -Destination (Join-Path $State.Directory 'state.json') -Force
+}
+
+function Write-Ci7Evidence {
+    param([object]$State, [ValidateSet('planned','registered','provisioned','running','job-success','job-failure','runner-absent','guest-removed','artifacts-removed','complete','failed','cleanup-failed')][string]$Classification)
+    Assert-Ci7State $State $State.Configuration.Root
+    $file = Join-Path $State.Configuration.Root ('evidence/' + $State.RunId + '.jsonl')
+    Assert-Ci7Path $State.Configuration.Root $file
+    [ordered]@{ run = $State.RunId; phase = $Classification; utc = [DateTime]::UtcNow.ToString('o') } |
+        ConvertTo-Json -Compress | Add-Content -LiteralPath $file -Encoding utf8NoBOM
+}
+
+function Move-Ci7Phase {
+    param([object]$State, [string]$Next)
+    $order = @('Planned','Registered','Provisioned','Running','JobCompleted','RunnerAbsent','GuestRemoved','ArtifactsRemoved','Complete')
+    $current = [array]::IndexOf($order, [string]$State.Phase)
+    $target = [array]::IndexOf($order, $Next)
+    if ($current -lt 0 -or $target -ne $current + 1) { throw 'ONE_JOB_LIFECYCLE_TRANSITION_REFUSED' }
+    $State.Phase = $Next
+}
+
+function New-Ci7Seed {
+    param([object]$State, [string]$Jit)
+    Assert-Ci7State $State $State.Configuration.Root
+    if ([string]::IsNullOrWhiteSpace($Jit) -or $Jit -notmatch '^[A-Za-z0-9+/=]+$') { throw 'JIT_MATERIAL_INVALID' }
+    $seed = Join-Path $State.Directory 'seed'
+    [void](New-Item -ItemType Directory -Path $seed)
+    $files = @(
+        @{ Path = '/run/ci7/jit'; Mode = '0600'; Data = $Jit },
+        @{ Path = '/run/ci7/run-id'; Mode = '0444'; Data = $State.RunId },
+        @{ Path = '/usr/local/lib/ci7/bootstrap.sh'; Mode = '0700'; Data = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'guest/bootstrap.sh')) },
+        @{ Path = '/usr/local/lib/ci7/run-one.sh'; Mode = '0755'; Data = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'guest/run-one.sh')) },
+        @{ Path = '/etc/systemd/system/ci7-runner.service'; Mode = '0644'; Data = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'guest/ci7-runner.service')) }
+    )
+    $lines = [Collections.Generic.List[string]]::new()
+    foreach ($line in @('#cloud-config','users:','  - name: ldw-runner','    lock_passwd: true','    shell: /bin/bash','    sudo: false','    groups: []','ssh_pwauth: false','disable_root: true','write_files:')) { $lines.Add($line) }
+    foreach ($file in $files) {
+        $lines.Add('  - path: ' + $file.Path); $lines.Add("    permissions: '" + $file.Mode + "'"); $lines.Add('    encoding: b64')
+        $lines.Add('    content: ' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($file.Data.Replace("`r`n", "`n"))))
+    }
+    $lines.Add('runcmd:'); $lines.Add('  - [bash, /usr/local/lib/ci7/bootstrap.sh]')
+    [IO.File]::WriteAllText((Join-Path $seed 'user-data'), ($lines -join "`n") + "`n", [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $seed 'meta-data'), ('instance-id: ' + $State.Name + "`nlocal-hostname: ci7-guest`n"), [Text.UTF8Encoding]::new($false))
+    if (-not ('LDW.CiRunner.Native' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'Native.cs') }
+    $iso = New-Object -ComObject IMAPI2FS.MsftFileSystemImage
+    try {
+        $iso.FileSystemsToCreate = 3; $iso.VolumeName = 'cidata'
+        $iso.Root.AddTree($seed, $false)
+        $image = $iso.CreateResultImage()
+        [LDW.CiRunner.Native]::SaveIso($image.ImageStream, $State.Seed)
+    } finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($iso) }
+    Remove-Item -LiteralPath (Join-Path $seed 'user-data'), (Join-Path $seed 'meta-data')
+    Remove-Item -LiteralPath $seed
+}
+
+function Assert-Ci7JitContract {
+    param([object]$State, [object]$Jit)
+    # Inspect only in memory. Never emit or persist the decoded registration files.
+    try {
+        $files = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Jit.encoded_jit_config)) | ConvertFrom-Json
+        $settings = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($files.'.runner')) | ConvertFrom-Json
+        if ($settings.agentName -cne $State.Name -or $settings.agentId -ne $State.RunnerId -or
+            $settings.gitHubUrl.TrimEnd('/') -cne ('https://github.com/' + $State.Configuration.Repository) -or
+            -not $settings.ephemeral -or -not $settings.disableUpdate) { throw 'JIT_ONE_JOB_PINNING_CONTRACT_INVALID' }
+    } catch { throw 'JIT_ONE_JOB_PINNING_CONTRACT_INVALID' }
+}
+
+function Get-Ci7PersistentBaseline {
+    param([object]$Configuration)
+    # Keep the reference baseline local and protected; never output fingerprints.
+    $all = Invoke-Ci7Api 'repos/LowcountryDigitalWorks/business-operations/actions/runners?per_page=100'
+    $persistent = @($all.runners | Where-Object name -CEQ 'ldw01-ci-01')
+    if ($persistent.Count -ne 1 -or $persistent[0].status -cne 'online') { throw 'PERSISTENT_RUNNER_BASELINE_UNAVAILABLE' }
+    $vms = @(Get-VM)
+    $summary = @($vms | Sort-Object VMId | ForEach-Object {
+        @{ Id = [string]$_.VMId; Name = $_.Name; Cpu = $_.ProcessorCount; Startup = $_.MemoryStartup;
+            Dynamic = $_.DynamicMemoryEnabled; State = [string]$_.State;
+            Disks = @(Get-VMHardDiskDrive -VM $_ | Select-Object ControllerType,ControllerNumber,ControllerLocation,Path);
+            Network = @(Get-VMNetworkAdapter -VM $_ | Select-Object SwitchId,MacAddress) }
+    })
+    [pscustomobject]@{ Runner = ($persistent[0] | Select-Object id,name,os,labels | ConvertTo-Json -Depth 6 -Compress);
+        VMs = ($summary | ConvertTo-Json -Depth 8 -Compress) }
+}
+
+function Assert-Ci7PersistentUnchanged {
+    param([object]$State)
+    $current = Get-Ci7PersistentBaseline $State.Configuration
+    if ($current.Runner -cne $State.PersistentBaseline.Runner -or $current.VMs -cne $State.PersistentBaseline.VMs) { throw 'PERSISTENT_REFERENCE_CHANGED' }
+}
+
+function New-Ci7Guest {
+    param([object]$State)
+    Assert-Ci7State $State $State.Configuration.Root
+    Assert-Ci7Capacity $State.Configuration
+    Assert-Ci7Base $State.Configuration.Root
+    if (@(Get-VM | Where-Object Name -CEQ $State.Name).Count) { throw 'FRESH_VM_NAME_REQUIRED' }
+    New-VHD -Path $State.Disk -ParentPath (Join-Path $State.Configuration.Root 'base/ubuntu-noble-20260926.vhdx') -Differencing -ErrorAction Stop | Out-Null
+    $vm = New-VM -Name $State.Name -Path (Join-Path $State.Directory 'vm') -Generation 2 -MemoryStartupBytes ($State.Configuration.MemoryMiB * 1MB) -VHDPath $State.Disk -SwitchName 'Default Switch' -ErrorAction Stop
+    $State.VMId = [string]$vm.VMId
+    Save-Ci7State $State
+    Set-VM -VM $vm -Notes ($script:Marker + ':' + $State.RunId) -AutomaticStartAction Nothing -AutomaticStopAction TurnOff -ErrorAction Stop
+    Set-VMProcessor -VM $vm -Count $State.Configuration.CpuCount
+    Set-VMMemory -VM $vm -DynamicMemoryEnabled $false
+    Set-VMFirmware -VM $vm -EnableSecureBoot On -SecureBootTemplate MicrosoftUEFICertificateAuthority
+    Get-VMIntegrationService -VM $vm | Where-Object Name -NE 'Heartbeat' | Disable-VMIntegrationService
+    Add-VMDvdDrive -VM $vm -Path $State.Seed
+    Set-VMNetworkAdapter -VM $vm -MacAddressSpoofing Off -DhcpGuard Off -RouterGuard On
+    $disk = @(Get-VMHardDiskDrive -VM $vm)
+    if ($disk.Count -ne 1 -or $disk[0].Path -cne $State.Disk) { throw 'VM_DISK_BOUNDARY_INVALID' }
+    Assert-Ci7OwnedVm $State (Get-VM -Id $State.VMId)
+}
+
+function Remove-Ci7LocalResources {
+    param([object]$State)
+    Assert-Ci7State $State $State.Configuration.Root
+    $matches = @(Get-VM | Where-Object { $_.Name -ceq $State.Name -or ($State.VMId -and [string]$_.VMId -ceq $State.VMId) })
+    if ($matches.Count -gt 1) { throw 'VM_OWNERSHIP_AMBIGUOUS' }
+    if ($matches.Count -eq 1) {
+        $vm = $matches[0]
+        Assert-Ci7OwnedVm $State $vm
+        $disk = @(Get-VMHardDiskDrive -VM $vm)
+        if ($disk.Count -ne 1 -or $disk[0].Path -cne $State.Disk) { throw 'VM_ATTACHED_DISK_AMBIGUOUS' }
+        $dvd = @(Get-VMDvdDrive -VM $vm)
+        if ($dvd.Count -ne 1 -or $dvd[0].Path -cne $State.Seed) { throw 'VM_BOOTSTRAP_MEDIA_AMBIGUOUS' }
+        if ($vm.State -ne 'Off') { Stop-VM -VM $vm -TurnOff -Force -Confirm:$false }
+        Remove-VM -VM $vm -Force -Confirm:$false
+        if (@(Get-VM | Where-Object { [string]$_.VMId -ceq $State.VMId -or $_.Name -ceq $State.Name }).Count) { throw 'VM_REMOVAL_UNCONFIRMED' }
+    }
+    Write-Ci7Evidence $State 'guest-removed'
+    foreach ($file in @($State.Disk, $State.Seed)) {
+        Assert-Ci7Path $State.Configuration.Root $file
+        if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force }
+        if (Test-Path -LiteralPath $file) { throw 'LOCAL_ARTIFACT_REMOVAL_UNCONFIRMED' }
+    }
+    Write-Ci7Evidence $State 'artifacts-removed'
+}
+
+function Remove-Ci7Runner {
+    param([object]$State, [switch]$Interrupted)
+    Assert-Ci7State $State $State.Configuration.Root
+    $repo = $State.Configuration.Repository
+    $all = Invoke-Ci7Api ('repos/' + $repo + '/actions/runners?per_page=100')
+    if ($all.total_count -gt 100) { throw 'RUNNER_INVENTORY_TRUNCATED' }
+    $matches = @($all.runners | Where-Object { $_.name -ceq $State.Name -or ($State.RunnerId -and $_.id -eq $State.RunnerId) })
+    if ($matches.Count -gt 1) { throw 'RUNNER_OWNERSHIP_AMBIGUOUS' }
+    if ($matches.Count -eq 1) {
+        $runner = $matches[0]
+        if (-not $State.RunnerId -or $runner.id -ne $State.RunnerId -or $runner.name -cne $State.Name -or $runner.name -ceq 'ldw01-ci-01') { throw 'RUNNER_NOT_CONCLUSIVELY_OWNED' }
+        $expected = @(Get-Ci7Labels $State.Configuration.WorkflowRunId)
+        if (@($runner.labels.name).Count -ne $expected.Count -or @(Compare-Object $expected @($runner.labels.name) -CaseSensitive).Count) { throw 'RUNNER_LABEL_OWNERSHIP_AMBIGUOUS' }
+        if ($runner.busy -and -not $Interrupted) { throw 'JOB_STILL_ACTIVE' }
+        Invoke-Ci7Api ('repos/' + $repo + '/actions/runners/' + $State.RunnerId) DELETE
+    }
+    $check = Invoke-Ci7Api ('repos/' + $repo + '/actions/runners?per_page=100')
+    if ($check.total_count -gt 100 -or @($check.runners | Where-Object { $_.name -ceq $State.Name -or ($State.RunnerId -and $_.id -eq $State.RunnerId) }).Count) { throw 'RUNNER_ABSENCE_UNCONFIRMED' }
+    Write-Ci7Evidence $State 'runner-absent'
+}
+
+function Clear-Ci7TransientState {
+    param([object]$State)
+    Assert-Ci7State $State $State.Configuration.Root
+    Assert-Ci7PersistentUnchanged $State
+    if (Test-Path -LiteralPath $State.Directory) {
+        $children = @(Get-ChildItem -LiteralPath $State.Directory -Force)
+        if (@($children | Where-Object Name -CNotIn @('state.json','state.pending','controller.lock','seed','vm')).Count) { throw 'TRANSIENT_DIRECTORY_HAS_UNKNOWN_CONTENT' }
+        $descendants = @(Get-ChildItem -LiteralPath $State.Directory -Recurse -Force)
+        foreach ($child in $descendants) { Assert-Ci7Path $State.Configuration.Root $child.FullName }
+        Remove-Item -LiteralPath $State.Directory -Recurse -Force
+    }
+    if (Test-Path -LiteralPath $State.Directory) { throw 'TRANSIENT_STATE_REMOVAL_UNCONFIRMED' }
+    Write-Ci7Evidence $State 'complete'
+}
+
+Export-ModuleMember -Function *-Ci7*

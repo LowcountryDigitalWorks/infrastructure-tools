@@ -1,5 +1,8 @@
 # LDW Infrastructure Tools
 
+The [disposable CI runner candidate](ci-runner/README.md) implements a bounded
+Hyper-V guest and repository-level JIT lifecycle for CI-RUNNER-EPHEMERAL-001 (#7).
+
 Reusable LDW-owned utilities for local computers, CI runners, and Linux nodes. This repository is public: keep host addresses, inventories, credentials, private connection details, and customer or regulated data out of Git.
 
 ## Current tools
