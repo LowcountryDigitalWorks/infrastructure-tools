@@ -45,6 +45,18 @@ def load_contract(data):
     return contract, scripts
 
 
+def expression_context(environment):
+    return {
+        "${{ github.event_name }}": environment["EVENT_NAME"],
+        "${{ github.event.pull_request.base.sha }}": environment.get("PR_BASE_SHA", ""),
+        "${{ github.event.pull_request.head.sha }}": environment.get("PR_HEAD_SHA", ""),
+        "${{ github.event.pull_request.base.sha || '' }}": environment.get("PR_BASE_SHA", ""),
+        "${{ github.event.pull_request.head.sha || '' }}": environment.get("PR_HEAD_SHA", ""),
+        "${{ github.sha }}": environment["CALLER_SHA"],
+        "${{ inputs.verify_canary }}": "true",
+    }
+
+
 def run_proof():
     if os.getuid() == 0 or os.environ.get("GITHUB_REPOSITORY") != "LowcountryDigitalWorks/infrastructure-tools":
         refuse("SYNTHETIC_CALLER_BOUNDARY")
@@ -55,13 +67,7 @@ def run_proof():
     contract, scripts = load_contract(data)
     environment = dict(os.environ)
     environment.update(contract["env"])
-    expressions = {
-        "${{ github.event_name }}": os.environ["EVENT_NAME"],
-        "${{ github.event.pull_request.base.sha }}": os.environ.get("PR_BASE_SHA", ""),
-        "${{ github.event.pull_request.head.sha }}": os.environ.get("PR_HEAD_SHA", ""),
-        "${{ github.sha }}": os.environ["CALLER_SHA"],
-        "${{ inputs.verify_canary }}": "true",
-    }
+    expressions = expression_context(os.environ)
     for index, step in enumerate(scripts, start=1):
         if step.get("if") not in (None, "${{ inputs.verify_canary }}"):
             refuse("UNSUPPORTED_STEP_CONDITION")

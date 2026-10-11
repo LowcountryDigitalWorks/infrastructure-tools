@@ -78,6 +78,17 @@ class ContractGuards(unittest.TestCase):
         value["jobs"]["secret-scan"]["steps"][1]["shell"] = "sh"
         self.rejects(value)
 
+    def test_push_expression_fallbacks_are_empty(self):
+        values = replay.expression_context({"EVENT_NAME": "push", "CALLER_SHA": "a" * 40})
+        self.assertEqual(values["${{ github.event.pull_request.base.sha || '' }}"], "")
+        self.assertEqual(values["${{ github.event.pull_request.head.sha || '' }}"], "")
+        self.assertEqual(values["${{ inputs.verify_canary }}"], "true")
+
+    def test_pull_request_expression_fallbacks_preserve_exact_shas(self):
+        values = replay.expression_context({"EVENT_NAME": "pull_request", "CALLER_SHA": "a" * 40, "PR_BASE_SHA": "b" * 40, "PR_HEAD_SHA": "c" * 40})
+        self.assertEqual(values["${{ github.event.pull_request.base.sha || '' }}"], "b" * 40)
+        self.assertEqual(values["${{ github.event.pull_request.head.sha || '' }}"], "c" * 40)
+
 
 if __name__ == "__main__":
     unittest.main()
