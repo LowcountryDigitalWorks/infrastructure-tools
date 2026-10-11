@@ -48,10 +48,19 @@ function Assert-Ci7Base {
     $contract = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
     if ($contract.Schema -ne 1 -or $contract.Release -cne 'noble-20260926' -or
         $contract.SourceSha256 -cne '6a81c37564db9b1ee84e141922625e1d7c5b389b99bb3c572e0243607d5bb4d2' -or
-        $contract.BaseSha256 -notmatch '^[0-9a-f]{64}$' -or -not (Get-Item -LiteralPath $base).IsReadOnly) { throw 'BASE_CONTRACT_INVALID' }
+        $contract.BaseSha256 -notmatch '^[0-9a-f]{64}$' -or $contract.VirtualSize -lt 3GB -or $contract.VirtualSize -gt 16GB -or
+        -not (Get-Item -LiteralPath $base).IsReadOnly) { throw 'BASE_CONTRACT_INVALID' }
     if ((Get-FileHash -LiteralPath $base -Algorithm SHA256).Hash.ToLowerInvariant() -cne $contract.BaseSha256) { throw 'BASE_DISK_HASH_MISMATCH' }
     $info = Get-VHD -Path $base -ErrorAction Stop
     if ($info.VhdType -ne 'Dynamic' -or $info.ParentPath -or $info.Size -ne $contract.VirtualSize) { throw 'BASE_DISK_CONTRACT_MISMATCH' }
+}
+
+function Enter-Ci7ControllerLock {
+    param([string]$Root)
+    $path = Join-Path $Root 'control.lock'
+    Assert-Ci7Path $Root $path
+    try { [IO.File]::Open($path, 'OpenOrCreate', 'ReadWrite', 'None') }
+    catch { throw 'ANOTHER_CONTROLLER_ACTIVE_OR_LOCK_UNCERTAIN' }
 }
 
 function New-Ci7Configuration {
@@ -240,7 +249,26 @@ function Get-Ci7PersistentBaseline {
 function Assert-Ci7PersistentUnchanged {
     param([object]$State)
     $current = Get-Ci7PersistentBaseline $State.Configuration
-    if ($current.Runner -cne $State.PersistentBaseline.Runner -or $current.VMs -cne $State.PersistentBaseline.VMs) { throw 'PERSISTENT_REFERENCE_CHANGED' }
+    if (-not (Test-Ci7EquivalentData ($current.Runner | ConvertFrom-Json -AsHashtable) ($State.PersistentBaseline.Runner | ConvertFrom-Json -AsHashtable)) -or
+        -not (Test-Ci7EquivalentData ($current.VMs | ConvertFrom-Json -AsHashtable) ($State.PersistentBaseline.VMs | ConvertFrom-Json -AsHashtable))) { throw 'PERSISTENT_REFERENCE_CHANGED' }
+}
+
+function Test-Ci7EquivalentData {
+    param($Left, $Right)
+    # JSON object key ordering is not a configuration change, especially after
+    # recovery in another PowerShell process. Array ordering remains significant.
+    if ($null -eq $Left -or $null -eq $Right) { return ($null -eq $Left -and $null -eq $Right) }
+    if ($Left -is [Collections.IDictionary]) {
+        if ($Right -isnot [Collections.IDictionary] -or $Left.Count -ne $Right.Count) { return $false }
+        foreach ($key in $Left.Keys) { if (-not $Right.Contains($key) -or -not (Test-Ci7EquivalentData $Left[$key] $Right[$key])) { return $false } }
+        return $true
+    }
+    if ($Left -is [Collections.IList]) {
+        if ($Right -isnot [Collections.IList] -or $Left.Count -ne $Right.Count) { return $false }
+        for ($index = 0; $index -lt $Left.Count; $index++) { if (-not (Test-Ci7EquivalentData $Left[$index] $Right[$index])) { return $false } }
+        return $true
+    }
+    return ($Left -ceq $Right)
 }
 
 function New-Ci7Guest {
@@ -253,16 +281,28 @@ function New-Ci7Guest {
     $vm = New-VM -Name $State.Name -Path (Join-Path $State.Directory 'vm') -Generation 2 -MemoryStartupBytes ($State.Configuration.MemoryMiB * 1MB) -VHDPath $State.Disk -SwitchName 'Default Switch' -ErrorAction Stop
     $State.VMId = [string]$vm.VMId
     Save-Ci7State $State
-    Set-VM -VM $vm -Notes ($script:Marker + ':' + $State.RunId) -AutomaticStartAction Nothing -AutomaticStopAction TurnOff -ErrorAction Stop
+    Set-VM -VM $vm -Notes ($script:Marker + ':' + $State.RunId) -AutomaticStartAction Nothing -AutomaticStopAction TurnOff -AutomaticCheckpointsEnabled $false -ErrorAction Stop
     Set-VMProcessor -VM $vm -Count $State.Configuration.CpuCount
     Set-VMMemory -VM $vm -DynamicMemoryEnabled $false
     Set-VMFirmware -VM $vm -EnableSecureBoot On -SecureBootTemplate MicrosoftUEFICertificateAuthority
     Get-VMIntegrationService -VM $vm | Where-Object Name -NE 'Heartbeat' | Disable-VMIntegrationService
     Add-VMDvdDrive -VM $vm -Path $State.Seed
+    # Local named-pipe diagnostics is not an inbound network administration path.
+    Set-VMComPort -VM $vm -Number 1 -Path ('\\.\pipe\' + $State.Name)
     Set-VMNetworkAdapter -VM $vm -MacAddressSpoofing Off -DhcpGuard Off -RouterGuard On
     $disk = @(Get-VMHardDiskDrive -VM $vm)
     if ($disk.Count -ne 1 -or $disk[0].Path -cne $State.Disk) { throw 'VM_DISK_BOUNDARY_INVALID' }
     Assert-Ci7OwnedVm $State (Get-VM -Id $State.VMId)
+}
+
+function Write-Ci7GuestEvidence {
+    param([object]$State, [ValidateSet('BOOTSTRAP','NETWORK','DEPENDENCIES','FIREWALL','IDENTITY','DOWNLOAD','HASH','SERVICE','FAILED',
+        'DOWNLOAD_DNS_FAILED','DOWNLOAD_CONNECT_FAILED','DOWNLOAD_HTTP_FAILED','DOWNLOAD_WRITE_FAILED','DOWNLOAD_TLS_FAILED','DOWNLOAD_OTHER_FAILED')][string]$Stage)
+    Assert-Ci7State $State $State.Configuration.Root
+    $file = Join-Path $State.Configuration.Root ('evidence/' + $State.RunId + '.jsonl')
+    Assert-Ci7Path $State.Configuration.Root $file
+    [ordered]@{ run = $State.RunId; phase = 'guest-' + $Stage.ToLowerInvariant(); utc = [DateTime]::UtcNow.ToString('o') } |
+        ConvertTo-Json -Compress | Add-Content -LiteralPath $file -Encoding utf8NoBOM
 }
 
 function Remove-Ci7LocalResources {
@@ -324,6 +364,24 @@ function Clear-Ci7TransientState {
     }
     if (Test-Path -LiteralPath $State.Directory) { throw 'TRANSIENT_STATE_REMOVAL_UNCONFIRMED' }
     Write-Ci7Evidence $State 'complete'
+}
+
+function Assert-Ci7AlreadyClean {
+    param([string]$Root, [string]$RunId, [string[]]$ApprovedRepositories = @('LowcountryDigitalWorks/business-operations'))
+    if ($RunId -cnotmatch '^[0-9a-f]{32}$') { throw 'LOCAL_RUN_ID_INVALID' }
+    $directory = Join-Path $Root ('runs/' + $RunId)
+    $log = Join-Path $Root ('evidence/' + $RunId + '.jsonl')
+    Assert-Ci7Path $Root $directory; Assert-Ci7Path $Root $log
+    if ((Test-Path -LiteralPath $directory) -or -not (Test-Path -LiteralPath $log)) { throw 'PRIOR_CLEANUP_NOT_CONFIRMED' }
+    $last = Get-Content -LiteralPath $log | Select-Object -Last 1 | ConvertFrom-Json
+    if ($last.run -cne $RunId -or $last.phase -cne 'complete') { throw 'PRIOR_CLEANUP_NOT_CONFIRMED' }
+    $name = 'ci7-' + $RunId
+    if (@(Get-VM | Where-Object Name -CEQ $name).Count) { throw 'VM_REAPPEARED_WITHOUT_CONCLUSIVE_STATE' }
+    foreach ($repo in @(@($ApprovedRepositories) + @('LowcountryDigitalWorks/infrastructure-tools') | Sort-Object -Unique)) {
+        if ($repo -cnotmatch '^LowcountryDigitalWorks/[a-z0-9-]+$') { throw 'REPOSITORY_NOT_APPROVED' }
+        $all = Invoke-Ci7Api ('repos/' + $repo + '/actions/runners?per_page=100')
+        if ($all.total_count -gt 100 -or @($all.runners | Where-Object name -CEQ $name).Count) { throw 'RUNNER_ABSENCE_UNCONFIRMED' }
+    }
 }
 
 Export-ModuleMember -Function *-Ci7*

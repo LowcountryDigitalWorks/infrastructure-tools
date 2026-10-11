@@ -30,6 +30,11 @@ function Fixture([switch]$Compressed) {
     @{Bytes=$bytes;Expected=$data}
 }
 try {
+    Assert ([LDW.CiRunner.GuestDiagnostics]::Classify('CI7_BOOT_PHASE=HASH') -ceq 'HASH')
+    foreach($line in @('CI7_BOOT_PHASE=UNKNOWN','arbitrary-private-content',' CI7_BOOT_PHASE=HASH','CI7_BOOT_PHASE=HASH extra')){
+        Assert ($null -eq [LDW.CiRunner.GuestDiagnostics]::Classify($line))
+    }
+    $total++; 'PASS guest diagnostics drops all non-whitelisted console lines'
     foreach($compressed in @($false,$true)){
         $fixture=Fixture -Compressed:$compressed
         $source=Join-Path $directory ('source-'+$compressed+'.qcow2')

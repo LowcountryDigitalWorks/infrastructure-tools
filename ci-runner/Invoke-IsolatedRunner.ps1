@@ -13,11 +13,19 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'CiRunner.psm1') -Force
 $state = $null
 $lock = $null
+$rootLock = $null
+$diagnostics = $null
 $cleanupComplete = $false
 try {
     Assert-Ci7Elevated
     if ($Mode -in @('Cleanup','Reap')) {
+        $rootLock = Enter-Ci7ControllerLock $Root
         if ($Mode -eq 'Cleanup' -and $LocalRunId -cnotmatch '^[0-9a-f]{32}$') { throw 'LOCAL_RUN_ID_REQUIRED' }
+        if ($Mode -eq 'Cleanup' -and -not (Test-Path -LiteralPath (Join-Path $Root ('runs/' + $LocalRunId)))) {
+            Assert-Ci7AlreadyClean $Root $LocalRunId $ApprovedRepositories
+            'CLEANUP_IDEMPOTENT=PASS'
+            exit 0
+        }
         $directories = if ($Mode -eq 'Cleanup') { @(Join-Path $Root ('runs/' + $LocalRunId)) } else {
             @(Get-ChildItem -LiteralPath (Join-Path $Root 'runs') -Directory -ErrorAction Stop | ForEach-Object FullName)
         }
@@ -54,6 +62,9 @@ try {
     $job = Get-Ci7ExpectedJob $configuration -RequireQueued
     if ($Mode -eq 'Plan') { 'PROVISIONING_PLAN=PASS'; exit 0 }
     Initialize-Ci7Root $Root
+    $rootLock = Enter-Ci7ControllerLock $Root
+    Assert-Ci7Capacity $configuration
+    $job = Get-Ci7ExpectedJob $configuration -RequireQueued
     if (@(Get-VM | Where-Object { $_.Name -cmatch '^ci7-' }).Count -or @(Get-ChildItem -LiteralPath (Join-Path $Root 'runs') -Directory).Count) { throw 'STALE_RUN_MUST_BE_RECONCILED_FIRST' }
     $state = New-Ci7State $configuration
     $state.JobId = $job.id
@@ -78,7 +89,8 @@ try {
         New-Ci7Guest $state
         Move-Ci7Phase $state Provisioned; Save-Ci7State $state
         Write-Ci7Evidence $state 'provisioned'
-        Start-VM -Id $state.VMId -ErrorAction Stop
+        Start-VM -VM (Get-VM -Id $state.VMId -ErrorAction Stop) -ErrorAction Stop
+        $diagnostics = [LDW.CiRunner.GuestDiagnostics]::new($state.Name)
         Move-Ci7Phase $state Running; Save-Ci7State $state
         Write-Ci7Evidence $state 'running'
         'SYNTHETIC_CONTROLLER_STARTED=YES'
@@ -86,13 +98,20 @@ try {
         $lastProgress = [DateTime]::UtcNow
         do {
             if ([DateTime]::UtcNow -ge $deadline) { throw 'BOUNDED_JOB_TIMEOUT' }
+            foreach ($stage in $diagnostics.Poll()) {
+                Write-Ci7GuestEvidence $state $stage; 'GUEST_BOOT_PHASE=' + $stage
+                if ($stage -like '*FAILED') { throw 'BOOTSTRAP_FAILURE_REPORTED' }
+            }
             $job = Get-Ci7ExpectedJob $configuration
             if ($job.id -ne $state.JobId -or ($job.runner_id -and $job.runner_id -ne $state.RunnerId)) { throw 'UNEXPECTED_JOB_ASSIGNMENT' }
             if ([DateTime]::UtcNow - $lastProgress -ge [TimeSpan]::FromSeconds(45)) { 'LIFECYCLE_WAIT=BOUNDED'; $lastProgress = [DateTime]::UtcNow }
             if ($job.status -ne 'completed') {
                 $vm = Get-VM -Id $state.VMId -ErrorAction Stop
                 Assert-Ci7OwnedVm $state $vm
-                if ($vm.State -eq 'Off') { throw 'GUEST_STOPPED_BEFORE_JOB_COMPLETION' }
+                if ($vm.State -eq 'Off') {
+                    foreach ($stage in $diagnostics.Poll()) { Write-Ci7GuestEvidence $state $stage; 'GUEST_BOOT_PHASE=' + $stage }
+                    throw 'GUEST_STOPPED_BEFORE_JOB_COMPLETION'
+                }
                 Start-Sleep -Seconds 10
             }
         } while ($job.status -ne 'completed')
@@ -138,4 +157,4 @@ try {
     'CONTROLLER_RESULT=FAIL'
     'CLASSIFICATION=' + $code
     exit 1
-} finally { if ($lock) { $lock.Dispose() } }
+} finally { if ($diagnostics) { $diagnostics.Dispose() }; if ($lock) { $lock.Dispose() }; if ($rootLock) { $rootLock.Dispose() } }

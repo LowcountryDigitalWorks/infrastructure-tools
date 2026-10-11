@@ -46,6 +46,20 @@ try {
         Refuses { New-Ci7Configuration -Repository $config.Repository -WorkflowRunId 1 -ExpectedSha ('a' * 40) -Root $root -CpuCount 3 }
         Refuses { New-Ci7Configuration -Repository $config.Repository -WorkflowRunId 1 -ExpectedSha ('a' * 40) -Root $root -TimeoutMinutes 31 }
     }
+    Check 'global controller lock prevents concurrent provisioning or reap' {
+        $first=Enter-Ci7ControllerLock $root
+        try { Refuses {Enter-Ci7ControllerLock $root} } finally {$first.Dispose()}
+        $second=Enter-Ci7ControllerLock $root
+        $second.Dispose()
+        Assert ((Get-Item -LiteralPath (Join-Path $root 'control.lock')).Length -eq 0)
+    }
+    Check 'persistent baseline comparison ignores JSON key order but detects changes' {
+        $left = '{"vm":{"cpu":2,"disks":["owned"]},"runner":21}' | ConvertFrom-Json -AsHashtable
+        $right = '{"runner":21,"vm":{"disks":["owned"],"cpu":2}}' | ConvertFrom-Json -AsHashtable
+        Assert (Test-Ci7EquivalentData $left $right)
+        $right.vm.cpu = 3; Assert (-not (Test-Ci7EquivalentData $left $right))
+        $right.vm.cpu = 2; $right.vm.disks = @('unrelated'); Assert (-not (Test-Ci7EquivalentData $left $right))
+    }
     Check 'isolation labels exclude persistent runner labels' {
         $labels = @(Get-Ci7Labels 12345)
         Assert ($labels.Count -eq 8)
@@ -59,6 +73,20 @@ try {
         foreach ($phase in @('Registered','Provisioned','Running','JobCompleted','RunnerAbsent','GuestRemoved','ArtifactsRemoved','Complete')) { Move-Ci7Phase $lifecycle $phase }
         Refuses { Move-Ci7Phase $lifecycle Running }
         Refuses { Move-Ci7Phase $lifecycle Complete }
+    }
+    Check 'Hyper-V command bindings match the installed management module' {
+        foreach ($source in @('../CiRunner.psm1','../Invoke-IsolatedRunner.ps1','../Prepare-Base.ps1')) {
+            $tokens=$null; $errors=$null
+            $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot $source),[ref]$tokens,[ref]$errors)
+            Assert ($errors.Count -eq 0)
+            $commands=$ast.FindAll({param($node); $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -match '^(Get|Set|New|Start|Stop|Remove|Add|Disable|Convert)-(VM|VHD)'},$true)
+            foreach($call in $commands){
+                $definition=Get-Command $call.GetCommandName() -ErrorAction Stop
+                foreach($element in $call.CommandElements|Where-Object{$_ -is [Management.Automation.Language.CommandParameterAst]}){
+                    Assert ($definition.Parameters.ContainsKey($element.ParameterName))
+                }
+            }
+        }
     }
     Check 'JIT is ephemeral with auto-update disabled and correct repository' {
         $state.RunnerId = 42
@@ -89,6 +117,25 @@ try {
         $owned.Name = 'CI-RUNNER-001'; Refuses { Assert-Ci7OwnedVm $state $owned }
         $owned.Name = $state.Name; $owned.Notes = ''; Refuses { Assert-Ci7OwnedVm $state $owned }
         $owned.Notes = 'CI-RUNNER-EPHEMERAL-001:' + $state.RunId; $owned.VMId = [guid]::NewGuid().ToString(); Refuses { Assert-Ci7OwnedVm $state $owned }
+    }
+    & $module {
+        param($cfg)
+        $script:ApiTestRepo=[pscustomobject]@{private=$true}
+        $script:ApiTestRun=[pscustomobject]@{head_sha=$cfg.ExpectedSha;path=$cfg.WorkflowPath;head_repository=[pscustomobject]@{full_name=$cfg.Repository};event='push';head_branch='main'}
+        $script:ApiTestJob=[pscustomobject]@{id=10;status='queued';runner_id=0;labels=@(Get-Ci7Labels $cfg.WorkflowRunId)}
+        $script:ApiTestCount=1
+        function script:Invoke-Ci7Api {param($Path,$Method='GET',$Body); if($Path -match '/jobs\?'){[pscustomobject]@{total_count=$script:ApiTestCount;jobs=@($script:ApiTestJob)}}elseif($Path -match '/actions/runs/'){$script:ApiTestRun}else{$script:ApiTestRepo}}
+    } $config
+    Check 'exact queued-job routing refuses source, labels, privacy and job-count drift' {
+        Assert ((Get-Ci7ExpectedJob $config -RequireQueued).id -eq 10)
+        & $module {$script:ApiTestRun.head_sha='c'*40}; Refuses {Get-Ci7ExpectedJob $config}
+        & $module {param($cfg);$script:ApiTestRun.head_sha=$cfg.ExpectedSha;$script:ApiTestRun.head_repository.full_name='untrusted/fork'} $config
+        Refuses {Get-Ci7ExpectedJob $config}
+        & $module {param($cfg);$script:ApiTestRun.head_repository.full_name=$cfg.Repository;$script:ApiTestRepo.private=$false} $config
+        Refuses {Get-Ci7ExpectedJob $config}
+        & $module {$script:ApiTestRepo.private=$true;$script:ApiTestCount=2}; Refuses {Get-Ci7ExpectedJob $config}
+        & $module {$script:ApiTestCount=1;$script:ApiTestJob.runner_id=42}; Refuses {Get-Ci7ExpectedJob $config -RequireQueued}
+        & $module {$script:ApiTestJob.runner_id=0;$script:ApiTestJob.labels=@('self-hosted','ldw-light')}; Refuses {Get-Ci7ExpectedJob $config}
     }
     # Replace only external Hyper-V/API seams within the imported module. No live
     # VM, runner, token, network, or policy mutation occurs in this harness.
@@ -147,6 +194,22 @@ try {
         Assert (-not (Test-Path -LiteralPath (Join-Path $state.Directory 'seed/user-data')))
         $log = Get-Content -LiteralPath (Join-Path $root ('evidence/' + $state.RunId + '.jsonl')) -Raw
         Assert (-not $log.Contains('dGVzdC1qdXQtbWF0ZXJpYWw='))
+    }
+    Check 'transient cleanup retains only sanitized evidence and is idempotent' {
+        $state.PersistentBaseline=[pscustomobject]@{Runner='{"id":21}';VMs='{"cpu":4}'}
+        & $module {param($baseline);$script:TestBaseline=$baseline;function script:Get-Ci7PersistentBaseline {param($Configuration);$script:TestBaseline}} $state.PersistentBaseline
+        Remove-Ci7LocalResources $state
+        Clear-Ci7TransientState $state
+        Clear-Ci7TransientState $state
+        Assert (-not (Test-Path -LiteralPath $state.Directory))
+        $last=Get-Content -LiteralPath (Join-Path $root ('evidence/'+$state.RunId+'.jsonl'))|Select-Object -Last 1|ConvertFrom-Json
+        Assert ($last.phase -ceq 'complete')
+        & $module {$script:TestRunners=@()}
+        Assert-Ci7AlreadyClean $root $state.RunId
+        Assert-Ci7AlreadyClean $root $state.RunId
+        & $module {param($s);$script:TestRunners=@([pscustomobject]@{id=999;name=$s.Name;busy=$false;labels=@()})} $state
+        Refuses {Assert-Ci7AlreadyClean $root $state.RunId}
+        Assert ((& $module {$script:DeletedRunners}) -eq 1)
     }
     'DETERMINISTIC_TESTS=PASS'
     'TEST_COUNT=' + $total

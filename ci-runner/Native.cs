@@ -1,11 +1,48 @@
 using System;
 using System.IO;
 using System.IO.Compression;
+using System.IO.Pipes;
+using System.Collections.Generic;
+using System.Threading.Tasks;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
 using System.Text;
 
 namespace LDW.CiRunner {
+    public sealed class GuestDiagnostics : IDisposable {
+        private readonly NamedPipeClientStream pipe;
+        private readonly byte[] buffer = new byte[4096];
+        private Task<int> read;
+        private string pending = "";
+        private bool ended;
+        public GuestDiagnostics(string name) { pipe = new NamedPipeClientStream(".", name, PipeDirection.In, PipeOptions.Asynchronous); }
+        public static string Classify(string line) {
+            foreach (string stage in new[] { "BOOTSTRAP", "NETWORK", "DEPENDENCIES", "FIREWALL", "IDENTITY", "DOWNLOAD", "HASH", "SERVICE", "FAILED",
+                "DOWNLOAD_DNS_FAILED", "DOWNLOAD_CONNECT_FAILED", "DOWNLOAD_HTTP_FAILED", "DOWNLOAD_WRITE_FAILED", "DOWNLOAD_TLS_FAILED", "DOWNLOAD_OTHER_FAILED" })
+                if (line.TrimEnd('\r') == "CI7_BOOT_PHASE=" + stage) return stage;
+            return null;
+        }
+        public string[] Poll() {
+            var result = new List<string>();
+            if (ended) return result.ToArray();
+            try {
+                if (!pipe.IsConnected) { pipe.Connect(200); read = pipe.ReadAsync(buffer, 0, buffer.Length); }
+                if (read != null && read.IsCompleted) {
+                    int count = read.GetAwaiter().GetResult();
+                    if (count == 0) { ended = true; return result.ToArray(); }
+                    foreach (byte value in buffer.AsSpan(0, count)) {
+                        if (value == 10) { string stage = Classify(pending); if (stage != null) result.Add(stage); pending = ""; }
+                        else { pending += value < 128 ? (char)value : '?'; if (pending.Length > 1024) pending = ""; }
+                    }
+                    Array.Clear(buffer, 0, buffer.Length);
+                    read = pipe.ReadAsync(buffer, 0, buffer.Length);
+                }
+            } catch (TimeoutException) { }
+              catch (IOException) { ended = true; }
+            return result.ToArray();
+        }
+        public void Dispose() { pipe.Dispose(); pending = ""; Array.Clear(buffer, 0, buffer.Length); }
+    }
     public static class Native {
         // IMAPI supplies IStream; copying in bounded chunks keeps seed contents off stdout.
         public static void SaveIso(object source, string destination) {

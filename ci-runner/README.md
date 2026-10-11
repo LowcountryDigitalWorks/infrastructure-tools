@@ -31,8 +31,9 @@ PowerShell 7 on the approved Hyper-V host, using the existing `gh` session.
   cannot be rewritten by the job. The service never restarts the runner.
 - Only the built-in NAT switch is used. SSH services are masked. Before starting
   the runner, nftables drops inbound administration and blocks private networks,
-  host addresses, metadata/link-local ranges, and IPv6. DHCP and loopback remain
-  available. Public outbound access supports GitHub and verified tool downloads;
+  host addresses, metadata/link-local ranges, and IPv6. DHCP, loopback, and DNS
+  only to the guest's assigned IPv4 resolvers remain available. Public outbound
+  access supports GitHub and verified tool downloads;
   this prototype does not enforce a domain-level outbound allowlist.
 - VM guest integration services except heartbeat are disabled. No inherited
   management credential or public inbound administration is configured.
@@ -59,7 +60,10 @@ It refuses backing files, encryption, incompatible features, malformed bounds,
 and unsupported flags. It appends a fixed VHD footer, then uses the built-in
 Hyper-V `Convert-VHD` to produce a dynamic VHDX. The resulting hash, source hash,
 release, and virtual size are recorded in a local protected provenance manifest.
-The VHDX is sealed read-only, rehashed before each run, and never booted directly.
+The VHDX has a bounded 16 GiB virtual capacity, is sealed read-only, rehashed
+before each run, and never booted directly. Preparation may explicitly expand
+an already verified smaller prototype base using `-ExpandVerifiedBase`, only
+with no disposable instances and no attached reference to that base.
 Every job uses a fresh differencing disk. This base has never executed a job.
 
 The runner is pinned to `v2.338.0`, Linux X64, from the official `actions/runner`
@@ -76,20 +80,25 @@ Incremental cash is `$0`; no Actions overage setting is changed.
    a two-CPU allocation, a 2–4 GiB guest, at least 4 GiB free host RAM after the
    allocation, CPU load at most 70%, and at least 40 GiB free disk.
 2. The controller snapshots the persistent runner/VM configuration locally and
-   creates a protected ownership manifest and exclusive controller lock.
+   creates a protected ownership manifest and exclusive controller locks. A
+   global lock serializes provisioning and reap; a per-run lock protects recovery.
 3. GitHub generates a repository-level JIT configuration. Its runner ID and name
    are recorded before provisioning. The material is never logged.
 4. Windows IMAPI creates a NoCloud `cidata` ISO from fixed guest files and the
    JIT configuration. Plain seed staging files are immediately removed. The ISO,
-   VM, differencing disk, and manifest live inside one protected owned directory.
+  VM, differencing disk, and manifest live inside one protected owned directory.
+  Automatic checkpoints are disabled on the disposable VM.
 5. The guest creates the non-root account, hardens networking and administration,
-   downloads and verifies the runner, and starts its one-job service. Cloud-init
-   and runner bootstrap output are suppressed rather than retained as raw logs.
+  downloads and verifies the runner, and starts its one-job service. Cloud-init
+  and runner bootstrap output are suppressed rather than retained as raw logs.
+  A local Hyper-V serial pipe filters fixed bootstrap phase/failure codes; every
+  other console line is discarded in memory, never printed or stored.
 6. The controller polls only the exact intended run/job. It refuses a different
    runner assignment, unexpected job count, source drift, or timeout.
 7. After job completion, it confirms/removes only its registration, removes the
    VM and disposable disk/media, checks the persistent baseline, and removes
-   transient state. The immutable base and sanitized evidence survive.
+   transient state. The immutable base, sanitized evidence, and empty global
+   mutex file survive; the mutex file contains no run or credential state.
 
 GitHub job/check logs provide job evidence. Local JSONL evidence retains only
 an opaque run ID, a fixed phase classification, and UTC timing. Ownership manifests
