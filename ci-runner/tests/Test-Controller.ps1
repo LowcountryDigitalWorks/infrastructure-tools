@@ -137,6 +137,86 @@ try {
         & $module {$script:ApiTestCount=1;$script:ApiTestJob.runner_id=42}; Refuses {Get-Ci7ExpectedJob $config -RequireQueued}
         & $module {$script:ApiTestJob.runner_id=0;$script:ApiTestJob.labels=@('self-hosted','ldw-light')}; Refuses {Get-Ci7ExpectedJob $config}
     }
+    Check 'closed WQT workload profiles accept exact job classes and reject drift' {
+        $wqt1 = New-Ci7Configuration -Repository 'LowcountryDigitalWorks/wqt-operations' -WorkflowRunId 2001 -ExpectedSha ('c' * 40) -Root $root -WorkflowPath '.github/workflows/wqt.yml' -JobName 'validate-pr'
+        Assert (-not $wqt1.WorkflowSecrets -and -not $wqt1.Docker -and $wqt1.WorkloadProfile -eq 'wqt-pr-validation')
+        Refuses { New-Ci7Configuration -Repository 'LowcountryDigitalWorks/wqt-operations' -WorkflowRunId 2001 -ExpectedSha ('c' * 40) -Root $root -WorkflowPath '.github/workflows/wqt.yml' -JobName 'unlisted-job' }
+        Refuses { New-Ci7Configuration -Repository 'LowcountryDigitalWorks/wqt-operations' -WorkflowRunId 2001 -ExpectedSha ('c' * 40) -Root $root -WorkflowPath '.github/workflows/wqt.yml' -JobName 'validate-*' }
+
+        $wqt2 = New-Ci7Configuration -Repository 'LowcountryDigitalWorks/wqt-operations' -WorkflowRunId 2002 -ExpectedSha ('d' * 40) -Root $root -WorkflowPath '.github/workflows/wqt-semantic-consumer.yml' -JobName 'validate-pr'
+        Assert ($wqt2.WorkloadProfile -eq 'wqt-semantic-validation')
+
+        $wqt3 = New-Ci7Configuration -Repository 'LowcountryDigitalWorks/wqt-operations' -WorkflowRunId 2002 -ExpectedSha ('d' * 40) -Root $root -WorkflowPath '.github/workflows/wqt-semantic-consumer.yml' -JobName 'retention-probe-pr'
+        Assert ($wqt3.WorkloadProfile -eq 'wqt-semantic-retention-probe' -and $wqt3.RequiredDependencyJob -eq 'validate-pr')
+    }
+    Check 'WQT job routing and dependency validation' {
+        & $module {
+            param($c1, $c2, $c3)
+            $script:ApiTestRepo = [pscustomobject]@{ private = $true }
+            $script:MockRuns = @{
+                2001 = [pscustomobject]@{ head_sha = $c1.ExpectedSha; path = $c1.WorkflowPath; head_repository = [pscustomobject]@{ full_name = $c1.Repository }; event = 'pull_request'; run_attempt = 1 }
+                2002 = [pscustomobject]@{ head_sha = $c2.ExpectedSha; path = $c2.WorkflowPath; head_repository = [pscustomobject]@{ full_name = $c2.Repository }; event = 'pull_request'; run_attempt = 1 }
+            }
+            $script:MockJobs = @{
+                2001 = @([pscustomobject]@{ id = 101; name = 'validate-pr'; status = 'queued'; runner_id = 0; labels = @(Get-Ci7Labels 2001); run_attempt = 1 })
+                2002 = @(
+                    [pscustomobject]@{ id = 201; name = 'validate-pr'; status = 'queued'; runner_id = 0; labels = @(Get-Ci7Labels 2002); run_attempt = 1 },
+                    [pscustomobject]@{ id = 202; name = 'retention-probe-pr'; status = 'queued'; runner_id = 0; labels = @(Get-Ci7Labels 2002); run_attempt = 1 },
+                    [pscustomobject]@{ id = 203; name = 'scan'; status = 'skipped'; runner_id = 0; labels = @(); run_attempt = 1 },
+                    [pscustomobject]@{ id = 204; name = 'consume-real'; status = 'skipped'; runner_id = 0; labels = @(); run_attempt = 1 }
+                )
+            }
+            function script:Invoke-Ci7Api {
+                param($Path, $Method = 'GET', $Body)
+                if ($Path -match '/actions/runs/(\d+)/jobs') {
+                    $runId = [long]$Matches[1]
+                    $jList = $script:MockJobs[$runId]
+                    [pscustomobject]@{ total_count = $jList.Count; jobs = $jList }
+                } elseif ($Path -match '/actions/runs/(\d+)') {
+                    $runId = [long]$Matches[1]
+                    $script:MockRuns[$runId]
+                } else {
+                    $script:ApiTestRepo
+                }
+            }
+        } $wqt1 $wqt2 $wqt3
+
+        Assert ((Get-Ci7ExpectedJob $wqt1 -RequireQueued).id -eq 101)
+
+        Refuses { Get-Ci7ExpectedJob $wqt3 -RequireQueued }
+
+        & $module {
+            $script:MockJobs[2002][0].status = 'completed'
+            $script:MockJobs[2002][0].conclusion = 'success'
+        }
+        Assert ((Get-Ci7ExpectedJob $wqt3 -RequireQueued).id -eq 202)
+
+        Refuses {
+            $badCfg = New-Ci7Configuration -Repository 'LowcountryDigitalWorks/wqt-operations' -WorkflowRunId 2002 -ExpectedSha ('d' * 40) -Root $root -WorkflowPath '.github/workflows/wqt-semantic-consumer.yml' -WorkloadProfile 'wqt-semantic-validation' -JobName 'scan'
+            Get-Ci7ExpectedJob $badCfg -RequireQueued
+        }
+        Refuses {
+            $badCfg = New-Ci7Configuration -Repository 'LowcountryDigitalWorks/wqt-operations' -WorkflowRunId 2002 -ExpectedSha ('d' * 40) -Root $root -WorkflowPath '.github/workflows/wqt-semantic-consumer.yml' -WorkloadProfile 'wqt-semantic-validation' -JobName 'consume-real'
+            Get-Ci7ExpectedJob $badCfg -RequireQueued
+        }
+
+        & $module {
+            $script:MockJobs[2002] += [pscustomobject]@{ id = 205; name = 'unexpected-runnable'; status = 'queued'; runner_id = 0; labels = @(); run_attempt = 1 }
+        }
+        Refuses { Get-Ci7ExpectedJob $wqt3 -RequireQueued }
+
+        & $module {
+            $script:MockJobs[2002] = @($script:MockJobs[2002] | Where-Object { $_.name -ne 'unexpected-runnable' })
+            $script:MockRuns[2002].event = 'push'
+        }
+        Refuses { Get-Ci7ExpectedJob $wqt3 -RequireQueued }
+
+        & $module {
+            $script:MockRuns[2002].event = 'pull_request'
+            $script:MockRuns[2002].run_attempt = 2
+        }
+        Refuses { Get-Ci7ExpectedJob $wqt3 -RequireQueued }
+    }
     # Replace only external Hyper-V/API seams within the imported module. No live
     # VM, runner, token, network, or policy mutation occurs in this harness.
     & $module {

@@ -2,12 +2,13 @@
 param(
     [ValidateSet('Plan','Run','Cleanup','Reap')][string]$Mode = 'Plan',
     [string]$Repository = 'LowcountryDigitalWorks/business-operations',
-    [string[]]$ApprovedRepositories = @('LowcountryDigitalWorks/business-operations'),
+    [string[]]$ApprovedRepositories = @('LowcountryDigitalWorks/business-operations', 'LowcountryDigitalWorks/wqt-operations'),
     [long]$WorkflowRunId, [string]$ExpectedSha,
     [string]$Root = (Join-Path $env:ProgramData 'LDW/CiRunnerEphemeral'),
     [string]$LocalRunId,
     [switch]$AllowPublicSyntheticProof,
-    [int]$MemoryMiB = 2048, [int]$CpuCount = 2, [int]$TimeoutMinutes = 20
+    [int]$MemoryMiB = 2048, [int]$CpuCount = 2, [int]$TimeoutMinutes = 20,
+    [string]$WorkloadProfile, [string]$WorkflowPath, [string]$JobName, [int]$RunAttempt = 1
 )
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'CiRunner.psm1') -Force
@@ -56,7 +57,7 @@ try {
         exit 0
     }
 
-    $configuration = New-Ci7Configuration -Repository $Repository -ApprovedRepositories $ApprovedRepositories -WorkflowRunId $WorkflowRunId -ExpectedSha $ExpectedSha -Root $Root -AllowPublicSyntheticProof:$AllowPublicSyntheticProof -MemoryMiB $MemoryMiB -CpuCount $CpuCount -TimeoutMinutes $TimeoutMinutes
+    $configuration = New-Ci7Configuration -Repository $Repository -ApprovedRepositories $ApprovedRepositories -WorkflowRunId $WorkflowRunId -ExpectedSha $ExpectedSha -Root $Root -AllowPublicSyntheticProof:$AllowPublicSyntheticProof -MemoryMiB $MemoryMiB -CpuCount $CpuCount -TimeoutMinutes $TimeoutMinutes -WorkloadProfile $WorkloadProfile -WorkflowPath $WorkflowPath -JobName $JobName -RunAttempt $RunAttempt
     Assert-Ci7Capacity $configuration
     Assert-Ci7Base $Root
     $job = Get-Ci7ExpectedJob $configuration -RequireQueued
