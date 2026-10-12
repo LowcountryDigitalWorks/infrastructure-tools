@@ -66,10 +66,11 @@ try {
     $owner='LDW\Owner'
     $action=[pscustomobject]@{Execute='C:\Program Files\PowerShell\7\pwsh.exe';Arguments=$taskArguments;WorkingDirectory=$null}
     $principal=[pscustomobject]@{UserId=$owner;LogonType='Interactive';RunLevel='Highest'}
-    $repetition=[pscustomobject]@{Interval='PT1M';Duration='P1D';StopAtDurationEnd=$false}
-    $logon=[pscustomobject]@{CimClass=[pscustomobject]@{CimClassName='MSFT_TaskLogonTrigger'};Enabled=$true;UserId=$owner;EndBoundary=$null}
-    $daily=[pscustomobject]@{CimClass=[pscustomobject]@{CimClassName='MSFT_TaskDailyTrigger'};Enabled=$true;DaysInterval=1;StartBoundary='2026-10-12T00:00:00';EndBoundary=$null;Repetition=$repetition}
-    $settings=[pscustomobject]@{MultipleInstances='IgnoreNew';ExecutionTimeLimit='PT25M';StartWhenAvailable=$true;DisallowStartIfOnBatteries=$false;StopIfGoingOnBatteries=$false}
+    $repetition=[pscustomobject]@{Interval='PT1M';Duration='P1D';StopAtDurationEnd=$true}
+    $emptyRepetition=[pscustomobject]@{Interval=$null;Duration=$null;StopAtDurationEnd=$false}
+    $logon=[pscustomobject]@{CimClass=[pscustomobject]@{CimClassName='MSFT_TaskLogonTrigger'};Enabled=$true;UserId=$owner;StartBoundary=$null;EndBoundary=$null;Delay=$null;Repetition=$emptyRepetition}
+    $daily=[pscustomobject]@{CimClass=[pscustomobject]@{CimClassName='MSFT_TaskDailyTrigger'};Enabled=$true;UserId=$null;DaysInterval=1;StartBoundary='2026-10-12T04:00:00Z';EndBoundary=$null;RandomDelay=$null;Repetition=$repetition}
+    $settings=[pscustomobject]@{MultipleInstances='IgnoreNew';ExecutionTimeLimit='PT25M';StartWhenAvailable=$true;DisallowStartIfOnBatteries=$false;StopIfGoingOnBatteries=$false;AllowDemandStart=$true;AllowHardTerminate=$true;Compatibility='Win7';DeleteExpiredTaskAfter=$null;Enabled=$true;Hidden=$false;Priority=7;RestartCount=0;RestartInterval=$null;RunOnlyIfIdle=$false;WakeToRun=$false}
     $task=[pscustomobject]@{TaskPath='\';Actions=@($action);Principal=$principal;Triggers=@($logon,$daily);Settings=$settings;State='Ready'}
 
     Check 'full accepted task contract passes' {
@@ -83,8 +84,12 @@ try {
         $bad=Clone $task;$bad.Triggers[1].Repetition.Interval='PT2M'
         AssertIdentityRefuses -Task $bad -Executable $action.Execute -Arguments $taskArguments -Owner $owner
     }
+    Check 'repetition stop-at-duration drift refused' {
+        $bad=Clone $task;$bad.Triggers[1].Repetition.StopAtDurationEnd=$false
+        AssertIdentityRefuses -Task $bad -Executable $action.Execute -Arguments $taskArguments -Owner $owner
+    }
     Check 'daily start drift refused' {
-        $bad=Clone $task;$bad.Triggers[1].StartBoundary='2026-10-12T00:01:00'
+        $bad=Clone $task;$bad.Triggers[1].StartBoundary='2026-10-12T04:01:00Z'
         AssertIdentityRefuses -Task $bad -Executable $action.Execute -Arguments $taskArguments -Owner $owner
     }
     Check 'multiple instance drift refused' {
@@ -97,6 +102,10 @@ try {
     }
     Check 'battery setting drift refused' {
         $bad=Clone $task;$bad.Settings.DisallowStartIfOnBatteries=$true
+        AssertIdentityRefuses -Task $bad -Executable $action.Execute -Arguments $taskArguments -Owner $owner
+    }
+    Check 'hidden setting drift refused' {
+        $bad=Clone $task;$bad.Settings.Hidden=$true
         AssertIdentityRefuses -Task $bad -Executable $action.Execute -Arguments $taskArguments -Owner $owner
     }
     Check 'action working directory drift refused' {

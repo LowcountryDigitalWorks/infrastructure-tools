@@ -81,16 +81,25 @@ function Assert-Ci10TaskIdentity {
     if ($logon.Count -ne 1 -or $daily.Count -ne 1) { throw 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN' }
     $logon=$logon[0];$daily=$daily[0]
     if (-not $logon.Enabled -or $logon.UserId -ine $Owner -or
+        -not [string]::IsNullOrEmpty([string]$logon.StartBoundary) -or
         -not [string]::IsNullOrEmpty([string]$logon.EndBoundary) -or
+        (ConvertFrom-Ci10TaskDuration $logon.Delay) -ne [TimeSpan]::Zero -or
+        (ConvertFrom-Ci10TaskDuration $logon.Repetition.Interval) -ne [TimeSpan]::Zero -or
+        (ConvertFrom-Ci10TaskDuration $logon.Repetition.Duration) -ne [TimeSpan]::Zero -or
+        [bool]$logon.Repetition.StopAtDurationEnd -or
         -not $daily.Enabled -or [int]$daily.DaysInterval -ne 1 -or
-        -not [string]::IsNullOrEmpty([string]$daily.EndBoundary)) {
+        -not [string]::IsNullOrEmpty([string]$daily.UserId) -or
+        -not [string]::IsNullOrEmpty([string]$daily.EndBoundary) -or
+        (ConvertFrom-Ci10TaskDuration $daily.RandomDelay) -ne [TimeSpan]::Zero) {
         throw 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
     }
-    try { $start=[DateTime]$daily.StartBoundary } catch { throw 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN' }
-    if ($start.TimeOfDay -ne [TimeSpan]::Zero -or
+    try {
+        $start=[DateTimeOffset]::Parse([string]$daily.StartBoundary,[Globalization.CultureInfo]::InvariantCulture)
+    } catch { throw 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN' }
+    if ($start.ToLocalTime().TimeOfDay -ne [TimeSpan]::Zero -or
         (ConvertFrom-Ci10TaskDuration $daily.Repetition.Interval) -ne (New-TimeSpan -Minutes 1) -or
         (ConvertFrom-Ci10TaskDuration $daily.Repetition.Duration) -ne (New-TimeSpan -Days 1) -or
-        [bool]$daily.Repetition.StopAtDurationEnd) {
+        -not [bool]$daily.Repetition.StopAtDurationEnd) {
         throw 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
     }
 
@@ -99,7 +108,18 @@ function Assert-Ci10TaskIdentity {
         (ConvertFrom-Ci10TaskDuration $settings.ExecutionTimeLimit) -ne (New-TimeSpan -Minutes 25) -or
         -not [bool]$settings.StartWhenAvailable -or
         [bool]$settings.DisallowStartIfOnBatteries -or
-        [bool]$settings.StopIfGoingOnBatteries) {
+        [bool]$settings.StopIfGoingOnBatteries -or
+        -not [bool]$settings.AllowDemandStart -or
+        -not [bool]$settings.AllowHardTerminate -or
+        $settings.Compatibility -ne 'Win7' -or
+        -not [string]::IsNullOrEmpty([string]$settings.DeleteExpiredTaskAfter) -or
+        -not [bool]$settings.Enabled -or
+        [bool]$settings.Hidden -or
+        [int]$settings.Priority -ne 7 -or
+        [int]$settings.RestartCount -ne 0 -or
+        -not [string]::IsNullOrEmpty([string]$settings.RestartInterval) -or
+        [bool]$settings.RunOnlyIfIdle -or
+        [bool]$settings.WakeToRun) {
         throw 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
     }
 }
