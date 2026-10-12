@@ -10,10 +10,11 @@ PowerShell 7 on the approved Hyper-V host, using the existing `gh` session.
 
 ## Security boundary
 
-- The normal repository allowlist starts with `business-operations`. An operator
+- The normal repository allowlist includes `business-operations` and `wqt-operations`. An operator
   can supply an explicit approved private-repository allowlist for future accepted
-  workflows. The implementation is parameterized; this is not acceptance of any
-  additional workflow or credential use.
+  workflows. Closed workload profiles define exact authorized repository, workflow path,
+  event, and job classes (`business-operations` `security-secrets.yml`, public synthetic proof, and
+  `wqt-operations` PR-validation jobs `validate-pr` and `retention-probe-pr`).
 - The public implementation repository has a narrowly scoped synthetic exception:
   its exact proof workflow, a push to the implementation branch, one job, exact
   head SHA, and the expected isolation labels. No production workload or secret
