@@ -4,6 +4,7 @@ $script:SafeLabels = @('self-hosted', 'Linux', 'X64', 'ldw01', 'ldw-ephemeral', 
 $script:Marker = 'CI-RUNNER-EPHEMERAL-001'
 
 function Assert-Ci7Elevated {
+    if (-not ($IsWindows -or [OperatingSystem]::IsWindows())) { return }
     $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'ELEVATED_CONTROLLER_REQUIRED' }
 }
@@ -28,14 +29,35 @@ function Initialize-Ci7Root {
     if ([IO.Path]::GetFileName($Root.TrimEnd('\', '/')) -cne 'CiRunnerEphemeral') { throw 'DEDICATED_ROOT_REQUIRED' }
     Assert-Ci7Path ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Root))) $Root
     [void](New-Item -ItemType Directory -Path $Root -Force)
-    $acl = [Security.AccessControl.DirectorySecurity]::new()
-    $acl.SetAccessRuleProtection($true, $false)
-    foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
-        $rule = [Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
-        $acl.AddAccessRule($rule)
+    if ($IsWindows -or [OperatingSystem]::IsWindows()) {
+        $acl = [Security.AccessControl.DirectorySecurity]::new()
+        $acl.SetAccessRuleProtection($true, $false)
+        foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
+            $rule = [Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+            $acl.AddAccessRule($rule)
+        }
+        Set-Acl -LiteralPath $Root -AclObject $acl
     }
-    Set-Acl -LiteralPath $Root -AclObject $acl
     foreach ($child in @('runs', 'evidence')) { [void](New-Item -ItemType Directory -Path (Join-Path $Root $child) -Force) }
+}
+
+function Assert-Ci7Provenance {
+    param([string]$ComponentRoot = $PSScriptRoot)
+    $manifestPath = Join-Path $ComponentRoot 'provenance.json'
+    Assert-Ci7Path $ComponentRoot $manifestPath
+    if (-not (Test-Path -LiteralPath $manifestPath)) { throw 'CONTROLLER_PROVENANCE_MANIFEST_MISSING' }
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    if ($manifest.Schema -ne 1 -or -not $manifest.Files) { throw 'CONTROLLER_PROVENANCE_MANIFEST_INVALID' }
+    foreach ($property in $manifest.Files.psobject.properties) {
+        $relPath = $property.Name
+        $expectedHash = [string]$property.Value
+        if ($expectedHash -ceq '0000000000000000000000000000000000000000000000000000000000000000') { continue }
+        $filePath = Join-Path $ComponentRoot $relPath
+        Assert-Ci7Path $ComponentRoot $filePath
+        if (-not (Test-Path -LiteralPath $filePath)) { throw 'CONTROLLER_PROVENANCE_FILE_MISSING' }
+        $actualHash = (Get-FileHash -LiteralPath $filePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actualHash -cne $expectedHash.ToLowerInvariant()) { throw 'CONTROLLER_PROVENANCE_HASH_MISMATCH' }
+    }
 }
 
 function Assert-Ci7Base {
@@ -61,6 +83,118 @@ function Enter-Ci7ControllerLock {
     Assert-Ci7Path $Root $path
     try { [IO.File]::Open($path, 'OpenOrCreate', 'ReadWrite', 'None') }
     catch { throw 'ANOTHER_CONTROLLER_ACTIVE_OR_LOCK_UNCERTAIN' }
+}
+
+function Enter-Ci7DispatcherLock {
+    param([string]$Root)
+    $path = Join-Path $Root 'dispatch.lock'
+    Assert-Ci7Path $Root $path
+    try { [IO.File]::Open($path, 'OpenOrCreate', 'ReadWrite', 'None') }
+    catch { throw 'ANOTHER_DISPATCHER_ACTIVE_OR_LOCK_UNCERTAIN' }
+}
+
+function Get-Ci7DispatcherAllowlist {
+    param([switch]$AllowPublicSyntheticProof)
+    $profiles = [Collections.Generic.List[object]]::new()
+    $profiles.Add([pscustomobject]@{
+        ProfileId = 'business-operations-secret-scan'
+        Repository = 'LowcountryDigitalWorks/business-operations'
+        WorkflowPath = '.github/workflows/security-secrets.yml'
+        AllowedEvents = @('push', 'pull_request', 'workflow_dispatch')
+        RequiredBranch = '*'
+        WorkloadProfile = 'security-isolated'
+        StaticLabels = @($script:SafeLabels)
+        MemoryMiB = 2048
+        CpuCount = 2
+        TimeoutMinutes = 20
+        AllowContainer = $false
+        AllowSecrets = $true
+        EgressProfile = 'github-verified'
+        AllowPublicSyntheticProof = $false
+    })
+    if ($AllowPublicSyntheticProof) {
+        $profiles.Add([pscustomobject]@{
+            ProfileId = 'infrastructure-tools-synthetic-proof'
+            Repository = 'LowcountryDigitalWorks/infrastructure-tools'
+            WorkflowPath = '.github/workflows/ci-runner-isolation-proof.yml'
+            AllowedEvents = @('push')
+            RequiredBranch = 'feat/ci-runner-ephemeral-001'
+            WorkloadProfile = 'security-isolated'
+            StaticLabels = @($script:SafeLabels)
+            MemoryMiB = 2048
+            CpuCount = 2
+            TimeoutMinutes = 20
+            AllowContainer = $false
+            AllowSecrets = $false
+            EgressProfile = 'github-verified'
+            AllowPublicSyntheticProof = $true
+        })
+    }
+    @($profiles)
+}
+
+function Assert-Ci7AllowlistProfile {
+    param([object]$Profile)
+    if (-not $Profile -or [string]::IsNullOrWhiteSpace($Profile.ProfileId) -or [string]::IsNullOrWhiteSpace($Profile.Repository) -or
+        [string]::IsNullOrWhiteSpace($Profile.WorkflowPath) -or -not $Profile.AllowedEvents -or -not $Profile.StaticLabels) {
+        throw 'ALLOWLIST_PROFILE_INVALID'
+    }
+    if ($Profile.Repository -cnotmatch '^LowcountryDigitalWorks/[a-z0-9-]+$') { throw 'ALLOWLIST_REPOSITORY_REFUSED' }
+    if ($Profile.MemoryMiB -lt 2048 -or $Profile.MemoryMiB -gt 4096 -or $Profile.CpuCount -lt 1 -or $Profile.CpuCount -gt 2 -or
+        $Profile.TimeoutMinutes -lt 5 -or $Profile.TimeoutMinutes -gt 30) { throw 'RESOURCE_BOUNDS_INVALID' }
+}
+
+function Get-Ci7QueuedCandidates {
+    param([object[]]$Allowlist, [switch]$AllowPublicSyntheticProof)
+    $candidates = [Collections.Generic.List[object]]::new()
+    foreach ($profile in $Allowlist) {
+        Assert-Ci7AllowlistProfile $profile
+        if ($profile.AllowPublicSyntheticProof -and -not $AllowPublicSyntheticProof) { continue }
+        $runsResponse = Invoke-Ci7Api ('repos/' + $profile.Repository + '/actions/runs?status=queued&per_page=50')
+        if (-not $runsResponse -or -not $runsResponse.workflow_runs) { continue }
+        foreach ($run in $runsResponse.workflow_runs) {
+            if ($run.path -cne $profile.WorkflowPath) { continue }
+            if ($run.event -cnotin $profile.AllowedEvents) { continue }
+            if ($run.head_repository.full_name -cne $profile.Repository) { continue }
+            if ($profile.RequiredBranch -ne '*' -and $run.head_branch -cne $profile.RequiredBranch) { continue }
+            if (-not $profile.AllowPublicSyntheticProof -and -not $run.head_repository.private) { continue }
+
+            $runId = [long]$run.id
+            $jobsResponse = Invoke-Ci7Api ('repos/' + $profile.Repository + '/actions/runs/' + $runId + '/jobs?filter=latest&per_page=100')
+            if (-not $jobsResponse -or $jobsResponse.total_count -ne 1 -or @($jobsResponse.jobs).Count -ne 1) { continue }
+            $job = $jobsResponse.jobs[0]
+            if ($job.status -cne 'queued' -or $job.runner_id) { continue }
+
+            $expectedLabels = @($profile.StaticLabels) + @('ci7-run-' + $runId)
+            if (@($job.labels).Count -ne $expectedLabels.Count -or @(Compare-Object $expectedLabels @($job.labels) -CaseSensitive).Count -ne 0) { continue }
+
+            $createdAt = if ($run.created_at) { [DateTime]::Parse([string]$run.created_at) } else { [DateTime]::MinValue }
+            $runNumber = if ($run.run_number) { [long]$run.run_number } else { 0L }
+            $candidates.Add([pscustomobject]@{
+                Profile = $profile
+                Repository = $profile.Repository
+                WorkflowRunId = $runId
+                ExpectedSha = [string]$run.head_sha
+                CreatedAt = $createdAt
+                RunNumber = $runNumber
+            })
+        }
+    }
+    @($candidates | Sort-Object CreatedAt, RunNumber, WorkflowRunId)
+}
+
+function Write-Ci7DispatcherLog {
+    param([string]$Root, [string]$Classification, [string]$ProfileId = $null, [long]$WorkflowRunId = 0)
+    Initialize-Ci7Root $Root
+    $file = Join-Path $Root 'evidence/dispatcher.jsonl'
+    Assert-Ci7Path $Root $file
+    $record = [ordered]@{
+        utc = [DateTime]::UtcNow.ToString('o')
+        phase = $Classification
+    }
+    if ($ProfileId) { $record['profile'] = $ProfileId }
+    if ($WorkflowRunId -gt 0) { $record['run_id'] = $WorkflowRunId }
+    $record | ConvertTo-Json -Compress | Add-Content -LiteralPath $file -Encoding utf8NoBOM
 }
 
 function New-Ci7Configuration {

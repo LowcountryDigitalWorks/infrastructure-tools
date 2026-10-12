@@ -18,6 +18,7 @@ $diagnostics = $null
 $cleanupComplete = $false
 try {
     Assert-Ci7Elevated
+    Assert-Ci7Provenance $PSScriptRoot
     if ($Mode -in @('Cleanup','Reap')) {
         $rootLock = Enter-Ci7ControllerLock $Root
         if ($Mode -eq 'Cleanup' -and $LocalRunId -cnotmatch '^[0-9a-f]{32}$') { throw 'LOCAL_RUN_ID_REQUIRED' }

@@ -5,6 +5,10 @@ obj/
 *.user
 *.suo
 
+# Python
+__pycache__/
+*.pyc
+
 # Machine-local configuration and credentials
 .env
 .env.*

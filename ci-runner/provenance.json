@@ -1,0 +1,16 @@
+{
+  "Schema": 1,
+  "Description": "SHA-256 provenance manifest for ci-runner controller and dispatcher components.",
+  "Files": {
+    "CiRunner.psm1": "f0061303553595fa02d3ec9aabd91a16860d764246ddfa4c5bcead5a8a986bdf",
+    "Invoke-IsolatedRunner.ps1": "150bc4fa7fa4221e14811cc6b9115b53d68dd719883aacf9c966b6d4518011d4",
+    "Invoke-Ci7Dispatcher.ps1": "310ed41920b109519b11a665cbfde07cb026e63e750765337aeebb0edf02bc5a",
+    "Native.cs": "f5af15fdcd477574114885635870049b199f992a997f061057c547a98b407261",
+    "Prepare-Base.ps1": "6fb41a7196955d83489cee068a8503c68e5417d89e999b14e2c75a4aad146fe9",
+    "guest/bootstrap.sh": "9eba5d80e12336fcb45841cb495260121197a69c0819508b46599b720bc58f55",
+    "guest/ci7-runner.service": "3f87a4de95d07bcf75719b728240ffbb9471f64b4b5fab938184bfe46e653104",
+    "guest/proof.sh": "91616d68365731720d49bf2df0f7957e63453aa83ead93125fe478524962bcc9",
+    "guest/prove-betterleaks.py": "ebf26993655796b3fadf8a2ea4b21df508506f5b48d08d8303bc64afc2b1986e",
+    "guest/run-one.sh": "a6f69f5605aa2a78f42fb32234ff91a097bf1683b7a7ef6e5ec910625ec864b1"
+  }
+}

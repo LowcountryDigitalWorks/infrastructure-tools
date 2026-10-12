@@ -1,11 +1,12 @@
 # Disposable Hyper-V runner candidate
 
 Work item: `LowcountryDigitalWorks/infrastructure-tools#7`.
+Dispatcher work item: `LowcountryDigitalWorks/infrastructure-tools — CI-RUNNER-DISPATCH-001`.
 Architecture and workflow acceptance: `LowcountryDigitalWorks/business-operations#552`.
 
-This is an elevated, owner-controlled, bounded controller prototype. It creates a
+This is an elevated, owner-controlled, bounded controller and dispatcher system. It creates a
 fresh Linux guest and a repository-scoped GitHub JIT runner for exactly one
-identified job. It does not install a standing privileged service. Run it from
+identified job. It does not install a standing unprivileged daemon or broad background service. Run it from
 PowerShell 7 on the approved Hyper-V host, using the existing `gh` session.
 
 ## Security boundary
@@ -74,9 +75,60 @@ from Ubuntu's signed package repositories. No paid software or cloud compute is
 used. Local CPU, RAM, disk, and outbound bandwidth are the runtime resources.
 Incremental cash is `$0`; no Actions overage setting is changed.
 
+## Artifact provenance
+
+Controller and dispatcher components are checked against `provenance.json` before execution:
+- `CiRunner.psm1`
+- `Invoke-IsolatedRunner.ps1`
+- `Invoke-Ci7Dispatcher.ps1`
+- `Native.cs`
+- `Prepare-Base.ps1`
+- `guest/*` scripts and service unit definitions
+
+Both `Invoke-IsolatedRunner.ps1` and `Invoke-Ci7Dispatcher.ps1` enforce `Assert-Ci7Provenance` at startup. If any script, module, or definition file is tampered with or missing, the controller/dispatcher fails closed without making API or provisioning calls.
+
+## Trusted dispatcher (CI-RUNNER-DISPATCH-001)
+
+`Invoke-Ci7Dispatcher.ps1` provides the host-side daily-use control plane layer that detects eligible queued jobs from allowed repositories and invokes the accepted one-job controller primitive.
+
+### Key Dispatcher Guarantees
+
+1. **Explicit Code-Reviewed Allowlist:** Only repositories and workflow paths explicitly registered in the allowlist (`Get-Ci7DispatcherAllowlist`) are polled. Broad organization-wide scanning or "all queued self-hosted jobs" rules are refused.
+2. **Deterministic Selection:** If multiple eligible queued jobs are detected, the dispatcher selects the oldest candidate (`created_at` / `run_number`) first.
+3. **Double Verification Before Launch:** Re-reads the queued job state via GitHub API immediately prior to controller invocation to confirm the job remains queued, unassigned, and matching the isolated label contract.
+4. **Capacity & Exclusive Mutex:** Uses `dispatch.lock` to ensure only one dispatcher instance polls or provisions at a time, permitting at most one active disposable runner VM on LDW01.
+5. **Safe Reconciliation:** Runs `Invoke-IsolatedRunner.ps1 -Mode Reap` before launching a guest to reconcile any stale or interrupted resources from a prior run crash.
+6. **No Credential Export:** Reuses the trusted owner's non-interactive `gh` session on LDW01 control plane. Tokens are never written to disk, exported to environment files, or passed to guests.
+
+### Dispatcher Modes & Operations
+
+- **Verify:** Confirms owner `gh` authentication status, allowlist profile integrity, component provenance, and storage root ACLs.
+  ```powershell
+  ./ci-runner/Invoke-Ci7Dispatcher.ps1 -Mode Verify
+  ```
+- **PollOnce:** Performs a single reconciliation and queue poll cycle, provisioning exactly one job if queued and allowed.
+  ```powershell
+  ./ci-runner/Invoke-Ci7Dispatcher.ps1 -Mode PollOnce
+  ```
+- **Service:** Continuous polling loop on the host (at bounded interval, e.g., 30s).
+  ```powershell
+  ./ci-runner/Invoke-Ci7Dispatcher.ps1 -Mode Service -PollIntervalSeconds 30
+  ```
+- **RegisterTask (Phase A Daily Use):** Registers a Windows Scheduled Task (`LDW-CiRunner-Dispatcher`) under the current owner identity with `Highest` privileges, configured to start at owner logon.
+  ```powershell
+  ./ci-runner/Invoke-Ci7Dispatcher.ps1 -Mode RegisterTask
+  ```
+- **UnregisterTask:** Cleanly unregisters and removes the Scheduled Task.
+  ```powershell
+  ./ci-runner/Invoke-Ci7Dispatcher.ps1 -Mode UnregisterTask
+  ```
+
+### Phase A Daily Use Scope
+Phase A installs an owner-session Scheduled Task running under the existing owner identity. It runs non-interactively without UAC prompts per JIT job, with zero embedded passwords or tokens. It provides daily-use acceptance during owner sessions, but is explicitly reported as not covering pre-login host reboots (which is preserved for a future Phase B gate).
+
 ## Lifecycle and bootstrap
 
-1. Read-only planning verifies elevation, base provenance, queued job identity,
+1. Read-only planning verifies elevation, base provenance, component hashes, queued job identity,
    a two-CPU allocation, a 2–4 GiB guest, at least 4 GiB free host RAM after the
    allocation, CPU load at most 70%, and at least 40 GiB free disk.
 2. The controller snapshots the persistent runner/VM configuration locally and
@@ -97,14 +149,14 @@ Incremental cash is `$0`; no Actions overage setting is changed.
    runner assignment, unexpected job count, source drift, or timeout.
 7. After job completion, it confirms/removes only its registration, removes the
    VM and disposable disk/media, checks the persistent baseline, and removes
-   transient state. The immutable base, sanitized evidence, and empty global
-   mutex file survive; the mutex file contains no run or credential state.
+   transient state. The immutable base, sanitized evidence, empty dispatcher mutex,
+   and empty global mutex file survive; mutex files contain no run or credential state.
 
-GitHub job/check logs provide job evidence. Local JSONL evidence retains only
-an opaque run ID, a fixed phase classification, and UTC timing. Ownership manifests
+GitHub job/check logs provide job evidence. Local JSONL evidence (`evidence/<run-id>.jsonl` and `evidence/dispatcher.jsonl`) retains only
+opaque run IDs, fixed phase classifications, profiles, and UTC timing. Ownership manifests
 contain local resource references but remain in ACL-protected local storage and
 are removed on successful cleanup. They are never GitHub artifacts. No detector
-finding contents or raw bootstrap logs are retained.
+finding contents, raw API response bodies, or raw bootstrap logs are retained.
 
 ## Failure and interrupted cleanup
 
@@ -119,45 +171,32 @@ The persistent `CI-RUNNER-001` / `ldw01-ci-01` resources cannot match these guar
 After an interrupted process or host reboot, run `Reap` or a specific `Cleanup`.
 The exclusive lock prevents cleanup racing a live controller. Cleanup is
 idempotent for already absent owned resources. A prefixed VM without conclusive
-state is an explicit blocker, never automatic deletion authority. There is no
-scheduled reap service in this candidate. The controller refuses another run
-until stale resources are reconciled.
+state is an explicit blocker, never automatic deletion authority. The dispatcher
+automatically invokes `Reap` before candidate discovery on every poll cycle.
 
 ## Validation and proof procedure
 
 ```powershell
 ./ci-runner/tests/Test-Controller.ps1
+./ci-runner/tests/Test-Dispatcher.ps1
 ./ci-runner/tests/Test-Native.ps1
+python3 -m unittest discover -s ci-runner/tests
 ./ci-runner/Prepare-Base.ps1
 ```
 
-Push the feature branch to queue its single harmless synthetic job. Retrieve its
-normal GitHub workflow run ID and exact head SHA, then plan and run the controller:
+To test dispatcher verification and single-poll execution:
 
 ```powershell
-./ci-runner/Invoke-IsolatedRunner.ps1 -Mode Plan `
-  -Repository LowcountryDigitalWorks/infrastructure-tools `
-  -AllowPublicSyntheticProof -WorkflowRunId <run-id> -ExpectedSha <head-sha>
-./ci-runner/Invoke-IsolatedRunner.ps1 -Mode Run `
-  -Repository LowcountryDigitalWorks/infrastructure-tools `
-  -AllowPublicSyntheticProof -WorkflowRunId <run-id> -ExpectedSha <head-sha>
-./ci-runner/Invoke-IsolatedRunner.ps1 -Mode Reap
+./ci-runner/Invoke-Ci7Dispatcher.ps1 -Mode Verify -AllowPublicSyntheticProof
+./ci-runner/Invoke-Ci7Dispatcher.ps1 -Mode PollOnce -AllowPublicSyntheticProof
 ```
 
-Use another branch push/run for a second fresh guest. The synthetic job writes a
-workspace marker only after confirming its absence; the next guest must not see
-it. The proof also checks job identity, credential locations, mounts, Docker,
-and lack of sudo. Controller evidence must independently confirm registration,
-one job, deregistration, disk/media removal, and the unchanged persistent baseline.
+To register or unregister the Phase A Scheduled Task:
 
-Normal private workflow routing has not been migrated. The current reusable
-secret scanner selects `ubuntu-latest` internally. An owning-workstream routing
-change is necessary for a real private check to select this class. Preserve its
-public caller default and single scanner implementation. ORCH01 must accept the
-isolation class and the workflow-specific proof gate before daily use. A trusted
-bounded queued-job poller could later invoke this controller from the host using
-existing owner authentication; long-lived runner administration credentials must
-never move into a candidate job or disposable guest.
+```powershell
+./ci-runner/Invoke-Ci7Dispatcher.ps1 -Mode RegisterTask
+./ci-runner/Invoke-Ci7Dispatcher.ps1 -Mode UnregisterTask
+```
 
 ## Betterleaks proof scope
 
