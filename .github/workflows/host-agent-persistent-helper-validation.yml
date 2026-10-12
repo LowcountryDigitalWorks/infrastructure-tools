@@ -1,0 +1,82 @@
+name: Host Agent persistent helper validation
+
+on:
+  push:
+    branches: [feat/host-agent-persistent-helper-deploy-v2]
+    paths:
+      - 'host-agent/**'
+      - '.github/workflows/host-agent-persistent-helper-validation.yml'
+  pull_request:
+    paths:
+      - 'host-agent/**'
+      - '.github/workflows/host-agent-persistent-helper-validation.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Parse deployment PowerShell
+        shell: pwsh
+        run: |
+          $allErrors = @()
+          Get-ChildItem host-agent/deploy -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1') } | ForEach-Object {
+            $tokens = $null
+            $parseErrors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$parseErrors)
+            $allErrors += @($parseErrors)
+          }
+          if ($allErrors.Count -ne 0) {
+            $allErrors | Format-List | Out-String | Write-Error
+            throw "PowerShell parser reported $($allErrors.Count) error(s)."
+          }
+
+      - name: Run deployment contract tests
+        shell: pwsh
+        run: pwsh ./host-agent/deploy/tests/Test-DeploymentContracts.ps1
+
+      - name: Restore Host Agent
+        shell: pwsh
+        run: dotnet restore ./host-agent/LDW.HostAgent.sln
+
+      - name: Build Host Agent Release
+        shell: pwsh
+        run: dotnet build ./host-agent/LDW.HostAgent.sln -c Release --no-restore
+
+      - name: Run Host Agent core contract tests
+        shell: pwsh
+        run: dotnet run --project ./host-agent/tests/LDW.HostAgent.Core.Tests/LDW.HostAgent.Core.Tests.csproj -c Release --no-build
+
+      - name: Run Hyper-V observer tests
+        shell: pwsh
+        run: dotnet run --project ./host-agent/tests/LDW.HostAgent.HyperVObserver.Tests/LDW.HostAgent.HyperVObserver.Tests.csproj -c Release --no-build
+
+      - name: Prove bounded publish and non-mutating plan
+        shell: pwsh
+        run: |
+          $publishRoot = Join-Path $env:RUNNER_TEMP 'host-agent-hyperv-observer-publish'
+          pwsh ./host-agent/deploy/Publish-HyperVObserver.ps1 -OutputDirectory $publishRoot
+          pwsh ./host-agent/deploy/Plan-HyperVObserverDeployment.ps1 `
+            -PublishedDirectory $publishRoot `
+            -PermittedCallerSid 'S-1-5-21-1000000000-1000000001-1000000002-1001'
+
+      - name: Diff whitespace validation
+        shell: pwsh
+        run: |
+          $base = (git merge-base origin/main HEAD).Trim()
+          git diff --check "$base...HEAD"
+          if ($LASTEXITCODE -ne 0) { throw 'git diff --check failed.' }
