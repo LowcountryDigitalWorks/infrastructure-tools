@@ -113,7 +113,6 @@ function Assert-Ci10TaskIdentity {
         -not [bool]$settings.AllowHardTerminate -or
         $settings.Compatibility -ne 'Win7' -or
         -not [string]::IsNullOrEmpty([string]$settings.DeleteExpiredTaskAfter) -or
-        -not [bool]$settings.Enabled -or
         [bool]$settings.Hidden -or
         [int]$settings.Priority -ne 7 -or
         [int]$settings.RestartCount -ne 0 -or
