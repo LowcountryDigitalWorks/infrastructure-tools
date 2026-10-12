@@ -23,7 +23,7 @@ function Import-FunctionFromAst([string]$Path,[string]$Name){
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $Name
     },$true))
     if($definition.Count -ne 1){throw 'FUNCTION_EXTRACTION_FAILED'}
-    Invoke-Expression $definition[0].Extent.Text
+    Invoke-Expression ('function script:'+$Name+' '+$definition[0].Body.Extent.Text)
 }
 try {
     $tokens=$null;$errors=$null
