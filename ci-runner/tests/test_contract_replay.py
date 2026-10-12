@@ -90,5 +90,45 @@ class ContractGuards(unittest.TestCase):
         self.assertEqual(values["${{ github.event.pull_request.head.sha || '' }}"], "c" * 40)
 
 
+class DispatcherContractGuards(unittest.TestCase):
+    def setUp(self):
+        self.ci_runner_dir = Path(__file__).parents[1]
+
+    def test_provenance_manifest_and_file_hashes(self):
+        prov_file = self.ci_runner_dir / "provenance.json"
+        self.assertTrue(prov_file.is_file(), "provenance.json missing")
+        import json
+        with open(prov_file, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        self.assertEqual(manifest.get("Schema"), 1)
+        files = manifest.get("Files", {})
+        self.assertIn("Invoke-Ci7Dispatcher.ps1", files)
+        self.assertIn("CiRunner.psm1", files)
+        self.assertIn("Invoke-IsolatedRunner.ps1", files)
+
+        for rel_path, expected_hash in files.items():
+            full_path = self.ci_runner_dir / rel_path
+            self.assertTrue(full_path.is_file(), f"Provenance file missing: {rel_path}")
+            data = full_path.read_bytes()
+            actual_hash = hashlib.sha256(data).hexdigest()
+            self.assertEqual(actual_hash.lower(), expected_hash.lower(), f"Hash mismatch for {rel_path}")
+
+    def test_dispatcher_script_contract(self):
+        dispatcher_file = self.ci_runner_dir / "Invoke-Ci7Dispatcher.ps1"
+        self.assertTrue(dispatcher_file.is_file())
+        content = dispatcher_file.read_text(encoding="utf-8")
+        for mode in ("PollOnce", "Loop", "InstallTask", "UninstallTask", "Status", "Reap"):
+            self.assertIn(mode, content)
+        self.assertIn("Assert-Ci7ControllerProvenance", content)
+        self.assertIn("LDW-CiRunner-Dispatcher", content)
+
+    def test_module_exports_dispatcher_functions(self):
+        psm1_file = self.ci_runner_dir / "CiRunner.psm1"
+        self.assertTrue(psm1_file.is_file())
+        content = psm1_file.read_text(encoding="utf-8")
+        for func in ("Assert-Ci7ControllerProvenance", "Get-Ci7DispatcherAllowlist", "Get-Ci7QueuedJobs", "Select-Ci7EligibleJob", "Write-Ci7DispatcherEvidence"):
+            self.assertIn(f"function {func}", content)
+
+
 if __name__ == "__main__":
     unittest.main()

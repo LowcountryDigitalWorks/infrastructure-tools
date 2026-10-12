@@ -123,6 +123,40 @@ state is an explicit blocker, never automatic deletion authority. There is no
 scheduled reap service in this candidate. The controller refuses another run
 until stale resources are reconciled.
 
+## Trusted Queued-Job Dispatcher (`Invoke-Ci7Dispatcher.ps1`)
+
+`CI-RUNNER-DISPATCH-001` provides a deterministic, $0 host-side dispatcher control-plane layer that automatically discovers queued jobs matching an explicit code-reviewed allowlist and invokes the JIT controller without human intervention.
+
+### Control-plane guarantees
+- **Allowlist Binding**: Evaluates only explicitly allowed repository/workflow profiles (e.g. `business-operations` security scan `.github/workflows/security-secrets.yml`). Refuses arbitrary organization scans.
+- **Contract Verification**: Discovers exact queued runs, head SHAs, and unassigned single-job runs with the expected isolated labels (`self-hosted`, `Linux`, `X64`, `ldw01`, `ldw-ephemeral`, `ldw-isolated`, `security-isolated`, plus `ci7-run-<run-id>`).
+- **Artifact Provenance**: Verifies controller component SHA-256 hashes against `ci-runner/provenance.json` before execution.
+- **Single Disposable Guest Limit**: Enforces at most one active JIT guest maximum on LDW01 using a global controller lock (`control.lock`).
+- **Oldest-First Selection**: Deterministically selects the oldest queued job when multiple candidate runs are queued.
+- **Sanitized Logging**: Emits structured JSONL logs to `evidence/dispatcher.jsonl` with fixed classifications only. Never logs secrets, tokens, raw API bodies, or private payloads.
+
+### Operational modes (Phase A daily use)
+
+```powershell
+# Single poll cycle
+./ci-runner/Invoke-Ci7Dispatcher.ps1 -Mode PollOnce
+
+# Continuous polling loop
+./ci-runner/Invoke-Ci7Dispatcher.ps1 -Mode Loop -PollIntervalSeconds 15
+
+# Install owner-session Windows Scheduled Task (Phase A daily use)
+./ci-runner/Invoke-Ci7Dispatcher.ps1 -Mode InstallTask
+
+# Check Scheduled Task and dispatcher status
+./ci-runner/Invoke-Ci7Dispatcher.ps1 -Mode Status
+
+# Uninstall Scheduled Task and cleanly stop dispatcher background process
+./ci-runner/Invoke-Ci7Dispatcher.ps1 -Mode UninstallTask
+
+# Reconcile stale/interrupted resources
+./ci-runner/Invoke-Ci7Dispatcher.ps1 -Mode Reap
+```
+
 ## Validation and proof procedure
 
 ```powershell

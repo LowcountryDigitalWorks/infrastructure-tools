@@ -211,6 +211,41 @@ try {
         Refuses {Assert-Ci7AlreadyClean $root $state.RunId}
         Assert ((& $module {$script:DeletedRunners}) -eq 1)
     }
+    Check 'controller provenance verification validates manifest and detects tampering' {
+        Assert-Ci7ControllerProvenance
+        $provPath = Join-Path (Join-Path $PSScriptRoot '..') 'provenance.json'
+        Assert (Test-Path -LiteralPath $provPath)
+    }
+    Check 'dispatcher allowlist binds repository, workflow, events and bounds' {
+        $allowlist = Get-Ci7DispatcherAllowlist
+        Assert ($allowlist.Count -eq 1)
+        Assert ($allowlist[0].ProfileId -ceq 'business-operations-secret-scan')
+        Assert ($allowlist[0].Repository -ceq 'LowcountryDigitalWorks/business-operations')
+        Assert ($allowlist[0].WorkflowPath -ceq '.github/workflows/security-secrets.yml')
+        Assert ($allowlist[0].PermitDocker -eq $false)
+
+        $withProof = Get-Ci7DispatcherAllowlist -AllowPublicSyntheticProof
+        Assert ($withProof.Count -eq 2)
+        Assert ($withProof[1].ProfileId -ceq 'infrastructure-tools-synthetic-proof')
+    }
+    Check 'deterministic job selection prefers oldest queued candidate' {
+        $j1 = [pscustomobject]@{ WorkflowRunId = 100; CreatedAt = '2026-10-15T12:00:00Z' }
+        $j2 = [pscustomobject]@{ WorkflowRunId = 101; CreatedAt = '2026-10-15T11:00:00Z' }
+        $j3 = [pscustomobject]@{ WorkflowRunId = 102; CreatedAt = '2026-10-15T11:00:00Z' }
+        $selected = Select-Ci7EligibleJob @($j1, $j2, $j3)
+        Assert ($selected.WorkflowRunId -eq 101)
+        Assert ((Select-Ci7EligibleJob @()).Equals($null))
+    }
+    Check 'sanitized dispatcher evidence output' {
+        Write-Ci7DispatcherEvidence -Root $root -Event 'TEST_EVENT' -ProfileId 'test-profile' -WorkflowRunId 999 -Status 'PASS'
+        $logFile = Join-Path $root 'evidence/dispatcher.jsonl'
+        Assert (Test-Path -LiteralPath $logFile)
+        $entry = Get-Content -LiteralPath $logFile | Select-Object -Last 1 | ConvertFrom-Json
+        Assert ($entry.event -ceq 'TEST_EVENT')
+        Assert ($entry.profile -ceq 'test-profile')
+        Assert ($entry.run_id -eq 999)
+        Assert ($entry.status -ceq 'PASS')
+    }
     'DETERMINISTIC_TESTS=PASS'
     'TEST_COUNT=' + $total
 } finally {

@@ -384,4 +384,122 @@ function Assert-Ci7AlreadyClean {
     }
 }
 
+function Assert-Ci7ControllerProvenance {
+    param([string]$Root = $PSScriptRoot)
+    $provFile = Join-Path $PSScriptRoot 'provenance.json'
+    if (-not (Test-Path -LiteralPath $provFile)) { throw 'CONTROLLER_PROVENANCE_MANIFEST_MISSING' }
+    $manifest = Get-Content -LiteralPath $provFile -Raw | ConvertFrom-Json
+    if ($manifest.Schema -ne 1 -or ($manifest.Component -cne 'ci7-runner-controller' -and $manifest.Component -cne 'ci-runner-controller')) { throw 'CONTROLLER_PROVENANCE_SCHEMA_INVALID' }
+    foreach ($entry in $manifest.Files.PSObject.Properties) {
+        $relativePath = $entry.Name
+        $expectedHash = [string]$entry.Value
+        $filePath = Join-Path $PSScriptRoot $relativePath
+        if (-not (Test-Path -LiteralPath $filePath)) { throw 'CONTROLLER_PROVENANCE_FILE_MISSING' }
+        $actualHash = (Get-FileHash -LiteralPath $filePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actualHash -cne $expectedHash.ToLowerInvariant()) { throw 'CONTROLLER_PROVENANCE_MISMATCH' }
+    }
+}
+
+function Get-Ci7DispatcherAllowlist {
+    param(
+        [switch]$AllowPublicSyntheticProof,
+        [string[]]$ApprovedRepositories = @('LowcountryDigitalWorks/business-operations')
+    )
+    $profiles = [System.Collections.Generic.List[object]]::new()
+    foreach ($repo in $ApprovedRepositories) {
+        if ($repo -cnotmatch '^LowcountryDigitalWorks/[a-z0-9-]+$') { throw 'REPOSITORY_NOT_APPROVED' }
+        if ($repo -ceq 'LowcountryDigitalWorks/business-operations') {
+            $profiles.Add([pscustomobject]@{
+                ProfileId = 'business-operations-secret-scan'
+                Repository = 'LowcountryDigitalWorks/business-operations'
+                WorkflowPath = '.github/workflows/security-secrets.yml'
+                AllowedEvents = @('push', 'pull_request', 'workflow_dispatch')
+                WorkloadProfile = 'security-isolated'
+                StaticLabels = @($script:SafeLabels)
+                MemoryMiB = 2048
+                CpuCount = 2
+                TimeoutMinutes = 20
+                PermitDocker = $false
+                SecretsPresent = $true
+                EgressProfile = 'default-nat'
+            })
+        }
+    }
+    if ($AllowPublicSyntheticProof) {
+        $profiles.Add([pscustomobject]@{
+            ProfileId = 'infrastructure-tools-synthetic-proof'
+            Repository = 'LowcountryDigitalWorks/infrastructure-tools'
+            WorkflowPath = '.github/workflows/ci-runner-isolation-proof.yml'
+            AllowedEvents = @('push')
+            BranchSemantics = 'feat/ci-runner-ephemeral-001'
+            WorkloadProfile = 'security-isolated'
+            StaticLabels = @($script:SafeLabels)
+            MemoryMiB = 2048
+            CpuCount = 2
+            TimeoutMinutes = 20
+            PermitDocker = $false
+            SecretsPresent = $false
+            EgressProfile = 'default-nat'
+        })
+    }
+    @($profiles)
+}
+
+function Get-Ci7QueuedJobs {
+    param([object[]]$Profiles)
+    $candidates = [System.Collections.Generic.List[object]]::new()
+    foreach ($profile in $Profiles) {
+        $runsResp = Invoke-Ci7Api ('repos/' + $profile.Repository + '/actions/runs?status=queued&per_page=100')
+        $runs = @($runsResp.workflow_runs)
+        foreach ($run in $runs) {
+            if ($run.path -cne $profile.WorkflowPath) { continue }
+            if ($run.event -cnotin $profile.AllowedEvents) { continue }
+            if ($run.head_repository.full_name -cne $profile.Repository) { continue }
+            if ($profile.BranchSemantics -and $run.head_branch -cne $profile.BranchSemantics) { continue }
+
+            $jobsResp = Invoke-Ci7Api ('repos/' + $profile.Repository + '/actions/runs/' + $run.id + '/jobs?filter=latest&per_page=100')
+            if ($jobsResp.total_count -ne 1 -or @($jobsResp.jobs).Count -ne 1) { continue }
+            $job = $jobsResp.jobs[0]
+            if ($job.status -cne 'queued' -or $job.runner_id) { continue }
+
+            $expectedLabels = @($profile.StaticLabels) + @('ci7-run-' + $run.id)
+            if (@($job.labels).Count -ne $expectedLabels.Count -or @(Compare-Object $expectedLabels @($job.labels) -CaseSensitive).Count -ne 0) { continue }
+
+            $candidates.Add([pscustomobject]@{
+                Profile = $profile
+                WorkflowRunId = [long]$run.id
+                ExpectedSha = [string]$run.head_sha
+                CreatedAt = [string]$run.created_at
+                Repository = [string]$profile.Repository
+            })
+        }
+    }
+    @($candidates)
+}
+
+function Select-Ci7EligibleJob {
+    param([object[]]$CandidateJobs)
+    if (-not $CandidateJobs -or $CandidateJobs.Count -eq 0) { return $null }
+    $CandidateJobs | Sort-Object -Property @{ Expression = { if ($_.CreatedAt) { [DateTime]::Parse($_.CreatedAt) } else { [DateTime]::MaxValue } } }, @{ Expression = { $_.WorkflowRunId } } | Select-Object -First 1
+}
+
+function Write-Ci7DispatcherEvidence {
+    param(
+        [string]$Root,
+        [string]$Event,
+        [string]$ProfileId = 'none',
+        [long]$WorkflowRunId = 0,
+        [string]$Status = 'INFO'
+    )
+    $file = Join-Path $Root 'evidence/dispatcher.jsonl'
+    Assert-Ci7Path $Root $file
+    [ordered]@{
+        utc = [DateTime]::UtcNow.ToString('o')
+        event = $Event
+        profile = $ProfileId
+        run_id = $WorkflowRunId
+        status = $Status
+    } | ConvertTo-Json -Compress | Add-Content -LiteralPath $file -Encoding utf8NoBOM
+}
+
 Export-ModuleMember -Function *-Ci7*

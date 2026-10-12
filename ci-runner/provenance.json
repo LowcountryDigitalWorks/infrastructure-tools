@@ -1,0 +1,14 @@
+{
+  "Schema": 1,
+  "Component": "ci-runner-controller",
+  "Files": {
+    "CiRunner.psm1": "d3174d51c3b0d2792907f637193cd98092c1bc24d09bf9c1b51625802e290576",
+    "Invoke-IsolatedRunner.ps1": "cd7907f9f8584aa00dc81a39672f347795b58fceecec1ec170f179e9145c8d62",
+    "Invoke-Ci7Dispatcher.ps1": "02d46a3294ebb8b8422cfd2b25453744d93e2af240318db4d8a561bbcd2f626a",
+    "Native.cs": "f5af15fdcd477574114885635870049b199f992a997f061057c547a98b407261",
+    "Prepare-Base.ps1": "6fb41a7196955d83489cee068a8503c68e5417d89e999b14e2c75a4aad146fe9",
+    "guest/bootstrap.sh": "9eba5d80e12336fcb45841cb495260121197a69c0819508b46599b720bc58f55",
+    "guest/run-one.sh": "a6f69f5605aa2a78f42fb32234ff91a097bf1683b7a7ef6e5ec910625ec864b1",
+    "guest/ci7-runner.service": "3f87a4de95d07bcf75719b728240ffbb9471f64b4b5fab938184bfe46e653104"
+  }
+}
