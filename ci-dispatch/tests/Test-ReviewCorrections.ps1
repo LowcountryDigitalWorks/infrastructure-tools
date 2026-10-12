@@ -76,6 +76,10 @@ try {
     Check 'full accepted task contract passes' {
         Assert-Ci10TaskIdentity -Task $task -Executable $action.Execute -Arguments $taskArguments -Owner $owner
     }
+    Check 'disabled exact task contract passes' {
+        $disabled=Clone $task;$disabled.Settings.Enabled=$false;$disabled.State='Disabled'
+        Assert-Ci10TaskIdentity -Task $disabled -Executable $action.Execute -Arguments $taskArguments -Owner $owner
+    }
     Check 'extra trigger refused' {
         $bad=Clone $task;$bad.Triggers+=@(Clone $daily)
         AssertIdentityRefuses -Task $bad -Executable $action.Execute -Arguments $taskArguments -Owner $owner
@@ -115,6 +119,16 @@ try {
     Check 'task path drift refused' {
         $bad=Clone $task;$bad.TaskPath='\Other\'
         AssertIdentityRefuses -Task $bad -Executable $action.Execute -Arguments $taskArguments -Owner $owner
+    }
+    Check 'disabled state remains reachable by management modes' {
+        $source=Get-Content -LiteralPath $managePath -Raw
+        $identity=$source.IndexOf('Assert-Ci10TaskIdentity -Task $task')
+        $switch=$source.IndexOf('switch ($Mode)')
+        $enable=$source.IndexOf("Enable {",$switch)
+        $uninstall=$source.IndexOf("Uninstall {",$switch)
+        Assert ($identity -ge 0 -and $switch -gt $identity -and $enable -gt $switch -and $uninstall -gt $switch)
+        Assert (-not $source.Contains('-not [bool]$settings.Enabled -or'))
+        Assert (-not $source.Substring($enable,$uninstall-$enable).Contains('State -ne ''Disabled'''))
     }
     Check 'identity check executes before task mode switch and acceptance gates remain' {
         $source=Get-Content -LiteralPath $managePath -Raw
