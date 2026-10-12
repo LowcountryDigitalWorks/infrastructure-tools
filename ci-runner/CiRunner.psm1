@@ -384,4 +384,120 @@ function Assert-Ci7AlreadyClean {
     }
 }
 
+function Get-Ci7DispatcherProfiles {
+    param(
+        [string[]]$ApprovedRepositories = @('LowcountryDigitalWorks/business-operations'),
+        [switch]$AllowPublicSyntheticProof
+    )
+    $profiles = [Collections.Generic.List[object]]::new()
+    if ($AllowPublicSyntheticProof) {
+        $profiles.Add([pscustomobject]@{
+            Name = 'infrastructure-tools-proof'
+            Repository = 'LowcountryDigitalWorks/infrastructure-tools'
+            WorkflowPath = '.github/workflows/ci-runner-isolation-proof.yml'
+            AllowedEvents = @('push')
+            AllowedBranch = 'feat/ci-runner-ephemeral-001'
+            StaticLabels = @($script:SafeLabels)
+            PublicSyntheticProof = $true
+            MemoryMiB = 2048
+            CpuCount = 2
+            TimeoutMinutes = 20
+        })
+    }
+    foreach ($repo in $ApprovedRepositories) {
+        if ($repo -ceq 'LowcountryDigitalWorks/business-operations') {
+            $profiles.Add([pscustomobject]@{
+                Name = 'business-operations-secrets'
+                Repository = $repo
+                WorkflowPath = '.github/workflows/security-secrets.yml'
+                AllowedEvents = @('push', 'pull_request', 'workflow_dispatch')
+                AllowedBranch = $null
+                StaticLabels = @($script:SafeLabels)
+                PublicSyntheticProof = $false
+                MemoryMiB = 2048
+                CpuCount = 2
+                TimeoutMinutes = 20
+            })
+        }
+    }
+    $profiles
+}
+
+function Assert-Ci7ArtifactProvenance {
+    param([string]$Path = $PSScriptRoot)
+    $manifestPath = Join-Path $Path 'provenance.json'
+    if (-not (Test-Path -LiteralPath $manifestPath)) { throw 'CONTROLLER_PROVENANCE_MANIFEST_MISSING' }
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    if ($manifest.Schema -ne 1 -or $null -eq $manifest.Files) { throw 'CONTROLLER_PROVENANCE_MANIFEST_INVALID' }
+    foreach ($prop in $manifest.Files.PSObject.Properties) {
+        $filePath = Join-Path $Path $prop.Name
+        Assert-Ci7Path $Path $filePath
+        if (-not (Test-Path -LiteralPath $filePath)) { throw 'CONTROLLER_PROVENANCE_FILE_MISSING' }
+        $actualHash = (Get-FileHash -LiteralPath $filePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actualHash -cne $prop.Value.ToLowerInvariant()) { throw 'CONTROLLER_PROVENANCE_HASH_MISMATCH' }
+    }
+}
+
+function Get-Ci7EligibleJobs {
+    param(
+        [object[]]$Profiles
+    )
+    $candidates = [Collections.Generic.List[object]]::new()
+    foreach ($profile in $Profiles) {
+        try {
+            $runsResp = Invoke-Ci7Api ('repos/' + $profile.Repository + '/actions/runs?status=queued&per_page=100')
+            if ($null -eq $runsResp -or $null -eq $runsResp.workflow_runs) { continue }
+            foreach ($run in $runsResp.workflow_runs) {
+                if ($run.path -cne $profile.WorkflowPath) { continue }
+                if ($profile.AllowedEvents -cnotin $run.event) { continue }
+                if ($profile.AllowedBranch) {
+                    $branch = $run.head_branch
+                    if ($branch -cne $profile.AllowedBranch -and ('refs/heads/' + $branch) -cne $profile.AllowedBranch) { continue }
+                }
+                if ($run.head_repository.full_name -cne $profile.Repository) { continue }
+
+                $jobsResp = Invoke-Ci7Api ('repos/' + $profile.Repository + '/actions/runs/' + $run.id + '/jobs?filter=latest&per_page=100')
+                if ($jobsResp.total_count -ne 1 -or @($jobsResp.jobs).Count -ne 1) { continue }
+                $job = $jobsResp.jobs[0]
+                if ($job.status -cne 'queued' -or $job.runner_id) { continue }
+
+                $expectedLabels = @(Get-Ci7Labels $run.id)
+                if (@($job.labels).Count -ne $expectedLabels.Count -or @(Compare-Object $expectedLabels @($job.labels) -CaseSensitive).Count -ne 0) { continue }
+
+                $createdUtc = [DateTime]::Parse($run.created_at).ToUniversalTime()
+
+                $candidates.Add([pscustomobject]@{
+                    Profile = $profile
+                    Repository = $profile.Repository
+                    WorkflowRunId = [long]$run.id
+                    JobId = [long]$job.id
+                    ExpectedSha = [string]$run.head_sha
+                    CreatedAtUtc = $createdUtc
+                })
+            }
+        } catch {
+            continue
+        }
+    }
+    @($candidates | Sort-Object CreatedAtUtc)
+}
+
+function Write-Ci7DispatcherEvidence {
+    param(
+        [string]$Root,
+        [string]$Event,
+        [hashtable]$Details = @{}
+    )
+    $log = Join-Path $Root 'evidence/dispatcher.jsonl'
+    Assert-Ci7Path $Root $log
+    $entry = [ordered]@{
+        event = $Event
+        utc = [DateTime]::UtcNow.ToString('o')
+    }
+    foreach ($key in $Details.Keys) {
+        $entry[$key] = $Details[$key]
+    }
+    $entry | ConvertTo-Json -Compress | Add-Content -LiteralPath $log -Encoding utf8NoBOM
+}
+
 Export-ModuleMember -Function *-Ci7*

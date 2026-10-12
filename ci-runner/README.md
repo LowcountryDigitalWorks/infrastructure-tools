@@ -159,6 +159,16 @@ bounded queued-job poller could later invoke this controller from the host using
 existing owner authentication; long-lived runner administration credentials must
 never move into a candidate job or disposable guest.
 
+## Dispatcher and Phase A scheduled task
+
+`CI-RUNNER-DISPATCH-001` introduces a host-side queued-job dispatcher (`Invoke-Ci7Dispatcher.ps1`) that eliminates manual run invocation:
+
+- **Allowlist Profiles**: Polls only explicitly configured repositories/workflows (e.g. `business-operations` secret scan or `infrastructure-tools` synthetic proof).
+- **Exact Contract Validation**: Matches queued jobs requiring the isolated label contract plus the per-run `ci7-run-<run-id>` label.
+- **Deterministic Selection**: Processes the oldest eligible queued job across profiles.
+- **Provenance Verification**: Verifies controller and script SHA-256 hashes against `provenance.json` before execution.
+- **Phase A Scheduled Task**: `Install-Ci7DispatcherTask.ps1` registers a Windows Scheduled Task running under the existing owner identity with highest privileges at logon. `Uninstall-Ci7DispatcherTask.ps1` provides clean uninstallation. Note: Phase A requires an active owner logon session; host reboot before owner logon is explicitly not covered until Phase B machine identity is authorized.
+
 ## Betterleaks proof scope
 
 After the synthetic boundary proof passes, the same one-job workflow replays the
