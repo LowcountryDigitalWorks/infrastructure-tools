@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "profiles": [{
+    "id": "ci10-accepted-synthetic",
+    "repository": "LowcountryDigitalWorks/infrastructure-tools",
+    "workflowPath": ".github/workflows/ci-runner-isolation-proof.yml",
+    "events": ["push"],
+    "branch": "feat/ci-runner-ephemeral-001",
+    "headSha": "6bf0fc0de72c7cef3cea7c3c054ba2326fdbfe26",
+    "jobName": "synthetic",
+    "labels": ["self-hosted", "Linux", "X64", "ldw01", "ldw-ephemeral", "ldw-isolated", "security-isolated"],
+    "dynamicLabel": "ci7-run-<run-id>",
+    "jobCount": 1,
+    "cpu": 2,
+    "memoryMiB": 2048,
+    "timeoutMinutes": 20,
+    "docker": false,
+    "workflowSecrets": false,
+    "privateProductionState": false,
+    "egress": "accepted-ci7-public-ipv4-private-deny",
+    "controllerProfile": "accepted-ci7-public-synthetic"
+  }]
+}

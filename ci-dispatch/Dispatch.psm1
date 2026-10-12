@@ -1,0 +1,294 @@
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$script:ControllerCommit = '49f39f5d3a66251ed18c2e776d843feb25f65fe1'
+$script:ControllerTree = '4d241fe9bc0fbf190daf2e36be0e9c52966c5a7b'
+$script:RuntimeFiles = @(
+    'ci-dispatch/Dispatch.psm1', 'ci-dispatch/Invoke-Dispatcher.ps1', 'ci-dispatch/profiles.json',
+    'ci-runner/CiRunner.psm1', 'ci-runner/Invoke-IsolatedRunner.ps1', 'ci-runner/Native.cs',
+    'ci-runner/guest/bootstrap.sh', 'ci-runner/guest/ci7-runner.service', 'ci-runner/guest/run-one.sh'
+)
+
+function Get-Ci10RuntimeFiles { @($script:RuntimeFiles) }
+
+function Assert-Ci10ParentBoundary {
+    param([string]$Path)
+    $acl = Get-Acl -LiteralPath $Path
+    if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @('S-1-5-18','S-1-5-32-544')) { throw 'BUNDLE_PARENT_OWNER_UNTRUSTED' }
+    $replace = [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
+    foreach ($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -eq 'Allow' -and -not ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -and
+            ($rule.FileSystemRights -band $replace) -and $rule.IdentityReference.Value -notin @('S-1-5-18','S-1-5-32-544')) { throw 'BUNDLE_PARENT_REPLACEMENT_UNTRUSTED' }
+    }
+}
+
+function Assert-Ci10ProtectedPath {
+    param([string]$Path)
+    $full = [IO.Path]::GetFullPath($Path)
+    $cursor = $full
+    while ($cursor) {
+        $item = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'REPARSE_PATH_REFUSED' }
+        $cursor = [IO.Path]::GetDirectoryName($cursor)
+    }
+    $acl = Get-Acl -LiteralPath $full
+    if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @('S-1-5-18','S-1-5-32-544')) {
+        throw 'BUNDLE_OWNER_UNTRUSTED'
+    }
+    $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+    $write = [Security.AccessControl.FileSystemRights]::Write -bor
+        [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership
+    foreach ($rule in $rules) {
+        if ($rule.AccessControlType -eq 'Allow' -and ($rule.FileSystemRights -band $write) -and
+            $rule.IdentityReference.Value -notin @('S-1-5-18','S-1-5-32-544')) { throw 'BUNDLE_ACL_UNTRUSTED_WRITE' }
+    }
+    foreach ($sid in @('S-1-5-18','S-1-5-32-544')) {
+        if (-not @($rules | Where-Object { $_.IdentityReference.Value -eq $sid -and $_.AccessControlType -eq 'Allow' -and
+            ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -eq [Security.AccessControl.FileSystemRights]::FullControl }).Count) {
+            throw 'BUNDLE_ACL_REQUIRED_PRINCIPAL_MISSING'
+        }
+    }
+}
+
+function Assert-Ci10Bundle {
+    param([string]$BundleRoot, [string]$ManifestSha, [string]$Commit, [string]$Tree)
+    if ($ManifestSha -cnotmatch '^[a-f0-9]{64}$' -or $Commit -cnotmatch '^[a-f0-9]{40}$' -or $Tree -cnotmatch '^[a-f0-9]{40}$') {
+        throw 'EXACT_BUNDLE_REFERENCE_REQUIRED'
+    }
+    Assert-Ci10ProtectedPath $BundleRoot
+    # Validate the release parent as well: deleting/replacing a protected child must be impossible for an unelevated account.
+    Assert-Ci10ProtectedPath ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($BundleRoot)))
+    $releaseRoot = [IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($BundleRoot)))
+    Assert-Ci10ProtectedPath $releaseRoot
+    $parent = [IO.Path]::GetDirectoryName($releaseRoot)
+    Assert-Ci10ParentBoundary $parent
+    Assert-Ci10ParentBoundary ([IO.Path]::GetDirectoryName($parent))
+    $manifestPath = Join-Path $BundleRoot 'manifest.json'
+    Assert-Ci10ProtectedPath $manifestPath
+    if ((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $ManifestSha) { throw 'MANIFEST_HASH_DRIFT' }
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    if ($manifest.schema -ne 1 -or $manifest.commit -cne $Commit -or $manifest.tree -cne $Tree -or
+        $manifest.controllerCommit -cne $script:ControllerCommit -or $manifest.controllerTree -cne $script:ControllerTree) {
+        throw 'BUNDLE_PROVENANCE_MISMATCH'
+    }
+    $expected = @($script:RuntimeFiles) + @('manifest.json')
+    $actual = @(Get-ChildItem -LiteralPath $BundleRoot -Recurse -Force -File | ForEach-Object {
+        [IO.Path]::GetRelativePath($BundleRoot, $_.FullName).Replace('\','/')
+    })
+    if ($actual.Count -ne $expected.Count -or @(Compare-Object $expected $actual -CaseSensitive).Count -or
+        @($manifest.files).Count -ne $script:RuntimeFiles.Count -or
+        @(Compare-Object $script:RuntimeFiles @($manifest.files.path) -CaseSensitive).Count) { throw 'BUNDLE_FILE_SET_DRIFT' }
+    foreach ($directory in @(Get-ChildItem -LiteralPath $BundleRoot -Recurse -Force -Directory)) {
+        Assert-Ci10ProtectedPath $directory.FullName
+    }
+    foreach ($entry in $manifest.files) {
+        if ($entry.sha256 -cnotmatch '^[a-f0-9]{64}$') { throw 'BUNDLE_MANIFEST_INVALID' }
+        $file = Join-Path $BundleRoot $entry.path
+        Assert-Ci10ProtectedPath $file
+        if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -cne $entry.sha256) { throw 'BUNDLE_FILE_HASH_DRIFT' }
+    }
+    $manifest
+}
+
+function Read-Ci10Profiles {
+    param([string]$Path)
+    $registry = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    if ($registry.schema -ne 1 -or @($registry.profiles).Count -ne 1) { throw 'PROFILE_REGISTRY_REFUSED' }
+    $profile = $registry.profiles[0]
+    $required = @('id','repository','workflowPath','events','branch','headSha','jobName','labels','dynamicLabel','jobCount',
+        'cpu','memoryMiB','timeoutMinutes','docker','workflowSecrets','privateProductionState','egress','controllerProfile')
+    if (@(Compare-Object $required @($profile.PSObject.Properties.Name) -CaseSensitive).Count -or
+        $profile.id -cne 'ci10-accepted-synthetic' -or $profile.repository -cne 'LowcountryDigitalWorks/infrastructure-tools' -or
+        $profile.workflowPath -cne '.github/workflows/ci-runner-isolation-proof.yml' -or @($profile.events).Count -ne 1 -or
+        $profile.events[0] -cne 'push' -or $profile.branch -cne 'feat/ci-runner-ephemeral-001' -or
+        $profile.headSha -cne '6bf0fc0de72c7cef3cea7c3c054ba2326fdbfe26' -or $profile.jobName -cne 'synthetic' -or
+        $profile.dynamicLabel -cne 'ci7-run-<run-id>' -or $profile.jobCount -ne 1 -or $profile.cpu -ne 2 -or
+        $profile.memoryMiB -ne 2048 -or $profile.timeoutMinutes -ne 20 -or
+        $profile.docker -isnot [bool] -or $profile.docker -or $profile.workflowSecrets -isnot [bool] -or $profile.workflowSecrets -or
+        $profile.privateProductionState -isnot [bool] -or $profile.privateProductionState -or
+        $profile.egress -cne 'accepted-ci7-public-ipv4-private-deny' -or $profile.controllerProfile -cne 'accepted-ci7-public-synthetic') {
+        throw 'PROFILE_CONTRACT_REFUSED'
+    }
+    $labels = @('self-hosted','Linux','X64','ldw01','ldw-ephemeral','ldw-isolated','security-isolated')
+    if (@($profile.labels).Count -ne 7 -or @(Compare-Object $labels @($profile.labels) -CaseSensitive).Count) { throw 'PROFILE_LABELS_REFUSED' }
+    @($registry.profiles)
+}
+
+function Invoke-Ci10Read {
+    param([string]$Path)
+    if ($Path -cnotmatch '^repos/LowcountryDigitalWorks/infrastructure-tools/actions/(runs|workflows|runners)(/|\?|$)') { throw 'API_SCOPE_REFUSED' }
+    $raw = & gh api --method GET $Path 2>$null
+    if ($LASTEXITCODE -ne 0) { throw 'API_READ_FAILED' }
+    try { $raw | ConvertFrom-Json -DateKind String -ErrorAction Stop } catch { throw 'API_RESPONSE_INVALID' }
+}
+
+function Get-Ci10Candidate {
+    param([object]$Profile, [object]$Run, [object]$Jobs)
+    # API objects never enter the log. Noneligible jobs are not cancelled or modified.
+    if ($Run.repository.full_name -cne $Profile.repository -or $Run.head_repository.full_name -cne $Profile.repository) { throw 'WRONG_REPOSITORY' }
+    if ($Run.path -cne $Profile.workflowPath) { throw 'WRONG_WORKFLOW' }
+    if ($Run.event -cnotin $Profile.events -or $Run.head_branch -cne $Profile.branch -or $Run.head_sha -cne $Profile.headSha) { throw 'WRONG_EVENT_REF_SOURCE' }
+    if ($Run.id -le 0 -or $Run.run_attempt -le 0 -or $Run.status -cne 'queued' -or $null -ne $Run.conclusion) { throw 'RUN_NOT_QUEUED' }
+    if ($Jobs.total_count -ne 1 -or @($Jobs.jobs).Count -ne 1) { throw 'EXACTLY_ONE_JOB_REQUIRED' }
+    $job = $Jobs.jobs[0]
+    if ($job.id -le 0 -or $job.run_id -ne $Run.id -or $job.run_attempt -ne $Run.run_attempt -or
+        $job.head_sha -cne $Run.head_sha -or $job.name -cne $Profile.jobName) { throw 'JOB_IDENTITY_MISMATCH' }
+    # GitHub supplies started_at even on an unassigned queued job. Assignment is established by runner identity fields.
+    if ($job.status -cne 'queued' -or $null -ne $job.conclusion -or $job.runner_id -or $job.runner_name -or $job.runner_group_id) { throw 'JOB_NOT_UNASSIGNED_QUEUED' }
+    $labels = @($Profile.labels) + @('ci7-run-' + $Run.id)
+    if (@($job.labels).Count -ne $labels.Count -or @(Compare-Object $labels @($job.labels) -CaseSensitive).Count) { throw 'WRONG_LABELS' }
+    $created = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse($Run.created_at, [ref]$created)) { throw 'RUN_TIME_INVALID' }
+    [pscustomobject]@{ Profile = $Profile; RunId = [long]$Run.id; Sha = $Run.head_sha; Attempt = [int]$Run.run_attempt;
+        JobId = [long]$job.id; CreatedUtc = $created.UtcDateTime }
+}
+
+function Select-Ci10Oldest {
+    param([object[]]$Candidates)
+    if (@($Candidates | Group-Object RunId | Where-Object Count -ne 1).Count) { throw 'DUPLICATE_CANDIDATE_REFUSED' }
+    @($Candidates | Sort-Object CreatedUtc, RunId, JobId | Select-Object -First 1)
+}
+
+function Find-Ci10QueuedJob {
+    param([object[]]$Profiles)
+    $candidates = [Collections.Generic.List[object]]::new()
+    foreach ($profile in $Profiles) {
+        $workflow = [Uri]::EscapeDataString([IO.Path]::GetFileName($profile.workflowPath))
+        $branch = [Uri]::EscapeDataString($profile.branch)
+        $seen = [Collections.Generic.HashSet[long]]::new()
+        for ($page = 1; $page -le 3; $page++) {
+            $response = Invoke-Ci10Read ('repos/' + $profile.repository + '/actions/workflows/' + $workflow +
+                '/runs?status=queued&event=push&branch=' + $branch + '&per_page=100&page=' + $page)
+            if ($response.total_count -gt 300) { throw 'QUEUE_BOUND_EXCEEDED' }
+            foreach ($run in @($response.workflow_runs)) {
+                if (-not $seen.Add([long]$run.id)) { throw 'QUEUE_PAGE_RACE_REFUSED' }
+                $jobs = Invoke-Ci10Read ('repos/' + $profile.repository + '/actions/runs/' + $run.id + '/jobs?filter=latest&per_page=100')
+                try { $candidate = Get-Ci10Candidate $profile $run $jobs; $candidates.Add($candidate) }
+                catch {
+                    if ($_.Exception.Message -cnotin @('WRONG_REPOSITORY','WRONG_WORKFLOW','WRONG_EVENT_REF_SOURCE','RUN_NOT_QUEUED',
+                        'EXACTLY_ONE_JOB_REQUIRED','JOB_IDENTITY_MISMATCH','JOB_NOT_UNASSIGNED_QUEUED','WRONG_LABELS','RUN_TIME_INVALID')) { throw }
+                }
+            }
+            if (@($response.workflow_runs).Count -lt 100) { break }
+            if ($page -eq 3) { throw 'QUEUE_BOUND_EXCEEDED' }
+        }
+    }
+    Select-Ci10Oldest @($candidates)
+}
+
+function Confirm-Ci10Candidate {
+    param([object]$Selected)
+    $base = 'repos/' + $Selected.Profile.repository + '/actions/runs/' + $Selected.RunId
+    $current = Get-Ci10Candidate $Selected.Profile (Invoke-Ci10Read $base) (Invoke-Ci10Read ($base + '/jobs?filter=latest&per_page=100'))
+    if ($current.RunId -ne $Selected.RunId -or $current.Sha -cne $Selected.Sha -or $current.JobId -ne $Selected.JobId -or
+        $current.Attempt -ne $Selected.Attempt -or $current.CreatedUtc -ne $Selected.CreatedUtc) { throw 'SELECTED_JOB_DRIFT' }
+    $current
+}
+
+function Enter-Ci10DispatcherLock {
+    param([string]$Root)
+    Assert-Ci10ProtectedPath $Root
+    try { [IO.File]::Open((Join-Path $Root 'dispatcher.lock'), 'OpenOrCreate', 'ReadWrite', 'None') }
+    catch { throw 'DISPATCHER_BUSY_OR_LOCK_UNCERTAIN' }
+}
+
+function Get-Ci10ControllerGate {
+    param([string]$ControllerRoot, [object]$Profile)
+    $lock = $null
+    try {
+        try { $lock = Enter-Ci7ControllerLock $ControllerRoot }
+        catch { if ($_.Exception.Message -ceq 'ANOTHER_CONTROLLER_ACTIVE_OR_LOCK_UNCERTAIN') { return 'BUSY' }; throw }
+        $directories = @(Get-ChildItem -LiteralPath (Join-Path $ControllerRoot 'runs') -Directory -Force)
+        $ownedNames = @()
+        foreach ($directory in $directories) {
+            Assert-Ci7Path $ControllerRoot $directory.FullName
+            $state = Get-Content -LiteralPath (Join-Path $directory.FullName 'state.json') -Raw | ConvertFrom-Json
+            Assert-Ci7State $state $ControllerRoot
+            if ($directory.Name -cne $state.RunId -or $state.Configuration.Repository -cne $Profile.repository -or
+                $state.Configuration.WorkflowPath -cne $Profile.workflowPath -or $state.Configuration.ExpectedSha -cne $Profile.headSha -or
+                -not $state.Configuration.PublicSyntheticProof) { throw 'STALE_PROFILE_OWNERSHIP_REFUSED' }
+            $runLock = $null
+            try { $runLock = [IO.File]::Open((Join-Path $directory.FullName 'controller.lock'),'OpenOrCreate','ReadWrite','None') }
+            catch { return 'BUSY' }
+            finally { if ($runLock) { $runLock.Dispose() } }
+            $vm = @(Get-VM | Where-Object { $_.Name -ceq $state.Name -or ($state.VMId -and [string]$_.VMId -ceq [string]$state.VMId) })
+            if ($vm.Count -gt 1) { throw 'STALE_VM_OWNERSHIP_AMBIGUOUS' }
+            if ($vm.Count -eq 1) { Assert-Ci7OwnedVm $state $vm[0] }
+            $ownedNames += $state.Name
+        }
+        if (@(Get-VM | Where-Object { $_.Name -cmatch '^ci7-' -and $_.Name -cnotin $ownedNames }).Count) { throw 'ORPHAN_VM_REQUIRES_CONCLUSIVE_STATE' }
+        if ($directories.Count) { return 'STALE' }
+        $runners = Invoke-Ci10Read ('repos/' + $Profile.repository + '/actions/runners?per_page=100')
+        if ($runners.total_count -gt 100 -or @($runners.runners | Where-Object name -cmatch '^ci7-').Count) { throw 'RUNNER_OWNERSHIP_UNCERTAIN' }
+        $configuration = New-Ci7Configuration -Repository $Profile.repository -WorkflowRunId 1 -ExpectedSha $Profile.headSha -Root $ControllerRoot -AllowPublicSyntheticProof
+        try { Assert-Ci7Capacity $configuration }
+        catch { if ($_.Exception.Message -cmatch '^CAPACITY_' -or $_.Exception.Message -ceq 'DEFAULT_NAT_SWITCH_REQUIRED') { return 'CAPACITY' }; throw }
+        'READY'
+    } finally { if ($lock) { $lock.Dispose() } }
+}
+
+function Get-Ci10StaleRunIds {
+    param([string]$ControllerRoot, [object]$Profile)
+    $lock = Enter-Ci7ControllerLock $ControllerRoot
+    try {
+        foreach ($directory in @(Get-ChildItem -LiteralPath (Join-Path $ControllerRoot 'runs') -Directory -Force | Sort-Object Name)) {
+            Assert-Ci7Path $ControllerRoot $directory.FullName
+            $state = Get-Content -LiteralPath (Join-Path $directory.FullName 'state.json') -Raw | ConvertFrom-Json
+            Assert-Ci7State $state $ControllerRoot
+            if ($directory.Name -cne $state.RunId -or $state.Configuration.Repository -cne $Profile.repository -or
+                $state.Configuration.WorkflowPath -cne $Profile.workflowPath -or $state.Configuration.ExpectedSha -cne $Profile.headSha -or
+                -not $state.Configuration.PublicSyntheticProof) { throw 'STALE_PROFILE_OWNERSHIP_REFUSED' }
+            $state.RunId
+        }
+    } finally { $lock.Dispose() }
+}
+
+function Write-Ci10Log {
+    param([string]$Root, [ValidateSet('start','stop','poll-pass','poll-fail','busy','capacity','idle','selected','discovery-only',
+        'controller-start','controller-pass','controller-fail','reap-pass','reap-fail')][string]$Classification,
+        [ValidateSet('ci10-accepted-synthetic')][string]$ProfileId = 'ci10-accepted-synthetic', [long]$RunId = 0)
+    if ($RunId -lt 0) { throw 'LOG_RUN_ID_INVALID' }
+    Assert-Ci10ProtectedPath $Root
+    $file = Join-Path $Root 'dispatcher.jsonl'
+    foreach ($candidate in @($file, ($file+'.1'), ($file+'.2'))) {
+        if (Test-Path -LiteralPath $candidate) { Assert-Ci10ProtectedPath $candidate }
+    }
+    if ((Test-Path -LiteralPath $file) -and (Get-Item -LiteralPath $file).Length -ge 256KB) {
+        if (Test-Path -LiteralPath ($file+'.2')) { Remove-Item -LiteralPath ($file+'.2') -Force }
+        if (Test-Path -LiteralPath ($file+'.1')) { Move-Item -LiteralPath ($file+'.1') -Destination ($file+'.2') }
+        Move-Item -LiteralPath $file -Destination ($file+'.1')
+    }
+    [ordered]@{ utc=[DateTime]::UtcNow.ToString('o'); phase=$Classification; profile=$ProfileId; run=$RunId } |
+        ConvertTo-Json -Compress | Add-Content -LiteralPath $file -Encoding utf8NoBOM
+}
+
+function Start-Ci10Controller {
+    param([string]$BundleRoot, [string]$ControllerRoot, [object]$Candidate,
+        [ValidatePattern('^[a-f0-9]{32}$')][string]$CleanupRunId)
+    # A child survives dispatcher interruption. Never terminate it from dispatcher finally.
+    # Controller owns its global/per-run locks, exact API checks, cleanup and sanitized evidence.
+    $info = [Diagnostics.ProcessStartInfo]::new((Get-Command pwsh).Source)
+    $info.UseShellExecute = $false; $info.CreateNoWindow = $true
+    $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
+    foreach ($arg in @('-NoLogo','-NoProfile','-NonInteractive','-File',(Join-Path $BundleRoot 'ci-runner/Invoke-IsolatedRunner.ps1'),
+        '-Mode',$(if ($CleanupRunId) { 'Cleanup' } else { 'Run' }),'-Root',$ControllerRoot)) { $info.ArgumentList.Add($arg) }
+    if ($CleanupRunId) { $info.ArgumentList.Add('-LocalRunId'); $info.ArgumentList.Add($CleanupRunId) }
+    else {
+        foreach ($arg in @('-Repository',$Candidate.Profile.repository,'-WorkflowRunId',[string]$Candidate.RunId,
+            '-ExpectedSha',$Candidate.Sha,'-AllowPublicSyntheticProof','-MemoryMiB',[string]$Candidate.Profile.memoryMiB,
+            '-CpuCount',[string]$Candidate.Profile.cpu,'-TimeoutMinutes',[string]$Candidate.Profile.timeoutMinutes)) { $info.ArgumentList.Add($arg) }
+    }
+    $process = [Diagnostics.Process]::Start($info)
+    # Drain streams asynchronously and discard every line; no raw diagnostics retained, even in memory buffers.
+    $process.StandardOutput.BaseStream.CopyToAsync([IO.Stream]::Null) | Out-Null
+    $process.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null) | Out-Null
+    try {
+        while (-not $process.WaitForExit(1000)) { }
+        if ($process.ExitCode -ne 0) { throw 'CONTROLLER_FAILED_OR_CLEANUP_UNCERTAIN' }
+    } finally { $process.Dispose() }
+}
+
+Export-ModuleMember -Function *-Ci10*
