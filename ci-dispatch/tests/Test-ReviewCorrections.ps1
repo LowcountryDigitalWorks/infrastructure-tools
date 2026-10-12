@@ -14,6 +14,11 @@ function Refuses([scriptblock]$Action,[string]$Expected){
     if($Expected){Assert ($code -ceq $Expected)}
 }
 function Clone($Object){$Object|ConvertTo-Json -Depth 15|ConvertFrom-Json}
+function AssertIdentityRefuses([object]$Task,[string]$Executable,[string]$Arguments,[string]$Owner){
+    $code=$null
+    try{Assert-Ci10TaskIdentity -Task $Task -Executable $Executable -Arguments $Arguments -Owner $Owner}catch{$code=$_.Exception.Message}
+    Assert ($code -ceq 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN')
+}
 function Import-FunctionFromAst([string]$Path,[string]$Name){
     $tokens=$null;$errors=$null
     $ast=[Management.Automation.Language.Parser]::ParseFile($Path,[ref]$tokens,[ref]$errors)
@@ -72,35 +77,35 @@ try {
     }
     Check 'extra trigger refused' {
         $bad=Clone $task;$bad.Triggers+=@(Clone $daily)
-        Refuses {Assert-Ci10TaskIdentity $bad $action.Execute $taskArguments $owner} 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
+        AssertIdentityRefuses -Task $bad -Executable $action.Execute -Arguments $taskArguments -Owner $owner
     }
     Check 'repetition drift refused' {
         $bad=Clone $task;$bad.Triggers[1].Repetition.Interval='PT2M'
-        Refuses {Assert-Ci10TaskIdentity $bad $action.Execute $taskArguments $owner} 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
+        AssertIdentityRefuses -Task $bad -Executable $action.Execute -Arguments $taskArguments -Owner $owner
     }
     Check 'daily start drift refused' {
         $bad=Clone $task;$bad.Triggers[1].StartBoundary='2026-10-12T00:01:00'
-        Refuses {Assert-Ci10TaskIdentity $bad $action.Execute $taskArguments $owner} 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
+        AssertIdentityRefuses -Task $bad -Executable $action.Execute -Arguments $taskArguments -Owner $owner
     }
     Check 'multiple instance drift refused' {
         $bad=Clone $task;$bad.Settings.MultipleInstances='Parallel'
-        Refuses {Assert-Ci10TaskIdentity $bad $action.Execute $taskArguments $owner} 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
+        AssertIdentityRefuses -Task $bad -Executable $action.Execute -Arguments $taskArguments -Owner $owner
     }
     Check 'execution limit drift refused' {
         $bad=Clone $task;$bad.Settings.ExecutionTimeLimit='PT30M'
-        Refuses {Assert-Ci10TaskIdentity $bad $action.Execute $taskArguments $owner} 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
+        AssertIdentityRefuses -Task $bad -Executable $action.Execute -Arguments $taskArguments -Owner $owner
     }
     Check 'battery setting drift refused' {
         $bad=Clone $task;$bad.Settings.DisallowStartIfOnBatteries=$true
-        Refuses {Assert-Ci10TaskIdentity $bad $action.Execute $taskArguments $owner} 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
+        AssertIdentityRefuses -Task $bad -Executable $action.Execute -Arguments $taskArguments -Owner $owner
     }
     Check 'action working directory drift refused' {
         $bad=Clone $task;$bad.Actions[0].WorkingDirectory='C:\Temp'
-        Refuses {Assert-Ci10TaskIdentity $bad $action.Execute $taskArguments $owner} 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
+        AssertIdentityRefuses -Task $bad -Executable $action.Execute -Arguments $taskArguments -Owner $owner
     }
     Check 'task path drift refused' {
         $bad=Clone $task;$bad.TaskPath='\Other\'
-        Refuses {Assert-Ci10TaskIdentity $bad $action.Execute $taskArguments $owner} 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
+        AssertIdentityRefuses -Task $bad -Executable $action.Execute -Arguments $taskArguments -Owner $owner
     }
     Check 'identity check executes before task mode switch and acceptance gates remain' {
         $source=Get-Content -LiteralPath $managePath -Raw
