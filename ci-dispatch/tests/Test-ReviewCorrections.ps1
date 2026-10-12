@@ -38,14 +38,14 @@ try {
     }
 
     $commit='a'*40;$tree='b'*40;$manifest='c'*64
-    $args=Get-Ci10TaskArguments -Bundle 'C:\ProgramData\LDW\CiRunnerDispatch\releases\candidate' -Commit $commit -Tree $tree -ManifestSha $manifest
+    $taskArguments=Get-Ci10TaskArguments -Bundle 'C:\ProgramData\LDW\CiRunnerDispatch\releases\candidate' -Commit $commit -Tree $tree -ManifestSha $manifest
     Check 'standing task verifier precedes bundle code execution' {
-        $acl=$args.IndexOf('Get-Acl')
-        $hash=$args.IndexOf('Get-FileHash')
-        $invoke=$args.IndexOf('& $e -Commit')
+        $acl=$taskArguments.IndexOf('Get-Acl')
+        $hash=$taskArguments.IndexOf('Get-FileHash')
+        $invoke=$taskArguments.IndexOf('& $e -Commit')
         Assert ($acl -ge 0 -and $hash -gt $acl -and $invoke -gt $hash)
-        Assert (-not $args.Contains('-EncodedCommand'))
-        Assert ($args.Length -lt 30000)
+        Assert (-not $taskArguments.Contains('-EncodedCommand'))
+        Assert ($taskArguments.Length -lt 30000)
     }
 
     $invokeSource=Get-Content -LiteralPath $invokePath -Raw
@@ -59,7 +59,7 @@ try {
     }
 
     $owner='LDW\Owner'
-    $action=[pscustomobject]@{Execute='C:\Program Files\PowerShell\7\pwsh.exe';Arguments=$args;WorkingDirectory=$null}
+    $action=[pscustomobject]@{Execute='C:\Program Files\PowerShell\7\pwsh.exe';Arguments=$taskArguments;WorkingDirectory=$null}
     $principal=[pscustomobject]@{UserId=$owner;LogonType='Interactive';RunLevel='Highest'}
     $repetition=[pscustomobject]@{Interval='PT1M';Duration='P1D';StopAtDurationEnd=$false}
     $logon=[pscustomobject]@{CimClass=[pscustomobject]@{CimClassName='MSFT_TaskLogonTrigger'};Enabled=$true;UserId=$owner;EndBoundary=$null}
@@ -68,39 +68,39 @@ try {
     $task=[pscustomobject]@{TaskPath='\';Actions=@($action);Principal=$principal;Triggers=@($logon,$daily);Settings=$settings;State='Ready'}
 
     Check 'full accepted task contract passes' {
-        Assert-Ci10TaskIdentity -Task $task -Executable $action.Execute -Arguments $args -Owner $owner
+        Assert-Ci10TaskIdentity -Task $task -Executable $action.Execute -Arguments $taskArguments -Owner $owner
     }
     Check 'extra trigger refused' {
         $bad=Clone $task;$bad.Triggers+=@(Clone $daily)
-        Refuses {Assert-Ci10TaskIdentity $bad $action.Execute $args $owner} 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
+        Refuses {Assert-Ci10TaskIdentity $bad $action.Execute $taskArguments $owner} 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
     }
     Check 'repetition drift refused' {
         $bad=Clone $task;$bad.Triggers[1].Repetition.Interval='PT2M'
-        Refuses {Assert-Ci10TaskIdentity $bad $action.Execute $args $owner} 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
+        Refuses {Assert-Ci10TaskIdentity $bad $action.Execute $taskArguments $owner} 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
     }
     Check 'daily start drift refused' {
         $bad=Clone $task;$bad.Triggers[1].StartBoundary='2026-10-12T00:01:00'
-        Refuses {Assert-Ci10TaskIdentity $bad $action.Execute $args $owner} 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
+        Refuses {Assert-Ci10TaskIdentity $bad $action.Execute $taskArguments $owner} 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
     }
     Check 'multiple instance drift refused' {
         $bad=Clone $task;$bad.Settings.MultipleInstances='Parallel'
-        Refuses {Assert-Ci10TaskIdentity $bad $action.Execute $args $owner} 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
+        Refuses {Assert-Ci10TaskIdentity $bad $action.Execute $taskArguments $owner} 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
     }
     Check 'execution limit drift refused' {
         $bad=Clone $task;$bad.Settings.ExecutionTimeLimit='PT30M'
-        Refuses {Assert-Ci10TaskIdentity $bad $action.Execute $args $owner} 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
+        Refuses {Assert-Ci10TaskIdentity $bad $action.Execute $taskArguments $owner} 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
     }
     Check 'battery setting drift refused' {
         $bad=Clone $task;$bad.Settings.DisallowStartIfOnBatteries=$true
-        Refuses {Assert-Ci10TaskIdentity $bad $action.Execute $args $owner} 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
+        Refuses {Assert-Ci10TaskIdentity $bad $action.Execute $taskArguments $owner} 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
     }
     Check 'action working directory drift refused' {
         $bad=Clone $task;$bad.Actions[0].WorkingDirectory='C:\Temp'
-        Refuses {Assert-Ci10TaskIdentity $bad $action.Execute $args $owner} 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
+        Refuses {Assert-Ci10TaskIdentity $bad $action.Execute $taskArguments $owner} 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
     }
     Check 'task path drift refused' {
         $bad=Clone $task;$bad.TaskPath='\Other\'
-        Refuses {Assert-Ci10TaskIdentity $bad $action.Execute $args $owner} 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
+        Refuses {Assert-Ci10TaskIdentity $bad $action.Execute $taskArguments $owner} 'TASK_OWNERSHIP_OR_PROVENANCE_UNCERTAIN'
     }
     Check 'identity check executes before task mode switch and acceptance gates remain' {
         $source=Get-Content -LiteralPath $managePath -Raw
