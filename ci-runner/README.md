@@ -10,8 +10,8 @@ PowerShell 7 on the approved Hyper-V host, using the existing `gh` session.
 
 ## Security boundary
 
-- The normal repository allowlist starts with `business-operations`. An operator
-  can supply an explicit approved private-repository allowlist for future accepted
+- The normal repository allowlist includes `business-operations` and `wqt-operations`.
+  An operator can supply an explicit approved private-repository allowlist for future accepted
   workflows. The implementation is parameterized; this is not acceptance of any
   additional workflow or credential use.
 - The public implementation repository has a narrowly scoped synthetic exception:
@@ -40,6 +40,17 @@ PowerShell 7 on the approved Hyper-V host, using the existing `gh` session.
 - Hyper-V separates candidate code from the host. A guest compromise can still
   consume its bounded resources and access its job token and JIT material. It
   must not receive customer or regulated-data authority.
+
+## Closed Workload Profiles
+
+The controller enforces closed workload profiles. Generalized or pattern-matched jobs are refused.
+Authorized closed profiles are:
+
+1. `business-operations-secrets`: Repository `LowcountryDigitalWorks/business-operations`, workflow `.github/workflows/security-secrets.yml`, single-job.
+2. `public-synthetic-proof`: Repository `LowcountryDigitalWorks/infrastructure-tools`, workflow `.github/workflows/ci-runner-isolation-proof.yml`, single-job public synthetic proof.
+3. `wqt-pr-validation`: Repository `LowcountryDigitalWorks/wqt-operations`, workflow `.github/workflows/wqt.yml`, event `pull_request`, job `validate-pr`.
+4. `wqt-semantic-validate`: Repository `LowcountryDigitalWorks/wqt-operations`, workflow `.github/workflows/wqt-semantic-consumer.yml`, event `pull_request`, job `validate-pr`.
+5. `wqt-semantic-retention-probe`: Repository `LowcountryDigitalWorks/wqt-operations`, workflow `.github/workflows/wqt-semantic-consumer.yml`, event `pull_request`, job `retention-probe-pr` (requires dependency `validate-pr` = `completed`/`success`).
 
 ## Verified base and downloads
 

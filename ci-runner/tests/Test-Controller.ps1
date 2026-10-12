@@ -36,8 +36,28 @@ try {
         Refuses { New-Ci7Configuration -Repository 'LowcountryDigitalWorks/business-operations' -WorkflowRunId 1 -ExpectedSha ('a' * 40) -Root $root -AllowPublicSyntheticProof }
         $public = New-Ci7Configuration -Repository 'LowcountryDigitalWorks/infrastructure-tools' -WorkflowRunId 1 -ExpectedSha ('a' * 40) -Root $root -AllowPublicSyntheticProof
         Assert $public.PublicSyntheticProof
-        $future = New-Ci7Configuration -Repository 'LowcountryDigitalWorks/wqt-operations' -ApprovedRepositories @('LowcountryDigitalWorks/wqt-operations') -WorkflowRunId 1 -ExpectedSha ('a' * 40) -Root $root
+        $future = New-Ci7Configuration -Repository 'LowcountryDigitalWorks/wqt-operations' -ApprovedRepositories @('LowcountryDigitalWorks/wqt-operations') -WorkflowRunId 1 -ExpectedSha ('a' * 40) -Root $root -WorkflowPath '.github/workflows/wqt.yml' -TargetJob 'validate-pr' -ExpectedEvent 'pull_request'
         Assert-Ci7State (New-Ci7State $future) $root
+    }
+    Check 'authorized WQT workload profiles accept exact configurations and reject wildcards/unlisted' {
+        $wqt1 = New-Ci7Configuration -Repository 'LowcountryDigitalWorks/wqt-operations' -WorkflowRunId 100 -ExpectedSha ('a' * 40) -Root $root -WorkflowPath '.github/workflows/wqt.yml' -TargetJob 'validate-pr' -ExpectedEvent 'pull_request'
+        Assert ($wqt1.TargetJob -ceq 'validate-pr' -and $wqt1.WorkflowPath -ceq '.github/workflows/wqt.yml')
+        $wqt2 = New-Ci7Configuration -Repository 'LowcountryDigitalWorks/wqt-operations' -WorkflowRunId 101 -ExpectedSha ('a' * 40) -Root $root -WorkflowPath '.github/workflows/wqt-semantic-consumer.yml' -TargetJob 'validate-pr' -ExpectedEvent 'pull_request'
+        Assert ($wqt2.TargetJob -ceq 'validate-pr')
+        $wqt3 = New-Ci7Configuration -Repository 'LowcountryDigitalWorks/wqt-operations' -WorkflowRunId 102 -ExpectedSha ('a' * 40) -Root $root -WorkflowPath '.github/workflows/wqt-semantic-consumer.yml' -TargetJob 'retention-probe-pr' -ExpectedEvent 'pull_request'
+        Assert ($wqt3.TargetJob -ceq 'retention-probe-pr')
+
+        # Refuse pattern matching / regex / wildcards
+        Refuses { New-Ci7Configuration -Repository 'LowcountryDigitalWorks/wqt-operations' -WorkflowRunId 103 -ExpectedSha ('a' * 40) -Root $root -WorkflowPath '.github/workflows/wqt.yml' -TargetJob 'validate-*' -ExpectedEvent 'pull_request' }
+        Refuses { New-Ci7Configuration -Repository 'LowcountryDigitalWorks/wqt-operations' -WorkflowRunId 104 -ExpectedSha ('a' * 40) -Root $root -WorkflowPath '.github/workflows/wqt.yml' -TargetJob '*' -ExpectedEvent 'pull_request' }
+
+        # Refuse unlisted jobs (scan, consume-real)
+        Refuses { New-Ci7Configuration -Repository 'LowcountryDigitalWorks/wqt-operations' -WorkflowRunId 105 -ExpectedSha ('a' * 40) -Root $root -WorkflowPath '.github/workflows/wqt.yml' -TargetJob 'scan' -ExpectedEvent 'pull_request' }
+        Refuses { New-Ci7Configuration -Repository 'LowcountryDigitalWorks/wqt-operations' -WorkflowRunId 106 -ExpectedSha ('a' * 40) -Root $root -WorkflowPath '.github/workflows/wqt.yml' -TargetJob 'consume-real' -ExpectedEvent 'pull_request' }
+
+        # Refuse invalid events or attempts
+        Refuses { New-Ci7Configuration -Repository 'LowcountryDigitalWorks/wqt-operations' -WorkflowRunId 107 -ExpectedSha ('a' * 40) -Root $root -WorkflowPath '.github/workflows/wqt.yml' -TargetJob 'validate-pr' -ExpectedEvent 'push' }
+        Refuses { New-Ci7Configuration -Repository 'LowcountryDigitalWorks/wqt-operations' -WorkflowRunId 108 -ExpectedSha ('a' * 40) -Root $root -WorkflowPath '.github/workflows/wqt.yml' -TargetJob 'validate-pr' -Attempt 0 }
     }
     Check 'configuration bounds and exact revision validation' {
         foreach ($memory in @(0,1024,4097)) { Refuses { New-Ci7Configuration -Repository $config.Repository -WorkflowRunId 1 -ExpectedSha ('a' * 40) -Root $root -MemoryMiB $memory } }
@@ -136,6 +156,33 @@ try {
         & $module {$script:ApiTestRepo.private=$true;$script:ApiTestCount=2}; Refuses {Get-Ci7ExpectedJob $config}
         & $module {$script:ApiTestCount=1;$script:ApiTestJob.runner_id=42}; Refuses {Get-Ci7ExpectedJob $config -RequireQueued}
         & $module {$script:ApiTestJob.runner_id=0;$script:ApiTestJob.labels=@('self-hosted','ldw-light')}; Refuses {Get-Ci7ExpectedJob $config}
+    }
+    $wqtConfig = New-Ci7Configuration -Repository 'LowcountryDigitalWorks/wqt-operations' -WorkflowRunId 999 -ExpectedSha ('c' * 40) -Root $root -WorkflowPath '.github/workflows/wqt-semantic-consumer.yml' -TargetJob 'retention-probe-pr' -ExpectedEvent 'pull_request'
+    & $module {
+        param($cfg)
+        $script:WqtRepo = [pscustomobject]@{ private = $true }
+        $script:WqtRun = [pscustomobject]@{ head_sha = $cfg.ExpectedSha; path = $cfg.WorkflowPath; head_repository = [pscustomobject]@{ full_name = $cfg.Repository }; event = 'pull_request'; run_attempt = 1 }
+        $script:WqtJobs = @(
+            [pscustomobject]@{ id = 101; name = 'validate-pr'; status = 'completed'; conclusion = 'success'; runner_id = 1; labels = @() },
+            [pscustomobject]@{ id = 102; name = 'retention-probe-pr'; status = 'queued'; runner_id = 0; labels = @(Get-Ci7Labels $cfg.WorkflowRunId) },
+            [pscustomobject]@{ id = 103; name = 'scan'; status = 'skipped'; runner_id = 0; labels = @() },
+            [pscustomobject]@{ id = 104; name = 'consume-real'; status = 'skipped'; runner_id = 0; labels = @() }
+        )
+        function script:Invoke-Ci7Api { param($Path, $Method = 'GET', $Body); if ($Path -match '/jobs\?') { [pscustomobject]@{ total_count = $script:WqtJobs.Count; jobs = $script:WqtJobs } } elseif ($Path -match '/actions/runs/') { $script:WqtRun } else { $script:WqtRepo } }
+    } $wqtConfig
+    Check 'WQT retention probe satisfies dependency and skips unclaimable graph members' {
+        Assert ((Get-Ci7ExpectedJob $wqtConfig -RequireQueued).id -eq 102)
+        & $module { $script:WqtJobs[0].status = 'queued' }
+        Refuses { Get-Ci7ExpectedJob $wqtConfig -RequireQueued }
+        & $module { $script:WqtJobs[0].status = 'completed'; $script:WqtJobs[0].conclusion = 'failure' }
+        Refuses { Get-Ci7ExpectedJob $wqtConfig -RequireQueued }
+        & $module { $script:WqtJobs[0].status = 'completed'; $script:WqtJobs[0].conclusion = 'success' }
+        & $module { $script:WqtRun.run_attempt = 2 }
+        Refuses { Get-Ci7ExpectedJob $wqtConfig -RequireQueued }
+        & $module { $script:WqtRun.run_attempt = 1 }
+        $s1 = New-Ci7State $wqtConfig
+        $s2 = New-Ci7State $wqtConfig
+        Assert ($s1.RunId -cne $s2.RunId -and $s1.Name -cne $s2.Name -and $s1.Directory -cne $s2.Directory)
     }
     # Replace only external Hyper-V/API seams within the imported module. No live
     # VM, runner, token, network, or policy mutation occurs in this harness.

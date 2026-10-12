@@ -3,6 +3,55 @@ $ErrorActionPreference = 'Stop'
 $script:SafeLabels = @('self-hosted', 'Linux', 'X64', 'ldw01', 'ldw-ephemeral', 'ldw-isolated', 'security-isolated')
 $script:Marker = 'CI-RUNNER-EPHEMERAL-001'
 
+$script:AuthorizedProfiles = @(
+    [pscustomobject]@{
+        ProfileId = 'business-operations-secrets'
+        Repository = 'LowcountryDigitalWorks/business-operations'
+        WorkflowPath = '.github/workflows/security-secrets.yml'
+        AllowedEvents = @('push', 'pull_request', 'workflow_dispatch')
+        SingleJobOnly = $true
+        TargetJob = $null
+        Dependencies = @()
+    },
+    [pscustomobject]@{
+        ProfileId = 'public-synthetic-proof'
+        Repository = 'LowcountryDigitalWorks/infrastructure-tools'
+        WorkflowPath = '.github/workflows/ci-runner-isolation-proof.yml'
+        AllowedEvents = @('push')
+        HeadBranch = 'feat/ci-runner-ephemeral-001'
+        SingleJobOnly = $true
+        TargetJob = $null
+        Dependencies = @()
+    },
+    [pscustomobject]@{
+        ProfileId = 'wqt-pr-validation'
+        Repository = 'LowcountryDigitalWorks/wqt-operations'
+        WorkflowPath = '.github/workflows/wqt.yml'
+        AllowedEvents = @('pull_request')
+        SingleJobOnly = $false
+        TargetJob = 'validate-pr'
+        Dependencies = @()
+    },
+    [pscustomobject]@{
+        ProfileId = 'wqt-semantic-validate'
+        Repository = 'LowcountryDigitalWorks/wqt-operations'
+        WorkflowPath = '.github/workflows/wqt-semantic-consumer.yml'
+        AllowedEvents = @('pull_request')
+        SingleJobOnly = $false
+        TargetJob = 'validate-pr'
+        Dependencies = @()
+    },
+    [pscustomobject]@{
+        ProfileId = 'wqt-semantic-retention-probe'
+        Repository = 'LowcountryDigitalWorks/wqt-operations'
+        WorkflowPath = '.github/workflows/wqt-semantic-consumer.yml'
+        AllowedEvents = @('pull_request')
+        SingleJobOnly = $false
+        TargetJob = 'retention-probe-pr'
+        Dependencies = @('validate-pr')
+    }
+)
+
 function Assert-Ci7Elevated {
     $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'ELEVATED_CONTROLLER_REQUIRED' }
@@ -65,16 +114,47 @@ function Enter-Ci7ControllerLock {
 
 function New-Ci7Configuration {
     param([string]$Repository, [long]$WorkflowRunId, [string]$ExpectedSha, [string]$Root,
-        [string[]]$ApprovedRepositories = @('LowcountryDigitalWorks/business-operations'),
-        [switch]$AllowPublicSyntheticProof, [int]$MemoryMiB = 2048, [int]$CpuCount = 2, [int]$TimeoutMinutes = 20)
+        [string[]]$ApprovedRepositories = @('LowcountryDigitalWorks/business-operations', 'LowcountryDigitalWorks/wqt-operations'),
+        [switch]$AllowPublicSyntheticProof, [int]$MemoryMiB = 2048, [int]$CpuCount = 2, [int]$TimeoutMinutes = 20,
+        [string]$WorkflowPath, [string]$TargetJob, [string]$ExpectedEvent, [int]$Attempt = 1)
+
     if ($ExpectedSha -notmatch '^[0-9a-f]{40}$' -or $WorkflowRunId -le 0) { throw 'EXACT_JOB_REFERENCE_REQUIRED' }
+    if ($Attempt -lt 1) { throw 'RUN_ATTEMPT_INVALID' }
     if ($MemoryMiB -lt 2048 -or $MemoryMiB -gt 4096 -or $CpuCount -lt 1 -or $CpuCount -gt 2 -or $TimeoutMinutes -lt 5 -or $TimeoutMinutes -gt 30) { throw 'RESOURCE_BOUNDS_INVALID' }
+
     $proof = $AllowPublicSyntheticProof -and $Repository -ceq 'LowcountryDigitalWorks/infrastructure-tools'
     if (-not $proof -and ($Repository -cnotin $ApprovedRepositories -or $Repository -cnotmatch '^LowcountryDigitalWorks/[a-z0-9-]+$')) { throw 'REPOSITORY_NOT_APPROVED' }
     if ($AllowPublicSyntheticProof -and -not $proof) { throw 'PUBLIC_PROOF_EXCEPTION_INVALID' }
+
+    if ($TargetJob -and $TargetJob -match '[\*\?\[\]\{\}\^\$\|\\]') { throw 'PATTERN_MATCHING_REFUSED' }
+
+    if (-not $WorkflowPath) {
+        if ($proof) {
+            $WorkflowPath = '.github/workflows/ci-runner-isolation-proof.yml'
+        } elseif ($Repository -ceq 'LowcountryDigitalWorks/business-operations') {
+            $WorkflowPath = '.github/workflows/security-secrets.yml'
+        } elseif ($Repository -ceq 'LowcountryDigitalWorks/wqt-operations') {
+            if ($TargetJob -ceq 'validate-pr') {
+                $WorkflowPath = '.github/workflows/wqt.yml'
+            }
+        }
+    }
+
+    $matched = $script:AuthorizedProfiles | Where-Object {
+        $_.Repository -ceq $Repository -and
+        $_.WorkflowPath -ceq $WorkflowPath -and
+        ($_.SingleJobOnly -or ($TargetJob -and $_.TargetJob -ceq $TargetJob)) -and
+        (-not $ExpectedEvent -or $ExpectedEvent -cin $_.AllowedEvents)
+    }
+
+    if (-not $matched) { throw 'WORKLOAD_PROFILE_NOT_AUTHORIZED' }
+    $profile = if ($matched -is [array]) { $matched[0] } else { $matched }
+
+    $effectiveTargetJob = if ($profile.SingleJobOnly) { if ($TargetJob) { $TargetJob } else { $null } } else { $profile.TargetJob }
+
     [pscustomobject]@{ Repository = $Repository; WorkflowRunId = $WorkflowRunId; ExpectedSha = $ExpectedSha;
         Root = [IO.Path]::GetFullPath($Root); ApprovedRepositories = @($ApprovedRepositories); PublicSyntheticProof = [bool]$proof; MemoryMiB = $MemoryMiB; CpuCount = $CpuCount;
-        TimeoutMinutes = $TimeoutMinutes; WorkflowPath = if ($proof) { '.github/workflows/ci-runner-isolation-proof.yml' } else { '.github/workflows/security-secrets.yml' } }
+        TimeoutMinutes = $TimeoutMinutes; WorkflowPath = $WorkflowPath; TargetJob = $effectiveTargetJob; ExpectedEvent = $ExpectedEvent; Attempt = $Attempt; Profile = $profile }
 }
 
 function Get-Ci7Labels {
@@ -99,11 +179,27 @@ function Get-Ci7ExpectedJob {
     if (-not $repo.private -and -not $Configuration.PublicSyntheticProof) { throw 'PRIVATE_REPOSITORY_REQUIRED' }
     $run = Invoke-Ci7Api ('repos/' + $Configuration.Repository + '/actions/runs/' + $Configuration.WorkflowRunId)
     if ($run.head_sha -cne $Configuration.ExpectedSha -or $run.path -cne $Configuration.WorkflowPath -or
-        $run.head_repository.full_name -cne $Configuration.Repository -or $run.event -cnotin @('push', 'pull_request', 'workflow_dispatch')) { throw 'WORKFLOW_IDENTITY_MISMATCH' }
+        $run.head_repository.full_name -cne $Configuration.Repository -or $run.event -cnotin $Configuration.Profile.AllowedEvents) { throw 'WORKFLOW_IDENTITY_MISMATCH' }
+    if ($Configuration.ExpectedEvent -and $run.event -cne $Configuration.ExpectedEvent) { throw 'WORKFLOW_IDENTITY_MISMATCH' }
+    if ($Configuration.Attempt -and $run.run_attempt -and $run.run_attempt -ne $Configuration.Attempt) { throw 'RUN_ATTEMPT_MISMATCH' }
     if ($Configuration.PublicSyntheticProof -and ($run.head_branch -cne 'feat/ci-runner-ephemeral-001' -or $run.event -cne 'push')) { throw 'PUBLIC_PROOF_TRIGGER_REFUSED' }
     $response = Invoke-Ci7Api ('repos/' + $Configuration.Repository + '/actions/runs/' + $Configuration.WorkflowRunId + '/jobs?filter=latest&per_page=100')
-    if ($response.total_count -ne 1 -or @($response.jobs).Count -ne 1) { throw 'EXACTLY_ONE_JOB_REQUIRED' }
-    $job = $response.jobs[0]
+    $job = $null
+    if ($Configuration.Profile.SingleJobOnly) {
+        if ($response.total_count -ne 1 -or @($response.jobs).Count -ne 1) { throw 'EXACTLY_ONE_JOB_REQUIRED' }
+        $job = $response.jobs[0]
+        if ($Configuration.TargetJob -and $job.name -cne $Configuration.TargetJob) { throw 'TARGET_JOB_NOT_FOUND' }
+    } else {
+        $matchingJobs = @($response.jobs | Where-Object { $_.name -ceq $Configuration.TargetJob })
+        if ($matchingJobs.Count -ne 1) { throw 'TARGET_JOB_NOT_FOUND' }
+        $job = $matchingJobs[0]
+        foreach ($depName in $Configuration.Profile.Dependencies) {
+            $depJobs = @($response.jobs | Where-Object { $_.name -ceq $depName })
+            if ($depJobs.Count -ne 1 -or $depJobs[0].status -cne 'completed' -or $depJobs[0].conclusion -cne 'success') {
+                throw 'DEPENDENCY_NOT_SATISFIED'
+            }
+        }
+    }
     $expected = @(Get-Ci7Labels $Configuration.WorkflowRunId)
     if (@($job.labels).Count -ne $expected.Count -or @(Compare-Object $expected @($job.labels) -CaseSensitive).Count -ne 0) { throw 'ISOLATED_JOB_LABELS_REQUIRED' }
     if ($RequireQueued -and ($job.status -cne 'queued' -or $job.runner_id)) { throw 'UNASSIGNED_QUEUED_JOB_REQUIRED' }
@@ -367,7 +463,7 @@ function Clear-Ci7TransientState {
 }
 
 function Assert-Ci7AlreadyClean {
-    param([string]$Root, [string]$RunId, [string[]]$ApprovedRepositories = @('LowcountryDigitalWorks/business-operations'))
+    param([string]$Root, [string]$RunId, [string[]]$ApprovedRepositories = @('LowcountryDigitalWorks/business-operations', 'LowcountryDigitalWorks/wqt-operations'))
     if ($RunId -cnotmatch '^[0-9a-f]{32}$') { throw 'LOCAL_RUN_ID_INVALID' }
     $directory = Join-Path $Root ('runs/' + $RunId)
     $log = Join-Path $Root ('evidence/' + $RunId + '.jsonl')
