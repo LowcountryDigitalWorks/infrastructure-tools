@@ -65,7 +65,8 @@ try {
         $uninstall=$source.IndexOf("Uninstall {",$switch)
         Assert ($identity -ge 0 -and $switch -gt $identity -and $enable -gt $switch -and $uninstall -gt $enable)
         $postIdentity=$source.Substring($identity,$switch-$identity)
-        Assert (-not ($postIdentity -match '\.State\s+-ne\s+[\'\"]Disabled[\'\"]|Settings\.Enabled'))
+        Assert (-not $postIdentity.Contains('Settings.Enabled'))
+        Assert (-not $postIdentity.Contains('$Task.State'))
     }
     Check 'action drift still fails closed' {
         $bad=Clone $enabled;$bad.Actions[0].Arguments='-NoProfile -Command altered'
