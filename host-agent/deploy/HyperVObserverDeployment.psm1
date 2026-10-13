@@ -1,3 +1,4 @@
+#requires -Version 7.0
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -289,8 +290,10 @@ function Get-HyperVObserverTaskIdentityProblems {
     if (-not (Test-HyperVObserverTaskDuration $settings.RestartInterval ([double]$Spec.RestartIntervalSeconds))) { $problems.Add('restart-interval') }
     if (-not (Test-HyperVObserverTaskDuration $settings.ExecutionTimeLimit ([double]$Spec.ExecutionTimeLimitSeconds))) { $problems.Add('execution-time-limit') }
     if (-not [string]::Equals([string]$settings.MultipleInstances, [string]$Spec.MultipleInstances, [StringComparison]::OrdinalIgnoreCase)) { $problems.Add('multiple-instances') }
-    if ([bool]$settings.AllowStartIfOnBatteries -ne [bool]$Spec.AllowStartIfOnBatteries) { $problems.Add('allow-on-battery') }
-    if ([bool]$settings.DontStopIfGoingOnBatteries -ne [bool]$Spec.DontStopIfGoingOnBatteries) { $problems.Add('dont-stop-on-battery') }
+    $disallowStart = $settings.PSObject.Properties['DisallowStartIfOnBatteries']
+    if ($null -eq $disallowStart -or [bool]$disallowStart.Value -ne (-not [bool]$Spec.AllowStartIfOnBatteries)) { $problems.Add('allow-on-battery') }
+    $stopOnBattery = $settings.PSObject.Properties['StopIfGoingOnBatteries']
+    if ($null -eq $stopOnBattery -or [bool]$stopOnBattery.Value -ne (-not [bool]$Spec.DontStopIfGoingOnBatteries)) { $problems.Add('dont-stop-on-battery') }
     @($problems)
 }
 

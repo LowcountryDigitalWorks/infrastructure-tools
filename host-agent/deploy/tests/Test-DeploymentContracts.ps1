@@ -75,6 +75,12 @@ finally {
     if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
 }
 
+$realTaskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+Assert-True ($realTaskSettings.PSObject.Properties.Name -contains 'DisallowStartIfOnBatteries') 'real ScheduledTasks settings must expose DisallowStartIfOnBatteries'
+Assert-True ($realTaskSettings.PSObject.Properties.Name -contains 'StopIfGoingOnBatteries') 'real ScheduledTasks settings must expose StopIfGoingOnBatteries'
+Assert-True (-not [bool]$realTaskSettings.DisallowStartIfOnBatteries) 'AllowStartIfOnBatteries must map to DisallowStartIfOnBatteries=false'
+Assert-True (-not [bool]$realTaskSettings.StopIfGoingOnBatteries) 'DontStopIfGoingOnBatteries must map to StopIfGoingOnBatteries=false'
+
 $installedExe = Join-Path $constants.ReleasesRoot '0123456789abcdef\LDW.HostAgent.HyperVObserver.exe'
 $spec = Get-HyperVObserverTaskSpec -InstalledExe $installedExe -ConfigPath $constants.ConfigPath
 $fakeTask = [pscustomobject]@{
@@ -91,8 +97,8 @@ $fakeTask = [pscustomobject]@{
         RestartInterval = 'PT1M'
         ExecutionTimeLimit = 'PT0S'
         MultipleInstances = 'IgnoreNew'
-        AllowStartIfOnBatteries = $true
-        DontStopIfGoingOnBatteries = $true
+        DisallowStartIfOnBatteries = $false
+        StopIfGoingOnBatteries = $false
     }
 }
 
@@ -108,6 +114,13 @@ Assert-True (@(Get-HyperVObserverTaskIdentityProblems -Task $fakeTask -Spec $spe
 $fakeTask.Settings.Hidden = $true
 $fakeTask.Settings.RestartCount = 99
 Assert-True (@(Get-HyperVObserverTaskIdentityProblems -Task $fakeTask -Spec $spec) -contains 'restart-count') 'restart policy drift must be detected'
+$fakeTask.Settings.RestartCount = 3
+$fakeTask.Settings.DisallowStartIfOnBatteries = $true
+Assert-True (@(Get-HyperVObserverTaskIdentityProblems -Task $fakeTask -Spec $spec) -contains 'allow-on-battery') 'battery-start drift must be detected using real ScheduledTasks property'
+$fakeTask.Settings.DisallowStartIfOnBatteries = $false
+$fakeTask.Settings.StopIfGoingOnBatteries = $true
+Assert-True (@(Get-HyperVObserverTaskIdentityProblems -Task $fakeTask -Spec $spec) -contains 'dont-stop-on-battery') 'battery-stop drift must be detected using real ScheduledTasks property'
+$fakeTask.Settings.StopIfGoingOnBatteries = $false
 
 foreach ($scriptName in @('Disable-HyperVObserver.ps1', 'Enable-HyperVObserver.ps1', 'Uninstall-HyperVObserver.ps1')) {
     $source = Get-Content -LiteralPath (Join-Path $deployRoot $scriptName) -Raw
