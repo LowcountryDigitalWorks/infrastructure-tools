@@ -96,30 +96,42 @@ function Assert-Ci10Bundle {
 function Read-Ci10Profiles {
     param([string]$Path)
     $registry = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
-    if ($registry.schema -ne 1 -or @($registry.profiles).Count -ne 1) { throw 'PROFILE_REGISTRY_REFUSED' }
-    $profile = $registry.profiles[0]
+    if ($registry.schema -ne 1 -or @($registry.profiles).Count -ne 2) { throw 'PROFILE_REGISTRY_REFUSED' }
+    $profiles = @($registry.profiles)
     $required = @('id','repository','workflowPath','events','branch','headSha','jobName','labels','dynamicLabel','jobCount',
         'cpu','memoryMiB','timeoutMinutes','docker','workflowSecrets','privateProductionState','egress','controllerProfile')
-    if (@(Compare-Object $required @($profile.PSObject.Properties.Name) -CaseSensitive).Count -or
-        $profile.id -cne 'ci10-accepted-synthetic' -or $profile.repository -cne 'LowcountryDigitalWorks/infrastructure-tools' -or
-        $profile.workflowPath -cne '.github/workflows/ci-runner-isolation-proof.yml' -or @($profile.events).Count -ne 1 -or
-        $profile.events[0] -cne 'push' -or $profile.branch -cne 'feat/ci-runner-ephemeral-001' -or
-        $profile.headSha -cne '6bf0fc0de72c7cef3cea7c3c054ba2326fdbfe26' -or $profile.jobName -cne 'synthetic' -or
-        $profile.dynamicLabel -cne 'ci7-run-<run-id>' -or $profile.jobCount -ne 1 -or $profile.cpu -ne 2 -or
-        $profile.memoryMiB -ne 2048 -or $profile.timeoutMinutes -ne 20 -or
-        $profile.docker -isnot [bool] -or $profile.docker -or $profile.workflowSecrets -isnot [bool] -or $profile.workflowSecrets -or
-        $profile.privateProductionState -isnot [bool] -or $profile.privateProductionState -or
-        $profile.egress -cne 'accepted-ci7-public-ipv4-private-deny' -or $profile.controllerProfile -cne 'accepted-ci7-public-synthetic') {
-        throw 'PROFILE_CONTRACT_REFUSED'
+    foreach ($profile in $profiles) {
+        if (@(Compare-Object $required @($profile.PSObject.Properties.Name) -CaseSensitive).Count -or
+            $profile.dynamicLabel -cne 'ci7-run-<run-id>' -or $profile.jobCount -ne 1 -or $profile.cpu -ne 2 -or
+            $profile.memoryMiB -ne 2048 -or $profile.timeoutMinutes -ne 20 -or
+            $profile.docker -isnot [bool] -or $profile.docker -or $profile.workflowSecrets -isnot [bool] -or $profile.workflowSecrets -or
+            $profile.privateProductionState -isnot [bool] -or $profile.privateProductionState -or
+            $profile.egress -cne 'accepted-ci7-public-ipv4-private-deny') { throw 'PROFILE_CONTRACT_REFUSED' }
+        $labels = @('self-hosted','Linux','X64','ldw01','ldw-ephemeral','ldw-isolated','security-isolated')
+        if (@($profile.labels).Count -ne 7 -or @(Compare-Object $labels @($profile.labels) -CaseSensitive).Count) { throw 'PROFILE_LABELS_REFUSED' }
     }
-    $labels = @('self-hosted','Linux','X64','ldw01','ldw-ephemeral','ldw-isolated','security-isolated')
-    if (@($profile.labels).Count -ne 7 -or @(Compare-Object $labels @($profile.labels) -CaseSensitive).Count) { throw 'PROFILE_LABELS_REFUSED' }
-    @($registry.profiles)
+    $synthetic = $profiles | Where-Object id -CEQ 'ci10-accepted-synthetic'
+    $production = $profiles | Where-Object id -CEQ 'ci10-bo-secret-scan'
+    if ($synthetic.Count -ne 1 -or $production.Count -ne 1 -or
+        $synthetic.repository -cne 'LowcountryDigitalWorks/infrastructure-tools' -or
+        $synthetic.workflowPath -cne '.github/workflows/ci-runner-isolation-proof.yml' -or
+        @($synthetic.events).Count -ne 1 -or $synthetic.events[0] -cne 'push' -or
+        $synthetic.branch -cne 'feat/ci-runner-ephemeral-001' -or
+        $synthetic.headSha -cne '6bf0fc0de72c7cef3cea7c3c054ba2326fdbfe26' -or
+        $synthetic.jobName -cne 'synthetic' -or $synthetic.controllerProfile -cne 'accepted-ci7-public-synthetic' -or
+        $production.repository -cne 'LowcountryDigitalWorks/business-operations' -or
+        $production.workflowPath -cne '.github/workflows/security-secrets.yml' -or
+        @($production.events).Count -ne 2 -or
+        @(Compare-Object @('pull_request','push') @($production.events) -CaseSensitive).Count -or
+        $null -ne $production.branch -or $null -ne $production.headSha -or
+        $production.jobName -cne 'secret-scan / secret-scan' -or
+        $production.controllerProfile -cne 'accepted-ci7-private-secret-scan') { throw 'PROFILE_CONTRACT_REFUSED' }
+    $profiles
 }
 
 function Invoke-Ci10Read {
     param([string]$Path)
-    if ($Path -cnotmatch '^repos/LowcountryDigitalWorks/infrastructure-tools/actions/(runs|workflows|runners)(/|\?|$)') { throw 'API_SCOPE_REFUSED' }
+    if ($Path -cnotmatch '^repos/LowcountryDigitalWorks/(infrastructure-tools|business-operations)/actions/(runs|workflows|runners)(/|\?|$)') { throw 'API_SCOPE_REFUSED' }
     $raw = & gh api --method GET $Path 2>$null
     if ($LASTEXITCODE -ne 0) { throw 'API_READ_FAILED' }
     try { $raw | ConvertFrom-Json -DateKind String -ErrorAction Stop } catch { throw 'API_RESPONSE_INVALID' }
@@ -130,7 +142,8 @@ function Get-Ci10Candidate {
     # API objects never enter the log. Noneligible jobs are not cancelled or modified.
     if ($Run.repository.full_name -cne $Profile.repository -or $Run.head_repository.full_name -cne $Profile.repository) { throw 'WRONG_REPOSITORY' }
     if ($Run.path -cne $Profile.workflowPath) { throw 'WRONG_WORKFLOW' }
-    if ($Run.event -cnotin $Profile.events -or $Run.head_branch -cne $Profile.branch -or $Run.head_sha -cne $Profile.headSha) { throw 'WRONG_EVENT_REF_SOURCE' }
+    if ($Run.event -cnotin $Profile.events -or ($null -ne $Profile.branch -and $Run.head_branch -cne $Profile.branch) -or
+        $Run.head_sha -notmatch '^[a-f0-9]{40}$' -or ($null -ne $Profile.headSha -and $Run.head_sha -cne $Profile.headSha)) { throw 'WRONG_EVENT_REF_SOURCE' }
     if ($Run.id -le 0 -or $Run.run_attempt -le 0 -or $Run.status -cne 'queued' -or $null -ne $Run.conclusion) { throw 'RUN_NOT_QUEUED' }
     if ($Jobs.total_count -ne 1 -or @($Jobs.jobs).Count -ne 1) { throw 'EXACTLY_ONE_JOB_REQUIRED' }
     $job = $Jobs.jobs[0]
@@ -157,11 +170,13 @@ function Find-Ci10QueuedJob {
     $candidates = [Collections.Generic.List[object]]::new()
     foreach ($profile in $Profiles) {
         $workflow = [Uri]::EscapeDataString([IO.Path]::GetFileName($profile.workflowPath))
-        $branch = [Uri]::EscapeDataString($profile.branch)
         $seen = [Collections.Generic.HashSet[long]]::new()
-        for ($page = 1; $page -le 3; $page++) {
-            $response = Invoke-Ci10Read ('repos/' + $profile.repository + '/actions/workflows/' + $workflow +
-                '/runs?status=queued&event=push&branch=' + $branch + '&per_page=100&page=' + $page)
+        foreach ($event in @($profile.events)) {
+            for ($page = 1; $page -le 3; $page++) {
+                $query = 'status=queued&event=' + [Uri]::EscapeDataString($event)
+                if ($null -ne $profile.branch) { $query += '&branch=' + [Uri]::EscapeDataString($profile.branch) }
+                $response = Invoke-Ci10Read ('repos/' + $profile.repository + '/actions/workflows/' + $workflow +
+                    '/runs?' + $query + '&per_page=100&page=' + $page)
             if ($response.total_count -gt 300) { throw 'QUEUE_BOUND_EXCEEDED' }
             foreach ($run in @($response.workflow_runs)) {
                 if (-not $seen.Add([long]$run.id)) { throw 'QUEUE_PAGE_RACE_REFUSED' }
@@ -174,6 +189,7 @@ function Find-Ci10QueuedJob {
             }
             if (@($response.workflow_runs).Count -lt 100) { break }
             if ($page -eq 3) { throw 'QUEUE_BOUND_EXCEEDED' }
+            }
         }
     }
     Select-Ci10Oldest @($candidates)
@@ -207,9 +223,29 @@ function Get-Ci10ControllerGate {
             Assert-Ci7Path $ControllerRoot $directory.FullName
             $state = Get-Content -LiteralPath (Join-Path $directory.FullName 'state.json') -Raw | ConvertFrom-Json
             Assert-Ci7State $state $ControllerRoot
+            $matchesProfile = $state.Configuration.Repository -ceq $Profile.repository -and
+                $state.Configuration.WorkflowPath -ceq $Profile.workflowPath
+            $matchesKnownOther = ($state.Configuration.Repository -ceq 'LowcountryDigitalWorks/infrastructure-tools' -and
+                $state.Configuration.WorkflowPath -ceq '.github/workflows/ci-runner-isolation-proof.yml') -or
+                ($state.Configuration.Repository -ceq 'LowcountryDigitalWorks/business-operations' -and
+                $state.Configuration.WorkflowPath -ceq '.github/workflows/security-secrets.yml')
+            if (-not $matchesProfile -and -not $matchesKnownOther) { throw 'STALE_PROFILE_OWNERSHIP_REFUSED' }
+            if (-not $matchesProfile) {
+                $otherRunLock = $null
+                try { $otherRunLock = [IO.File]::Open((Join-Path $directory.FullName 'controller.lock'),'OpenOrCreate','ReadWrite','None') }
+                catch { return 'BUSY' }
+                finally { if ($otherRunLock) { $otherRunLock.Dispose() } }
+                $otherVm = @(Get-VM | Where-Object { $_.Name -ceq $state.Name -or ($state.VMId -and [string]$_.VMId -ceq [string]$state.VMId) })
+                if ($otherVm.Count -gt 1) { throw 'STALE_VM_OWNERSHIP_AMBIGUOUS' }
+                if ($otherVm.Count -eq 1) { Assert-Ci7OwnedVm $state $otherVm[0] }
+                $ownedNames += $state.Name
+                continue
+            }
             if ($directory.Name -cne $state.RunId -or $state.Configuration.Repository -cne $Profile.repository -or
-                $state.Configuration.WorkflowPath -cne $Profile.workflowPath -or $state.Configuration.ExpectedSha -cne $Profile.headSha -or
-                -not $state.Configuration.PublicSyntheticProof) { throw 'STALE_PROFILE_OWNERSHIP_REFUSED' }
+                $state.Configuration.WorkflowPath -cne $Profile.workflowPath -or
+                ($Profile.id -ceq 'ci10-accepted-synthetic' -and
+                    ($state.Configuration.ExpectedSha -cne $Profile.headSha -or -not $state.Configuration.PublicSyntheticProof)) -or
+                ($Profile.id -ceq 'ci10-bo-secret-scan' -and $state.Configuration.PublicSyntheticProof)) { throw 'STALE_PROFILE_OWNERSHIP_REFUSED' }
             $runLock = $null
             try { $runLock = [IO.File]::Open((Join-Path $directory.FullName 'controller.lock'),'OpenOrCreate','ReadWrite','None') }
             catch { return 'BUSY' }
@@ -223,7 +259,7 @@ function Get-Ci10ControllerGate {
         if ($directories.Count) { return 'STALE' }
         $runners = Invoke-Ci10Read ('repos/' + $Profile.repository + '/actions/runners?per_page=100')
         if ($runners.total_count -gt 100 -or @($runners.runners | Where-Object name -cmatch '^ci7-').Count) { throw 'RUNNER_OWNERSHIP_UNCERTAIN' }
-        $configuration = New-Ci7Configuration -Repository $Profile.repository -WorkflowRunId 1 -ExpectedSha $Profile.headSha -Root $ControllerRoot -AllowPublicSyntheticProof
+        $configuration = New-Ci7Configuration -Repository $Profile.repository -WorkflowRunId 1 -ExpectedSha ('0' * 40) -Root $ControllerRoot -ApprovedRepositories @('LowcountryDigitalWorks/business-operations') -AllowPublicSyntheticProof:($Profile.id -ceq 'ci10-accepted-synthetic')
         try { Assert-Ci7Capacity $configuration }
         catch { if ($_.Exception.Message -cmatch '^CAPACITY_' -or $_.Exception.Message -ceq 'DEFAULT_NAT_SWITCH_REQUIRED') { return 'CAPACITY' }; throw }
         'READY'
@@ -238,9 +274,20 @@ function Get-Ci10StaleRunIds {
             Assert-Ci7Path $ControllerRoot $directory.FullName
             $state = Get-Content -LiteralPath (Join-Path $directory.FullName 'state.json') -Raw | ConvertFrom-Json
             Assert-Ci7State $state $ControllerRoot
+            if ($state.Configuration.Repository -cne $Profile.repository -or
+                $state.Configuration.WorkflowPath -cne $Profile.workflowPath) {
+                $knownOther = ($state.Configuration.Repository -ceq 'LowcountryDigitalWorks/infrastructure-tools' -and
+                    $state.Configuration.WorkflowPath -ceq '.github/workflows/ci-runner-isolation-proof.yml') -or
+                    ($state.Configuration.Repository -ceq 'LowcountryDigitalWorks/business-operations' -and
+                    $state.Configuration.WorkflowPath -ceq '.github/workflows/security-secrets.yml')
+                if (-not $knownOther) { throw 'STALE_PROFILE_OWNERSHIP_REFUSED' }
+                continue
+            }
             if ($directory.Name -cne $state.RunId -or $state.Configuration.Repository -cne $Profile.repository -or
-                $state.Configuration.WorkflowPath -cne $Profile.workflowPath -or $state.Configuration.ExpectedSha -cne $Profile.headSha -or
-                -not $state.Configuration.PublicSyntheticProof) { throw 'STALE_PROFILE_OWNERSHIP_REFUSED' }
+                $state.Configuration.WorkflowPath -cne $Profile.workflowPath -or
+                ($Profile.id -ceq 'ci10-accepted-synthetic' -and
+                    ($state.Configuration.ExpectedSha -cne $Profile.headSha -or -not $state.Configuration.PublicSyntheticProof)) -or
+                ($Profile.id -ceq 'ci10-bo-secret-scan' -and $state.Configuration.PublicSyntheticProof)) { throw 'STALE_PROFILE_OWNERSHIP_REFUSED' }
             $state.RunId
         }
     } finally { $lock.Dispose() }
@@ -249,7 +296,7 @@ function Get-Ci10StaleRunIds {
 function Write-Ci10Log {
     param([string]$Root, [ValidateSet('start','stop','poll-pass','poll-fail','busy','capacity','idle','selected','discovery-only',
         'controller-start','controller-pass','controller-fail','reap-pass','reap-fail')][string]$Classification,
-        [ValidateSet('ci10-accepted-synthetic')][string]$ProfileId = 'ci10-accepted-synthetic', [long]$RunId = 0)
+        [ValidateSet('ci10-accepted-synthetic','ci10-bo-secret-scan')][string]$ProfileId = 'ci10-accepted-synthetic', [long]$RunId = 0)
     if ($RunId -lt 0) { throw 'LOG_RUN_ID_INVALID' }
     Assert-Ci10ProtectedPath $Root
     $file = Join-Path $Root 'dispatcher.jsonl'
@@ -277,9 +324,12 @@ function Start-Ci10Controller {
         '-Mode',$(if ($CleanupRunId) { 'Cleanup' } else { 'Run' }),'-Root',$ControllerRoot)) { $info.ArgumentList.Add($arg) }
     if ($CleanupRunId) { $info.ArgumentList.Add('-LocalRunId'); $info.ArgumentList.Add($CleanupRunId) }
     else {
-        foreach ($arg in @('-Repository',$Candidate.Profile.repository,'-WorkflowRunId',[string]$Candidate.RunId,
-            '-ExpectedSha',$Candidate.Sha,'-AllowPublicSyntheticProof','-MemoryMiB',[string]$Candidate.Profile.memoryMiB,
-            '-CpuCount',[string]$Candidate.Profile.cpu,'-TimeoutMinutes',[string]$Candidate.Profile.timeoutMinutes)) { $info.ArgumentList.Add($arg) }
+        $args = @('-Repository',$Candidate.Profile.repository,'-WorkflowRunId',[string]$Candidate.RunId,
+            '-ExpectedSha',$Candidate.Sha,'-MemoryMiB',[string]$Candidate.Profile.memoryMiB,
+            '-CpuCount',[string]$Candidate.Profile.cpu,'-TimeoutMinutes',[string]$Candidate.Profile.timeoutMinutes)
+        if ($Candidate.Profile.id -ceq 'ci10-accepted-synthetic') { $args += '-AllowPublicSyntheticProof' }
+        else { $args += @('-ApprovedRepositories','LowcountryDigitalWorks/business-operations') }
+        foreach ($arg in $args) { $info.ArgumentList.Add($arg) }
     }
     $process = [Diagnostics.Process]::Start($info)
     # Drain streams asynchronously and discard every line; no raw diagnostics retained, even in memory buffers.

@@ -19,5 +19,24 @@
     "privateProductionState": false,
     "egress": "accepted-ci7-public-ipv4-private-deny",
     "controllerProfile": "accepted-ci7-public-synthetic"
+  }, {
+    "id": "ci10-bo-secret-scan",
+    "repository": "LowcountryDigitalWorks/business-operations",
+    "workflowPath": ".github/workflows/security-secrets.yml",
+    "events": ["pull_request", "push"],
+    "branch": null,
+    "headSha": null,
+    "jobName": "secret-scan / secret-scan",
+    "labels": ["self-hosted", "Linux", "X64", "ldw01", "ldw-ephemeral", "ldw-isolated", "security-isolated"],
+    "dynamicLabel": "ci7-run-<run-id>",
+    "jobCount": 1,
+    "cpu": 2,
+    "memoryMiB": 2048,
+    "timeoutMinutes": 20,
+    "docker": false,
+    "workflowSecrets": false,
+    "privateProductionState": false,
+    "egress": "accepted-ci7-public-ipv4-private-deny",
+    "controllerProfile": "accepted-ci7-private-secret-scan"
   }]
 }
