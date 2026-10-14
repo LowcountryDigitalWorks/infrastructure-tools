@@ -44,7 +44,7 @@ The tray refuses to start elevated. There are no service/VM/power controls, remo
 
 The helper's machine-local allowlist defaults to `%ProgramData%\LowcountryDigitalWorks\HostAgent\hyperv-observer.Local.json`; an explicit local path may be supplied with `--config <path>`. Use `config/hyperv-observer.Local.example.json` only as the public shape. Real SIDs remain machine-local and `*.Local.json` is gitignored.
 
-This repository slice does **not** install/register/start a persistent privileged service or task. Persistent installation and live elevated proof remain explicit post-review gates.
+For persistent deployment as a Scheduled Task under LocalSystem without elevating the tray, see [`docs/PERSISTENT_HELPER_DEPLOYMENT.md`](docs/PERSISTENT_HELPER_DEPLOYMENT.md) and the management scripts in [`deploy/`](deploy/). Persistent installation on LDW01 remains an explicit post-review gate.
 
 ## Machine-local Host Agent configuration
 
@@ -67,6 +67,7 @@ dotnet build LDW.HostAgent.sln -c Release
 dotnet run --project tests/LDW.HostAgent.Core.Tests/LDW.HostAgent.Core.Tests.csproj -c Release
 dotnet run --project tests/LDW.HostAgent.HyperVObserver.Tests/LDW.HostAgent.HyperVObserver.Tests.csproj -c Release
 dotnet run --project tools/LDW.HostAgent.LiveProbe/LDW.HostAgent.LiveProbe.csproj -c Release
+pwsh deploy/tests/Test-DeploymentContracts.ps1
 ```
 
 The live-probe tool is read-only and emits sanitized component summaries for bounded local validation. Contract tests use only synthetic/documentation address values and do not query Hyper-V. No external NuGet packages are required.

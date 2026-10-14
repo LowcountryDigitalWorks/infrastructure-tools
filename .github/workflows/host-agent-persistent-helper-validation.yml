@@ -2,7 +2,7 @@ name: Host Agent persistent helper validation
 
 on:
   push:
-    branches: [feat/host-agent-persistent-helper-deploy-v2]
+    branches: [main, feat/host-agent-persistent-helper-deploy-v2, 'feat/**']
     paths:
       - 'host-agent/**'
       - '.github/workflows/host-agent-persistent-helper-validation.yml'
