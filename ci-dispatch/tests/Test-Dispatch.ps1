@@ -30,6 +30,38 @@ try {
     $profilePath=Join-Path $fixture 'profiles.json'
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../profiles.json') -Destination $profilePath
     $profiles=@(Read-Ci10Profiles $profilePath); $profile=$profiles[0]
+    $production=$profiles | Where-Object id -CEQ 'ci10-bo-secret-scan'
+    Check 'accepted production profile is exact and source-dynamic' {
+        Assert ($production.repository -ceq 'LowcountryDigitalWorks/business-operations')
+        Assert ($production.workflowPath -ceq '.github/workflows/security-secrets.yml')
+        Assert (@(Compare-Object @('pull_request','push') @($production.events) -CaseSensitive).Count -eq 0)
+        Assert ($null -eq $production.branch -and $null -eq $production.headSha)
+        Assert ($production.jobName -ceq 'secret-scan / secret-scan')
+    }
+    $productionRun=[pscustomobject]@{id=223344; run_attempt=1; status='queued'; conclusion=$null; created_at='2026-10-11T20:00:00Z';
+        repository=@{full_name=$production.repository}; head_repository=@{full_name=$production.repository}; path=$production.workflowPath;
+        event='pull_request'; head_branch='feature/example'; head_sha=('a'*40)}
+    $productionJobs=[pscustomobject]@{total_count=1; jobs=@([pscustomobject]@{id=667788;run_id=223344;run_attempt=1;head_sha=('a'*40);
+        name=$production.jobName;status='queued';conclusion=$null;runner_id=0;runner_name=$null;runner_group_id=0;started_at=$null;
+        labels=@($production.labels)+@('ci7-run-223344')})}
+    Check 'production profile accepts immutable run head' {
+        Assert ((Get-Ci10Candidate $production $productionRun $productionJobs).Sha -ceq ('a'*40))
+    }
+    Check 'fork production PR refused' {
+        $bad=Clone $productionRun; $bad.head_repository.full_name='LowcountryDigitalWorks/fork'
+        Refuses { Get-Ci10Candidate $production $bad $productionJobs } 'WRONG_REPOSITORY'
+    }
+    Check 'production job commit mismatch refused' {
+        $bad=Clone $productionJobs; $bad.jobs[0].head_sha='b'*40
+        Refuses { Get-Ci10Candidate $production $productionRun $bad } 'JOB_IDENTITY_MISMATCH'
+    }
+    Check 'unknown profile is refused' {
+        $registry=Get-Content -LiteralPath $profilePath -Raw|ConvertFrom-Json
+        $registry.profiles[1].id='ci10-unknown'
+        $registry|ConvertTo-Json -Depth 10|Set-Content -LiteralPath $profilePath
+        Refuses { Read-Ci10Profiles $profilePath }
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../profiles.json') -Destination $profilePath -Force
+    }
     $run=[pscustomobject]@{id=12345; run_attempt=2; status='queued'; conclusion=$null; created_at='2026-10-11T20:00:00Z';
         repository=@{full_name=$profile.repository}; head_repository=@{full_name=$profile.repository}; path=$profile.workflowPath;
         event='push'; head_branch=$profile.branch; head_sha=$profile.headSha}
@@ -89,6 +121,7 @@ try {
         $script:RunFixture=$r;$script:JobFixture=$j;$script:Calls=[Collections.Generic.List[string]]::new()
         function script:Invoke-Ci10Read([string]$Path){
             $script:Calls.Add($Path)
+            if($Path.Contains('business-operations')){return [pscustomobject]@{total_count=0;workflow_runs=@()}}
             if($Path.Contains('/workflows/')){return [pscustomobject]@{total_count=1;workflow_runs=@($script:RunFixture)}}
             if($Path.Contains('/jobs?')){return $script:JobFixture}
             return $script:RunFixture

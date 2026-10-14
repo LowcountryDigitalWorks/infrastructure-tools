@@ -120,15 +120,21 @@ try {
     Write-Ci10Log $dispatchRoot start
     for ($poll = 0; $poll -lt $(if ($Mode -eq 'Poll') { $PollCount } else { 1 }); $poll++) {
         $null = Assert-Ci10Bundle $bundle $ManifestSha $Commit $Tree
-        $gate = Get-Ci10ControllerGate $controllerRoot $profiles[0]
-        if ($gate -eq 'STALE') {
+        $gates = @($profiles | ForEach-Object { [pscustomobject]@{ Profile = $_; Value = Get-Ci10ControllerGate $controllerRoot $_ } })
+        if (@($gates | Where-Object Value -ceq 'STALE').Count) {
             # Select exact validated state IDs. Root-wide Reap could include another workload appearing after the probe.
-            foreach ($runId in @(Get-Ci10StaleRunIds $controllerRoot $profiles[0])) {
-                Start-Ci10Controller $bundle $controllerRoot -CleanupRunId $runId
+            foreach ($stale in @($gates | Where-Object Value -ceq 'STALE')) {
+                foreach ($runId in @(Get-Ci10StaleRunIds $controllerRoot $stale.Profile)) {
+                    Start-Ci10Controller $bundle $controllerRoot -CleanupRunId $runId
+                }
             }
             Write-Ci10Log $dispatchRoot reap-pass
-            $gate = Get-Ci10ControllerGate $controllerRoot $profiles[0]
+            $gates = @($profiles | ForEach-Object { [pscustomobject]@{ Profile = $_; Value = Get-Ci10ControllerGate $controllerRoot $_ } })
         }
+        $gate = if (@($gates | Where-Object Value -ceq 'BUSY').Count) { 'BUSY' }
+            elseif (@($gates | Where-Object Value -ceq 'CAPACITY').Count) { 'CAPACITY' }
+            elseif (@($gates | Where-Object Value -ceq 'READY').Count -eq $profiles.Count) { 'READY' }
+            else { 'CONTROLLER_GATE_UNCERTAIN' }
         if ($Mode -eq 'Recover') {
             if ($gate -notin @('READY','CAPACITY')) { throw 'RECOVERY_BUSY_OR_UNCERTAIN' }
             'DISPATCHER_RESULT=RECOVERED'
@@ -145,9 +151,9 @@ try {
                 'DISPATCHER_RESULT=IDLE'
             } else {
                 $candidate = Confirm-Ci10Candidate $selected[0]
-                Write-Ci10Log $dispatchRoot selected -RunId $candidate.RunId
+                Write-Ci10Log $dispatchRoot selected -ProfileId $candidate.Profile.id -RunId $candidate.RunId
                 if ($Mode -eq 'Discover') {
-                    Write-Ci10Log $dispatchRoot discovery-only -RunId $candidate.RunId
+                    Write-Ci10Log $dispatchRoot discovery-only -ProfileId $candidate.Profile.id -RunId $candidate.RunId
                     # Bounded manual interruption seam: this mode can never launch a controller.
                     if ($DiscoverHoldSeconds) { Start-Sleep -Seconds $DiscoverHoldSeconds }
                     'DISPATCHER_RESULT=DISCOVERED'
@@ -161,10 +167,10 @@ try {
                     $gate = Get-Ci10ControllerGate $controllerRoot $candidate.Profile
                     if ($gate -cne 'READY') { throw 'CONTROLLER_GATE_CHANGED' }
                     $candidate = Confirm-Ci10Candidate $candidate
-                    Write-Ci10Log $dispatchRoot controller-start -RunId $candidate.RunId
+                    Write-Ci10Log $dispatchRoot controller-start -ProfileId $candidate.Profile.id -RunId $candidate.RunId
                     Start-Ci10Controller $bundle $controllerRoot $candidate
                     if ((Get-Ci10ControllerGate $controllerRoot $candidate.Profile) -cne 'READY') { throw 'CLEANUP_UNCONFIRMED' }
-                    Write-Ci10Log $dispatchRoot controller-pass -RunId $candidate.RunId
+                    Write-Ci10Log $dispatchRoot controller-pass -ProfileId $candidate.Profile.id -RunId $candidate.RunId
                     'DISPATCHER_RESULT=PASS'
                     'DISCOVERED_RUN_ID=' + $candidate.RunId
                     'DISCOVERED_JOB_ID=' + $candidate.JobId

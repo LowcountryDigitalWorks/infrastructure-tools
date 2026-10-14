@@ -7,13 +7,16 @@ workflow, Royal profile, or PR #559.
 
 ## Admission and discovery
 
-`profiles.json` admits one harmless public infrastructure-tools synthetic profile.
-It binds the exact repository, workflow, push event, source branch, reviewed source
-SHA `6bf0fc0de72c7cef3cea7c3c054ba2326fdbfe26`, job name, seven static labels,
-`ci7-run-<run-id>`, one unassigned queued job, CPU/RAM/timeout, no Docker,
-no workflow secrets or private production state, and the accepted egress/controller
-profile. The module also validates this exact registry contract. Unknown profiles
-require a reviewed source change; no arbitrary caller-supplied allowlist is accepted.
+`profiles.json` admits the harmless public infrastructure-tools synthetic profile
+and the bounded `ci10-bo-secret-scan` business-operations profile. The synthetic
+profile binds the exact repository, workflow, push event, source branch, reviewed
+source SHA `6bf0fc0de72c7cef3cea7c3c054ba2326fdbfe26`. The production profile binds
+the exact private repository/workflow, pull-request and main push events, same-repo
+head repository, immutable run/job head SHA equality, job name, seven static labels,
+`ci7-run-<run-id>`, one unassigned queued job, CPU/RAM/timeout, no Docker, no
+workflow secrets or private production state, and the accepted egress/controller
+profile. The module validates this exact registry contract. Unknown profiles and
+fork pull requests are refused; no arbitrary caller-supplied allowlist is accepted.
 
 Polling reads only that repository's specific workflow/branch/event queue, at most
 three pages of 100 runs per poll. An incomplete/unstable listing fails closed. It
@@ -27,8 +30,10 @@ selected run/job are re-read immediately before launch; any drift aborts dispatc
 The existing synthetic push workflow is reused by rerunning its accepted run.
 No synthetic workflow or controller exception change was needed. A rerun keeps
 its original event, branch, immutable head and run ID, with a new attempt/job ID.
-Setup may requeue the accepted surface; the dispatcher accepts no run ID/SHA input.
-Only the registry supplies source policy. Production profiles remain disabled.
+The production profile derives its candidate SHA from each queued run and requires
+the job SHA to match it. The dispatcher accepts no run ID/SHA input; only the
+registry supplies source policy. The profile is source-only: this change does not
+execute a real scan, install/enable a host task, or activate production routing.
 
 ## Protected provenance
 
