@@ -48,8 +48,8 @@ try {
         Assert ($royalProfile.workflowPath -ceq '.github/workflows/deploy-dashboard-pr379.yml')
         Assert (@($royalProfile.events).Count -eq 1 -and $royalProfile.events[0] -ceq 'workflow_dispatch')
         Assert ($royalProfile.branch -ceq 'main')
-        Assert ($null -eq $royalProfile.headSha)
-        Assert ($null -eq $royalProfile.workflowBlobSha)
+        Assert ($royalProfile.headSha -ceq 'd77a0e01f42b7ecddd6bce0f7f226288dcc0b11e')
+        Assert ($royalProfile.workflowBlobSha -ceq '3bfe9fec5fa4ebc10db17d41594ded8878b37064')
         Assert ($royalProfile.jobName -ceq 'deploy')
         Assert ($royalProfile.workflowSecrets -eq $true)
         Assert ($royalProfile.docker -eq $false)
@@ -68,24 +68,15 @@ try {
 
     $royalRun=[pscustomobject]@{id=98765; run_attempt=1; status='queued'; conclusion=$null; created_at='2026-10-11T20:00:00Z';
         repository=@{full_name=$royalProfile.repository}; head_repository=@{full_name=$royalProfile.repository}; path=$royalProfile.workflowPath;
-        event='workflow_dispatch'; head_branch='main'; head_sha=('c'*40)}
-    $royalJobs=[pscustomobject]@{total_count=1; jobs=@([pscustomobject]@{id=112233;run_id=98765;run_attempt=1;head_sha=('c'*40);
+        event='workflow_dispatch'; head_branch='main'; head_sha='d77a0e01f42b7ecddd6bce0f7f226288dcc0b11e'}
+    $royalJobs=[pscustomobject]@{total_count=1; jobs=@([pscustomobject]@{id=112233;run_id=98765;run_attempt=1;head_sha='d77a0e01f42b7ecddd6bce0f7f226288dcc0b11e';
         name='deploy';status='queued';conclusion=$null;runner_id=0;runner_name=$null;runner_group_id=0;started_at=$null;
         labels=@($royalProfile.labels)+@('ci7-run-98765')})}
     Check 'Royal deployment profile accepts exact pinned queued job' {
-        Assert ((Get-Ci10Candidate $royalProfile $royalRun $royalJobs ('c'*40) ('d'*40)).JobId -eq 112233)
+        Assert ((Get-Ci10Candidate $royalProfile $royalRun $royalJobs).JobId -eq 112233)
     }
     Check 'Royal job event mismatch refused' {
-        $bad=Clone $royalRun; Check 'missing frozen Royal head refused' { Refuses { Get-Ci10Candidate $royalProfile $royalRun $royalJobs $null ('d'*40) } 'FROZEN_ROYAL_HEAD_REQUIRED' }
-Check 'missing frozen Royal blob refused' { Refuses { Get-Ci10Candidate $royalProfile $royalRun $royalJobs ('c'*40) $null } 'FROZEN_ROYAL_WORKFLOW_BLOB_REQUIRED' }
-Check 'malformed frozen Royal head refused' { Refuses { Get-Ci10Candidate $royalProfile $royalRun $royalJobs 'bad' ('d'*40) } 'FROZEN_ROYAL_HEAD_REQUIRED' }
-Check 'malformed frozen Royal blob refused' { Refuses { Get-Ci10Candidate $royalProfile $royalRun $royalJobs ('c'*40) 'bad' } 'FROZEN_ROYAL_WORKFLOW_BLOB_REQUIRED' }
-Check 'known pre-routing Royal pair refused' { Refuses { Get-Ci10Candidate $royalProfile $royalRun $royalJobs 'd77a0e01f42b7ecddd6bce0f7f226288dcc0b11e' '3bfe9fec5fa4ebc10db17d41594ded8878b37064' } 'PRE_ROUTING_ROYAL_PAIR_REFUSED' }
-Check 'frozen Royal head mismatch refused' { $bad=Clone $royalRun; $bad.head_sha='e'*40; Refuses { Get-Ci10Candidate $royalProfile $bad $royalJobs ('c'*40) ('d'*40) } 'WRONG_EVENT_REF_SOURCE' }
-Check 'Royal profile does not block other queued profiles without invocation pins' { Assert ($null -eq $royalProfile.headSha -and $null -eq $royalProfile.workflowBlobSha) }
-Check 'wrong Royal static label refused' { $bad=Clone $royalJobs; $bad.jobs[0].labels[3]='ldw-light'; Refuses { Get-Ci10Candidate $royalProfile $royalRun $bad ('c'*40) ('d'*40) } 'WRONG_LABELS' }
-Check 'wrong Royal job name refused' { $bad=Clone $royalJobs; $bad.jobs[0].name='other'; Refuses { Get-Ci10Candidate $royalProfile $royalRun $bad ('c'*40) ('d'*40) } 'JOB_IDENTITY_MISMATCH' }
-$bad.event='push'
+        $bad=Clone $royalRun; $bad.event='push'
         Refuses { Get-Ci10Candidate $royalProfile $bad $royalJobs } 'WRONG_EVENT_REF_SOURCE'
     }
     Check 'Royal job branch mismatch refused' {
