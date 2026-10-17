@@ -121,6 +121,21 @@ if (OperatingSystem.IsWindows())
            && rejectedResponse?.ErrorCode == "invalid-request"
            && HyperVObserverContract.SelectSshCandidates(rejectedResponse).Count == 0,
         "invalid request returns no candidate data");
+
+    using var recoveryTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+    var recoverySource = new ThrowOnceObservationSource(running with { AddressCandidates = ["192.0.2.55"] });
+    var resilientServer = new HyperVObserverPipeServer([currentSid], recoverySource);
+    var resilientTask = resilientServer.RunAsync(recoveryTimeout.Token);
+    var failedClientResponse = await RoundTripAsync(HyperVObserverContract.CreateRequestJson());
+    Assert(string.IsNullOrEmpty(failedClientResponse),
+        "a per-client observation exception closes only that client without leaking exception details");
+    var recoveredClientResponse = await RoundTripAsync(HyperVObserverContract.CreateRequestJson());
+    Assert(HyperVObserverContract.TryParseResponse(recoveredClientResponse, out var recovered)
+           && recovered?.AddressCandidates.SequenceEqual(["192.0.2.55"]) == true,
+        "a later valid client is served after the preceding client faults");
+    recoveryTimeout.Cancel();
+    await resilientTask;
+    Assert(recoverySource.Calls == 2, "server survived one client fault and observed the next valid request exactly once");
 }
 
 Console.WriteLine($"Hyper-V observer tests passed ({assertions} assertions).");
@@ -153,6 +168,19 @@ sealed class FakeObservationSource(HyperVObservationResponse response) : IHyperV
     public ValueTask<HyperVObservationResponse> ObserveAsync(CancellationToken cancellationToken)
     {
         Calls++;
+        return ValueTask.FromResult(response);
+    }
+}
+
+sealed class ThrowOnceObservationSource(HyperVObservationResponse response) : IHyperVObservationSource
+{
+    public int Calls { get; private set; }
+
+    public ValueTask<HyperVObservationResponse> ObserveAsync(CancellationToken cancellationToken)
+    {
+        Calls++;
+        if (Calls == 1)
+            throw new InvalidOperationException("synthetic per-client failure");
         return ValueTask.FromResult(response);
     }
 }

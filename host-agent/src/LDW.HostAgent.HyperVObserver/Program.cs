@@ -203,14 +203,34 @@ internal sealed class HyperVObserverPipeServer(
     public async Task RunAsync(CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
-            await ServeOneAsync(cancellationToken);
+        {
+            try
+            {
+                await ServeOneAsync(cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+        }
     }
 
     internal async Task ServeOneAsync(CancellationToken cancellationToken)
     {
         await using var pipe = SecurePipeFactory.CreateServer(permittedCallerSids);
         await pipe.WaitForConnectionAsync(cancellationToken);
-        await HandleClientAsync(pipe, cancellationToken);
+        try
+        {
+            await HandleClientAsync(pipe, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            // Contain a single client's pipe/observation failure; the next accepted client gets a fresh pipe.
+        }
     }
 
     private async Task HandleClientAsync(NamedPipeServerStream pipe, CancellationToken cancellationToken)
