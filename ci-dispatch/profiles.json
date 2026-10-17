@@ -7,6 +7,7 @@
     "events": ["push"],
     "branch": "feat/ci-runner-ephemeral-001",
     "headSha": "6bf0fc0de72c7cef3cea7c3c054ba2326fdbfe26",
+    "workflowBlobSha": null,
     "jobName": "synthetic",
     "labels": ["self-hosted", "Linux", "X64", "ldw01", "ldw-ephemeral", "ldw-isolated", "security-isolated"],
     "dynamicLabel": "ci7-run-<run-id>",
@@ -26,6 +27,7 @@
     "events": ["pull_request", "push"],
     "branch": null,
     "headSha": null,
+    "workflowBlobSha": null,
     "jobName": "secret-scan / secret-scan",
     "labels": ["self-hosted", "Linux", "X64", "ldw01", "ldw-ephemeral", "ldw-isolated", "security-isolated"],
     "dynamicLabel": "ci7-run-<run-id>",
@@ -38,5 +40,25 @@
     "privateProductionState": false,
     "egress": "accepted-ci7-public-ipv4-private-deny",
     "controllerProfile": "accepted-ci7-private-secret-scan"
+  }, {
+    "id": "ci10-royal-dashboard-deploy",
+    "repository": "LowcountryDigitalWorks/royal-cruise-tracker",
+    "workflowPath": ".github/workflows/deploy-dashboard-pr379.yml",
+    "events": ["workflow_dispatch"],
+    "branch": "main",
+    "headSha": "d77a0e01f42b7ecddd6bce0f7f226288dcc0b11e",
+    "workflowBlobSha": "3bfe9fec5fa4ebc10db17d41594ded8878b37064",
+    "jobName": "deploy",
+    "labels": ["self-hosted", "Linux", "X64", "ldw01", "ldw-ephemeral", "ldw-isolated", "royal-isolated"],
+    "dynamicLabel": "ci7-run-<run-id>",
+    "jobCount": 1,
+    "cpu": 2,
+    "memoryMiB": 2048,
+    "timeoutMinutes": 20,
+    "docker": false,
+    "workflowSecrets": true,
+    "privateProductionState": false,
+    "egress": "accepted-ci7-public-ipv4-private-deny",
+    "controllerProfile": "accepted-ci7-royal-dashboard-deploy"
   }]
 }

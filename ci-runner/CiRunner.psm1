@@ -4,6 +4,7 @@ $script:SafeLabels = @('self-hosted', 'Linux', 'X64', 'ldw01', 'ldw-ephemeral', 
 $script:Marker = 'CI-RUNNER-EPHEMERAL-001'
 
 function Assert-Ci7Elevated {
+    if ($env:OS -ne 'Windows_NT') { return }
     $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'ELEVATED_CONTROLLER_REQUIRED' }
 }
@@ -28,13 +29,15 @@ function Initialize-Ci7Root {
     if ([IO.Path]::GetFileName($Root.TrimEnd('\', '/')) -cne 'CiRunnerEphemeral') { throw 'DEDICATED_ROOT_REQUIRED' }
     Assert-Ci7Path ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Root))) $Root
     [void](New-Item -ItemType Directory -Path $Root -Force)
-    $acl = [Security.AccessControl.DirectorySecurity]::new()
-    $acl.SetAccessRuleProtection($true, $false)
-    foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
-        $rule = [Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
-        $acl.AddAccessRule($rule)
+    if ($env:OS -eq 'Windows_NT') {
+        $acl = [Security.AccessControl.DirectorySecurity]::new()
+        $acl.SetAccessRuleProtection($true, $false)
+        foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
+            $rule = [Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+            $acl.AddAccessRule($rule)
+        }
+        Set-Acl -LiteralPath $Root -AclObject $acl
     }
-    Set-Acl -LiteralPath $Root -AclObject $acl
     foreach ($child in @('runs', 'evidence')) { [void](New-Item -ItemType Directory -Path (Join-Path $Root $child) -Force) }
 }
 
@@ -65,22 +68,51 @@ function Enter-Ci7ControllerLock {
 
 function New-Ci7Configuration {
     param([string]$Repository, [long]$WorkflowRunId, [string]$ExpectedSha, [string]$Root,
-        [string[]]$ApprovedRepositories = @('LowcountryDigitalWorks/business-operations'),
-        [switch]$AllowPublicSyntheticProof, [int]$MemoryMiB = 2048, [int]$CpuCount = 2, [int]$TimeoutMinutes = 20)
+        [string[]]$ApprovedRepositories = @('LowcountryDigitalWorks/business-operations', 'LowcountryDigitalWorks/royal-cruise-tracker'),
+        [switch]$AllowPublicSyntheticProof, [int]$MemoryMiB = 2048, [int]$CpuCount = 2, [int]$TimeoutMinutes = 20,
+        [string]$WorkflowPath, [string]$WorkflowBlobSha, [string[]]$StaticLabels)
     if ($ExpectedSha -notmatch '^[0-9a-f]{40}$' -or $WorkflowRunId -le 0) { throw 'EXACT_JOB_REFERENCE_REQUIRED' }
     if ($MemoryMiB -lt 2048 -or $MemoryMiB -gt 4096 -or $CpuCount -lt 1 -or $CpuCount -gt 2 -or $TimeoutMinutes -lt 5 -or $TimeoutMinutes -gt 30) { throw 'RESOURCE_BOUNDS_INVALID' }
     $proof = $AllowPublicSyntheticProof -and $Repository -ceq 'LowcountryDigitalWorks/infrastructure-tools'
     if (-not $proof -and ($Repository -cnotin $ApprovedRepositories -or $Repository -cnotmatch '^LowcountryDigitalWorks/[a-z0-9-]+$')) { throw 'REPOSITORY_NOT_APPROVED' }
     if ($AllowPublicSyntheticProof -and -not $proof) { throw 'PUBLIC_PROOF_EXCEPTION_INVALID' }
+
+    $resolvedWorkflowPath = if ($WorkflowPath) {
+        $WorkflowPath
+    } elseif ($proof) {
+        '.github/workflows/ci-runner-isolation-proof.yml'
+    } elseif ($Repository -ceq 'LowcountryDigitalWorks/royal-cruise-tracker') {
+        '.github/workflows/deploy-dashboard-pr379.yml'
+    } else {
+        '.github/workflows/security-secrets.yml'
+    }
+
+    if ($Repository -ceq 'LowcountryDigitalWorks/royal-cruise-tracker' -and $resolvedWorkflowPath -cne '.github/workflows/deploy-dashboard-pr379.yml') {
+        throw 'ROYAL_WORKFLOW_PATH_INVALID'
+    }
+
+    $resolvedStaticLabels = if ($StaticLabels) {
+        @($StaticLabels)
+    } elseif ($Repository -ceq 'LowcountryDigitalWorks/royal-cruise-tracker') {
+        @('self-hosted', 'Linux', 'X64', 'ldw01', 'ldw-ephemeral', 'ldw-isolated', 'royal-isolated')
+    } else {
+        @($script:SafeLabels)
+    }
+
     [pscustomobject]@{ Repository = $Repository; WorkflowRunId = $WorkflowRunId; ExpectedSha = $ExpectedSha;
         Root = [IO.Path]::GetFullPath($Root); ApprovedRepositories = @($ApprovedRepositories); PublicSyntheticProof = [bool]$proof; MemoryMiB = $MemoryMiB; CpuCount = $CpuCount;
-        TimeoutMinutes = $TimeoutMinutes; WorkflowPath = if ($proof) { '.github/workflows/ci-runner-isolation-proof.yml' } else { '.github/workflows/security-secrets.yml' } }
+        TimeoutMinutes = $TimeoutMinutes; WorkflowPath = $resolvedWorkflowPath; WorkflowBlobSha = $WorkflowBlobSha; StaticLabels = @($resolvedStaticLabels) }
 }
 
 function Get-Ci7Labels {
-    param([long]$WorkflowRunId)
+    param([long]$WorkflowRunId, [object]$Configuration)
     if ($WorkflowRunId -le 0) { throw 'WORKFLOW_RUN_ID_INVALID' }
-    @($script:SafeLabels) + @('ci7-run-' + $WorkflowRunId)
+    $static = if ($Configuration -and $Configuration.StaticLabels) {
+        @($Configuration.StaticLabels)
+    } else {
+        @($script:SafeLabels)
+    }
+    @($static) + @('ci7-run-' + $WorkflowRunId)
 }
 
 function Invoke-Ci7Api {
@@ -99,12 +131,25 @@ function Get-Ci7ExpectedJob {
     if (-not $repo.private -and -not $Configuration.PublicSyntheticProof) { throw 'PRIVATE_REPOSITORY_REQUIRED' }
     $run = Invoke-Ci7Api ('repos/' + $Configuration.Repository + '/actions/runs/' + $Configuration.WorkflowRunId)
     if ($run.head_sha -cne $Configuration.ExpectedSha -or $run.path -cne $Configuration.WorkflowPath -or
-        $run.head_repository.full_name -cne $Configuration.Repository -or $run.event -cnotin @('push', 'pull_request', 'workflow_dispatch')) { throw 'WORKFLOW_IDENTITY_MISMATCH' }
+        $run.head_repository.full_name -cne $Configuration.Repository) { throw 'WORKFLOW_IDENTITY_MISMATCH' }
+
+    if ($Configuration.Repository -ceq 'LowcountryDigitalWorks/royal-cruise-tracker') {
+        if ($run.event -cne 'workflow_dispatch') { throw 'ROYAL_EVENT_REFUSED' }
+        if ($run.head_branch -cne 'main') { throw 'ROYAL_REF_REFUSED' }
+        if ($Configuration.ExpectedSha -cne 'd77a0e01f42b7ecddd6bce0f7f226288dcc0b11e') { throw 'ROYAL_HEAD_SHA_REFUSED' }
+        if ($Configuration.WorkflowBlobSha) {
+            $blob = Invoke-Ci7Api ('repos/' + $Configuration.Repository + '/contents/' + $Configuration.WorkflowPath + '?ref=' + $run.head_sha)
+            if ($blob.sha -cne $Configuration.WorkflowBlobSha) { throw 'WORKFLOW_BLOB_SHA_MISMATCH' }
+        }
+    } else {
+        if ($run.event -cnotin @('push', 'pull_request', 'workflow_dispatch')) { throw 'WORKFLOW_IDENTITY_MISMATCH' }
+    }
+
     if ($Configuration.PublicSyntheticProof -and ($run.head_branch -cne 'feat/ci-runner-ephemeral-001' -or $run.event -cne 'push')) { throw 'PUBLIC_PROOF_TRIGGER_REFUSED' }
     $response = Invoke-Ci7Api ('repos/' + $Configuration.Repository + '/actions/runs/' + $Configuration.WorkflowRunId + '/jobs?filter=latest&per_page=100')
     if ($response.total_count -ne 1 -or @($response.jobs).Count -ne 1) { throw 'EXACTLY_ONE_JOB_REQUIRED' }
     $job = $response.jobs[0]
-    $expected = @(Get-Ci7Labels $Configuration.WorkflowRunId)
+    $expected = @(Get-Ci7Labels $Configuration.WorkflowRunId $Configuration)
     if (@($job.labels).Count -ne $expected.Count -or @(Compare-Object $expected @($job.labels) -CaseSensitive).Count -ne 0) { throw 'ISOLATED_JOB_LABELS_REQUIRED' }
     if ($RequireQueued -and ($job.status -cne 'queued' -or $job.runner_id)) { throw 'UNASSIGNED_QUEUED_JOB_REQUIRED' }
     $job
@@ -341,7 +386,7 @@ function Remove-Ci7Runner {
     if ($matches.Count -eq 1) {
         $runner = $matches[0]
         if (-not $State.RunnerId -or $runner.id -ne $State.RunnerId -or $runner.name -cne $State.Name -or $runner.name -ceq 'ldw01-ci-01') { throw 'RUNNER_NOT_CONCLUSIVELY_OWNED' }
-        $expected = @(Get-Ci7Labels $State.Configuration.WorkflowRunId)
+        $expected = @(Get-Ci7Labels $State.Configuration.WorkflowRunId $State.Configuration)
         if (@($runner.labels.name).Count -ne $expected.Count -or @(Compare-Object $expected @($runner.labels.name) -CaseSensitive).Count) { throw 'RUNNER_LABEL_OWNERSHIP_AMBIGUOUS' }
         if ($runner.busy -and -not $Interrupted) { throw 'JOB_STILL_ACTIVE' }
         Invoke-Ci7Api ('repos/' + $repo + '/actions/runners/' + $State.RunnerId) DELETE
@@ -367,7 +412,7 @@ function Clear-Ci7TransientState {
 }
 
 function Assert-Ci7AlreadyClean {
-    param([string]$Root, [string]$RunId, [string[]]$ApprovedRepositories = @('LowcountryDigitalWorks/business-operations'))
+    param([string]$Root, [string]$RunId, [string[]]$ApprovedRepositories = @('LowcountryDigitalWorks/business-operations', 'LowcountryDigitalWorks/royal-cruise-tracker'))
     if ($RunId -cnotmatch '^[0-9a-f]{32}$') { throw 'LOCAL_RUN_ID_INVALID' }
     $directory = Join-Path $Root ('runs/' + $RunId)
     $log = Join-Path $Root ('evidence/' + $RunId + '.jsonl')

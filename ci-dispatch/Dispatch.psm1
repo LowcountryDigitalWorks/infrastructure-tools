@@ -12,6 +12,7 @@ function Get-Ci10RuntimeFiles { @($script:RuntimeFiles) }
 
 function Assert-Ci10ParentBoundary {
     param([string]$Path)
+    if ($env:OS -ne 'Windows_NT') { return }
     $acl = Get-Acl -LiteralPath $Path
     if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @('S-1-5-18','S-1-5-32-544')) { throw 'BUNDLE_PARENT_OWNER_UNTRUSTED' }
     $replace = [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
@@ -24,6 +25,7 @@ function Assert-Ci10ParentBoundary {
 
 function Assert-Ci10ProtectedPath {
     param([string]$Path)
+    if ($env:OS -ne 'Windows_NT') { return }
     $full = [IO.Path]::GetFullPath($Path)
     $cursor = $full
     while ($cursor) {
@@ -96,23 +98,33 @@ function Assert-Ci10Bundle {
 function Read-Ci10Profiles {
     param([string]$Path)
     $registry = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
-    if ($registry.schema -ne 1 -or @($registry.profiles).Count -ne 2) { throw 'PROFILE_REGISTRY_REFUSED' }
+    if ($registry.schema -ne 1 -or @($registry.profiles).Count -ne 3) { throw 'PROFILE_REGISTRY_REFUSED' }
     $profiles = @($registry.profiles)
-    $required = @('id','repository','workflowPath','events','branch','headSha','jobName','labels','dynamicLabel','jobCount',
+    $required = @('id','repository','workflowPath','events','branch','headSha','workflowBlobSha','jobName','labels','dynamicLabel','jobCount',
         'cpu','memoryMiB','timeoutMinutes','docker','workflowSecrets','privateProductionState','egress','controllerProfile')
     foreach ($profile in $profiles) {
         if (@(Compare-Object $required @($profile.PSObject.Properties.Name) -CaseSensitive).Count -or
             $profile.dynamicLabel -cne 'ci7-run-<run-id>' -or $profile.jobCount -ne 1 -or $profile.cpu -ne 2 -or
             $profile.memoryMiB -ne 2048 -or $profile.timeoutMinutes -ne 20 -or
-            $profile.docker -isnot [bool] -or $profile.docker -or $profile.workflowSecrets -isnot [bool] -or $profile.workflowSecrets -or
+            $profile.docker -isnot [bool] -or $profile.docker -or $profile.workflowSecrets -isnot [bool] -or
             $profile.privateProductionState -isnot [bool] -or $profile.privateProductionState -or
             $profile.egress -cne 'accepted-ci7-public-ipv4-private-deny') { throw 'PROFILE_CONTRACT_REFUSED' }
-        $labels = @('self-hosted','Linux','X64','ldw01','ldw-ephemeral','ldw-isolated','security-isolated')
+        if ($profile.id -ceq 'ci10-royal-dashboard-deploy') {
+            if (-not $profile.workflowSecrets) { throw 'PROFILE_CONTRACT_REFUSED' }
+        } else {
+            if ($profile.workflowSecrets) { throw 'PROFILE_CONTRACT_REFUSED' }
+        }
+        $labels = if ($profile.id -ceq 'ci10-royal-dashboard-deploy') {
+            @('self-hosted','Linux','X64','ldw01','ldw-ephemeral','ldw-isolated','royal-isolated')
+        } else {
+            @('self-hosted','Linux','X64','ldw01','ldw-ephemeral','ldw-isolated','security-isolated')
+        }
         if (@($profile.labels).Count -ne 7 -or @(Compare-Object $labels @($profile.labels) -CaseSensitive).Count) { throw 'PROFILE_LABELS_REFUSED' }
     }
     $synthetic = $profiles | Where-Object id -CEQ 'ci10-accepted-synthetic'
     $production = $profiles | Where-Object id -CEQ 'ci10-bo-secret-scan'
-    if ($synthetic.Count -ne 1 -or $production.Count -ne 1 -or
+    $royal = $profiles | Where-Object id -CEQ 'ci10-royal-dashboard-deploy'
+    if ($synthetic.Count -ne 1 -or $production.Count -ne 1 -or $royal.Count -ne 1 -or
         $synthetic.repository -cne 'LowcountryDigitalWorks/infrastructure-tools' -or
         $synthetic.workflowPath -cne '.github/workflows/ci-runner-isolation-proof.yml' -or
         @($synthetic.events).Count -ne 1 -or $synthetic.events[0] -cne 'push' -or
@@ -125,13 +137,22 @@ function Read-Ci10Profiles {
         @(Compare-Object @('pull_request','push') @($production.events) -CaseSensitive).Count -or
         $null -ne $production.branch -or $null -ne $production.headSha -or
         $production.jobName -cne 'secret-scan / secret-scan' -or
-        $production.controllerProfile -cne 'accepted-ci7-private-secret-scan') { throw 'PROFILE_CONTRACT_REFUSED' }
+        $production.controllerProfile -cne 'accepted-ci7-private-secret-scan' -or
+        $royal.repository -cne 'LowcountryDigitalWorks/royal-cruise-tracker' -or
+        $royal.workflowPath -cne '.github/workflows/deploy-dashboard-pr379.yml' -or
+        @($royal.events).Count -ne 1 -or $royal.events[0] -cne 'workflow_dispatch' -or
+        $royal.branch -cne 'main' -or
+        $royal.headSha -cne 'd77a0e01f42b7ecddd6bce0f7f226288dcc0b11e' -or
+        $royal.workflowBlobSha -cne '3bfe9fec5fa4ebc10db17d41594ded8878b37064' -or
+        $royal.jobName -cne 'deploy' -or
+        -not $royal.workflowSecrets -or
+        $royal.controllerProfile -cne 'accepted-ci7-royal-dashboard-deploy') { throw 'PROFILE_CONTRACT_REFUSED' }
     $profiles
 }
 
 function Invoke-Ci10Read {
     param([string]$Path)
-    if ($Path -cnotmatch '^repos/LowcountryDigitalWorks/(infrastructure-tools|business-operations)/actions/(runs|workflows|runners)(/|\?|$)') { throw 'API_SCOPE_REFUSED' }
+    if ($Path -cnotmatch '^repos/LowcountryDigitalWorks/(infrastructure-tools|business-operations|royal-cruise-tracker)/(actions/(runs|workflows|runners)|contents(/|$))(/|\?|$)') { throw 'API_SCOPE_REFUSED' }
     $raw = & gh api --method GET $Path 2>$null
     if ($LASTEXITCODE -ne 0) { throw 'API_READ_FAILED' }
     try { $raw | ConvertFrom-Json -DateKind String -ErrorAction Stop } catch { throw 'API_RESPONSE_INVALID' }
@@ -228,7 +249,9 @@ function Get-Ci10ControllerGate {
             $matchesKnownOther = ($state.Configuration.Repository -ceq 'LowcountryDigitalWorks/infrastructure-tools' -and
                 $state.Configuration.WorkflowPath -ceq '.github/workflows/ci-runner-isolation-proof.yml') -or
                 ($state.Configuration.Repository -ceq 'LowcountryDigitalWorks/business-operations' -and
-                $state.Configuration.WorkflowPath -ceq '.github/workflows/security-secrets.yml')
+                $state.Configuration.WorkflowPath -ceq '.github/workflows/security-secrets.yml') -or
+                ($state.Configuration.Repository -ceq 'LowcountryDigitalWorks/royal-cruise-tracker' -and
+                $state.Configuration.WorkflowPath -ceq '.github/workflows/deploy-dashboard-pr379.yml')
             if (-not $matchesProfile -and -not $matchesKnownOther) { throw 'STALE_PROFILE_OWNERSHIP_REFUSED' }
             if (-not $matchesProfile) {
                 $otherRunLock = $null
@@ -245,7 +268,8 @@ function Get-Ci10ControllerGate {
                 $state.Configuration.WorkflowPath -cne $Profile.workflowPath -or
                 ($Profile.id -ceq 'ci10-accepted-synthetic' -and
                     ($state.Configuration.ExpectedSha -cne $Profile.headSha -or -not $state.Configuration.PublicSyntheticProof)) -or
-                ($Profile.id -ceq 'ci10-bo-secret-scan' -and $state.Configuration.PublicSyntheticProof)) { throw 'STALE_PROFILE_OWNERSHIP_REFUSED' }
+                ($Profile.id -ceq 'ci10-bo-secret-scan' -and $state.Configuration.PublicSyntheticProof) -or
+                ($Profile.id -ceq 'ci10-royal-dashboard-deploy' -and $state.Configuration.PublicSyntheticProof)) { throw 'STALE_PROFILE_OWNERSHIP_REFUSED' }
             $runLock = $null
             try { $runLock = [IO.File]::Open((Join-Path $directory.FullName 'controller.lock'),'OpenOrCreate','ReadWrite','None') }
             catch { return 'BUSY' }
@@ -259,7 +283,8 @@ function Get-Ci10ControllerGate {
         if ($directories.Count) { return 'STALE' }
         $runners = Invoke-Ci10Read ('repos/' + $Profile.repository + '/actions/runners?per_page=100')
         if ($runners.total_count -gt 100 -or @($runners.runners | Where-Object name -cmatch '^ci7-').Count) { throw 'RUNNER_OWNERSHIP_UNCERTAIN' }
-        $configuration = New-Ci7Configuration -Repository $Profile.repository -WorkflowRunId 1 -ExpectedSha ('0' * 40) -Root $ControllerRoot -ApprovedRepositories @('LowcountryDigitalWorks/business-operations') -AllowPublicSyntheticProof:($Profile.id -ceq 'ci10-accepted-synthetic')
+        $approved = @('LowcountryDigitalWorks/business-operations', 'LowcountryDigitalWorks/royal-cruise-tracker')
+        $configuration = New-Ci7Configuration -Repository $Profile.repository -WorkflowRunId 1 -ExpectedSha ('0' * 40) -Root $ControllerRoot -ApprovedRepositories $approved -AllowPublicSyntheticProof:($Profile.id -ceq 'ci10-accepted-synthetic') -WorkflowPath $Profile.workflowPath -WorkflowBlobSha $Profile.workflowBlobSha -StaticLabels $Profile.labels
         try { Assert-Ci7Capacity $configuration }
         catch { if ($_.Exception.Message -cmatch '^CAPACITY_' -or $_.Exception.Message -ceq 'DEFAULT_NAT_SWITCH_REQUIRED') { return 'CAPACITY' }; throw }
         'READY'
@@ -279,7 +304,9 @@ function Get-Ci10StaleRunIds {
                 $knownOther = ($state.Configuration.Repository -ceq 'LowcountryDigitalWorks/infrastructure-tools' -and
                     $state.Configuration.WorkflowPath -ceq '.github/workflows/ci-runner-isolation-proof.yml') -or
                     ($state.Configuration.Repository -ceq 'LowcountryDigitalWorks/business-operations' -and
-                    $state.Configuration.WorkflowPath -ceq '.github/workflows/security-secrets.yml')
+                    $state.Configuration.WorkflowPath -ceq '.github/workflows/security-secrets.yml') -or
+                    ($state.Configuration.Repository -ceq 'LowcountryDigitalWorks/royal-cruise-tracker' -and
+                    $state.Configuration.WorkflowPath -ceq '.github/workflows/deploy-dashboard-pr379.yml')
                 if (-not $knownOther) { throw 'STALE_PROFILE_OWNERSHIP_REFUSED' }
                 continue
             }
@@ -287,7 +314,8 @@ function Get-Ci10StaleRunIds {
                 $state.Configuration.WorkflowPath -cne $Profile.workflowPath -or
                 ($Profile.id -ceq 'ci10-accepted-synthetic' -and
                     ($state.Configuration.ExpectedSha -cne $Profile.headSha -or -not $state.Configuration.PublicSyntheticProof)) -or
-                ($Profile.id -ceq 'ci10-bo-secret-scan' -and $state.Configuration.PublicSyntheticProof)) { throw 'STALE_PROFILE_OWNERSHIP_REFUSED' }
+                ($Profile.id -ceq 'ci10-bo-secret-scan' -and $state.Configuration.PublicSyntheticProof) -or
+                ($Profile.id -ceq 'ci10-royal-dashboard-deploy' -and $state.Configuration.PublicSyntheticProof)) { throw 'STALE_PROFILE_OWNERSHIP_REFUSED' }
             $state.RunId
         }
     } finally { $lock.Dispose() }
@@ -296,7 +324,7 @@ function Get-Ci10StaleRunIds {
 function Write-Ci10Log {
     param([string]$Root, [ValidateSet('start','stop','poll-pass','poll-fail','busy','capacity','idle','selected','discovery-only',
         'controller-start','controller-pass','controller-fail','reap-pass','reap-fail')][string]$Classification,
-        [ValidateSet('ci10-accepted-synthetic','ci10-bo-secret-scan')][string]$ProfileId = 'ci10-accepted-synthetic', [long]$RunId = 0)
+        [ValidateSet('ci10-accepted-synthetic','ci10-bo-secret-scan','ci10-royal-dashboard-deploy')][string]$ProfileId = 'ci10-accepted-synthetic', [long]$RunId = 0)
     if ($RunId -lt 0) { throw 'LOG_RUN_ID_INVALID' }
     Assert-Ci10ProtectedPath $Root
     $file = Join-Path $Root 'dispatcher.jsonl'
@@ -328,7 +356,10 @@ function Start-Ci10Controller {
             '-ExpectedSha',$Candidate.Sha,'-MemoryMiB',[string]$Candidate.Profile.memoryMiB,
             '-CpuCount',[string]$Candidate.Profile.cpu,'-TimeoutMinutes',[string]$Candidate.Profile.timeoutMinutes)
         if ($Candidate.Profile.id -ceq 'ci10-accepted-synthetic') { $args += '-AllowPublicSyntheticProof' }
-        else { $args += @('-ApprovedRepositories','LowcountryDigitalWorks/business-operations') }
+        else { $args += @('-ApprovedRepositories','LowcountryDigitalWorks/business-operations,LowcountryDigitalWorks/royal-cruise-tracker') }
+        if ($Candidate.Profile.workflowPath) { $args += @('-WorkflowPath', $Candidate.Profile.workflowPath) }
+        if ($Candidate.Profile.workflowBlobSha) { $args += @('-WorkflowBlobSha', $Candidate.Profile.workflowBlobSha) }
+        if ($Candidate.Profile.labels) { $args += @('-StaticLabels', ($Candidate.Profile.labels -join ',')) }
         foreach ($arg in $args) { $info.ArgumentList.Add($arg) }
     }
     $process = [Diagnostics.Process]::Start($info)
