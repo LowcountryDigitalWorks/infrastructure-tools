@@ -123,7 +123,7 @@ try {
     & $module {
         param($cfg)
         $script:ApiTestRepo=[pscustomobject]@{private=$true}
-        $script:ApiTestRun=[pscustomobject]@{head_sha=$cfg.ExpectedSha;path=$cfg.WorkflowPath;head_repository=[pscustomobject]@{full_name=$cfg.Repository};event='push';head_branch='main'}
+        $script:ApiTestRun=[pscustomobject]@{head_sha=$cfg.ExpectedSha;path=$cfg.WorkflowPath;repository=[pscustomobject]@{full_name=$cfg.Repository};head_repository=[pscustomobject]@{full_name=$cfg.Repository};event='push';head_branch='main'}
         $script:ApiTestJob=[pscustomobject]@{id=10;status='queued';runner_id=0;labels=@(Get-Ci7Labels $cfg.WorkflowRunId $cfg)}
         $script:ApiTestCount=1
         function script:Invoke-Ci7Api {param($Path,$Method='GET',$Body); if($Path -match '/jobs\?'){[pscustomobject]@{total_count=$script:ApiTestCount;jobs=@($script:ApiTestJob)}}elseif($Path -match '/actions/runs/'){$script:ApiTestRun}else{$script:ApiTestRepo}}
@@ -140,8 +140,8 @@ try {
         & $module {$script:ApiTestJob.runner_id=0;$script:ApiTestJob.labels=@('self-hosted','ldw-light')}; Refuses {Get-Ci7ExpectedJob $config}
     }
     Check 'exact Royal deployment profile contract accepted and verified' {
-        $royalHeadSha = 'd77a0e01f42b7ecddd6bce0f7f226288dcc0b11e'
-        $royalBlobSha = '3bfe9fec5fa4ebc10db17d41594ded8878b37064'
+        $royalHeadSha = 'c' * 40
+        $royalBlobSha = 'd' * 40
         $royalRepo = 'LowcountryDigitalWorks/royal-cruise-tracker'
         $royalWorkflow = '.github/workflows/deploy-dashboard-pr379.yml'
         $royalConfig = New-Ci7Configuration -Repository $royalRepo -WorkflowRunId 99999 -ExpectedSha $royalHeadSha -WorkflowPath $royalWorkflow -WorkflowBlobSha $royalBlobSha -Root $root
@@ -156,8 +156,8 @@ try {
         & $module {
             param($cfg,$headSha,$blobSha)
             $script:ApiTestRepo=[pscustomobject]@{private=$true}
-            $script:ApiTestRun=[pscustomobject]@{head_sha=$headSha;path=$cfg.WorkflowPath;head_repository=[pscustomobject]@{full_name=$cfg.Repository};event='workflow_dispatch';head_branch='main'}
-            $script:ApiTestJob=[pscustomobject]@{id=99;status='queued';runner_id=0;labels=@(Get-Ci7Labels $cfg.WorkflowRunId $cfg)}
+            $script:ApiTestRun=[pscustomobject]@{id=$cfg.WorkflowRunId;status='queued';conclusion=$null;run_attempt=1;head_sha=$headSha;path=$cfg.WorkflowPath;repository=[pscustomobject]@{full_name=$cfg.Repository};head_repository=[pscustomobject]@{full_name=$cfg.Repository};event='workflow_dispatch';head_branch='main'}
+            $script:ApiTestJob=[pscustomobject]@{id=99;name='deploy';run_id=$cfg.WorkflowRunId;run_attempt=1;head_sha=$headSha;status='queued';runner_id=0;labels=@(Get-Ci7Labels $cfg.WorkflowRunId $cfg)}
             $script:ApiTestBlob=[pscustomobject]@{sha=$blobSha}
             $script:ApiTestCount=1
             function script:Invoke-Ci7Api {
@@ -171,6 +171,13 @@ try {
 
         Assert ((Get-Ci7ExpectedJob $royalConfig -RequireQueued).id -eq 99)
 
+        & $module {$script:ApiTestRun.repository.full_name='LowcountryDigitalWorks/other'}; Refuses {Get-Ci7ExpectedJob $royalConfig}
+        & $module {$script:ApiTestRun.repository.full_name='LowcountryDigitalWorks/royal-cruise-tracker'}
+        & $module {$script:ApiTestRun.path='.github/workflows/other.yml'}; Refuses {Get-Ci7ExpectedJob $royalConfig}
+        & $module {$script:ApiTestRun.path='.github/workflows/deploy-dashboard-pr379.yml'}
+        & $module {$script:ApiTestJob.labels[3]='ldw-light'}; Refuses {Get-Ci7ExpectedJob $royalConfig}
+        & $module {$script:ApiTestJob.labels[3]='ldw01'}
+
         # Refuses non-workflow_dispatch events for Royal
         & $module {$script:ApiTestRun.event='push'}; Refuses {Get-Ci7ExpectedJob $royalConfig}
         & $module {$script:ApiTestRun.event='pull_request'}; Refuses {Get-Ci7ExpectedJob $royalConfig}
@@ -179,6 +186,16 @@ try {
         # Refuses non-main head branch for Royal
         & $module {$script:ApiTestRun.head_branch='feature/x'}; Refuses {Get-Ci7ExpectedJob $royalConfig}
         & $module {$script:ApiTestRun.head_branch='main'}
+        & $module {$script:ApiTestRun.head_sha=('e'*40)}; Refuses {Get-Ci7ExpectedJob $royalConfig}
+        & $module {$script:ApiTestRun.head_sha=('c'*40)}
+        & $module {$script:ApiTestRun.status='in_progress'}; Refuses {Get-Ci7ExpectedJob $royalConfig}
+        & $module {$script:ApiTestRun.status='queued'}
+        & $module {$script:ApiTestRun.id=88888}; Refuses {Get-Ci7ExpectedJob $royalConfig}
+        & $module {$script:ApiTestRun.id=99999}
+        & $module {$script:ApiTestJob.head_sha=('e'*40)}; Refuses {Get-Ci7ExpectedJob $royalConfig}
+        & $module {$script:ApiTestJob.head_sha=('c'*40)}
+        & $module {$script:ApiTestJob.name='another job'}; Refuses {Get-Ci7ExpectedJob $royalConfig}
+        & $module {$script:ApiTestJob.name='deploy'}
 
         # Refuses mismatched workflow blob SHA
         & $module {$script:ApiTestBlob.sha='wrongblob'}; Refuses {Get-Ci7ExpectedJob $royalConfig}
@@ -186,6 +203,10 @@ try {
 
         # Refuses invalid workflow path
         Refuses { New-Ci7Configuration -Repository $royalRepo -WorkflowRunId 99999 -ExpectedSha $royalHeadSha -WorkflowPath '.github/workflows/unauthorized.yml' -Root $root }
+        Refuses { New-Ci7Configuration -Repository $royalRepo -WorkflowRunId 99999 -ExpectedSha $royalHeadSha -WorkflowPath $royalWorkflow -Root $root }
+        Refuses { New-Ci7Configuration -Repository $royalRepo -WorkflowRunId 99999 -ExpectedSha $royalHeadSha -WorkflowPath $royalWorkflow -WorkflowBlobSha 'bad' -Root $root }
+        Refuses { New-Ci7Configuration -Repository $royalRepo -WorkflowRunId 99999 -ExpectedSha 'd77a0e01f42b7ecddd6bce0f7f226288dcc0b11e' -WorkflowPath $royalWorkflow -WorkflowBlobSha '3bfe9fec5fa4ebc10db17d41594ded8878b37064' -Root $root }
+        Refuses { New-Ci7Configuration -Repository $royalRepo -WorkflowRunId 99999 -ExpectedSha $royalHeadSha -WorkflowPath $royalWorkflow -WorkflowBlobSha $royalBlobSha -StaticLabels @('self-hosted','Linux','X64','ldw01','ldw-ephemeral','ldw-isolated','ldw-light') -Root $root }
     }
     # Replace only external Hyper-V/API seams within the imported module. No live
     # VM, runner, token, network, or policy mutation occurs in this harness.

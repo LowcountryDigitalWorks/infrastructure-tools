@@ -12,7 +12,7 @@ function Get-Ci10RuntimeFiles { @($script:RuntimeFiles) }
 
 function Assert-Ci10ParentBoundary {
     param([string]$Path)
-    if ($env:OS -ne 'Windows_NT') { return }
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return }
     $acl = Get-Acl -LiteralPath $Path
     if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @('S-1-5-18','S-1-5-32-544')) { throw 'BUNDLE_PARENT_OWNER_UNTRUSTED' }
     $replace = [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
@@ -25,7 +25,7 @@ function Assert-Ci10ParentBoundary {
 
 function Assert-Ci10ProtectedPath {
     param([string]$Path)
-    if ($env:OS -ne 'Windows_NT') { return }
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return }
     $full = [IO.Path]::GetFullPath($Path)
     $cursor = $full
     while ($cursor) {
@@ -142,8 +142,7 @@ function Read-Ci10Profiles {
         $royal.workflowPath -cne '.github/workflows/deploy-dashboard-pr379.yml' -or
         @($royal.events).Count -ne 1 -or $royal.events[0] -cne 'workflow_dispatch' -or
         $royal.branch -cne 'main' -or
-        $royal.headSha -cne 'd77a0e01f42b7ecddd6bce0f7f226288dcc0b11e' -or
-        $royal.workflowBlobSha -cne '3bfe9fec5fa4ebc10db17d41594ded8878b37064' -or
+        $null -ne $royal.headSha -or $null -ne $royal.workflowBlobSha -or
         $royal.jobName -cne 'deploy' -or
         -not $royal.workflowSecrets -or
         $royal.controllerProfile -cne 'accepted-ci7-royal-dashboard-deploy') { throw 'PROFILE_CONTRACT_REFUSED' }
@@ -159,12 +158,23 @@ function Invoke-Ci10Read {
 }
 
 function Get-Ci10Candidate {
-    param([object]$Profile, [object]$Run, [object]$Jobs)
+    param([object]$Profile, [object]$Run, [object]$Jobs,
+        [string]$RoyalExpectedSha, [string]$RoyalWorkflowBlobSha)
     # API objects never enter the log. Noneligible jobs are not cancelled or modified.
     if ($Run.repository.full_name -cne $Profile.repository -or $Run.head_repository.full_name -cne $Profile.repository) { throw 'WRONG_REPOSITORY' }
     if ($Run.path -cne $Profile.workflowPath) { throw 'WRONG_WORKFLOW' }
+    $expectedSha = $Profile.headSha
+    $workflowBlobSha = $Profile.workflowBlobSha
+    if ($Profile.id -ceq 'ci10-royal-dashboard-deploy') {
+        if ($RoyalExpectedSha -cnotmatch '^[a-f0-9]{40}$') { throw 'FROZEN_ROYAL_HEAD_REQUIRED' }
+        if ($RoyalWorkflowBlobSha -cnotmatch '^[a-f0-9]{40}$') { throw 'FROZEN_ROYAL_WORKFLOW_BLOB_REQUIRED' }
+        if ($RoyalExpectedSha -ceq 'd77a0e01f42b7ecddd6bce0f7f226288dcc0b11e' -and
+            $RoyalWorkflowBlobSha -ceq '3bfe9fec5fa4ebc10db17d41594ded8878b37064') { throw 'PRE_ROUTING_ROYAL_PAIR_REFUSED' }
+        $expectedSha = $RoyalExpectedSha
+        $workflowBlobSha = $RoyalWorkflowBlobSha
+    }
     if ($Run.event -cnotin $Profile.events -or ($null -ne $Profile.branch -and $Run.head_branch -cne $Profile.branch) -or
-        $Run.head_sha -notmatch '^[a-f0-9]{40}$' -or ($null -ne $Profile.headSha -and $Run.head_sha -cne $Profile.headSha)) { throw 'WRONG_EVENT_REF_SOURCE' }
+        $Run.head_sha -notmatch '^[a-f0-9]{40}$' -or ($null -ne $expectedSha -and $Run.head_sha -cne $expectedSha)) { throw 'WRONG_EVENT_REF_SOURCE' }
     if ($Run.id -le 0 -or $Run.run_attempt -le 0 -or $Run.status -cne 'queued' -or $null -ne $Run.conclusion) { throw 'RUN_NOT_QUEUED' }
     if ($Jobs.total_count -ne 1 -or @($Jobs.jobs).Count -ne 1) { throw 'EXACTLY_ONE_JOB_REQUIRED' }
     $job = $Jobs.jobs[0]
@@ -177,6 +187,7 @@ function Get-Ci10Candidate {
     $created = [DateTimeOffset]::MinValue
     if (-not [DateTimeOffset]::TryParse($Run.created_at, [ref]$created)) { throw 'RUN_TIME_INVALID' }
     [pscustomobject]@{ Profile = $Profile; RunId = [long]$Run.id; Sha = $Run.head_sha; Attempt = [int]$Run.run_attempt;
+        FrozenHeadSha = $expectedSha; FrozenWorkflowBlobSha = $workflowBlobSha;
         JobId = [long]$job.id; CreatedUtc = $created.UtcDateTime }
 }
 
@@ -187,7 +198,7 @@ function Select-Ci10Oldest {
 }
 
 function Find-Ci10QueuedJob {
-    param([object[]]$Profiles)
+    param([object[]]$Profiles, [string]$RoyalExpectedSha, [string]$RoyalWorkflowBlobSha)
     $candidates = [Collections.Generic.List[object]]::new()
     foreach ($profile in $Profiles) {
         $workflow = [Uri]::EscapeDataString([IO.Path]::GetFileName($profile.workflowPath))
@@ -202,10 +213,10 @@ function Find-Ci10QueuedJob {
             foreach ($run in @($response.workflow_runs)) {
                 if (-not $seen.Add([long]$run.id)) { throw 'QUEUE_PAGE_RACE_REFUSED' }
                 $jobs = Invoke-Ci10Read ('repos/' + $profile.repository + '/actions/runs/' + $run.id + '/jobs?filter=latest&per_page=100')
-                try { $candidate = Get-Ci10Candidate $profile $run $jobs; $candidates.Add($candidate) }
+                try { $candidate = Get-Ci10Candidate $profile $run $jobs $RoyalExpectedSha $RoyalWorkflowBlobSha; $candidates.Add($candidate) }
                 catch {
                     if ($_.Exception.Message -cnotin @('WRONG_REPOSITORY','WRONG_WORKFLOW','WRONG_EVENT_REF_SOURCE','RUN_NOT_QUEUED',
-                        'EXACTLY_ONE_JOB_REQUIRED','JOB_IDENTITY_MISMATCH','JOB_NOT_UNASSIGNED_QUEUED','WRONG_LABELS','RUN_TIME_INVALID')) { throw }
+                        'EXACTLY_ONE_JOB_REQUIRED','JOB_IDENTITY_MISMATCH','JOB_NOT_UNASSIGNED_QUEUED','WRONG_LABELS','RUN_TIME_INVALID','FROZEN_ROYAL_HEAD_REQUIRED','FROZEN_ROYAL_WORKFLOW_BLOB_REQUIRED')) { throw }
                 }
             }
             if (@($response.workflow_runs).Count -lt 100) { break }
@@ -219,7 +230,7 @@ function Find-Ci10QueuedJob {
 function Confirm-Ci10Candidate {
     param([object]$Selected)
     $base = 'repos/' + $Selected.Profile.repository + '/actions/runs/' + $Selected.RunId
-    $current = Get-Ci10Candidate $Selected.Profile (Invoke-Ci10Read $base) (Invoke-Ci10Read ($base + '/jobs?filter=latest&per_page=100'))
+    $current = Get-Ci10Candidate $Selected.Profile (Invoke-Ci10Read $base) (Invoke-Ci10Read ($base + '/jobs?filter=latest&per_page=100')) $Selected.FrozenHeadSha $Selected.FrozenWorkflowBlobSha
     if ($current.RunId -ne $Selected.RunId -or $current.Sha -cne $Selected.Sha -or $current.JobId -ne $Selected.JobId -or
         $current.Attempt -ne $Selected.Attempt -or $current.CreatedUtc -ne $Selected.CreatedUtc) { throw 'SELECTED_JOB_DRIFT' }
     $current
@@ -284,7 +295,9 @@ function Get-Ci10ControllerGate {
         $runners = Invoke-Ci10Read ('repos/' + $Profile.repository + '/actions/runners?per_page=100')
         if ($runners.total_count -gt 100 -or @($runners.runners | Where-Object name -cmatch '^ci7-').Count) { throw 'RUNNER_OWNERSHIP_UNCERTAIN' }
         $approved = @('LowcountryDigitalWorks/business-operations', 'LowcountryDigitalWorks/royal-cruise-tracker')
-        $configuration = New-Ci7Configuration -Repository $Profile.repository -WorkflowRunId 1 -ExpectedSha ('0' * 40) -Root $ControllerRoot -ApprovedRepositories $approved -AllowPublicSyntheticProof:($Profile.id -ceq 'ci10-accepted-synthetic') -WorkflowPath $Profile.workflowPath -WorkflowBlobSha $Profile.workflowBlobSha -StaticLabels $Profile.labels
+        # This check measures local capacity only; these placeholder refs never enter candidate verification or launch.
+        $capacityBlobSha = if ($Profile.id -ceq 'ci10-royal-dashboard-deploy') { '0000000000000000000000000000000000000000' } else { $Profile.workflowBlobSha }
+        $configuration = New-Ci7Configuration -Repository $Profile.repository -WorkflowRunId 1 -ExpectedSha ('0' * 40) -Root $ControllerRoot -ApprovedRepositories $approved -AllowPublicSyntheticProof:($Profile.id -ceq 'ci10-accepted-synthetic') -WorkflowPath $Profile.workflowPath -WorkflowBlobSha $capacityBlobSha -StaticLabels $Profile.labels
         try { Assert-Ci7Capacity $configuration }
         catch { if ($_.Exception.Message -cmatch '^CAPACITY_' -or $_.Exception.Message -ceq 'DEFAULT_NAT_SWITCH_REQUIRED') { return 'CAPACITY' }; throw }
         'READY'
@@ -353,12 +366,12 @@ function Start-Ci10Controller {
     if ($CleanupRunId) { $info.ArgumentList.Add('-LocalRunId'); $info.ArgumentList.Add($CleanupRunId) }
     else {
         $args = @('-Repository',$Candidate.Profile.repository,'-WorkflowRunId',[string]$Candidate.RunId,
-            '-ExpectedSha',$Candidate.Sha,'-MemoryMiB',[string]$Candidate.Profile.memoryMiB,
+            '-ExpectedSha',$(if ($Candidate.Profile.id -ceq 'ci10-royal-dashboard-deploy') { $Candidate.FrozenHeadSha } else { $Candidate.Sha }),'-MemoryMiB',[string]$Candidate.Profile.memoryMiB,
             '-CpuCount',[string]$Candidate.Profile.cpu,'-TimeoutMinutes',[string]$Candidate.Profile.timeoutMinutes)
         if ($Candidate.Profile.id -ceq 'ci10-accepted-synthetic') { $args += '-AllowPublicSyntheticProof' }
         else { $args += @('-ApprovedRepositories','LowcountryDigitalWorks/business-operations,LowcountryDigitalWorks/royal-cruise-tracker') }
         if ($Candidate.Profile.workflowPath) { $args += @('-WorkflowPath', $Candidate.Profile.workflowPath) }
-        if ($Candidate.Profile.workflowBlobSha) { $args += @('-WorkflowBlobSha', $Candidate.Profile.workflowBlobSha) }
+        if ($Candidate.FrozenWorkflowBlobSha) { $args += @('-WorkflowBlobSha', $Candidate.FrozenWorkflowBlobSha) }
         if ($Candidate.Profile.labels) { $args += @('-StaticLabels', ($Candidate.Profile.labels -join ',')) }
         foreach ($arg in $args) { $info.ArgumentList.Add($arg) }
     }
