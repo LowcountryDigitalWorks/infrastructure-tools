@@ -9,6 +9,10 @@ Host Agent is a device-first, local status surface for owner-controlled LDW comp
 - Intentionally stopped/disabled/on-demand components remain healthy when that matches desired state. `RunningAfterLogin` uses explicit owner-session context.
 - Dependency availability is checked while a dependent component is expected to be active; intentionally inactive pre-login/on-demand components do not fail merely because their dependencies are also inactive.
 
+## Normal-user tray autostart
+
+`deploy/Manage-TrayAutostart.ps1` provides a bounded exact-readback user-logon lifecycle for the unelevated tray. See [normal-user tray autostart](docs/TRAY_AUTOSTART.md). Source validation does not install or mutate the task on LDW01.
+
 ## Read-only live-adapter slice
 
 `src/LDW.HostAgent.Windows` wires the accepted model to normal-user observations for:
