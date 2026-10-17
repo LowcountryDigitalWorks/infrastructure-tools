@@ -113,7 +113,13 @@ function Assert-TrayAutostartCurrentOwner {
 function Test-TrayAutostartEnabled {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Task)
-    return ([string]$Task.State -cne 'Disabled')
+    switch -CaseSensitive ([string]$Task.State) {
+        'Disabled' { return $false }
+        'Ready' { return $true }
+        'Running' { return $true }
+        'Queued' { return $true }
+        default { throw 'Managed task enabled state is unknown; lifecycle must fail closed.' }
+    }
 }
 
 function Get-TrayAutostartInstallDisposition {

@@ -67,6 +67,10 @@ try {
     Assert-True ((Get-TrayAutostartInstallDisposition -Task $task -Spec $spec) -eq 'Enable') 'install may re-enable the exact disabled task without registering another'
     $task.State = 'Ready'
     Assert-True (Test-TrayAutostartEnabled -Task $task) 'ready state must read back as enabled'
+    $task.State = 'Queued'
+    Assert-True (Test-TrayAutostartEnabled -Task $task) 'queued state is enabled while awaiting the owner logon trigger'
+    $task.State = 'Unknown'
+    Assert-Throws { Test-TrayAutostartEnabled -Task $task } 'unknown task state must fail closed'
 
     Assert-Throws { Get-TrayAutostartSpec -OwnerSid 'S-1-5-18' } 'SYSTEM/service principal must not be accepted for tray'
     Assert-Throws { Get-TrayAutostartSpec -OwnerSid $sid -ExecutablePath (Join-Path $tempRoot 'untrusted.exe') } 'unmanaged executable path must not be accepted'
