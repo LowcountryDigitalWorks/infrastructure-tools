@@ -2,8 +2,9 @@
 param(
     [ValidateSet('Plan','Run','Cleanup','Reap')][string]$Mode = 'Plan',
     [string]$Repository = 'LowcountryDigitalWorks/business-operations',
-    [string[]]$ApprovedRepositories = @('LowcountryDigitalWorks/business-operations'),
+    [string[]]$ApprovedRepositories = @('LowcountryDigitalWorks/business-operations', 'LowcountryDigitalWorks/royal-cruise-tracker'),
     [long]$WorkflowRunId, [string]$ExpectedSha,
+    [string]$WorkflowPath, [string]$WorkflowBlobSha, [string[]]$StaticLabels,
     [string]$Root = (Join-Path $env:ProgramData 'LDW/CiRunnerEphemeral'),
     [string]$LocalRunId,
     [switch]$AllowPublicSyntheticProof,
@@ -11,6 +12,9 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'CiRunner.psm1') -Force
+$approvedList = @($ApprovedRepositories | ForEach-Object { $_ -split ',' })
+$staticLabelsList = if ($StaticLabels) { @($StaticLabels | ForEach-Object { $_ -split ',' }) } else { $null }
+
 $state = $null
 $lock = $null
 $rootLock = $null
@@ -22,7 +26,7 @@ try {
         $rootLock = Enter-Ci7ControllerLock $Root
         if ($Mode -eq 'Cleanup' -and $LocalRunId -cnotmatch '^[0-9a-f]{32}$') { throw 'LOCAL_RUN_ID_REQUIRED' }
         if ($Mode -eq 'Cleanup' -and -not (Test-Path -LiteralPath (Join-Path $Root ('runs/' + $LocalRunId)))) {
-            Assert-Ci7AlreadyClean $Root $LocalRunId $ApprovedRepositories
+            Assert-Ci7AlreadyClean $Root $LocalRunId $approvedList
             'CLEANUP_IDEMPOTENT=PASS'
             exit 0
         }
@@ -56,7 +60,7 @@ try {
         exit 0
     }
 
-    $configuration = New-Ci7Configuration -Repository $Repository -ApprovedRepositories $ApprovedRepositories -WorkflowRunId $WorkflowRunId -ExpectedSha $ExpectedSha -Root $Root -AllowPublicSyntheticProof:$AllowPublicSyntheticProof -MemoryMiB $MemoryMiB -CpuCount $CpuCount -TimeoutMinutes $TimeoutMinutes
+    $configuration = New-Ci7Configuration -Repository $Repository -ApprovedRepositories $approvedList -WorkflowRunId $WorkflowRunId -ExpectedSha $ExpectedSha -WorkflowPath $WorkflowPath -WorkflowBlobSha $WorkflowBlobSha -StaticLabels $staticLabelsList -Root $Root -AllowPublicSyntheticProof:$AllowPublicSyntheticProof -MemoryMiB $MemoryMiB -CpuCount $CpuCount -TimeoutMinutes $TimeoutMinutes
     Assert-Ci7Capacity $configuration
     Assert-Ci7Base $Root
     $job = Get-Ci7ExpectedJob $configuration -RequireQueued
@@ -75,7 +79,7 @@ try {
     Write-Ci7Evidence $state 'planned'
     try {
         $jit = Invoke-Ci7Api ('repos/' + $Repository + '/actions/runners/generate-jitconfig') POST @{
-            name = $state.Name; runner_group_id = 1; labels = @(Get-Ci7Labels $WorkflowRunId); work_folder = '_work'
+            name = $state.Name; runner_group_id = 1; labels = @(Get-Ci7Labels $WorkflowRunId $configuration); work_folder = '_work'
         }
         if ($jit.runner.name -cne $state.Name -or $jit.runner.id -le 0) { throw 'JIT_REGISTRATION_IDENTITY_AMBIGUOUS' }
         $state.RunnerId = [long]$jit.runner.id

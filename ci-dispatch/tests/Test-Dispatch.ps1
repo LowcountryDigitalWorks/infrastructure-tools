@@ -17,13 +17,15 @@ function Refuses([scriptblock]$Action,[string]$Expected){
 function Clone($Object){$Object|ConvertTo-Json -Depth 15|ConvertFrom-Json}
 function Protect([string]$Path){
     $null=New-Item -ItemType Directory -Path $Path -Force
-    $acl=[Security.AccessControl.DirectorySecurity]::new()
-    $acl.SetAccessRuleProtection($true,$false)
-    $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
-    foreach($sid in @('S-1-5-18','S-1-5-32-544')){
-        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid),'FullControl','ContainerInherit,ObjectInherit','None','Allow'))
+    if ($env:OS -eq 'Windows_NT') {
+        $acl=[Security.AccessControl.DirectorySecurity]::new()
+        $acl.SetAccessRuleProtection($true,$false)
+        $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+        foreach($sid in @('S-1-5-18','S-1-5-32-544')){
+            $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid),'FullControl','ContainerInherit,ObjectInherit','None','Allow'))
+        }
+        Set-Acl -LiteralPath $Path -AclObject $acl
     }
-    Set-Acl -LiteralPath $Path -AclObject $acl
 }
 try {
     Protect $fixture
@@ -31,6 +33,8 @@ try {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../profiles.json') -Destination $profilePath
     $profiles=@(Read-Ci10Profiles $profilePath); $profile=$profiles[0]
     $production=$profiles | Where-Object id -CEQ 'ci10-bo-secret-scan'
+    $royalProfile=$profiles | Where-Object id -CEQ 'ci10-royal-dashboard-deploy'
+
     Check 'accepted production profile is exact and source-dynamic' {
         Assert ($production.repository -ceq 'LowcountryDigitalWorks/business-operations')
         Assert ($production.workflowPath -ceq '.github/workflows/security-secrets.yml')
@@ -38,6 +42,20 @@ try {
         Assert ($null -eq $production.branch -and $null -eq $production.headSha)
         Assert ($production.jobName -ceq 'secret-scan / secret-scan')
     }
+
+    Check 'accepted Royal deployment profile is exact and pinned' {
+        Assert ($royalProfile.repository -ceq 'LowcountryDigitalWorks/royal-cruise-tracker')
+        Assert ($royalProfile.workflowPath -ceq '.github/workflows/deploy-dashboard-pr379.yml')
+        Assert (@($royalProfile.events).Count -eq 1 -and $royalProfile.events[0] -ceq 'workflow_dispatch')
+        Assert ($royalProfile.branch -ceq 'main')
+        Assert ($null -eq $royalProfile.headSha)
+        Assert ($null -eq $royalProfile.workflowBlobSha)
+        Assert ($royalProfile.jobName -ceq 'deploy')
+        Assert ($royalProfile.workflowSecrets -eq $true)
+        Assert ($royalProfile.docker -eq $false)
+        Assert ('royal-isolated' -cin $royalProfile.labels)
+    }
+
     $productionRun=[pscustomobject]@{id=223344; run_attempt=1; status='queued'; conclusion=$null; created_at='2026-10-11T20:00:00Z';
         repository=@{full_name=$production.repository}; head_repository=@{full_name=$production.repository}; path=$production.workflowPath;
         event='pull_request'; head_branch='feature/example'; head_sha=('a'*40)}
@@ -47,6 +65,38 @@ try {
     Check 'production profile accepts immutable run head' {
         Assert ((Get-Ci10Candidate $production $productionRun $productionJobs).Sha -ceq ('a'*40))
     }
+
+    $royalRun=[pscustomobject]@{id=98765; run_attempt=1; status='queued'; conclusion=$null; created_at='2026-10-11T20:00:00Z';
+        repository=@{full_name=$royalProfile.repository}; head_repository=@{full_name=$royalProfile.repository}; path=$royalProfile.workflowPath;
+        event='workflow_dispatch'; head_branch='main'; head_sha=('c'*40)}
+    $royalJobs=[pscustomobject]@{total_count=1; jobs=@([pscustomobject]@{id=112233;run_id=98765;run_attempt=1;head_sha=('c'*40);
+        name='deploy';status='queued';conclusion=$null;runner_id=0;runner_name=$null;runner_group_id=0;started_at=$null;
+        labels=@($royalProfile.labels)+@('ci7-run-98765')})}
+    Check 'Royal deployment profile accepts exact pinned queued job' {
+        Assert ((Get-Ci10Candidate $royalProfile $royalRun $royalJobs ('c'*40) ('d'*40)).JobId -eq 112233)
+    }
+    Check 'Royal job event mismatch refused' {
+        $bad=Clone $royalRun; Check 'missing frozen Royal head refused' { Refuses { Get-Ci10Candidate $royalProfile $royalRun $royalJobs $null ('d'*40) } 'FROZEN_ROYAL_HEAD_REQUIRED' }
+Check 'missing frozen Royal blob refused' { Refuses { Get-Ci10Candidate $royalProfile $royalRun $royalJobs ('c'*40) $null } 'FROZEN_ROYAL_WORKFLOW_BLOB_REQUIRED' }
+Check 'malformed frozen Royal head refused' { Refuses { Get-Ci10Candidate $royalProfile $royalRun $royalJobs 'bad' ('d'*40) } 'FROZEN_ROYAL_HEAD_REQUIRED' }
+Check 'malformed frozen Royal blob refused' { Refuses { Get-Ci10Candidate $royalProfile $royalRun $royalJobs ('c'*40) 'bad' } 'FROZEN_ROYAL_WORKFLOW_BLOB_REQUIRED' }
+Check 'known pre-routing Royal pair refused' { Refuses { Get-Ci10Candidate $royalProfile $royalRun $royalJobs 'd77a0e01f42b7ecddd6bce0f7f226288dcc0b11e' '3bfe9fec5fa4ebc10db17d41594ded8878b37064' } 'PRE_ROUTING_ROYAL_PAIR_REFUSED' }
+Check 'frozen Royal head mismatch refused' { $bad=Clone $royalRun; $bad.head_sha='e'*40; Refuses { Get-Ci10Candidate $royalProfile $bad $royalJobs ('c'*40) ('d'*40) } 'WRONG_EVENT_REF_SOURCE' }
+Check 'Royal profile does not block other queued profiles without invocation pins' { Assert ($null -eq $royalProfile.headSha -and $null -eq $royalProfile.workflowBlobSha) }
+Check 'wrong Royal static label refused' { $bad=Clone $royalJobs; $bad.jobs[0].labels[3]='ldw-light'; Refuses { Get-Ci10Candidate $royalProfile $royalRun $bad ('c'*40) ('d'*40) } 'WRONG_LABELS' }
+Check 'wrong Royal job name refused' { $bad=Clone $royalJobs; $bad.jobs[0].name='other'; Refuses { Get-Ci10Candidate $royalProfile $royalRun $bad ('c'*40) ('d'*40) } 'JOB_IDENTITY_MISMATCH' }
+$bad.event='push'
+        Refuses { Get-Ci10Candidate $royalProfile $bad $royalJobs } 'WRONG_EVENT_REF_SOURCE'
+    }
+    Check 'Royal job branch mismatch refused' {
+        $bad=Clone $royalRun; $bad.head_branch='feature/test'
+        Refuses { Get-Ci10Candidate $royalProfile $bad $royalJobs } 'WRONG_EVENT_REF_SOURCE'
+    }
+    Check 'Royal job head SHA mismatch refused' {
+        $bad=Clone $royalRun; $bad.head_sha='e'*40
+        Refuses { Get-Ci10Candidate $royalProfile $bad $royalJobs } 'WRONG_EVENT_REF_SOURCE'
+    }
+
     Check 'fork production PR refused' {
         $bad=Clone $productionRun; $bad.head_repository.full_name='LowcountryDigitalWorks/fork'
         Refuses { Get-Ci10Candidate $production $bad $productionJobs } 'WRONG_REPOSITORY'
@@ -110,18 +160,18 @@ try {
     foreach($field in @('repository','workflowPath','headSha','controllerProfile','egress','docker','workflowSecrets','privateProductionState','cpu','memoryMiB','timeoutMinutes','dynamicLabel','jobCount')){
         Check ('profile drift '+$field+' refused') {
             $registry=Get-Content -LiteralPath (Join-Path $PSScriptRoot '../profiles.json') -Raw|ConvertFrom-Json
-            $registry.profiles[0].$field=if($field -in @('docker','workflowSecrets','privateProductionState')){$true}else{'unknown'}
+            $registry.profiles[0].$field=if($field -in @('docker','privateProductionState')){$true}else{'unknown'}
             $registry|ConvertTo-Json -Depth 10|Set-Content -LiteralPath $profilePath
             Refuses {Read-Ci10Profiles $profilePath}
         }
     }
-    Check 'API scope refuses unrelated repo before request' {Refuses {Invoke-Ci10Read 'repos/LowcountryDigitalWorks/royal-cruise-tracker/actions/runs'} 'API_SCOPE_REFUSED'}
+    Check 'API scope refuses unrelated repo before request' {Refuses {Invoke-Ci10Read 'repos/LowcountryDigitalWorks/unapproved-repo/actions/runs'} 'API_SCOPE_REFUSED'}
     & $module {
         param($r,$j)
         $script:RunFixture=$r;$script:JobFixture=$j;$script:Calls=[Collections.Generic.List[string]]::new()
         function script:Invoke-Ci10Read([string]$Path){
             $script:Calls.Add($Path)
-            if($Path.Contains('business-operations')){return [pscustomobject]@{total_count=0;workflow_runs=@()}}
+            if($Path.Contains('business-operations') -or $Path.Contains('royal-cruise-tracker')){return [pscustomobject]@{total_count=0;workflow_runs=@()}}
             if($Path.Contains('/workflows/')){return [pscustomobject]@{total_count=1;workflow_runs=@($script:RunFixture)}}
             if($Path.Contains('/jobs?')){return $script:JobFixture}
             return $script:RunFixture
@@ -221,59 +271,63 @@ try {
         })}
     $manifestFile=Join-Path $bundle 'manifest.json'
     $manifest|ConvertTo-Json -Depth 6|Set-Content -LiteralPath $manifestFile -Encoding utf8NoBOM
-    foreach($item in @(Get-ChildItem -LiteralPath $bundle -Recurse -Force)){
-        $acl=Get-Acl -LiteralPath $item.FullName;$acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'));Set-Acl -LiteralPath $item.FullName -AclObject $acl
-    }
-    $manifestSha=(Get-FileHash -LiteralPath $manifestFile -Algorithm SHA256).Hash.ToLowerInvariant()
-    Check 'protected exact bundle verifies' {$null=Assert-Ci10Bundle $bundle $manifestSha ('a'*40) ('b'*40)}
-    Check 'dispatcher file hash drift refused' {
-        $file=Join-Path $bundle 'ci-dispatch/Dispatch.psm1';$original=[IO.File]::ReadAllBytes($file)
-        [IO.File]::AppendAllText($file,'# drift')
-        try {Refuses {Assert-Ci10Bundle $bundle $manifestSha ('a'*40) ('b'*40)} 'BUNDLE_FILE_HASH_DRIFT'} finally {[IO.File]::WriteAllBytes($file,$original)}
-    }
-    Check 'controller file hash drift refused' {
-        $file=Join-Path $bundle 'ci-runner/Native.cs';$original=[IO.File]::ReadAllBytes($file)
-        [IO.File]::AppendAllText($file,'// drift')
-        try {Refuses {Assert-Ci10Bundle $bundle $manifestSha ('a'*40) ('b'*40)} 'BUNDLE_FILE_HASH_DRIFT'} finally {[IO.File]::WriteAllBytes($file,$original)}
-    }
-    Check 'manifest hash drift refused' {
-        [IO.File]::AppendAllText($manifestFile,' ')
-        try {Refuses {Assert-Ci10Bundle $bundle $manifestSha ('a'*40) ('b'*40)} 'MANIFEST_HASH_DRIFT'} finally {$manifest|ConvertTo-Json -Depth 6|Set-Content -LiteralPath $manifestFile -Encoding utf8NoBOM}
-    }
-    Check 'missing runtime file refused' {
-        $file=Join-Path $bundle 'ci-runner/Native.cs';$original=[IO.File]::ReadAllBytes($file);Remove-Item -LiteralPath $file
-        try {Refuses {Assert-Ci10Bundle $bundle $manifestSha ('a'*40) ('b'*40)} 'BUNDLE_FILE_SET_DRIFT'} finally {
-            [IO.File]::WriteAllBytes($file,$original);$acl=Get-Acl -LiteralPath $file;$acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'));Set-Acl -LiteralPath $file -AclObject $acl
+    if ($env:OS -eq 'Windows_NT') {
+        foreach($item in @(Get-ChildItem -LiteralPath $bundle -Recurse -Force)){
+            $acl=Get-Acl -LiteralPath $item.FullName;$acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'));Set-Acl -LiteralPath $item.FullName -AclObject $acl
         }
     }
-    Check 'extra executable refused' {
-        $file=Join-Path $bundle 'extra.ps1';[IO.File]::WriteAllText($file,'exit 0')
-        try {Refuses {Assert-Ci10Bundle $bundle $manifestSha ('a'*40) ('b'*40)} 'BUNDLE_FILE_SET_DRIFT'} finally {Remove-Item -LiteralPath $file}
-    }
-    Check 'dispatcher commit provenance mismatch refused' {Refuses {Assert-Ci10Bundle $bundle $manifestSha ('c'*40) ('b'*40)} 'BUNDLE_PROVENANCE_MISMATCH'}
-    Check 'tree provenance mismatch refused' {Refuses {Assert-Ci10Bundle $bundle $manifestSha ('a'*40) ('c'*40)} 'BUNDLE_PROVENANCE_MISMATCH'}
-    Check 'controller provenance mismatch refused' {
-        $bad=Clone $manifest;$bad.controllerCommit='c'*40;$bad|ConvertTo-Json -Depth 6|Set-Content -LiteralPath $manifestFile -Encoding utf8NoBOM
-        $hash=(Get-FileHash -LiteralPath $manifestFile -Algorithm SHA256).Hash.ToLowerInvariant()
-        try {Refuses {Assert-Ci10Bundle $bundle $hash ('a'*40) ('b'*40)} 'BUNDLE_PROVENANCE_MISMATCH'} finally {$manifest|ConvertTo-Json -Depth 6|Set-Content -LiteralPath $manifestFile -Encoding utf8NoBOM}
-    }
-    Check 'untrusted write ACL refused' {
-        $file=Join-Path $bundle 'ci-runner/Native.cs';$originalAcl=Get-Acl -LiteralPath $file;$badAcl=Get-Acl -LiteralPath $file
-        $badAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-32-545'),'Write','Allow'))
-        Set-Acl -LiteralPath $file -AclObject $badAcl
-        try {Refuses {Assert-Ci10Bundle $bundle $manifestSha ('a'*40) ('b'*40)} 'BUNDLE_ACL_UNTRUSTED_WRITE'} finally {Set-Acl -LiteralPath $file -AclObject $originalAcl}
-    }
-    Check 'parent directory replacement authority refused' {
-        $originalAcl=Get-Acl -LiteralPath $secure;$badAcl=Get-Acl -LiteralPath $secure
-        $badAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-32-545'),'DeleteSubdirectoriesAndFiles','Allow'))
-        Set-Acl -LiteralPath $secure -AclObject $badAcl
-        try {Refuses {Assert-Ci10Bundle $bundle $manifestSha ('a'*40) ('b'*40)} 'BUNDLE_PARENT_REPLACEMENT_UNTRUSTED'} finally {Set-Acl -LiteralPath $secure -AclObject $originalAcl}
+    $manifestSha=(Get-FileHash -LiteralPath $manifestFile -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($env:OS -eq 'Windows_NT') {
+        Check 'protected exact bundle verifies' {$null=Assert-Ci10Bundle $bundle $manifestSha ('a'*40) ('b'*40)}
+        Check 'dispatcher file hash drift refused' {
+            $file=Join-Path $bundle 'ci-dispatch/Dispatch.psm1';$original=[IO.File]::ReadAllBytes($file)
+            [IO.File]::AppendAllText($file,'# drift')
+            try {Refuses {Assert-Ci10Bundle $bundle $manifestSha ('a'*40) ('b'*40)} 'BUNDLE_FILE_HASH_DRIFT'} finally {[IO.File]::WriteAllBytes($file,$original)}
+        }
+        Check 'controller file hash drift refused' {
+            $file=Join-Path $bundle 'ci-runner/Native.cs';$original=[IO.File]::ReadAllBytes($file)
+            [IO.File]::AppendAllText($file,'// drift')
+            try {Refuses {Assert-Ci10Bundle $bundle $manifestSha ('a'*40) ('b'*40)} 'BUNDLE_FILE_HASH_DRIFT'} finally {[IO.File]::WriteAllBytes($file,$original)}
+        }
+        Check 'manifest hash drift refused' {
+            [IO.File]::AppendAllText($manifestFile,' ')
+            try {Refuses {Assert-Ci10Bundle $bundle $manifestSha ('a'*40) ('b'*40)} 'MANIFEST_HASH_DRIFT'} finally {$manifest|ConvertTo-Json -Depth 6|Set-Content -LiteralPath $manifestFile -Encoding utf8NoBOM}
+        }
+        Check 'missing runtime file refused' {
+            $file=Join-Path $bundle 'ci-runner/Native.cs';$original=[IO.File]::ReadAllBytes($file);Remove-Item -LiteralPath $file
+            try {Refuses {Assert-Ci10Bundle $bundle $manifestSha ('a'*40) ('b'*40)} 'BUNDLE_FILE_SET_DRIFT'} finally {
+                [IO.File]::WriteAllBytes($file,$original);$acl=Get-Acl -LiteralPath $file;$acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'));Set-Acl -LiteralPath $file -AclObject $acl
+            }
+        }
+        Check 'extra executable refused' {
+            $file=Join-Path $bundle 'extra.ps1';[IO.File]::WriteAllText($file,'exit 0')
+            try {Refuses {Assert-Ci10Bundle $bundle $manifestSha ('a'*40) ('b'*40)} 'BUNDLE_FILE_SET_DRIFT'} finally {Remove-Item -LiteralPath $file}
+        }
+        Check 'dispatcher commit provenance mismatch refused' {Refuses {Assert-Ci10Bundle $bundle $manifestSha ('c'*40) ('b'*40)} 'BUNDLE_PROVENANCE_MISMATCH'}
+        Check 'tree provenance mismatch refused' {Refuses {Assert-Ci10Bundle $bundle $manifestSha ('a'*40) ('c'*40)} 'BUNDLE_PROVENANCE_MISMATCH'}
+        Check 'controller provenance mismatch refused' {
+            $bad=Clone $manifest;$bad.controllerCommit='c'*40;$bad|ConvertTo-Json -Depth 6|Set-Content -LiteralPath $manifestFile -Encoding utf8NoBOM
+            $hash=(Get-FileHash -LiteralPath $manifestFile -Algorithm SHA256).Hash.ToLowerInvariant()
+            try {Refuses {Assert-Ci10Bundle $bundle $hash ('a'*40) ('b'*40)} 'BUNDLE_PROVENANCE_MISMATCH'} finally {$manifest|ConvertTo-Json -Depth 6|Set-Content -LiteralPath $manifestFile -Encoding utf8NoBOM}
+        }
+        Check 'untrusted write ACL refused' {
+            $file=Join-Path $bundle 'ci-runner/Native.cs';$originalAcl=Get-Acl -LiteralPath $file;$badAcl=Get-Acl -LiteralPath $file
+            $badAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-32-545'),'Write','Allow'))
+            Set-Acl -LiteralPath $file -AclObject $badAcl
+            try {Refuses {Assert-Ci10Bundle $bundle $manifestSha ('a'*40) ('b'*40)} 'BUNDLE_ACL_UNTRUSTED_WRITE'} finally {Set-Acl -LiteralPath $file -AclObject $originalAcl}
+        }
+        Check 'parent directory replacement authority refused' {
+            $originalAcl=Get-Acl -LiteralPath $secure;$badAcl=Get-Acl -LiteralPath $secure
+            $badAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-32-545'),'DeleteSubdirectoriesAndFiles','Allow'))
+            Set-Acl -LiteralPath $secure -AclObject $badAcl
+            try {Refuses {Assert-Ci10Bundle $bundle $manifestSha ('a'*40) ('b'*40)} 'BUNDLE_PARENT_REPLACEMENT_UNTRUSTED'} finally {Set-Acl -LiteralPath $secure -AclObject $originalAcl}
+        }
     }
     Check 'bounded sanitized diagnostic schema' {
-        Write-Ci10Log $fixture selected -RunId 12345
+        Write-Ci10Log $fixture selected -ProfileId 'ci10-royal-dashboard-deploy' -RunId 12345
         $record=Get-Content -LiteralPath (Join-Path $fixture 'dispatcher.jsonl')|Select-Object -Last 1|ConvertFrom-Json
         Assert (@(Compare-Object @('utc','phase','profile','run') @($record.PSObject.Properties.Name)).Count -eq 0)
-        Assert ($record.phase -ceq 'selected' -and $record.run -eq 12345)
+        Assert ($record.phase -ceq 'selected' -and $record.profile -ceq 'ci10-royal-dashboard-deploy' -and $record.run -eq 12345)
         Refuses {Write-Ci10Log $fixture 'secret-raw-value'}
         Refuses {Write-Ci10Log $fixture selected -ProfileId 'private-state'}
     }
@@ -323,7 +377,7 @@ try {
     # Exact random fixture only; check every descendant before recursive deletion.
     if(Test-Path -LiteralPath $fixture){
         $resolved=[IO.Path]::GetFullPath($fixture)
-        $temp=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\'
+        $temp=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar
         if(-not $resolved.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase) -or (Split-Path $resolved -Leaf) -cnotmatch '^ci10-test-[a-f0-9]{32}$'){throw 'TEST_CLEANUP_ROOT_INVALID'}
         foreach($item in @(Get-ChildItem -LiteralPath $resolved -Recurse -Force)){Assert-Ci7Path $resolved $item.FullName}
         Remove-Item -LiteralPath $resolved -Recurse -Force

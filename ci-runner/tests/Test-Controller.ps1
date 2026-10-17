@@ -79,11 +79,13 @@ try {
             $tokens=$null; $errors=$null
             $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot $source),[ref]$tokens,[ref]$errors)
             Assert ($errors.Count -eq 0)
-            $commands=$ast.FindAll({param($node); $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -match '^(Get|Set|New|Start|Stop|Remove|Add|Disable|Convert)-(VM|VHD)'},$true)
-            foreach($call in $commands){
-                $definition=Get-Command $call.GetCommandName() -ErrorAction Stop
-                foreach($element in $call.CommandElements|Where-Object{$_ -is [Management.Automation.Language.CommandParameterAst]}){
-                    Assert ($definition.Parameters.ContainsKey($element.ParameterName))
+            if (Get-Command 'Get-VHD' -ErrorAction SilentlyContinue) {
+                $commands=$ast.FindAll({param($node); $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -match '^(Get|Set|New|Start|Stop|Remove|Add|Disable|Convert)-(VM|VHD)'},$true)
+                foreach($call in $commands){
+                    $definition=Get-Command $call.GetCommandName() -ErrorAction Stop
+                    foreach($element in $call.CommandElements|Where-Object{$_ -is [Management.Automation.Language.CommandParameterAst]}){
+                        Assert ($definition.Parameters.ContainsKey($element.ParameterName))
+                    }
                 }
             }
         }
@@ -121,8 +123,8 @@ try {
     & $module {
         param($cfg)
         $script:ApiTestRepo=[pscustomobject]@{private=$true}
-        $script:ApiTestRun=[pscustomobject]@{head_sha=$cfg.ExpectedSha;path=$cfg.WorkflowPath;head_repository=[pscustomobject]@{full_name=$cfg.Repository};event='push';head_branch='main'}
-        $script:ApiTestJob=[pscustomobject]@{id=10;status='queued';runner_id=0;labels=@(Get-Ci7Labels $cfg.WorkflowRunId)}
+        $script:ApiTestRun=[pscustomobject]@{head_sha=$cfg.ExpectedSha;path=$cfg.WorkflowPath;repository=[pscustomobject]@{full_name=$cfg.Repository};head_repository=[pscustomobject]@{full_name=$cfg.Repository};event='push';head_branch='main'}
+        $script:ApiTestJob=[pscustomobject]@{id=10;status='queued';runner_id=0;labels=@(Get-Ci7Labels $cfg.WorkflowRunId $cfg)}
         $script:ApiTestCount=1
         function script:Invoke-Ci7Api {param($Path,$Method='GET',$Body); if($Path -match '/jobs\?'){[pscustomobject]@{total_count=$script:ApiTestCount;jobs=@($script:ApiTestJob)}}elseif($Path -match '/actions/runs/'){$script:ApiTestRun}else{$script:ApiTestRepo}}
     } $config
@@ -136,6 +138,75 @@ try {
         & $module {$script:ApiTestRepo.private=$true;$script:ApiTestCount=2}; Refuses {Get-Ci7ExpectedJob $config}
         & $module {$script:ApiTestCount=1;$script:ApiTestJob.runner_id=42}; Refuses {Get-Ci7ExpectedJob $config -RequireQueued}
         & $module {$script:ApiTestJob.runner_id=0;$script:ApiTestJob.labels=@('self-hosted','ldw-light')}; Refuses {Get-Ci7ExpectedJob $config}
+    }
+    Check 'exact Royal deployment profile contract accepted and verified' {
+        $royalHeadSha = 'c' * 40
+        $royalBlobSha = 'd' * 40
+        $royalRepo = 'LowcountryDigitalWorks/royal-cruise-tracker'
+        $royalWorkflow = '.github/workflows/deploy-dashboard-pr379.yml'
+        $royalConfig = New-Ci7Configuration -Repository $royalRepo -WorkflowRunId 99999 -ExpectedSha $royalHeadSha -WorkflowPath $royalWorkflow -WorkflowBlobSha $royalBlobSha -Root $root
+        Assert ($royalConfig.Repository -ceq $royalRepo)
+        Assert ($royalConfig.WorkflowPath -ceq $royalWorkflow)
+        Assert ($royalConfig.WorkflowBlobSha -ceq $royalBlobSha)
+        $royalLabels = @(Get-Ci7Labels 99999 $royalConfig)
+        Assert ('royal-isolated' -cin $royalLabels)
+        Assert ('security-isolated' -cnotin $royalLabels)
+        Assert ('ldw01-ci-01' -cnotin $royalLabels -and 'plexpc-ci-01' -cnotin $royalLabels)
+
+        & $module {
+            param($cfg,$headSha,$blobSha)
+            $script:ApiTestRepo=[pscustomobject]@{private=$true}
+            $script:ApiTestRun=[pscustomobject]@{id=$cfg.WorkflowRunId;status='queued';conclusion=$null;run_attempt=1;head_sha=$headSha;path=$cfg.WorkflowPath;repository=[pscustomobject]@{full_name=$cfg.Repository};head_repository=[pscustomobject]@{full_name=$cfg.Repository};event='workflow_dispatch';head_branch='main'}
+            $script:ApiTestJob=[pscustomobject]@{id=99;name='deploy';run_id=$cfg.WorkflowRunId;run_attempt=1;head_sha=$headSha;status='queued';runner_id=0;labels=@(Get-Ci7Labels $cfg.WorkflowRunId $cfg)}
+            $script:ApiTestBlob=[pscustomobject]@{sha=$blobSha}
+            $script:ApiTestCount=1
+            function script:Invoke-Ci7Api {
+                param($Path,$Method='GET',$Body)
+                if ($Path -match '/jobs\?') { [pscustomobject]@{total_count=$script:ApiTestCount;jobs=@($script:ApiTestJob)} }
+                elseif ($Path -match '/actions/runs/') { $script:ApiTestRun }
+                elseif ($Path -match '/contents/') { $script:ApiTestBlob }
+                else { $script:ApiTestRepo }
+            }
+        } $royalConfig $royalHeadSha $royalBlobSha
+
+        Assert ((Get-Ci7ExpectedJob $royalConfig -RequireQueued).id -eq 99)
+
+        & $module {$script:ApiTestRun.repository.full_name='LowcountryDigitalWorks/other'}; Refuses {Get-Ci7ExpectedJob $royalConfig}
+        & $module {$script:ApiTestRun.repository.full_name='LowcountryDigitalWorks/royal-cruise-tracker'}
+        & $module {$script:ApiTestRun.path='.github/workflows/other.yml'}; Refuses {Get-Ci7ExpectedJob $royalConfig}
+        & $module {$script:ApiTestRun.path='.github/workflows/deploy-dashboard-pr379.yml'}
+        & $module {$script:ApiTestJob.labels[3]='ldw-light'}; Refuses {Get-Ci7ExpectedJob $royalConfig}
+        & $module {$script:ApiTestJob.labels[3]='ldw01'}
+
+        # Refuses non-workflow_dispatch events for Royal
+        & $module {$script:ApiTestRun.event='push'}; Refuses {Get-Ci7ExpectedJob $royalConfig}
+        & $module {$script:ApiTestRun.event='pull_request'}; Refuses {Get-Ci7ExpectedJob $royalConfig}
+        & $module {$script:ApiTestRun.event='workflow_dispatch'}
+
+        # Refuses non-main head branch for Royal
+        & $module {$script:ApiTestRun.head_branch='feature/x'}; Refuses {Get-Ci7ExpectedJob $royalConfig}
+        & $module {$script:ApiTestRun.head_branch='main'}
+        & $module {$script:ApiTestRun.head_sha=('e'*40)}; Refuses {Get-Ci7ExpectedJob $royalConfig}
+        & $module {$script:ApiTestRun.head_sha=('c'*40)}
+        & $module {$script:ApiTestRun.status='in_progress'}; Refuses {Get-Ci7ExpectedJob $royalConfig}
+        & $module {$script:ApiTestRun.status='queued'}
+        & $module {$script:ApiTestRun.id=88888}; Refuses {Get-Ci7ExpectedJob $royalConfig}
+        & $module {$script:ApiTestRun.id=99999}
+        & $module {$script:ApiTestJob.head_sha=('e'*40)}; Refuses {Get-Ci7ExpectedJob $royalConfig}
+        & $module {$script:ApiTestJob.head_sha=('c'*40)}
+        & $module {$script:ApiTestJob.name='another job'}; Refuses {Get-Ci7ExpectedJob $royalConfig}
+        & $module {$script:ApiTestJob.name='deploy'}
+
+        # Refuses mismatched workflow blob SHA
+        & $module {$script:ApiTestBlob.sha='wrongblob'}; Refuses {Get-Ci7ExpectedJob $royalConfig}
+        & $module { param($sha) $script:ApiTestBlob.sha=$sha } $royalBlobSha
+
+        # Refuses invalid workflow path
+        Refuses { New-Ci7Configuration -Repository $royalRepo -WorkflowRunId 99999 -ExpectedSha $royalHeadSha -WorkflowPath '.github/workflows/unauthorized.yml' -Root $root }
+        Refuses { New-Ci7Configuration -Repository $royalRepo -WorkflowRunId 99999 -ExpectedSha $royalHeadSha -WorkflowPath $royalWorkflow -Root $root }
+        Refuses { New-Ci7Configuration -Repository $royalRepo -WorkflowRunId 99999 -ExpectedSha $royalHeadSha -WorkflowPath $royalWorkflow -WorkflowBlobSha 'bad' -Root $root }
+        Refuses { New-Ci7Configuration -Repository $royalRepo -WorkflowRunId 99999 -ExpectedSha 'd77a0e01f42b7ecddd6bce0f7f226288dcc0b11e' -WorkflowPath $royalWorkflow -WorkflowBlobSha '3bfe9fec5fa4ebc10db17d41594ded8878b37064' -Root $root }
+        Refuses { New-Ci7Configuration -Repository $royalRepo -WorkflowRunId 99999 -ExpectedSha $royalHeadSha -WorkflowPath $royalWorkflow -WorkflowBlobSha $royalBlobSha -StaticLabels @('self-hosted','Linux','X64','ldw01','ldw-ephemeral','ldw-isolated','ldw-light') -Root $root }
     }
     # Replace only external Hyper-V/API seams within the imported module. No live
     # VM, runner, token, network, or policy mutation occurs in this harness.
@@ -164,7 +235,7 @@ try {
         & $module { $script:TestVMs=@() }
     }
     Check 'interrupted runner cleanup is exact and idempotent' {
-        & $module { param($s,$labels); $script:TestRunners=@([pscustomobject]@{id=$s.RunnerId;name=$s.Name;busy=$true;labels=@($labels|ForEach-Object{[pscustomobject]@{name=$_}})}) } $state @(Get-Ci7Labels $config.WorkflowRunId)
+        & $module { param($s,$labels); $script:TestRunners=@([pscustomobject]@{id=$s.RunnerId;name=$s.Name;busy=$true;labels=@($labels|ForEach-Object{[pscustomobject]@{name=$_}})}) } $state @(Get-Ci7Labels $config.WorkflowRunId $config)
         Refuses { Remove-Ci7Runner $state }
         Remove-Ci7Runner $state -Interrupted
         Remove-Ci7Runner $state -Interrupted
@@ -188,12 +259,14 @@ try {
         Assert ($bootstrap.Contains('192.168.0.0/16') -and $bootstrap.Contains('systemctl mask ssh.service ssh.socket'))
         Assert ($bootstrap.Contains('sha256sum --check --strict'))
     }
-    Check 'real NoCloud media generation removes transient plaintext seed files' {
-        New-Ci7Seed $state 'dGVzdC1qdXQtbWF0ZXJpYWw='
-        Assert ((Get-Item -LiteralPath $state.Seed).Length -gt 32768)
-        Assert (-not (Test-Path -LiteralPath (Join-Path $state.Directory 'seed/user-data')))
-        $log = Get-Content -LiteralPath (Join-Path $root ('evidence/' + $state.RunId + '.jsonl')) -Raw
-        Assert (-not $log.Contains('dGVzdC1qdXQtbWF0ZXJpYWw='))
+    if ($env:OS -eq 'Windows_NT') {
+        Check 'real NoCloud media generation removes transient plaintext seed files' {
+            New-Ci7Seed $state 'dGVzdC1qdXQtbWF0ZXJpYWw='
+            Assert ((Get-Item -LiteralPath $state.Seed).Length -gt 32768)
+            Assert (-not (Test-Path -LiteralPath (Join-Path $state.Directory 'seed/user-data')))
+            $log = Get-Content -LiteralPath (Join-Path $root ('evidence/' + $state.RunId + '.jsonl')) -Raw
+            Assert (-not $log.Contains('dGVzdC1qdXQtbWF0ZXJpYWw='))
+        }
     }
     Check 'transient cleanup retains only sanitized evidence and is idempotent' {
         $state.PersistentBaseline=[pscustomobject]@{Runner='{"id":21}';VMs='{"cpu":4}'}
