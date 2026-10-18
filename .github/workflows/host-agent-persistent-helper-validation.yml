@@ -49,6 +49,10 @@ jobs:
         shell: pwsh
         run: pwsh ./host-agent/deploy/tests/Test-DeploymentContracts.ps1
 
+      - name: Run tray autostart contract tests
+        shell: pwsh
+        run: pwsh ./host-agent/deploy/tests/Test-TrayAutostartContracts.ps1
+
       - name: Restore Host Agent
         shell: pwsh
         run: dotnet restore ./host-agent/LDW.HostAgent.sln
