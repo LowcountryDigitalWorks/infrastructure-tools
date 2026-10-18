@@ -144,10 +144,11 @@ try {
         $royalBlobSha = 'd' * 40
         $royalRepo = 'LowcountryDigitalWorks/royal-cruise-tracker'
         $royalWorkflow = '.github/workflows/deploy-dashboard-pr379.yml'
-        $royalConfig = New-Ci7Configuration -Repository $royalRepo -WorkflowRunId 99999 -ExpectedSha $royalHeadSha -WorkflowPath $royalWorkflow -WorkflowBlobSha $royalBlobSha -Root $root
+        $royalConfig = New-Ci7Configuration -Repository $royalRepo -WorkflowRunId 99999 -ExpectedSha $royalHeadSha -WorkflowPath $royalWorkflow -WorkflowBlobSha $royalBlobSha -ExpectedJobName 'Manual exact-SHA' -Root $root
         Assert ($royalConfig.Repository -ceq $royalRepo)
         Assert ($royalConfig.WorkflowPath -ceq $royalWorkflow)
         Assert ($royalConfig.WorkflowBlobSha -ceq $royalBlobSha)
+        Assert ($royalConfig.ExpectedJobName -ceq 'Manual exact-SHA')
         $royalLabels = @(Get-Ci7Labels 99999 $royalConfig)
         Assert ('royal-isolated' -cin $royalLabels)
         Assert ('security-isolated' -cnotin $royalLabels)
@@ -157,7 +158,7 @@ try {
             param($cfg,$headSha,$blobSha)
             $script:ApiTestRepo=[pscustomobject]@{private=$true}
             $script:ApiTestRun=[pscustomobject]@{id=$cfg.WorkflowRunId;status='queued';conclusion=$null;run_attempt=1;head_sha=$headSha;path=$cfg.WorkflowPath;repository=[pscustomobject]@{full_name=$cfg.Repository};head_repository=[pscustomobject]@{full_name=$cfg.Repository};event='workflow_dispatch';head_branch='main'}
-            $script:ApiTestJob=[pscustomobject]@{id=99;name='deploy';run_id=$cfg.WorkflowRunId;run_attempt=1;head_sha=$headSha;status='queued';runner_id=0;labels=@(Get-Ci7Labels $cfg.WorkflowRunId $cfg)}
+            $script:ApiTestJob=[pscustomobject]@{id=99;name='Manual exact-SHA';run_id=$cfg.WorkflowRunId;run_attempt=1;head_sha=$headSha;status='queued';runner_id=0;labels=@(Get-Ci7Labels $cfg.WorkflowRunId $cfg)}
             $script:ApiTestBlob=[pscustomobject]@{sha=$blobSha}
             $script:ApiTestCount=1
             function script:Invoke-Ci7Api {
@@ -195,11 +196,15 @@ try {
         & $module {$script:ApiTestJob.head_sha=('e'*40)}; Refuses {Get-Ci7ExpectedJob $royalConfig}
         & $module {$script:ApiTestJob.head_sha=('c'*40)}
         & $module {$script:ApiTestJob.name='another job'}; Refuses {Get-Ci7ExpectedJob $royalConfig}
-        & $module {$script:ApiTestJob.name='deploy'}
+        & $module {$script:ApiTestJob.name='deploy'}; Refuses {Get-Ci7ExpectedJob $royalConfig}
+        & $module {$script:ApiTestJob.name='Manual exact-SHA'}
 
         # Refuses mismatched workflow blob SHA
         & $module {$script:ApiTestBlob.sha='wrongblob'}; Refuses {Get-Ci7ExpectedJob $royalConfig}
         & $module { param($sha) $script:ApiTestBlob.sha=$sha } $royalBlobSha
+
+        # Refuses wrong Jobs API name in closed Royal configuration
+        Refuses { New-Ci7Configuration -Repository $royalRepo -WorkflowRunId 99999 -ExpectedSha $royalHeadSha -WorkflowPath $royalWorkflow -WorkflowBlobSha $royalBlobSha -ExpectedJobName 'deploy' -Root $root }
 
         # Refuses invalid workflow path
         Refuses { New-Ci7Configuration -Repository $royalRepo -WorkflowRunId 99999 -ExpectedSha $royalHeadSha -WorkflowPath '.github/workflows/unauthorized.yml' -Root $root }

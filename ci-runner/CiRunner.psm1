@@ -70,7 +70,7 @@ function New-Ci7Configuration {
     param([string]$Repository, [long]$WorkflowRunId, [string]$ExpectedSha, [string]$Root,
         [string[]]$ApprovedRepositories = @('LowcountryDigitalWorks/business-operations', 'LowcountryDigitalWorks/royal-cruise-tracker'),
         [switch]$AllowPublicSyntheticProof, [int]$MemoryMiB = 2048, [int]$CpuCount = 2, [int]$TimeoutMinutes = 20,
-        [string]$WorkflowPath, [string]$WorkflowBlobSha, [string[]]$StaticLabels)
+        [string]$WorkflowPath, [string]$WorkflowBlobSha, [string]$ExpectedJobName, [string[]]$StaticLabels)
     if ($ExpectedSha -notmatch '^[0-9a-f]{40}$' -or $WorkflowRunId -le 0) { throw 'EXACT_JOB_REFERENCE_REQUIRED' }
     if ($MemoryMiB -lt 2048 -or $MemoryMiB -gt 4096 -or $CpuCount -lt 1 -or $CpuCount -gt 2 -or $TimeoutMinutes -lt 5 -or $TimeoutMinutes -gt 30) { throw 'RESOURCE_BOUNDS_INVALID' }
     $proof = $AllowPublicSyntheticProof -and $Repository -ceq 'LowcountryDigitalWorks/infrastructure-tools'
@@ -91,6 +91,7 @@ function New-Ci7Configuration {
         $royalLabels = @('self-hosted', 'Linux', 'X64', 'ldw01', 'ldw-ephemeral', 'ldw-isolated', 'royal-isolated')
         if ($resolvedWorkflowPath -cne '.github/workflows/deploy-dashboard-pr379.yml') { throw 'ROYAL_WORKFLOW_PATH_INVALID' }
         if ($WorkflowBlobSha -cnotmatch '^[a-f0-9]{40}$') { throw 'FROZEN_ROYAL_WORKFLOW_BLOB_REQUIRED' }
+        if ($ExpectedJobName -cne 'Manual exact-SHA') { throw 'ROYAL_JOB_NAME_REFUSED' }
         if ($ExpectedSha -ceq 'd77a0e01f42b7ecddd6bce0f7f226288dcc0b11e' -and
             $WorkflowBlobSha -ceq '3bfe9fec5fa4ebc10db17d41594ded8878b37064') { throw 'PRE_ROUTING_ROYAL_PAIR_REFUSED' }
         if ($StaticLabels -and @(Compare-Object $royalLabels @($StaticLabels) -CaseSensitive).Count) { throw 'ROYAL_STATIC_LABELS_REFUSED' }
@@ -98,7 +99,7 @@ function New-Ci7Configuration {
     } else { $resolvedStaticLabels = if ($StaticLabels) { @($StaticLabels) } else { @($script:SafeLabels) } }
     [pscustomobject]@{ Repository = $Repository; WorkflowRunId = $WorkflowRunId; ExpectedSha = $ExpectedSha;
         Root = [IO.Path]::GetFullPath($Root); ApprovedRepositories = @($ApprovedRepositories); PublicSyntheticProof = [bool]$proof; MemoryMiB = $MemoryMiB; CpuCount = $CpuCount;
-        TimeoutMinutes = $TimeoutMinutes; WorkflowPath = $resolvedWorkflowPath; WorkflowBlobSha = $WorkflowBlobSha; StaticLabels = @($resolvedStaticLabels) }
+        TimeoutMinutes = $TimeoutMinutes; WorkflowPath = $resolvedWorkflowPath; WorkflowBlobSha = $WorkflowBlobSha; ExpectedJobName = $ExpectedJobName; StaticLabels = @($resolvedStaticLabels) }
 }
 
 function Get-Ci7Labels {
@@ -148,7 +149,7 @@ function Get-Ci7ExpectedJob {
     $response = Invoke-Ci7Api ('repos/' + $Configuration.Repository + '/actions/runs/' + $Configuration.WorkflowRunId + '/jobs?filter=latest&per_page=100')
     if ($response.total_count -ne 1 -or @($response.jobs).Count -ne 1) { throw 'EXACTLY_ONE_JOB_REQUIRED' }
     $job = $response.jobs[0]
-    if ($Configuration.Repository -ceq 'LowcountryDigitalWorks/royal-cruise-tracker' -and ($job.name -cne 'deploy' -or $job.run_id -ne $Configuration.WorkflowRunId -or $job.run_attempt -ne $run.run_attempt -or $job.head_sha -cne $Configuration.ExpectedSha)) { throw 'JOB_IDENTITY_MISMATCH' }
+    if ($Configuration.Repository -ceq 'LowcountryDigitalWorks/royal-cruise-tracker' -and ($Configuration.ExpectedJobName -cne 'Manual exact-SHA' -or $job.name -cne $Configuration.ExpectedJobName -or $job.run_id -ne $Configuration.WorkflowRunId -or $job.run_attempt -ne $run.run_attempt -or $job.head_sha -cne $Configuration.ExpectedSha)) { throw 'JOB_IDENTITY_MISMATCH' }
     $expected = @(Get-Ci7Labels $Configuration.WorkflowRunId $Configuration)
     if (@($job.labels).Count -ne $expected.Count -or @(Compare-Object $expected @($job.labels) -CaseSensitive).Count -ne 0) { throw 'ISOLATED_JOB_LABELS_REQUIRED' }
     if ($RequireQueued -and ($job.status -cne 'queued' -or $job.runner_id)) { throw 'UNASSIGNED_QUEUED_JOB_REQUIRED' }

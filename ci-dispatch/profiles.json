@@ -48,7 +48,7 @@
     "branch": "main",
     "headSha": null,
     "workflowBlobSha": null,
-    "jobName": "deploy",
+    "jobName": "Manual exact-SHA",
     "labels": ["self-hosted", "Linux", "X64", "ldw01", "ldw-ephemeral", "ldw-isolated", "royal-isolated"],
     "dynamicLabel": "ci7-run-<run-id>",
     "jobCount": 1,

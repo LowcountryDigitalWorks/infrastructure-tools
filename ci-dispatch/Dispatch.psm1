@@ -143,7 +143,7 @@ function Read-Ci10Profiles {
         @($royal.events).Count -ne 1 -or $royal.events[0] -cne 'workflow_dispatch' -or
         $royal.branch -cne 'main' -or
         $null -ne $royal.headSha -or $null -ne $royal.workflowBlobSha -or
-        $royal.jobName -cne 'deploy' -or
+        $royal.jobName -cne 'Manual exact-SHA' -or
         -not $royal.workflowSecrets -or
         $royal.controllerProfile -cne 'accepted-ci7-royal-dashboard-deploy') { throw 'PROFILE_CONTRACT_REFUSED' }
     $profiles
@@ -372,6 +372,7 @@ function Start-Ci10Controller {
         else { $args += @('-ApprovedRepositories','LowcountryDigitalWorks/business-operations,LowcountryDigitalWorks/royal-cruise-tracker') }
         if ($Candidate.Profile.workflowPath) { $args += @('-WorkflowPath', $Candidate.Profile.workflowPath) }
         if ($Candidate.FrozenWorkflowBlobSha) { $args += @('-WorkflowBlobSha', $Candidate.FrozenWorkflowBlobSha) }
+        if ($Candidate.Profile.jobName) { $args += @('-ExpectedJobName', $Candidate.Profile.jobName) }
         if ($Candidate.Profile.labels) { $args += @('-StaticLabels', ($Candidate.Profile.labels -join ',')) }
         foreach ($arg in $args) { $info.ArgumentList.Add($arg) }
     }
