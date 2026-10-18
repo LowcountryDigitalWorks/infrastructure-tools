@@ -25,6 +25,18 @@ try {
     $sid = 'S-1-5-21-111-222-333-1001'
     $spec = Get-TrayAutostartSpec -OwnerSid $sid
 
+    $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $currentSid = $currentIdentity.User.Value
+    $currentAccount = $currentIdentity.Name
+    $currentSpec = Get-TrayAutostartSpec -OwnerSid $currentSid
+    $definition = New-TrayAutostartTaskDefinition -Spec $currentSpec
+    Assert-True (@($definition.Actions).Count -eq 1) 'task definition must construct exactly one action'
+    Assert-True ([string]::Equals([string]$definition.Actions[0].Execute, $currentSpec.ExecutablePath, [StringComparison]::OrdinalIgnoreCase)) 'task definition must preserve the protected executable path'
+    Assert-True ([string]::IsNullOrEmpty([string]$definition.Actions[0].Arguments)) 'task definition must construct successfully without launch arguments'
+    Assert-True (Test-TrayAutostartUserIdMatchesSid -UserId ([string]$definition.Principal.UserId) -OwnerSid $currentSid) 'ScheduledTasks principal readback form must resolve to the requested owner SID'
+    Assert-True (Test-TrayAutostartUserIdMatchesSid -UserId $currentAccount -OwnerSid $currentSid) 'DOMAIN\\user readback must resolve to the requested owner SID'
+    Assert-True (-not (Test-TrayAutostartUserIdMatchesSid -UserId '' -OwnerSid $currentSid)) 'empty user identity must fail closed'
+
     Assert-True ($spec.TriggerClass -eq 'MSFT_TaskLogonTrigger') 'startup must be a user-logon trigger'
     Assert-True ($spec.OwnerSid -eq $sid) 'task principal must bind to the explicit user SID'
     Assert-True ($spec.LogonType -eq 'Interactive' -and $spec.RunLevel -eq 'Limited') 'tray must use the logged-in user at limited privilege'

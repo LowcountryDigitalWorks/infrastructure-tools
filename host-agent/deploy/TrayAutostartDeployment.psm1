@@ -45,6 +45,25 @@ function Get-TrayAutostartSpec {
     }
 }
 
+function Test-TrayAutostartUserIdMatchesSid {
+    [CmdletBinding()]
+    param(
+        [AllowNull()][AllowEmptyString()][string]$UserId,
+        [Parameter(Mandatory)][string]$OwnerSid
+    )
+
+    if ([string]::IsNullOrWhiteSpace($UserId)) { return $false }
+    if ([string]::Equals($UserId, $OwnerSid, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+
+    try {
+        $account = [Security.Principal.NTAccount]::new($UserId)
+        $resolvedSid = $account.Translate([Security.Principal.SecurityIdentifier])
+        return [string]::Equals($resolvedSid.Value, $OwnerSid, [StringComparison]::OrdinalIgnoreCase)
+    } catch {
+        return $false
+    }
+}
+
 function Get-TrayAutostartIdentityProblems {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Task, [Parameter(Mandatory)]$Spec)
@@ -60,9 +79,9 @@ function Get-TrayAutostartIdentityProblems {
     else {
         $trigger = $Task.Triggers[0]
         if ([string]$trigger.CimClass.CimClassName -cne $Spec.TriggerClass) { $problems.Add('trigger-type') }
-        if (-not [string]::Equals([string]$trigger.UserId, $Spec.OwnerSid, [StringComparison]::OrdinalIgnoreCase)) { $problems.Add('trigger-user') }
+        if (-not (Test-TrayAutostartUserIdMatchesSid -UserId ([string]$trigger.UserId) -OwnerSid $Spec.OwnerSid)) { $problems.Add('trigger-user') }
     }
-    if (-not [string]::Equals([string]$Task.Principal.UserId, $Spec.OwnerSid, [StringComparison]::OrdinalIgnoreCase)) { $problems.Add('principal-user') }
+    if (-not (Test-TrayAutostartUserIdMatchesSid -UserId ([string]$Task.Principal.UserId) -OwnerSid $Spec.OwnerSid)) { $problems.Add('principal-user') }
     if ([string]$Task.Principal.LogonType -cne $Spec.LogonType) { $problems.Add('principal-logon-type') }
     if ([string]$Task.Principal.RunLevel -cne $Spec.RunLevel) { $problems.Add('principal-run-level') }
     if ([string]$Task.Settings.MultipleInstances -cne $Spec.MultipleInstances) { $problems.Add('multiple-instances') }
@@ -88,7 +107,14 @@ function Assert-TrayAutostartTask {
 
 function New-TrayAutostartTaskDefinition {
     param([Parameter(Mandatory)]$Spec)
-    $action = New-ScheduledTaskAction -Execute $Spec.ExecutablePath -Argument $Spec.Arguments -WorkingDirectory (Split-Path -Parent $Spec.ExecutablePath)
+    $actionParameters = @{
+        Execute = $Spec.ExecutablePath
+        WorkingDirectory = (Split-Path -Parent $Spec.ExecutablePath)
+    }
+    if (-not [string]::IsNullOrEmpty([string]$Spec.Arguments)) {
+        $actionParameters.Argument = [string]$Spec.Arguments
+    }
+    $action = New-ScheduledTaskAction @actionParameters
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $Spec.OwnerSid
     $principal = New-ScheduledTaskPrincipal -UserId $Spec.OwnerSid -LogonType Interactive -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
@@ -132,4 +158,4 @@ function Get-TrayAutostartInstallDisposition {
     return 'NoOp'
 }
 
-Export-ModuleMember -Function Get-TrayAutostartSpec, Get-TrayAutostartIdentityProblems, Get-TrayAutostartTask, Assert-TrayAutostartTask, New-TrayAutostartTaskDefinition, Assert-TrayAutostartAdministrator, Assert-TrayAutostartCurrentOwner, Test-TrayAutostartEnabled, Get-TrayAutostartInstallDisposition
+Export-ModuleMember -Function Get-TrayAutostartSpec, Test-TrayAutostartUserIdMatchesSid, Get-TrayAutostartIdentityProblems, Get-TrayAutostartTask, Assert-TrayAutostartTask, New-TrayAutostartTaskDefinition, Assert-TrayAutostartAdministrator, Assert-TrayAutostartCurrentOwner, Test-TrayAutostartEnabled, Get-TrayAutostartInstallDisposition
