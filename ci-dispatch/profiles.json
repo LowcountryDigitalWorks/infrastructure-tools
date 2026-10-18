@@ -60,5 +60,25 @@
     "privateProductionState": false,
     "egress": "accepted-ci7-public-ipv4-private-deny",
     "controllerProfile": "accepted-ci7-royal-dashboard-deploy"
+  }, {
+    "id": "ci10-royal-dashboard-release-gate-pr",
+    "repository": "LowcountryDigitalWorks/royal-cruise-tracker",
+    "workflowPath": ".github/workflows/dashboard-release-gate.yml",
+    "events": ["pull_request"],
+    "branch": null,
+    "headSha": null,
+    "workflowBlobSha": null,
+    "jobName": "Zero-side-effect full repository release validation",
+    "labels": ["self-hosted", "Linux", "X64", "ldw01", "ldw-ephemeral", "ldw-isolated", "royal-isolated"],
+    "dynamicLabel": "ci7-run-<run-id>",
+    "jobCount": 1,
+    "cpu": 2,
+    "memoryMiB": 2048,
+    "timeoutMinutes": 20,
+    "docker": false,
+    "workflowSecrets": false,
+    "privateProductionState": false,
+    "egress": "accepted-ci7-public-ipv4-private-deny",
+    "controllerProfile": "accepted-ci7-royal-dashboard-release-gate-pr"
   }]
 }

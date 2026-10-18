@@ -43,6 +43,27 @@ try {
         Assert ($production.jobName -ceq 'secret-scan / secret-scan')
     }
 
+
+    Check 'Royal PR release-gate profile accepts only its closed queued job identity' {
+        $prProfile=$profiles | Where-Object id -CEQ 'ci10-royal-dashboard-release-gate-pr'
+        Assert ($null -ne $prProfile)
+        Assert ($prProfile.repository -ceq 'LowcountryDigitalWorks/royal-cruise-tracker')
+        Assert ($prProfile.workflowPath -ceq '.github/workflows/dashboard-release-gate.yml')
+        Assert (@($prProfile.events).Count -eq 1 -and $prProfile.events[0] -ceq 'pull_request')
+        Assert ($prProfile.jobName -ceq 'Zero-side-effect full repository release validation')
+        Assert ($prProfile.workflowSecrets -eq $false -and $prProfile.privateProductionState -eq $false -and $prProfile.docker -eq $false)
+        Assert ($prProfile.cpu -eq 2 -and $prProfile.memoryMiB -eq 2048 -and $prProfile.timeoutMinutes -eq 20)
+        $prRun=[pscustomobject]@{id=99886;run_attempt=1;status='queued';conclusion=$null;created_at='2026-10-18T12:00:00Z';head_sha=('e'*40);head_branch='feature/release-gate';event='pull_request';path=$prProfile.workflowPath;repository=@{full_name=$prProfile.repository};head_repository=@{full_name=$prProfile.repository}}
+        $prJobs=[pscustomobject]@{total_count=1;jobs=@([pscustomobject]@{id=77665;run_id=99886;run_attempt=1;head_sha=('e'*40);name=$prProfile.jobName;status='queued';conclusion=$null;runner_id=0;runner_name=$null;runner_group_id=0;started_at=$null;labels=@($prProfile.labels)+@('ci7-run-99886')})}
+        Assert ((Get-Ci10Candidate $prProfile $prRun $prJobs).JobId -eq 77665)
+        $bad=Clone $prRun; $bad.repository.full_name='LowcountryDigitalWorks/other'; Refuses { Get-Ci10Candidate $prProfile $bad $prJobs } 'WRONG_REPOSITORY'
+        $bad=Clone $prRun; $bad.path='.github/workflows/other.yml'; Refuses { Get-Ci10Candidate $prProfile $bad $prJobs } 'WRONG_WORKFLOW'
+        $bad=Clone $prRun; $bad.event='workflow_dispatch'; Refuses { Get-Ci10Candidate $prProfile $bad $prJobs } 'WRONG_EVENT_REF_SOURCE'
+        $bad=Clone $prJobs; $bad.jobs[0].name='Manual exact-SHA'; Refuses { Get-Ci10Candidate $prProfile $prRun $bad } 'JOB_IDENTITY_MISMATCH'
+        $bad=Clone $prJobs; $bad.jobs[0].labels[6]='security-isolated'; Refuses { Get-Ci10Candidate $prProfile $prRun $bad } 'WRONG_LABELS'
+        $deployProfile=$profiles | Where-Object id -CEQ 'ci10-royal-dashboard-deploy'
+        Refuses { Get-Ci10Candidate $deployProfile $prRun $prJobs ('e'*40) ('d'*40) } 'WRONG_WORKFLOW'
+    }
     Check 'accepted Royal deployment profile is exact and pinned' {
         Assert ($royalProfile.repository -ceq 'LowcountryDigitalWorks/royal-cruise-tracker')
         Assert ($royalProfile.workflowPath -ceq '.github/workflows/deploy-dashboard-pr379.yml')

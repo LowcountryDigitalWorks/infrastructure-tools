@@ -139,6 +139,39 @@ try {
         & $module {$script:ApiTestCount=1;$script:ApiTestJob.runner_id=42}; Refuses {Get-Ci7ExpectedJob $config -RequireQueued}
         & $module {$script:ApiTestJob.runner_id=0;$script:ApiTestJob.labels=@('self-hosted','ldw-light')}; Refuses {Get-Ci7ExpectedJob $config}
     }
+
+    Check 'Royal PR release-gate profile is exact and isolated from production deploy' {
+        $prRepo = 'LowcountryDigitalWorks/royal-cruise-tracker'
+        $prPath = '.github/workflows/dashboard-release-gate.yml'
+        $prName = 'Zero-side-effect full repository release validation'
+        $prSha = 'e' * 40
+        $prConfig = New-Ci7Configuration -Repository $prRepo -WorkflowRunId 99887 -ExpectedSha $prSha -Root $root -WorkflowPath $prPath -ExpectedJobName $prName
+        Assert ($prConfig.WorkflowPath -ceq $prPath -and $prConfig.ExpectedJobName -ceq $prName)
+        Assert ('royal-isolated' -cin $prConfig.StaticLabels -and 'security-isolated' -cnotin $prConfig.StaticLabels)
+        & $module {
+            param($cfg,$sha)
+            $script:ApiTestRepo=[pscustomobject]@{private=$true}
+            $script:ApiTestRun=[pscustomobject]@{id=$cfg.WorkflowRunId;status='queued';conclusion=$null;run_attempt=1;head_sha=$sha;path=$cfg.WorkflowPath;repository=[pscustomobject]@{full_name=$cfg.Repository};head_repository=[pscustomobject]@{full_name=$cfg.Repository};event='pull_request';head_branch='feature/release-gate'}
+            $script:ApiTestJob=[pscustomobject]@{id=98;name=$cfg.ExpectedJobName;run_id=$cfg.WorkflowRunId;run_attempt=1;head_sha=$sha;status='queued';runner_id=0;labels=@(Get-Ci7Labels $cfg.WorkflowRunId $cfg)}
+            $script:ApiTestCount=1
+            function script:Invoke-Ci7Api { param($Path,$Method='GET',$Body)
+                if ($Path -match '/jobs\?') { [pscustomobject]@{total_count=$script:ApiTestCount;jobs=@($script:ApiTestJob)} }
+                elseif ($Path -match '/actions/runs/') { $script:ApiTestRun }
+                else { $script:ApiTestRepo }
+            }
+        } $prConfig $prSha
+        Assert ((Get-Ci7ExpectedJob $prConfig -RequireQueued).id -eq 98)
+        & $module {$script:ApiTestRun.repository.full_name='LowcountryDigitalWorks/other'}; Refuses { Get-Ci7ExpectedJob $prConfig }
+        & $module {$script:ApiTestRun.repository.full_name='LowcountryDigitalWorks/royal-cruise-tracker';$script:ApiTestRun.path='.github/workflows/other.yml'}; Refuses { Get-Ci7ExpectedJob $prConfig }
+        & $module {$script:ApiTestRun.path='.github/workflows/dashboard-release-gate.yml';$script:ApiTestRun.event='push'}; Refuses { Get-Ci7ExpectedJob $prConfig }
+        & $module {$script:ApiTestRun.event='pull_request';$script:ApiTestJob.name='wrong job'}; Refuses { Get-Ci7ExpectedJob $prConfig }
+        & $module {$script:ApiTestJob.name='Zero-side-effect full repository release validation';$script:ApiTestJob.labels[6]='security-isolated'}; Refuses { Get-Ci7ExpectedJob $prConfig }
+        & $module {param($cfg);$script:ApiTestJob.labels=@(Get-Ci7Labels $cfg.WorkflowRunId $cfg)} $prConfig
+        Refuses { New-Ci7Configuration -Repository $prRepo -WorkflowRunId 99887 -ExpectedSha $prSha -Root $root -WorkflowPath $prPath -ExpectedJobName 'Manual exact-SHA' }
+        $deploy = New-Ci7Configuration -Repository $prRepo -WorkflowRunId 99888 -ExpectedSha $prSha -Root $root -WorkflowPath '.github/workflows/deploy-dashboard-pr379.yml' -WorkflowBlobSha ('d' * 40) -ExpectedJobName 'Manual exact-SHA'
+        & $module {param($cfg,$sha);$script:ApiTestRun.id=99888;$script:ApiTestRun.path=$cfg.WorkflowPath;$script:ApiTestRun.event='pull_request';$script:ApiTestJob.name='Manual exact-SHA';$script:ApiTestJob.run_id=99888;$script:ApiTestJob.head_sha=$sha;$script:ApiTestJob.labels=@(Get-Ci7Labels 99888 $cfg)} $deploy $prSha
+        Refuses { Get-Ci7ExpectedJob $deploy }
+    }
     Check 'exact Royal deployment profile contract accepted and verified' {
         $royalHeadSha = 'c' * 40
         $royalBlobSha = 'd' * 40

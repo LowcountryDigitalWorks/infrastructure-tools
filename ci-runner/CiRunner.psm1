@@ -89,11 +89,15 @@ function New-Ci7Configuration {
 
     if ($Repository -ceq 'LowcountryDigitalWorks/royal-cruise-tracker') {
         $royalLabels = @('self-hosted', 'Linux', 'X64', 'ldw01', 'ldw-ephemeral', 'ldw-isolated', 'royal-isolated')
-        if ($resolvedWorkflowPath -cne '.github/workflows/deploy-dashboard-pr379.yml') { throw 'ROYAL_WORKFLOW_PATH_INVALID' }
-        if ($WorkflowBlobSha -cnotmatch '^[a-f0-9]{40}$') { throw 'FROZEN_ROYAL_WORKFLOW_BLOB_REQUIRED' }
-        if ($ExpectedJobName -cne 'Manual exact-SHA') { throw 'ROYAL_JOB_NAME_REFUSED' }
-        if ($ExpectedSha -ceq 'd77a0e01f42b7ecddd6bce0f7f226288dcc0b11e' -and
-            $WorkflowBlobSha -ceq '3bfe9fec5fa4ebc10db17d41594ded8878b37064') { throw 'PRE_ROUTING_ROYAL_PAIR_REFUSED' }
+        if ($resolvedWorkflowPath -ceq '.github/workflows/deploy-dashboard-pr379.yml') {
+            if ($WorkflowBlobSha -cnotmatch '^[a-f0-9]{40}$') { throw 'FROZEN_ROYAL_WORKFLOW_BLOB_REQUIRED' }
+            if ($ExpectedJobName -cne 'Manual exact-SHA') { throw 'ROYAL_JOB_NAME_REFUSED' }
+            if ($ExpectedSha -ceq 'd77a0e01f42b7ecddd6bce0f7f226288dcc0b11e' -and
+                $WorkflowBlobSha -ceq '3bfe9fec5fa4ebc10db17d41594ded8878b37064') { throw 'PRE_ROUTING_ROYAL_PAIR_REFUSED' }
+        } elseif ($resolvedWorkflowPath -ceq '.github/workflows/dashboard-release-gate.yml') {
+            if ($WorkflowBlobSha) { throw 'ROYAL_PR_WORKFLOW_BLOB_PIN_REFUSED' }
+            if ($ExpectedJobName -cne 'Zero-side-effect full repository release validation') { throw 'ROYAL_PR_JOB_NAME_REFUSED' }
+        } else { throw 'ROYAL_WORKFLOW_PATH_INVALID' }
         if ($StaticLabels -and @(Compare-Object $royalLabels @($StaticLabels) -CaseSensitive).Count) { throw 'ROYAL_STATIC_LABELS_REFUSED' }
         $resolvedStaticLabels = $royalLabels
     } else { $resolvedStaticLabels = if ($StaticLabels) { @($StaticLabels) } else { @($script:SafeLabels) } }
@@ -132,15 +136,21 @@ function Get-Ci7ExpectedJob {
         $run.head_repository.full_name -cne $Configuration.Repository) { throw 'WORKFLOW_IDENTITY_MISMATCH' }
 
     if ($Configuration.Repository -ceq 'LowcountryDigitalWorks/royal-cruise-tracker') {
-        if ($run.event -cne 'workflow_dispatch') { throw 'ROYAL_EVENT_REFUSED' }
         if ($run.repository.full_name -cne $Configuration.Repository) { throw 'ROYAL_REPOSITORY_REFUSED' }
-        if ($run.head_branch -cne 'main') { throw 'ROYAL_REF_REFUSED' }
-        if ($run.id -ne $Configuration.WorkflowRunId -or $run.status -cne 'queued' -or $null -ne $run.conclusion -or $run.run_attempt -le 0) { throw 'ROYAL_RUN_NOT_QUEUED' }
-        if ($Configuration.ExpectedSha -cnotmatch '^[a-f0-9]{40}$' -or $run.head_sha -cne $Configuration.ExpectedSha) { throw 'ROYAL_HEAD_SHA_REFUSED' }
-        if ($Configuration.WorkflowBlobSha) {
-            $blob = Invoke-Ci7Api ('repos/' + $Configuration.Repository + '/contents/' + $Configuration.WorkflowPath + '?ref=' + $run.head_sha)
-            if ($blob.sha -cne $Configuration.WorkflowBlobSha) { throw 'WORKFLOW_BLOB_SHA_MISMATCH' }
-        }
+        if ($Configuration.WorkflowPath -ceq '.github/workflows/deploy-dashboard-pr379.yml') {
+            if ($run.event -cne 'workflow_dispatch') { throw 'ROYAL_EVENT_REFUSED' }
+            if ($run.head_branch -cne 'main') { throw 'ROYAL_REF_REFUSED' }
+            if ($run.id -ne $Configuration.WorkflowRunId -or $run.status -cne 'queued' -or $null -ne $run.conclusion -or $run.run_attempt -le 0) { throw 'ROYAL_RUN_NOT_QUEUED' }
+            if ($Configuration.ExpectedSha -cnotmatch '^[a-f0-9]{40}$' -or $run.head_sha -cne $Configuration.ExpectedSha) { throw 'ROYAL_HEAD_SHA_REFUSED' }
+            if ($Configuration.WorkflowBlobSha) {
+                $blob = Invoke-Ci7Api ('repos/' + $Configuration.Repository + '/contents/' + $Configuration.WorkflowPath + '?ref=' + $run.head_sha)
+                if ($blob.sha -cne $Configuration.WorkflowBlobSha) { throw 'WORKFLOW_BLOB_SHA_MISMATCH' }
+            }
+        } elseif ($Configuration.WorkflowPath -ceq '.github/workflows/dashboard-release-gate.yml') {
+            if ($run.event -cne 'pull_request') { throw 'ROYAL_PR_EVENT_REFUSED' }
+            if ($run.id -ne $Configuration.WorkflowRunId -or $run.status -cne 'queued' -or $null -ne $run.conclusion -or $run.run_attempt -le 0) { throw 'ROYAL_RUN_NOT_QUEUED' }
+            if ($Configuration.ExpectedJobName -cne 'Zero-side-effect full repository release validation') { throw 'ROYAL_PR_JOB_NAME_REFUSED' }
+        } else { throw 'ROYAL_WORKFLOW_PATH_INVALID' }
     } else {
         if ($run.event -cnotin @('push', 'pull_request', 'workflow_dispatch')) { throw 'WORKFLOW_IDENTITY_MISMATCH' }
     }
@@ -149,7 +159,9 @@ function Get-Ci7ExpectedJob {
     $response = Invoke-Ci7Api ('repos/' + $Configuration.Repository + '/actions/runs/' + $Configuration.WorkflowRunId + '/jobs?filter=latest&per_page=100')
     if ($response.total_count -ne 1 -or @($response.jobs).Count -ne 1) { throw 'EXACTLY_ONE_JOB_REQUIRED' }
     $job = $response.jobs[0]
-    if ($Configuration.Repository -ceq 'LowcountryDigitalWorks/royal-cruise-tracker' -and ($Configuration.ExpectedJobName -cne 'Manual exact-SHA' -or $job.name -cne $Configuration.ExpectedJobName -or $job.run_id -ne $Configuration.WorkflowRunId -or $job.run_attempt -ne $run.run_attempt -or $job.head_sha -cne $Configuration.ExpectedSha)) { throw 'JOB_IDENTITY_MISMATCH' }
+    if ($Configuration.Repository -ceq 'LowcountryDigitalWorks/royal-cruise-tracker' -and
+        ($job.name -cne $Configuration.ExpectedJobName -or $job.run_id -ne $Configuration.WorkflowRunId -or
+         $job.run_attempt -ne $run.run_attempt -or $job.head_sha -cne $run.head_sha)) { throw 'JOB_IDENTITY_MISMATCH' }
     $expected = @(Get-Ci7Labels $Configuration.WorkflowRunId $Configuration)
     if (@($job.labels).Count -ne $expected.Count -or @(Compare-Object $expected @($job.labels) -CaseSensitive).Count -ne 0) { throw 'ISOLATED_JOB_LABELS_REQUIRED' }
     if ($RequireQueued -and ($job.status -cne 'queued' -or $job.runner_id)) { throw 'UNASSIGNED_QUEUED_JOB_REQUIRED' }

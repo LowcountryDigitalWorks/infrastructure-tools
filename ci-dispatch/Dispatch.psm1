@@ -98,7 +98,7 @@ function Assert-Ci10Bundle {
 function Read-Ci10Profiles {
     param([string]$Path)
     $registry = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
-    if ($registry.schema -ne 1 -or @($registry.profiles).Count -ne 3) { throw 'PROFILE_REGISTRY_REFUSED' }
+    if ($registry.schema -ne 1 -or @($registry.profiles).Count -ne 4) { throw 'PROFILE_REGISTRY_REFUSED' }
     $profiles = @($registry.profiles)
     $required = @('id','repository','workflowPath','events','branch','headSha','workflowBlobSha','jobName','labels','dynamicLabel','jobCount',
         'cpu','memoryMiB','timeoutMinutes','docker','workflowSecrets','privateProductionState','egress','controllerProfile')
@@ -114,7 +114,7 @@ function Read-Ci10Profiles {
         } else {
             if ($profile.workflowSecrets) { throw 'PROFILE_CONTRACT_REFUSED' }
         }
-        $labels = if ($profile.id -ceq 'ci10-royal-dashboard-deploy') {
+        $labels = if ($profile.id -cin @('ci10-royal-dashboard-deploy','ci10-royal-dashboard-release-gate-pr')) {
             @('self-hosted','Linux','X64','ldw01','ldw-ephemeral','ldw-isolated','royal-isolated')
         } else {
             @('self-hosted','Linux','X64','ldw01','ldw-ephemeral','ldw-isolated','security-isolated')
@@ -124,7 +124,8 @@ function Read-Ci10Profiles {
     $synthetic = $profiles | Where-Object id -CEQ 'ci10-accepted-synthetic'
     $production = $profiles | Where-Object id -CEQ 'ci10-bo-secret-scan'
     $royal = $profiles | Where-Object id -CEQ 'ci10-royal-dashboard-deploy'
-    if ($synthetic.Count -ne 1 -or $production.Count -ne 1 -or $royal.Count -ne 1 -or
+    $royalPr = $profiles | Where-Object id -CEQ 'ci10-royal-dashboard-release-gate-pr'
+    if ($synthetic.Count -ne 1 -or $production.Count -ne 1 -or $royal.Count -ne 1 -or $royalPr.Count -ne 1 -or
         $synthetic.repository -cne 'LowcountryDigitalWorks/infrastructure-tools' -or
         $synthetic.workflowPath -cne '.github/workflows/ci-runner-isolation-proof.yml' -or
         @($synthetic.events).Count -ne 1 -or $synthetic.events[0] -cne 'push' -or
@@ -145,7 +146,14 @@ function Read-Ci10Profiles {
         $null -ne $royal.headSha -or $null -ne $royal.workflowBlobSha -or
         $royal.jobName -cne 'Manual exact-SHA' -or
         -not $royal.workflowSecrets -or
-        $royal.controllerProfile -cne 'accepted-ci7-royal-dashboard-deploy') { throw 'PROFILE_CONTRACT_REFUSED' }
+        $royal.controllerProfile -cne 'accepted-ci7-royal-dashboard-deploy' -or
+        $royalPr.repository -cne 'LowcountryDigitalWorks/royal-cruise-tracker' -or
+        $royalPr.workflowPath -cne '.github/workflows/dashboard-release-gate.yml' -or
+        @($royalPr.events).Count -ne 1 -or $royalPr.events[0] -cne 'pull_request' -or
+        $null -ne $royalPr.branch -or $null -ne $royalPr.headSha -or $null -ne $royalPr.workflowBlobSha -or
+        $royalPr.jobName -cne 'Zero-side-effect full repository release validation' -or
+        $royalPr.workflowSecrets -or $royalPr.privateProductionState -or $royalPr.docker -or
+        $royalPr.controllerProfile -cne 'accepted-ci7-royal-dashboard-release-gate-pr') { throw 'PROFILE_CONTRACT_REFUSED' }
     $profiles
 }
 
@@ -262,7 +270,10 @@ function Get-Ci10ControllerGate {
                 ($state.Configuration.Repository -ceq 'LowcountryDigitalWorks/business-operations' -and
                 $state.Configuration.WorkflowPath -ceq '.github/workflows/security-secrets.yml') -or
                 ($state.Configuration.Repository -ceq 'LowcountryDigitalWorks/royal-cruise-tracker' -and
-                $state.Configuration.WorkflowPath -ceq '.github/workflows/deploy-dashboard-pr379.yml')
+                $state.Configuration.WorkflowPath -ceq '.github/workflows/deploy-dashboard-pr379.yml') -or
+            ($Profile.id -ceq 'ci10-royal-dashboard-release-gate-pr' -and
+                $state.Configuration.Repository -ceq 'LowcountryDigitalWorks/royal-cruise-tracker' -and
+                $state.Configuration.WorkflowPath -ceq '.github/workflows/dashboard-release-gate.yml')
             if (-not $matchesProfile -and -not $matchesKnownOther) { throw 'STALE_PROFILE_OWNERSHIP_REFUSED' }
             if (-not $matchesProfile) {
                 $otherRunLock = $null
@@ -280,7 +291,7 @@ function Get-Ci10ControllerGate {
                 ($Profile.id -ceq 'ci10-accepted-synthetic' -and
                     ($state.Configuration.ExpectedSha -cne $Profile.headSha -or -not $state.Configuration.PublicSyntheticProof)) -or
                 ($Profile.id -ceq 'ci10-bo-secret-scan' -and $state.Configuration.PublicSyntheticProof) -or
-                ($Profile.id -ceq 'ci10-royal-dashboard-deploy' -and $state.Configuration.PublicSyntheticProof)) { throw 'STALE_PROFILE_OWNERSHIP_REFUSED' }
+                ($Profile.id -cin @('ci10-royal-dashboard-deploy','ci10-royal-dashboard-release-gate-pr') -and $state.Configuration.PublicSyntheticProof)) { throw 'STALE_PROFILE_OWNERSHIP_REFUSED' }
             $runLock = $null
             try { $runLock = [IO.File]::Open((Join-Path $directory.FullName 'controller.lock'),'OpenOrCreate','ReadWrite','None') }
             catch { return 'BUSY' }
@@ -297,7 +308,7 @@ function Get-Ci10ControllerGate {
         $approved = @('LowcountryDigitalWorks/business-operations', 'LowcountryDigitalWorks/royal-cruise-tracker')
         # This check measures local capacity only; these placeholder refs never enter candidate verification or launch.
         $capacityBlobSha = if ($Profile.id -ceq 'ci10-royal-dashboard-deploy') { '0000000000000000000000000000000000000000' } else { $Profile.workflowBlobSha }
-        $configuration = New-Ci7Configuration -Repository $Profile.repository -WorkflowRunId 1 -ExpectedSha ('0' * 40) -Root $ControllerRoot -ApprovedRepositories $approved -AllowPublicSyntheticProof:($Profile.id -ceq 'ci10-accepted-synthetic') -WorkflowPath $Profile.workflowPath -WorkflowBlobSha $capacityBlobSha -StaticLabels $Profile.labels
+        $configuration = New-Ci7Configuration -Repository $Profile.repository -WorkflowRunId 1 -ExpectedSha ('0' * 40) -Root $ControllerRoot -ApprovedRepositories $approved -AllowPublicSyntheticProof:($Profile.id -ceq 'ci10-accepted-synthetic') -WorkflowPath $Profile.workflowPath -WorkflowBlobSha $capacityBlobSha -ExpectedJobName $Profile.jobName -StaticLabels $Profile.labels
         try { Assert-Ci7Capacity $configuration }
         catch { if ($_.Exception.Message -cmatch '^CAPACITY_' -or $_.Exception.Message -ceq 'DEFAULT_NAT_SWITCH_REQUIRED') { return 'CAPACITY' }; throw }
         'READY'
@@ -328,7 +339,7 @@ function Get-Ci10StaleRunIds {
                 ($Profile.id -ceq 'ci10-accepted-synthetic' -and
                     ($state.Configuration.ExpectedSha -cne $Profile.headSha -or -not $state.Configuration.PublicSyntheticProof)) -or
                 ($Profile.id -ceq 'ci10-bo-secret-scan' -and $state.Configuration.PublicSyntheticProof) -or
-                ($Profile.id -ceq 'ci10-royal-dashboard-deploy' -and $state.Configuration.PublicSyntheticProof)) { throw 'STALE_PROFILE_OWNERSHIP_REFUSED' }
+                ($Profile.id -cin @('ci10-royal-dashboard-deploy','ci10-royal-dashboard-release-gate-pr') -and $state.Configuration.PublicSyntheticProof)) { throw 'STALE_PROFILE_OWNERSHIP_REFUSED' }
             $state.RunId
         }
     } finally { $lock.Dispose() }
@@ -337,7 +348,7 @@ function Get-Ci10StaleRunIds {
 function Write-Ci10Log {
     param([string]$Root, [ValidateSet('start','stop','poll-pass','poll-fail','busy','capacity','idle','selected','discovery-only',
         'controller-start','controller-pass','controller-fail','reap-pass','reap-fail')][string]$Classification,
-        [ValidateSet('ci10-accepted-synthetic','ci10-bo-secret-scan','ci10-royal-dashboard-deploy')][string]$ProfileId = 'ci10-accepted-synthetic', [long]$RunId = 0)
+        [ValidateSet('ci10-accepted-synthetic','ci10-bo-secret-scan','ci10-royal-dashboard-deploy','ci10-royal-dashboard-release-gate-pr')][string]$ProfileId = 'ci10-accepted-synthetic', [long]$RunId = 0)
     if ($RunId -lt 0) { throw 'LOG_RUN_ID_INVALID' }
     Assert-Ci10ProtectedPath $Root
     $file = Join-Path $Root 'dispatcher.jsonl'
@@ -366,7 +377,7 @@ function Start-Ci10Controller {
     if ($CleanupRunId) { $info.ArgumentList.Add('-LocalRunId'); $info.ArgumentList.Add($CleanupRunId) }
     else {
         $args = @('-Repository',$Candidate.Profile.repository,'-WorkflowRunId',[string]$Candidate.RunId,
-            '-ExpectedSha',$(if ($Candidate.Profile.id -ceq 'ci10-royal-dashboard-deploy') { $Candidate.FrozenHeadSha } else { $Candidate.Sha }),'-MemoryMiB',[string]$Candidate.Profile.memoryMiB,
+            '-ExpectedSha',$(if ($Candidate.Profile.id -ceq 'ci10-royal-dashboard-deploy') { $Candidate.FrozenHeadSha } elseif ($Candidate.Profile.id -ceq 'ci10-royal-dashboard-release-gate-pr') { $Candidate.Sha } else { $Candidate.Sha }),'-MemoryMiB',[string]$Candidate.Profile.memoryMiB,
             '-CpuCount',[string]$Candidate.Profile.cpu,'-TimeoutMinutes',[string]$Candidate.Profile.timeoutMinutes)
         if ($Candidate.Profile.id -ceq 'ci10-accepted-synthetic') { $args += '-AllowPublicSyntheticProof' }
         else { $args += @('-ApprovedRepositories','LowcountryDigitalWorks/business-operations,LowcountryDigitalWorks/royal-cruise-tracker') }
