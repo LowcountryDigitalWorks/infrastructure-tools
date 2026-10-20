@@ -57,16 +57,81 @@ public sealed class SyntheticBrowserAdapter : IBridgeBrowserAdapter
             return null;
         }
 
-        // Strip userinfo/query/fragment so secret-bearing URL components never leave LDW01.
-        var redactedUrl = parsed.GetComponents(
-            UriComponents.Scheme | UriComponents.Host | UriComponents.Port | UriComponents.Path,
+        // Strip userinfo/query/fragment, then apply a fail-closed path representation so
+        // credential-bearing path segments cannot egress while short structural tab identity remains.
+        var authority = parsed.GetComponents(
+            UriComponents.Scheme | UriComponents.Host | UriComponents.Port,
             UriFormat.UriEscaped);
+        var redactedUrl = authority + RedactPath(parsed.AbsolutePath);
 
         return tab with
         {
             Title = tab.Title.Length > 120 ? tab.Title[..120] : tab.Title,
             Url = redactedUrl
         };
+    }
+
+    private static string RedactPath(string absolutePath)
+    {
+        if (string.IsNullOrEmpty(absolutePath) || absolutePath == "/")
+        {
+            return string.IsNullOrEmpty(absolutePath) ? "/" : absolutePath;
+        }
+
+        // Fail-closed path representation: keep at most one short structural segment
+        // (e.g. /c/*), then a single "*" placeholder. Token/reset/login path material
+        // never egresses as raw segments; no exhaustive secret classifier required.
+        var parts = absolutePath.Split('/');
+        var output = new List<string>(parts.Length);
+        var retainedStructural = false;
+        var emittedPlaceholder = false;
+
+        foreach (var segment in parts)
+        {
+            if (segment.Length == 0)
+            {
+                output.Add(segment);
+                continue;
+            }
+
+            if (!retainedStructural && IsSafeStructuralPathSegment(segment))
+            {
+                output.Add(segment);
+                retainedStructural = true;
+                continue;
+            }
+
+            if (!emittedPlaceholder)
+            {
+                output.Add("*");
+                emittedPlaceholder = true;
+            }
+
+            break;
+        }
+
+        return string.Join('/', output);
+    }
+
+    private static bool IsSafeStructuralPathSegment(string segment)
+    {
+        const int maxLength = 16;
+        if (segment.Length > maxLength)
+        {
+            return false;
+        }
+
+        foreach (var ch in segment)
+        {
+            if (char.IsAsciiLetterOrDigit(ch) || ch is '-' or '_')
+            {
+                continue;
+            }
+
+            return false;
+        }
+
+        return true;
     }
 
     private static bool IsAllowlistedHost(string host, string allowedDomain)

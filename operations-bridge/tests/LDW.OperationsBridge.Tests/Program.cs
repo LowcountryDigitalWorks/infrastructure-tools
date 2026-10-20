@@ -141,7 +141,9 @@ var adapter = new CountingBrowserAdapter(
     new BrowserTabMetadata("2", "NOT_ALLOWLISTED", "Bank", "https://bank.example.com/private"),
     new BrowserTabMetadata("3", "LOOKALIKE", "Fake GPT", "https://evilchatgpt.com/prompt"),
     new BrowserTabMetadata("4", "SUBDOMAIN_OK", "OpenAI", "https://status.openai.com/"),
-    new BrowserTabMetadata("5", "USERINFO", "Creds", "https://user:pass@chatgpt.com/c/safe")
+    new BrowserTabMetadata("5", "USERINFO", "Creds", "https://user:pass@chatgpt.com/c/safe"),
+    new BrowserTabMetadata("6", "RESET_PATH", "Reset", "https://chatgpt.com/reset/Sup3rSecretResetTokenValue1234567890"),
+    new BrowserTabMetadata("7", "LOGIN_TOKEN_PATH", "Login", "https://chatgpt.com/login/token/one-time-login-secret-abcDEF999")
 ]);
 
 var client = new OutboundBridgeClient(bridgeId, adapter, validator);
@@ -163,10 +165,14 @@ Assert(transport.Results[0].Payload.ContainsKey("tab_0_url"), "result includes s
 Assert(!transport.Results[0].Payload.Values.Any(value => value.Contains("bank.example.com", StringComparison.OrdinalIgnoreCase)), "non-allowlisted tab metadata is filtered");
 Assert(!transport.Results[0].Payload.Values.Any(value => value.Contains("evilchatgpt.com", StringComparison.OrdinalIgnoreCase)), "lookalike host is filtered from allowlist");
 Assert(transport.Results[0].Payload.Values.Any(value => value.Contains("status.openai.com", StringComparison.OrdinalIgnoreCase)), "allowlisted subdomain remains visible");
-Assert(transport.Results[0].Payload.Values.Any(value => value.Equals("https://chatgpt.com/c/123", StringComparison.Ordinal)), "allowlisted URL query/fragment are redacted before egress");
+Assert(transport.Results[0].Payload.Values.Any(value => value.Equals("https://chatgpt.com/c/*", StringComparison.Ordinal)), "allowlisted URL keeps short structural path identity with deeper segments redacted");
 Assert(!transport.Results[0].Payload.Values.Any(value => value.Contains("access_token", StringComparison.OrdinalIgnoreCase)), "secret-bearing query values never leave LDW01");
 Assert(!transport.Results[0].Payload.Values.Any(value => value.Contains("user:pass@", StringComparison.OrdinalIgnoreCase)), "URL userinfo never leaves LDW01");
-Assert(transport.Results[0].Payload.Values.Any(value => value.Equals("https://chatgpt.com/c/safe", StringComparison.Ordinal)), "userinfo-bearing allowlisted URL is redacted to scheme/host/path");
+Assert(transport.Results[0].Payload.Values.Count(value => value.Equals("https://chatgpt.com/c/*", StringComparison.Ordinal)) >= 2, "userinfo-bearing allowlisted URL uses the same structural path representation");
+Assert(!transport.Results[0].Payload.Values.Any(value => value.Contains("Sup3rSecretResetTokenValue1234567890", StringComparison.Ordinal)), "reset-path token material never leaves LDW01");
+Assert(!transport.Results[0].Payload.Values.Any(value => value.Contains("one-time-login-secret-abcDEF999", StringComparison.Ordinal)), "login/token path secret material never leaves LDW01");
+Assert(transport.Results[0].Payload.Values.Any(value => value.Equals("https://chatgpt.com/reset/*", StringComparison.Ordinal)), "reset-style path redacts to structural label plus placeholder");
+Assert(transport.Results[0].Payload.Values.Any(value => value.Equals("https://chatgpt.com/login/*", StringComparison.Ordinal)), "login/token-style path redacts to structural label plus placeholder");
 Assert(adapter.ListTabsCalls == 1, "allowlisted happy-path invoked adapter once");
 
 var staleClientRequest = BuildRequest(
