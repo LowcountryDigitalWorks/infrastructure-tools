@@ -203,9 +203,9 @@ export class BridgeRelayDurableObject {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  deliverQueuedDispatches(bridgeId, connectionId, socket) {
+  deliverQueuedDispatches(bridgeId, connectionId, socket, limit = MAX_QUEUED_DELIVERIES_PER_CONNECTION) {
     this.repository.resolveNonterminal(new Date().toISOString());
-    const queued = this.repository.listQueued(bridgeId, MAX_QUEUED_DELIVERIES_PER_CONNECTION);
+    const queued = this.repository.listQueued(bridgeId, limit);
     let failedDispatchId = null;
     let deliveredCount = 0;
 
@@ -237,7 +237,11 @@ export class BridgeRelayDurableObject {
     }
 
     // Exact bridge identity and connection id are bound server-side from the hibernated socket.
-    this.repository.completeFromClient(attachment.connectionId, payload, new Date().toISOString());
+    const completion = this.repository.completeFromClient(attachment.connectionId, payload, new Date().toISOString());
+    if (completion.ok) {
+      // Advance the bounded in-flight window only after an accepted terminal acknowledgement.
+      this.deliverQueuedDispatches(attachment.bridgeId, attachment.connectionId, ws, 1);
+    }
   }
 
   async webSocketClose(ws, code, reason) {

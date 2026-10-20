@@ -159,6 +159,50 @@ test("queued dispatch drains on bridge reconnect without duplicate execution", a
   assert.equal(socket.sent.length, 1);
 });
 
+test("reconnect drains a bounded window and advances one queued item per accepted terminal", async () => {
+  const env = buildEnv();
+  const dispatches = [];
+  for (let index = 0; index < 34; index += 1) {
+    const dispatch = buildDispatch({
+      idempotencyKey: `idem-backlog-${index}`,
+      correlationId: `corr-backlog-${index}`
+    });
+    dispatches.push(dispatch);
+    const response = await sendWithToken(env, env.SITE_DISPATCH_TOKEN, "/relay/dispatch", "POST", dispatch);
+    assert.equal(response.status, 200);
+  }
+
+  const { durable, socket } = attachSocket(env, "ldw01-bridge");
+  const connectionId = socket.deserializeAttachment().connectionId;
+  assert.equal(socket.sent.length, 32);
+  const remaining = durable.repository.listQueued("ldw01-bridge", 32);
+  assert.equal(remaining.length, 2);
+  assert.equal(durable.repository.getDispatch(remaining[1].dispatch_id).lifecycle, "queued");
+
+  const terminal = {
+    type: "terminal",
+    dispatchId: dispatches[0].dispatchId,
+    idempotencyKey: dispatches[0].idempotencyKey,
+    correlationId: dispatches[0].correlationId,
+    status: "PASS",
+    bridgeRuntime: "ldw-operations-bridge",
+    bridgeVersion: "1.0.0",
+    operation: dispatches[0].operation,
+    resultClass: "PASS",
+    startedAt: new Date(Date.now() - 500).toISOString(),
+    evidence: "completed",
+    payload: {}
+  };
+  await durable.webSocketMessage(socket, JSON.stringify(terminal));
+  assert.equal(socket.sent.length, 33);
+  assert.equal(socket.sent[32].dispatchId, remaining[0].dispatch_id);
+  assert.equal(durable.repository.getDispatch(remaining[0].dispatch_id).delivery_connection_id, connectionId);
+  assert.equal(durable.repository.getDispatch(remaining[1].dispatch_id).lifecycle, "queued");
+
+  await durable.webSocketMessage(socket, JSON.stringify(terminal));
+  assert.equal(socket.sent.length, 33, "duplicate terminal does not advance the queue");
+  assert.equal(durable.repository.getDispatch(remaining[1].dispatch_id).lifecycle, "queued");
+});
 test("stale and unknown envelopes are rejected before persistence", () => {
   const now = new Date().toISOString();
   const stale = normalizeDispatchPayload(
