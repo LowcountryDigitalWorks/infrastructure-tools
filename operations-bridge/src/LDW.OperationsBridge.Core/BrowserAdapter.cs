@@ -114,25 +114,7 @@ public sealed class SyntheticBrowserAdapter : IBridgeBrowserAdapter
     }
 
     private static bool IsSafeStructuralPathSegment(string segment)
-    {
-        const int maxLength = 16;
-        if (segment.Length > maxLength)
-        {
-            return false;
-        }
-
-        foreach (var ch in segment)
-        {
-            if (char.IsAsciiLetterOrDigit(ch) || ch is '-' or '_')
-            {
-                continue;
-            }
-
-            return false;
-        }
-
-        return true;
-    }
+        => segment is "c" or "reset" or "login";
 
     private static bool IsAllowlistedHost(string host, string allowedDomain)
     {

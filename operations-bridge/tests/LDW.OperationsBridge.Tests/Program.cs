@@ -143,7 +143,9 @@ var adapter = new CountingBrowserAdapter(
     new BrowserTabMetadata("4", "SUBDOMAIN_OK", "OpenAI", "https://status.openai.com/"),
     new BrowserTabMetadata("5", "USERINFO", "Creds", "https://user:pass@chatgpt.com/c/safe"),
     new BrowserTabMetadata("6", "RESET_PATH", "Reset", "https://chatgpt.com/reset/Sup3rSecretResetTokenValue1234567890"),
-    new BrowserTabMetadata("7", "LOGIN_TOKEN_PATH", "Login", "https://chatgpt.com/login/token/one-time-login-secret-abcDEF999")
+    new BrowserTabMetadata("7", "LOGIN_TOKEN_PATH", "Login", "https://chatgpt.com/login/token/one-time-login-secret-abcDEF999"),
+    new BrowserTabMetadata("8", "SHORT_TOKEN_ROOT", "Short token", "https://chatgpt.com/abc123"),
+    new BrowserTabMetadata("9", "SHORT_TOKEN_SEGMENT", "Short token segment", "https://chatgpt.com/r/aBc123")
 ]);
 
 var client = new OutboundBridgeClient(bridgeId, adapter, validator);
@@ -173,6 +175,9 @@ Assert(!transport.Results[0].Payload.Values.Any(value => value.Contains("Sup3rSe
 Assert(!transport.Results[0].Payload.Values.Any(value => value.Contains("one-time-login-secret-abcDEF999", StringComparison.Ordinal)), "login/token path secret material never leaves LDW01");
 Assert(transport.Results[0].Payload.Values.Any(value => value.Equals("https://chatgpt.com/reset/*", StringComparison.Ordinal)), "reset-style path redacts to structural label plus placeholder");
 Assert(transport.Results[0].Payload.Values.Any(value => value.Equals("https://chatgpt.com/login/*", StringComparison.Ordinal)), "login/token-style path redacts to structural label plus placeholder");
+Assert(!transport.Results[0].Payload.Values.Any(value => value.Contains("abc123", StringComparison.OrdinalIgnoreCase)), "short token-like path material never leaves LDW01");
+Assert(!transport.Results[0].Payload.Values.Any(value => value.Contains("aBc123", StringComparison.OrdinalIgnoreCase)), "short token-like later path material never leaves LDW01");
+Assert(transport.Results[0].Payload.Values.Any(value => value.Equals("https://chatgpt.com/*", StringComparison.Ordinal)), "unrecognized first path segment is fully redacted");
 Assert(adapter.ListTabsCalls == 1, "allowlisted happy-path invoked adapter once");
 
 var staleClientRequest = BuildRequest(

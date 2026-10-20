@@ -26,6 +26,8 @@ test("source/runtime contract requires Cloudflare hibernation APIs", () => {
   assert.equal(typeof BridgeRelayDurableObject.prototype.webSocketMessage, "function");
   assert.equal(typeof BridgeRelayDurableObject.prototype.webSocketClose, "function");
   assert.equal(typeof BridgeRelayDurableObject.prototype.selectBridgeSocket, "function");
+  assert.equal(typeof BridgeRelayDurableObject.prototype.deliverQueuedDispatches, "function");
+  assert.match(RELAY_SOURCE, /this\.deliverQueuedDispatches\(bridgeId, connectionId, server\)/);
   assert.ok(HIBERNATION_RUNTIME_CONTRACT.acceptWebSocket.includes("acceptWebSocket"));
   assert.ok(!/\bserver\.accept\s*\(/.test(RELAY_SOURCE));
   assert.ok(!RELAY_SOURCE.includes("this.connections = new Map"));
@@ -121,6 +123,40 @@ test("full-envelope socket delivery and send failure does not mark delivered", a
   assert.ok(row.protocol_version);
   assert.ok(row.operation);
   assert.ok(row.args_json);
+});
+
+test("queued dispatch drains on bridge reconnect without duplicate execution", async () => {
+  const env = buildEnv();
+  const dispatch = buildDispatch({ idempotencyKey: "idem-reconnect", correlationId: "corr-reconnect" });
+
+  const queuedResponse = await sendWithToken(env, env.SITE_DISPATCH_TOKEN, "/relay/dispatch", "POST", dispatch);
+  const queuedBody = await queuedResponse.json();
+  assert.equal(queuedBody.state, "accepted");
+  assert.equal(queuedBody.delivery, "pending");
+
+  const stub = env.BRIDGE_RELAY.get(env.BRIDGE_RELAY.idFromName("ldw01-bridge"));
+  const durable = stub.__durable();
+  assert.equal(durable.repository.getDispatch(dispatch.dispatchId).lifecycle, "queued");
+
+  const { socket } = attachSocket(env, "ldw01-bridge");
+  const record = durable.repository.getDispatch(dispatch.dispatchId);
+  assert.equal(socket.sent.length, 1);
+  assert.equal(socket.sent[0].dispatchId, dispatch.dispatchId);
+  assert.equal(socket.sent[0].idempotencyKey, dispatch.idempotencyKey);
+  assert.equal(socket.sent[0].correlationId, dispatch.correlationId);
+  assert.equal(record.lifecycle, "delivered");
+  assert.equal(record.delivery_connection_id, socket.deserializeAttachment().connectionId);
+
+  const retry = await sendWithToken(env, env.SITE_DISPATCH_TOKEN, "/relay/dispatch", "POST", {
+    ...buildDispatch({ idempotencyKey: dispatch.idempotencyKey, correlationId: "corr-retry" }),
+    dispatchId: crypto.randomUUID()
+  });
+  const retryBody = await retry.json();
+  assert.equal(retryBody.state, "duplicate");
+  assert.equal(retryBody.dispatchId, dispatch.dispatchId);
+  assert.equal(retryBody.correlationId, dispatch.correlationId);
+  assert.equal(retryBody.delivery, "sent");
+  assert.equal(socket.sent.length, 1);
 });
 
 test("stale and unknown envelopes are rejected before persistence", () => {
@@ -576,7 +612,9 @@ function attachSocket(env, bridgeId) {
   const durable = stub.__durable();
   const socket = createFakeSocket(bridgeId);
   durable.__state.acceptWebSocket(socket, [bridgeId]);
-  socket.serializeAttachment({ bridgeId, connectionId: crypto.randomUUID() });
+  const connectionId = crypto.randomUUID();
+  socket.serializeAttachment({ bridgeId, connectionId });
+  durable.deliverQueuedDispatches(bridgeId, connectionId, socket);
   return { durable, socket };
 }
 
@@ -671,6 +709,13 @@ function createFakeSql() {
       if (sql.startsWith("SELECT * FROM dispatches WHERE idempotency_key")) {
         const dispatchId = byIdempotency.get(params[0]);
         return dispatchId ? [rows.get(dispatchId)] : [];
+      }
+
+      if (sql.startsWith("SELECT * FROM dispatches WHERE bridge_id")) {
+        return [...rows.values()]
+          .filter((row) => row.bridge_id === params[0] && row.lifecycle === "queued" && !row.terminal_status)
+          .sort((a, b) => a.issued_at.localeCompare(b.issued_at) || a.dispatch_id.localeCompare(b.dispatch_id))
+          .slice(0, Number(params[1]));
       }
 
       if (sql.startsWith("SELECT * FROM dispatches WHERE dispatch_id")) {

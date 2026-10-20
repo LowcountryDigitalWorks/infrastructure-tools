@@ -5,6 +5,7 @@ const RELAY_PATHS = {
 
 const PROTOCOL_VERSION = "1.0";
 const MAX_TTL_MS = 5 * 60 * 1000;
+const MAX_QUEUED_DELIVERIES_PER_CONNECTION = 32;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const MAX_EVIDENCE_LENGTH = 512;
 const MAX_PAYLOAD_ENTRIES = 32;
@@ -130,50 +131,23 @@ export class BridgeRelayDurableObject {
         return jsonResponse({ error: accepted.error }, 400);
       }
 
-      if (accepted.state === "duplicate") {
-        return jsonResponse(sanitizeSiteDispatchResponse(accepted), 200);
-      }
-
       const selected = this.selectBridgeSocket(accepted.record.bridge_id);
-      if (!selected) {
-        return jsonResponse(
-          {
-            state: accepted.state,
-            dispatchId: accepted.record.dispatch_id,
-            correlationId: accepted.record.correlation_id,
-            delivery: "pending"
-          },
-          200
-        );
+      const delivery = selected
+        ? this.deliverQueuedDispatches(accepted.record.bridge_id, selected.connectionId, selected.socket)
+        : { failedDispatchId: null };
+      const record = this.repository.getDispatch(accepted.record.dispatch_id) || accepted.record;
+
+      if (accepted.state === "duplicate") {
+        return jsonResponse(sanitizeSiteDispatchResponse({ ...accepted, record }), 200);
       }
 
-      const envelope = buildDeliveryEnvelope(accepted.record);
-      try {
-        selected.socket.send(JSON.stringify(envelope));
-      } catch {
-        return jsonResponse(
-          {
-            state: accepted.state,
-            dispatchId: accepted.record.dispatch_id,
-            correlationId: accepted.record.correlation_id,
-            delivery: "send_failed"
-          },
-          200
-        );
-      }
-
-      this.repository.markDelivered(
-        accepted.record.dispatch_id,
-        selected.connectionId,
-        new Date().toISOString()
-      );
-
+      const delivered = record.lifecycle === "delivered";
       return jsonResponse(
         {
-          state: "delivered",
-          dispatchId: accepted.record.dispatch_id,
-          correlationId: accepted.record.correlation_id,
-          delivery: "sent"
+          state: delivered ? "delivered" : accepted.state,
+          dispatchId: record.dispatch_id,
+          correlationId: record.correlation_id,
+          delivery: delivered ? "sent" : delivery.failedDispatchId === record.dispatch_id ? "send_failed" : "pending"
         },
         200
       );
@@ -224,8 +198,30 @@ export class BridgeRelayDurableObject {
     // Hibernation path: attach via acceptWebSocket + attachment (not the non-hibernating accept API).
     this.state.acceptWebSocket(server, [bridgeId]);
     server.serializeAttachment({ bridgeId, connectionId });
+    this.deliverQueuedDispatches(bridgeId, connectionId, server);
 
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  deliverQueuedDispatches(bridgeId, connectionId, socket) {
+    this.repository.resolveNonterminal(new Date().toISOString());
+    const queued = this.repository.listQueued(bridgeId, MAX_QUEUED_DELIVERIES_PER_CONNECTION);
+    let failedDispatchId = null;
+    let deliveredCount = 0;
+
+    for (const record of queued) {
+      try {
+        socket.send(JSON.stringify(buildDeliveryEnvelope(record)));
+      } catch {
+        failedDispatchId = record.dispatch_id;
+        break;
+      }
+
+      this.repository.markDelivered(record.dispatch_id, connectionId, new Date().toISOString());
+      deliveredCount += 1;
+    }
+
+    return { deliveredCount, failedDispatchId };
   }
 
   async webSocketMessage(ws, message) {
@@ -460,6 +456,14 @@ export class SqliteRelayRepository {
     return updated;
   }
 
+  listQueued(bridgeId, limit) {
+    return this.sql.exec(
+      "SELECT * FROM dispatches WHERE bridge_id = ?1 AND lifecycle = 'queued' AND terminal_status IS NULL ORDER BY issued_at ASC, dispatch_id ASC LIMIT ?2",
+      bridgeId,
+      limit
+    );
+  }
+
   getDispatch(dispatchId) {
     return this.first(this.sql.exec("SELECT * FROM dispatches WHERE dispatch_id = ?1", dispatchId)) || null;
   }
@@ -532,6 +536,14 @@ export class InMemoryRelayRepository {
 
     row.lifecycle = "delivered";
     row.delivery_connection_id = connectionId;
+  }
+
+  listQueued(bridgeId, limit) {
+    return Array.from(this.dispatches.values())
+      .filter(row => row.bridge_id === bridgeId && row.lifecycle === "queued" && !row.terminal_status)
+      .sort((a, b) => a.issued_at.localeCompare(b.issued_at) || a.dispatch_id.localeCompare(b.dispatch_id))
+      .slice(0, limit)
+      .map(row => ({ ...row }));
   }
 
   completeFromClient(connectionId, payload, nowIso) {
