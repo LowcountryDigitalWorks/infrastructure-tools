@@ -1,0 +1,11 @@
+name = "ldw-operations-bridge-relay"
+main = "src/relay.js"
+compatibility_date = "2026-10-01"
+
+[[durable_objects.bindings]]
+name = "BRIDGE_RELAY"
+class_name = "BridgeRelayDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["BridgeRelayDurableObject"]
