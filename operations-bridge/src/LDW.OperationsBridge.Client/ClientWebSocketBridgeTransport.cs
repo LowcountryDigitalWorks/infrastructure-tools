@@ -26,13 +26,20 @@ public sealed class ClientWebSocketBridgeTransport : IBridgeTransport, IAsyncDis
 
     public bool IsConnected => _socket.State == WebSocketState.Open;
 
-    public async Task ConnectAsync(Uri relayConnectUri, string bridgeBearerToken, CancellationToken cancellationToken)
+    public async Task ConnectAsync(
+        Uri relayConnectUri,
+        string bridgeBearerToken,
+        IReadOnlyCollection<TrustedRelayEndpoint> trustedRelayEndpoints,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(relayConnectUri);
         if (string.IsNullOrWhiteSpace(bridgeBearerToken))
         {
             throw new ArgumentException("Bridge bearer token is required.", nameof(bridgeBearerToken));
         }
+
+        // Fail closed before attaching/sending the Bridge bearer token.
+        BridgeConnectGuard.EnsureTrustedSecureEndpoint(relayConnectUri, trustedRelayEndpoints);
 
         if (_socket.State != WebSocketState.None)
         {
@@ -155,6 +162,10 @@ public sealed class ClientWebSocketBridgeTransport : IBridgeTransport, IAsyncDis
             dispatchId = result.DispatchId.ToString("D"),
             idempotencyKey = result.IdempotencyKey,
             correlationId = result.CorrelationId,
+            bridgeRuntime = BridgeProtocol.BoundBridgeRuntime(result.BridgeRuntime),
+            bridgeVersion = BridgeProtocol.BoundBridgeVersion(result.BridgeVersion),
+            operation = result.OperationClass,
+            resultClass = result.ResultClass,
             status = BridgeProtocol.ToWireTerminalStatus(result.TerminalStatus),
             startedAt = result.StartedAt.ToString("O"),
             completedAt = result.CompletedAt.ToString("O"),
@@ -206,7 +217,16 @@ public sealed class ClientWebSocketBridgeTransport : IBridgeTransport, IAsyncDis
             var handler = DispatchReceived;
             if (handler is not null)
             {
-                await handler(request, "local-outbound", cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await handler(request, "local-outbound", cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception)
+                {
+                    // Adapter/handler faults must not leave the receive loop crashed without a
+                    // terminal outcome; OutboundBridgeClient catches and emits FAILED. Any
+                    // remaining fault is swallowed so the socket can continue for other work.
+                }
             }
         }
     }

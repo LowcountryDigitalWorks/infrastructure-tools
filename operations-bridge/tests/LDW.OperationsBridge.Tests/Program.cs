@@ -25,18 +25,22 @@ Assert(
         validRequest.DispatchId,
         "conn-a",
         "corr-1",
+        "idem-1",
         DispatchTerminalStatus.Pass,
         now.AddSeconds(3),
         "ok",
         new Dictionary<string, string> { ["tab_count"] = "1" }),
     "accepts correlated pass result");
 Assert(store.Get(validRequest.DispatchId)?.TerminalResult?.TerminalStatus == DispatchTerminalStatus.Pass, "stores PASS terminal result exactly once");
+Assert(store.Get(validRequest.DispatchId)?.TerminalResult?.BridgeRuntime == BridgeProtocol.BridgeRuntime, "PASS terminal preserves bridge runtime");
+Assert(store.Get(validRequest.DispatchId)?.TerminalResult?.Operation == BridgeOperation.ListTabs, "PASS terminal preserves exact operation");
 
 Assert(
     !store.TryComplete(
         validRequest.DispatchId,
         "conn-a",
         "corr-1",
+        "idem-1",
         DispatchTerminalStatus.Failed,
         now.AddSeconds(4),
         "late duplicate",
@@ -98,6 +102,7 @@ Assert(
         lostCorrelation.DispatchId,
         "other-connection",
         "wrong-correlation",
+        "idem-6",
         DispatchTerminalStatus.Pass,
         now.AddSeconds(10),
         "should not pass",
@@ -193,6 +198,9 @@ var terminalWire = ClientWebSocketBridgeTransport.ToTerminalWireMessage(
         parsed!.DispatchId,
         parsed.IdempotencyKey,
         parsed.CorrelationId,
+        BridgeProtocol.BridgeRuntime,
+        BridgeProtocol.BridgeRuntimeVersion,
+        parsed.Operation,
         DispatchTerminalStatus.Pass,
         now,
         now.AddSeconds(1),
@@ -210,6 +218,12 @@ using (var terminalDoc = JsonDocument.Parse(terminalJson))
     Assert(root.GetProperty("status").GetString() == "PASS", "terminal wire status is closed PASS");
     Assert(root.GetProperty("evidence").GetString()!.Length == BridgeProtocol.MaxEvidenceLength, "terminal evidence is bounded");
     Assert(root.GetProperty("payload").GetProperty("overflow").GetString()!.Length == BridgeProtocol.MaxPayloadValueLength, "terminal payload values are bounded");
+    Assert(root.GetProperty("bridgeRuntime").GetString() == BridgeProtocol.BridgeRuntime, "terminal wire includes bridge runtime");
+    Assert(root.GetProperty("bridgeVersion").GetString() == BridgeProtocol.BridgeRuntimeVersion, "terminal wire includes bridge version");
+    Assert(root.GetProperty("operation").GetString() == "browser.health", "terminal wire includes exact operation class");
+    Assert(root.GetProperty("resultClass").GetString() == "PASS", "terminal wire includes result class");
+    Assert(root.GetProperty("startedAt").GetString() is not null, "terminal wire includes startedAt");
+    Assert(root.GetProperty("completedAt").GetString() is not null, "terminal wire includes completedAt");
 }
 
 Assert(BridgeProtocol.AllowedTerminalStatuses.SetEquals(
@@ -225,6 +239,78 @@ Assert(!ClientWebSocketBridgeTransport.TryParseDispatchMessage(
     """{"type":"dispatch","protocolVersion":"1.0","dispatchId":"bad","bridgeId":"ldw01-bridge","operation":"browser.eval","issuedAt":"2026-01-01T00:00:00Z","expiresAt":"2026-01-01T00:01:00Z","idempotencyKey":"x","correlationId":"y","args":{}}""",
     out _,
     out _), "unknown/invalid wire dispatch fails parse before execution");
+
+// HIGH: bearer must not attach unless wss + explicitly trusted Worker endpoint.
+var trusted = new TrustedRelayEndpoint(new Uri("wss://relay.example/relay/connect?bridgeId=ldw01-bridge"));
+AssertThrows(
+    () => BridgeConnectGuard.EnsureTrustedSecureEndpoint(new Uri("ws://relay.example/relay/connect"), [trusted]),
+    "plaintext ws endpoint is rejected before credential attach");
+AssertThrows(
+    () => BridgeConnectGuard.EnsureTrustedSecureEndpoint(new Uri("wss://attacker.example/relay/connect"), [trusted]),
+    "arbitrary wss endpoint is rejected before credential attach");
+AssertThrows(
+    () => BridgeConnectGuard.EnsureTrustedSecureEndpoint(trusted.ConnectUri, Array.Empty<TrustedRelayEndpoint>()),
+    "empty trusted endpoint configuration fails closed");
+BridgeConnectGuard.EnsureTrustedSecureEndpoint(trusted.ConnectUri, [trusted]);
+assertionCount++;
+
+// MEDIUM: missing/mismatched idempotency key never records PASS.
+var idemGuard = BuildRequest(bridgeId, BridgeOperation.BrowserHealth, now, now.AddMinutes(2), "idem-key-guard", "corr-key-guard");
+Assert(store.Accept(idemGuard, now).State == DispatchAcceptState.Accepted, "accepts idempotency guard dispatch");
+Assert(store.TryMarkDelivered(idemGuard.DispatchId, "conn-idem", now), "delivers idempotency guard dispatch");
+Assert(store.TryMarkStarted(idemGuard.DispatchId, "conn-idem", now), "starts idempotency guard dispatch");
+Assert(
+    !store.TryComplete(
+        idemGuard.DispatchId,
+        "conn-idem",
+        "corr-key-guard",
+        "",
+        DispatchTerminalStatus.Pass,
+        now.AddSeconds(1),
+        "missing key",
+        new Dictionary<string, string>()),
+    "missing idempotency key rejects terminal completion");
+Assert(
+    !store.TryComplete(
+        idemGuard.DispatchId,
+        "conn-idem",
+        "corr-key-guard",
+        "wrong-idem",
+        DispatchTerminalStatus.Pass,
+        now.AddSeconds(1),
+        "mismatched key",
+        new Dictionary<string, string>()),
+    "mismatched idempotency key rejects terminal completion");
+Assert(store.Get(idemGuard.DispatchId)?.TerminalResult is null, "idempotency mismatch never records terminal PASS");
+Assert(
+    store.TryComplete(
+        idemGuard.DispatchId,
+        "conn-idem",
+        "corr-key-guard",
+        "idem-key-guard",
+        DispatchTerminalStatus.Pass,
+        now.AddSeconds(2),
+        "matched",
+        new Dictionary<string, string> { ["ready"] = "true" }),
+    "exact idempotency match accepts terminal");
+
+// MEDIUM: adapter exceptions resolve FAILED without manufacturing PASS.
+var throwingAdapter = new ThrowingBrowserAdapter();
+var throwingClient = new OutboundBridgeClient(bridgeId, throwingAdapter, validator);
+var throwingTransport = new FakeBridgeTransport();
+throwingClient.Attach(throwingTransport);
+var throwingDispatch = BuildRequest(bridgeId, BridgeOperation.ListTabs, now, now.AddMinutes(2), "idem-throw", "corr-throw");
+await throwingTransport.DeliverAsync(throwingDispatch, "conn-throw");
+Assert(throwingTransport.Results.Count == 1, "adapter exception still emits one terminal");
+Assert(throwingTransport.Results[0].TerminalStatus == DispatchTerminalStatus.Failed, "adapter exception resolves FAILED");
+Assert(throwingTransport.Results[0].ResultClass == "FAILED", "adapter exception result class is FAILED");
+
+// MEDIUM: connection-loss resolver marks delivered/started nonterminal as AMBIGUOUS.
+var lostConn = BuildRequest(bridgeId, BridgeOperation.ListTabs, now, now.AddMinutes(5), "idem-lost-conn", "corr-lost-conn");
+Assert(store.Accept(lostConn, now).State == DispatchAcceptState.Accepted, "accepts connection-loss dispatch");
+Assert(store.TryMarkDelivered(lostConn.DispatchId, "conn-lost", now), "delivers before connection loss");
+Assert(store.ResolveConnectionLoss("conn-lost", now.AddSeconds(1)) == 1, "connection-loss resolver updates one dispatch");
+Assert(store.Get(lostConn.DispatchId)?.TerminalResult?.TerminalStatus == DispatchTerminalStatus.Ambiguous, "connection loss resolves AMBIGUOUS not PASS");
 
 Console.WriteLine($"Operations bridge deterministic tests passed ({assertionCount} assertions).");
 
@@ -254,6 +340,24 @@ void Assert(bool condition, string description)
     if (!condition)
     {
         throw new InvalidOperationException($"FAILED: {description}");
+    }
+}
+
+void AssertThrows(Action action, string description)
+{
+    assertionCount++;
+    try
+    {
+        action();
+        throw new InvalidOperationException($"FAILED: {description} (expected exception)");
+    }
+    catch (InvalidOperationException ex) when (ex.Message.StartsWith("FAILED:", StringComparison.Ordinal))
+    {
+        throw;
+    }
+    catch (Exception)
+    {
+        // expected fail-closed rejection
     }
 }
 
@@ -310,4 +414,16 @@ sealed class CountingBrowserAdapter : IBridgeBrowserAdapter
         TotalCalls++;
         return _inner.ReadTabMetadataAsync(tabId, cancellationToken);
     }
+}
+
+sealed class ThrowingBrowserAdapter : IBridgeBrowserAdapter
+{
+    public Task<BrowserHealth> GetHealthAsync(CancellationToken cancellationToken)
+        => throw new InvalidOperationException("synthetic adapter fault");
+
+    public Task<IReadOnlyList<BrowserTabMetadata>> ListTabsAsync(CancellationToken cancellationToken)
+        => throw new InvalidOperationException("synthetic adapter fault");
+
+    public Task<BrowserTabMetadata?> ReadTabMetadataAsync(string tabId, CancellationToken cancellationToken)
+        => throw new InvalidOperationException("synthetic adapter fault");
 }

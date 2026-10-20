@@ -51,7 +51,10 @@ Optional (no deploy): `npx wrangler deploy --dry-run` / `npx wrangler check` whe
 - protocol/client/TTL/idempotency/correlation checks fail closed at relay and client;
 - dispatch is delivered over the connected outbound bridge socket; delivered only after successful send;
 - terminal result constrained to `PASS | BLOCKED | FAILED | STALE | AMBIGUOUS` with bounded evidence/payload;
-- disconnect/lost-correlation scenarios cannot synthesize `PASS`;
+- Bridge bearer attach requires secure `wss:` plus exact trusted Worker endpoint configuration;
+- terminal acceptance requires exact dispatch id + idempotency key + correlation/connection identity;
+- terminal provenance includes bridge runtime/version, operation/result class, and started/completed timestamps;
+- disconnect/expiry/adapter-fault paths resolve fail-closed to `FAILED`/`STALE`/`AMBIGUOUS` (never manufactured `PASS`) on both in-memory and SQLite DO stores;
 - synthetic adapter filters to exact allowlisted hosts/subdomains and metadata-only output.
 
 ## Rollback / cleanup

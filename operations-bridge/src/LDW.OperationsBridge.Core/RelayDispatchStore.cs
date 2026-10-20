@@ -109,10 +109,14 @@ public sealed class RelayDispatchStore
         Guid dispatchId,
         string connectionId,
         string correlationId,
+        string idempotencyKey,
         DispatchTerminalStatus status,
         DateTimeOffset now,
         string evidence,
-        IReadOnlyDictionary<string, string> payload)
+        IReadOnlyDictionary<string, string> payload,
+        string? bridgeRuntime = null,
+        string? bridgeVersion = null,
+        DateTimeOffset? startedAt = null)
     {
         if (!_dispatches.TryGetValue(dispatchId, out var envelope))
         {
@@ -120,6 +124,13 @@ public sealed class RelayDispatchStore
         }
 
         if (envelope.TerminalResult is not null || envelope.StartedAt is null)
+        {
+            return false;
+        }
+
+        // Missing/mismatched idempotency key fails closed without accepting a terminal result.
+        if (string.IsNullOrWhiteSpace(idempotencyKey) ||
+            !string.Equals(envelope.Request.IdempotencyKey, idempotencyKey, StringComparison.Ordinal))
         {
             return false;
         }
@@ -148,12 +159,16 @@ public sealed class RelayDispatchStore
             payload = new Dictionary<string, string>();
         }
 
+        var effectiveStartedAt = startedAt ?? envelope.StartedAt.Value;
         var result = new BridgeDispatchResult(
             dispatchId,
             envelope.Request.IdempotencyKey,
             envelope.Request.CorrelationId,
+            BridgeProtocol.BoundBridgeRuntime(bridgeRuntime),
+            BridgeProtocol.BoundBridgeVersion(bridgeVersion),
+            envelope.Request.Operation,
             status,
-            envelope.StartedAt.Value,
+            effectiveStartedAt,
             now,
             BridgeProtocol.BoundEvidence(evidence),
             BridgeProtocol.BoundPayload(payload));
@@ -182,24 +197,55 @@ public sealed class RelayDispatchStore
                 continue;
             }
 
-            var startedAt = envelope.StartedAt ?? envelope.DeliveredAt ?? envelope.AcceptedAt;
-            var terminal = new BridgeDispatchResult(
-                envelope.Request.DispatchId,
-                envelope.Request.IdempotencyKey,
-                envelope.Request.CorrelationId,
+            ApplyFailClosedResolution(
+                entry.Key,
+                envelope,
                 envelope.StartedAt is null ? DispatchTerminalStatus.Stale : DispatchTerminalStatus.Ambiguous,
-                startedAt,
-                now,
                 envelope.StartedAt is null
                     ? "Dispatch expired before execution start."
                     : "Connection dropped before correlated terminal result.",
-                new Dictionary<string, string>());
+                now);
+            updated++;
+        }
 
-            _dispatches[entry.Key] = envelope with
+        return updated;
+    }
+
+    /// <summary>
+    /// Resolve nonterminal dispatches bound to a lost connection without manufacturing PASS.
+    /// </summary>
+    public int ResolveConnectionLoss(string connectionId, DateTimeOffset now)
+    {
+        if (string.IsNullOrWhiteSpace(connectionId))
+        {
+            return 0;
+        }
+
+        var updated = 0;
+        foreach (var entry in _dispatches.ToArray())
+        {
+            var envelope = entry.Value;
+            if (envelope.TerminalResult is not null)
             {
-                Lifecycle = DispatchLifecycle.Terminal,
-                TerminalResult = terminal
-            };
+                continue;
+            }
+
+            if (!string.Equals(envelope.DeliveryConnectionId, connectionId, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (envelope.Lifecycle is not (DispatchLifecycle.Delivered or DispatchLifecycle.Started))
+            {
+                continue;
+            }
+
+            ApplyFailClosedResolution(
+                entry.Key,
+                envelope,
+                DispatchTerminalStatus.Ambiguous,
+                "Bridge connection lost after delivery before terminal return.",
+                now);
             updated++;
         }
 
@@ -208,6 +254,34 @@ public sealed class RelayDispatchStore
 
     public DispatchEnvelope? Get(Guid dispatchId)
         => _dispatches.TryGetValue(dispatchId, out var envelope) ? envelope : null;
+
+    private void ApplyFailClosedResolution(
+        Guid dispatchId,
+        DispatchEnvelope envelope,
+        DispatchTerminalStatus status,
+        string evidence,
+        DateTimeOffset now)
+    {
+        var startedAt = envelope.StartedAt ?? envelope.DeliveredAt ?? envelope.AcceptedAt;
+        var terminal = new BridgeDispatchResult(
+            envelope.Request.DispatchId,
+            envelope.Request.IdempotencyKey,
+            envelope.Request.CorrelationId,
+            BridgeProtocol.BridgeRuntime,
+            BridgeProtocol.BridgeRuntimeVersion,
+            envelope.Request.Operation,
+            status,
+            startedAt,
+            now,
+            BridgeProtocol.BoundEvidence(evidence),
+            new Dictionary<string, string>());
+
+        _dispatches[dispatchId] = envelope with
+        {
+            Lifecycle = DispatchLifecycle.Terminal,
+            TerminalResult = terminal
+        };
+    }
 
     private static DispatchEnvelope BuildBlockedEnvelope(
         BridgeDispatchRequest request,
@@ -218,6 +292,9 @@ public sealed class RelayDispatchStore
             request.DispatchId,
             request.IdempotencyKey,
             request.CorrelationId,
+            BridgeProtocol.BridgeRuntime,
+            BridgeProtocol.BridgeRuntimeVersion,
+            request.Operation,
             validationError == DispatchValidationError.StaleOrExpired
                 ? DispatchTerminalStatus.Stale
                 : DispatchTerminalStatus.Blocked,

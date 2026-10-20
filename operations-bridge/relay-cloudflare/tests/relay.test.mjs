@@ -146,6 +146,7 @@ test("terminal enum/payload bounds and lost correlation never PASS", () => {
     idempotency_key: "idem-term",
     correlation_id: "corr-term",
     delivery_connection_id: "conn-1",
+    operation: "browser.list_tabs",
     expires_at: new Date(Date.now() + 60_000).toISOString()
   };
 
@@ -154,6 +155,7 @@ test("terminal enum/payload bounds and lost correlation never PASS", () => {
     "conn-1",
     {
       correlationId: "corr-term",
+      idempotencyKey: "idem-term",
       status: "SUCCESS",
       evidence: "unsupported",
       payload: { ready: "true" }
@@ -168,21 +170,30 @@ test("terminal enum/payload bounds and lost correlation never PASS", () => {
     "conn-1",
     {
       correlationId: "corr-term",
+      idempotencyKey: "idem-term",
       status: "BLOCKED",
       evidence: "x".repeat(600),
-      payload: { a: "1", b: "2", huge: "y".repeat(400) }
+      payload: { a: "1", b: "2", huge: "y".repeat(400) },
+      bridgeRuntime: "ldw-operations-bridge",
+      bridgeVersion: "1.0.0",
+      startedAt: new Date().toISOString()
     },
     new Date().toISOString()
   );
   assert.equal(bounded.terminalStatus, "BLOCKED");
   assert.ok(bounded.evidence.length <= 512);
   assert.ok(bounded.payload.huge.length <= 256);
+  assert.equal(bounded.bridgeRuntime, "ldw-operations-bridge");
+  assert.equal(bounded.operation, "browser.list_tabs");
+  assert.equal(bounded.resultClass, "BLOCKED");
+  assert.ok(bounded.startedAt);
 
   const lost = finalizeTerminal(
     row,
     "conn-wrong",
     {
       correlationId: "corr-wrong",
+      idempotencyKey: "idem-term",
       status: "PASS",
       evidence: "forged",
       payload: { ready: "true" }
@@ -210,13 +221,20 @@ test("duplicate idempotency and immutable one terminal via hibernated socket pat
   assert.equal(duplicateBody.state, "duplicate");
   assert.equal(duplicateBody.correlationId, "corr-dup");
 
+  const startedAt = new Date().toISOString();
   await durable.webSocketMessage(
     socket,
     JSON.stringify({
       type: "terminal",
       dispatchId: dispatch.dispatchId,
+      idempotencyKey: dispatch.idempotencyKey,
       correlationId: "corr-dup",
       status: "PASS",
+      bridgeRuntime: "ldw-operations-bridge",
+      bridgeVersion: "1.0.0",
+      operation: "browser.list_tabs",
+      resultClass: "PASS",
+      startedAt,
       evidence: "ok",
       payload: { tab_count: "1" }
     })
@@ -224,11 +242,17 @@ test("duplicate idempotency and immutable one terminal via hibernated socket pat
 
   const row = durable.repository.getDispatch(dispatch.dispatchId);
   assert.equal(row.terminal_status, "PASS");
+  assert.equal(row.bridge_runtime, "ldw-operations-bridge");
+  assert.equal(row.bridge_version, "1.0.0");
+  assert.equal(row.result_class, "PASS");
+  assert.equal(row.started_at, new Date(startedAt).toISOString());
+  assert.ok(row.completed_at);
 
   const second = durable.repository.completeFromClient(
     socket.deserializeAttachment().connectionId,
     {
       dispatchId: dispatch.dispatchId,
+      idempotencyKey: dispatch.idempotencyKey,
       correlationId: "corr-dup",
       status: "FAILED",
       evidence: "late"
@@ -238,6 +262,117 @@ test("duplicate idempotency and immutable one terminal via hibernated socket pat
   assert.equal(second.ok, false);
   assert.equal(second.error, "already-terminal");
   assert.equal(durable.repository.getDispatch(dispatch.dispatchId).terminal_status, "PASS");
+});
+
+test("missing or mismatched idempotency key never records PASS", async () => {
+  const env = buildEnv();
+  const { durable, socket } = attachSocket(env, "ldw01-bridge");
+  const dispatch = buildDispatch({ idempotencyKey: "idem-required", correlationId: "corr-required" });
+  await sendWithToken(env, env.SITE_DISPATCH_TOKEN, "/relay/dispatch", "POST", dispatch);
+
+  const missing = durable.repository.completeFromClient(
+    socket.deserializeAttachment().connectionId,
+    {
+      dispatchId: dispatch.dispatchId,
+      correlationId: "corr-required",
+      status: "PASS",
+      evidence: "no key"
+    },
+    new Date().toISOString()
+  );
+  assert.equal(missing.ok, false);
+  assert.equal(missing.error, "missing-idempotency-key");
+  assert.equal(durable.repository.getDispatch(dispatch.dispatchId).terminal_status, null);
+
+  const mismatched = durable.repository.completeFromClient(
+    socket.deserializeAttachment().connectionId,
+    {
+      dispatchId: dispatch.dispatchId,
+      idempotencyKey: "wrong-key",
+      correlationId: "corr-required",
+      status: "PASS",
+      evidence: "wrong key"
+    },
+    new Date().toISOString()
+  );
+  assert.equal(mismatched.ok, false);
+  assert.equal(mismatched.error, "idempotency-mismatch");
+  assert.equal(durable.repository.getDispatch(dispatch.dispatchId).terminal_status, null);
+});
+
+test("SQLite path resolves expiry and disconnect without manufacturing PASS", async () => {
+  const env = buildEnv();
+  const { durable, socket } = attachSocket(env, "ldw01-bridge");
+
+  const expiredQueued = buildDispatch({
+    idempotencyKey: "idem-expire-queued",
+    issuedAt: new Date(Date.now() - 120_000).toISOString(),
+    expiresAt: new Date(Date.now() - 30_000).toISOString()
+  });
+  // Bypass accept validation by inserting via repository after normalizing a fresh window, then backdating.
+  const fresh = buildDispatch({ idempotencyKey: "idem-expire-queued" });
+  const accepted = durable.repository.acceptDispatch(fresh, new Date().toISOString());
+  assert.equal(accepted.ok, true);
+  const queuedRow = durable.repository.getDispatch(fresh.dispatchId);
+  queuedRow.issued_at = expiredQueued.issuedAt;
+  queuedRow.expires_at = expiredQueued.expiresAt;
+
+  const resolved = durable.repository.resolveNonterminal(new Date().toISOString());
+  assert.ok(resolved >= 1);
+  assert.equal(durable.repository.getDispatch(fresh.dispatchId).terminal_status, "STALE");
+  assert.equal(durable.repository.getDispatch(fresh.dispatchId).result_class, "STALE");
+
+  const delivered = buildDispatch({ idempotencyKey: "idem-disconnect" });
+  await sendWithToken(env, env.SITE_DISPATCH_TOKEN, "/relay/dispatch", "POST", delivered);
+  assert.equal(durable.repository.getDispatch(delivered.dispatchId).lifecycle, "delivered");
+
+  await durable.webSocketClose(socket, 1000, "bye");
+  const afterClose = durable.repository.getDispatch(delivered.dispatchId);
+  assert.equal(afterClose.terminal_status, "AMBIGUOUS");
+  assert.equal(afterClose.result_class, "AMBIGUOUS");
+  assert.notEqual(afterClose.terminal_status, "PASS");
+});
+
+test("terminal provenance fields are stored and returned to Site", async () => {
+  const env = buildEnv();
+  const { durable, socket } = attachSocket(env, "ldw01-bridge");
+  const dispatch = buildDispatch({ idempotencyKey: "idem-provenance" });
+  await sendWithToken(env, env.SITE_DISPATCH_TOKEN, "/relay/dispatch", "POST", dispatch);
+
+  const startedAt = new Date(Date.now() - 1_000).toISOString();
+  await durable.webSocketMessage(
+    socket,
+    JSON.stringify({
+      type: "terminal",
+      dispatchId: dispatch.dispatchId,
+      idempotencyKey: dispatch.idempotencyKey,
+      correlationId: dispatch.correlationId,
+      status: "PASS",
+      bridgeRuntime: "ldw-operations-bridge",
+      bridgeVersion: "1.0.0",
+      operation: "browser.list_tabs",
+      resultClass: "PASS",
+      startedAt,
+      evidence: "ok",
+      payload: { tab_count: "1" }
+    })
+  );
+
+  const status = await sendWithToken(
+    env,
+    env.SITE_DISPATCH_TOKEN,
+    `/relay/dispatch/${dispatch.dispatchId}`,
+    "GET"
+  );
+  const body = await status.json();
+  assert.equal(body.terminal_status, "PASS");
+  assert.equal(body.bridge_runtime, "ldw-operations-bridge");
+  assert.equal(body.bridge_version, "1.0.0");
+  assert.equal(body.result_class, "PASS");
+  assert.equal(body.operation, "browser.list_tabs");
+  assert.equal(body.started_at, new Date(startedAt).toISOString());
+  assert.ok(body.completed_at);
+  assert.equal(Object.hasOwn(body, "delivery_connection_id"), false);
 });
 
 test("hibernation rehydration uses getWebSockets + attachment, not instance maps", async () => {
@@ -293,8 +428,12 @@ test("SQLite repository persists full envelope and enforces one terminal", () =>
     "conn-sql",
     {
       dispatchId: dispatch.dispatchId,
+      idempotencyKey: dispatch.idempotencyKey,
       correlationId: dispatch.correlationId,
       status: "PASS",
+      bridgeRuntime: "ldw-operations-bridge",
+      bridgeVersion: "1.0.0",
+      startedAt: new Date().toISOString(),
       evidence: "ok",
       payload: { ready: "true" }
     },
@@ -302,11 +441,14 @@ test("SQLite repository persists full envelope and enforces one terminal", () =>
   );
   assert.equal(first.ok, true);
   assert.equal(first.result.terminalStatus, "PASS");
+  assert.equal(first.result.bridgeRuntime, "ldw-operations-bridge");
+  assert.equal(first.result.resultClass, "PASS");
 
   const second = repository.completeFromClient(
     "conn-sql",
     {
       dispatchId: dispatch.dispatchId,
+      idempotencyKey: dispatch.idempotencyKey,
       correlationId: dispatch.correlationId,
       status: "FAILED",
       evidence: "nope"
@@ -439,7 +581,11 @@ function createFakeSql() {
           terminal_correlation_id: null,
           terminal_evidence: null,
           terminal_payload_json: null,
-          completed_at: null
+          started_at: null,
+          completed_at: null,
+          bridge_runtime: null,
+          bridge_version: null,
+          result_class: null
         };
         rows.set(record.dispatch_id, record);
         byIdempotency.set(record.idempotency_key, record.dispatch_id);
@@ -454,6 +600,19 @@ function createFakeSql() {
       if (sql.startsWith("SELECT * FROM dispatches WHERE dispatch_id")) {
         const row = rows.get(params[0]);
         return row ? [row] : [];
+      }
+
+      if (sql.includes("delivery_connection_id = ?1") && sql.includes("lifecycle IN")) {
+        return [...rows.values()].filter(
+          (row) =>
+            !row.terminal_status &&
+            row.delivery_connection_id === params[0] &&
+            (row.lifecycle === "delivered" || row.lifecycle === "started")
+        );
+      }
+
+      if (sql.startsWith("SELECT * FROM dispatches WHERE terminal_status IS NULL")) {
+        return [...rows.values()].filter((row) => !row.terminal_status);
       }
 
       if (sql.startsWith("UPDATE dispatches SET lifecycle = 'delivered'")) {
@@ -473,7 +632,11 @@ function createFakeSql() {
           row.terminal_correlation_id = params[2];
           row.terminal_evidence = params[3];
           row.terminal_payload_json = params[4];
-          row.completed_at = params[5];
+          row.started_at = params[5];
+          row.completed_at = params[6];
+          row.bridge_runtime = params[7];
+          row.bridge_version = params[8];
+          row.result_class = params[9];
         }
         return [];
       }

@@ -4,6 +4,8 @@ const RELAY_PATHS = {
 };
 
 const PROTOCOL_VERSION = "1.0";
+const BRIDGE_RUNTIME = "ldw-operations-bridge";
+const BRIDGE_RUNTIME_VERSION = "1.0.0";
 const MAX_TTL_MS = 5 * 60 * 1000;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const MAX_EVIDENCE_LENGTH = 512;
@@ -11,6 +13,8 @@ const MAX_PAYLOAD_ENTRIES = 32;
 const MAX_PAYLOAD_VALUE_LENGTH = 256;
 const MAX_ARG_ENTRIES = 16;
 const MAX_ARG_VALUE_LENGTH = 256;
+const MAX_BRIDGE_RUNTIME_LENGTH = 64;
+const MAX_BRIDGE_VERSION_LENGTH = 32;
 
 const ALLOWED_OPERATIONS = new Set(["browser.health", "browser.list_tabs", "browser.read_tab"]);
 const ALLOWED_TERMINAL_STATUSES = new Set(["PASS", "BLOCKED", "FAILED", "STALE", "AMBIGUOUS"]);
@@ -121,7 +125,9 @@ export class BridgeRelayDurableObject {
     const url = new URL(request.url);
     if (url.pathname === "/dispatch" && request.method === "POST") {
       const body = await readJson(request);
-      const accepted = this.repository.acceptDispatch(body, new Date().toISOString());
+      const nowIso = new Date().toISOString();
+      this.repository.resolveNonterminal(nowIso);
+      const accepted = this.repository.acceptDispatch(body, nowIso);
       if (!accepted.ok) {
         return jsonResponse({ error: accepted.error }, 400);
       }
@@ -181,6 +187,7 @@ export class BridgeRelayDurableObject {
 
     if (url.pathname.startsWith("/dispatch/") && request.method === "GET") {
       const dispatchId = decodeURIComponent(url.pathname.slice("/dispatch/".length));
+      this.repository.resolveNonterminal(new Date().toISOString());
       const record = this.repository.getDispatch(dispatchId);
       if (!record) {
         return jsonResponse({ error: "not-found" }, 404);
@@ -240,6 +247,11 @@ export class BridgeRelayDurableObject {
   }
 
   async webSocketClose(ws, code, reason) {
+    const attachment = safeDeserializeAttachment(ws);
+    if (attachment?.connectionId) {
+      this.repository.resolveConnectionLoss(attachment.connectionId, new Date().toISOString());
+    }
+
     try {
       ws.close(code, reason);
     } catch {
@@ -248,6 +260,11 @@ export class BridgeRelayDurableObject {
   }
 
   async webSocketError(ws) {
+    const attachment = safeDeserializeAttachment(ws);
+    if (attachment?.connectionId) {
+      this.repository.resolveConnectionLoss(attachment.connectionId, new Date().toISOString());
+    }
+
     try {
       ws.close(1011, "error");
     } catch {
@@ -314,7 +331,11 @@ export class SqliteRelayRepository {
         terminal_correlation_id TEXT,
         terminal_evidence TEXT,
         terminal_payload_json TEXT,
-        completed_at TEXT
+        started_at TEXT,
+        completed_at TEXT,
+        bridge_runtime TEXT,
+        bridge_version TEXT,
+        result_class TEXT
       );
     `);
   }
@@ -377,7 +398,72 @@ export class SqliteRelayRepository {
       return { ok: false, error: "already-terminal" };
     }
 
+    if (typeof payload?.idempotencyKey !== "string" || payload.idempotencyKey.length === 0) {
+      return { ok: false, error: "missing-idempotency-key" };
+    }
+
+    if (payload.idempotencyKey !== row.idempotency_key) {
+      return { ok: false, error: "idempotency-mismatch" };
+    }
+
     const result = finalizeTerminal(row, connectionId, payload, nowIso);
+    this.applyTerminal(dispatchId, result);
+    return { ok: true, result };
+  }
+
+  resolveNonterminal(nowIso) {
+    const rows = [...this.sql.exec("SELECT * FROM dispatches WHERE terminal_status IS NULL")];
+    let updated = 0;
+    for (const row of rows) {
+      const resolution = buildExpiryResolution(row, nowIso);
+      if (!resolution) {
+        continue;
+      }
+
+      this.applyTerminal(row.dispatch_id, resolution);
+      updated += 1;
+    }
+
+    return updated;
+  }
+
+  resolveConnectionLoss(connectionId, nowIso) {
+    if (typeof connectionId !== "string" || connectionId.length === 0) {
+      return 0;
+    }
+
+    const rows = [
+      ...this.sql.exec(
+        `SELECT * FROM dispatches
+         WHERE terminal_status IS NULL
+           AND delivery_connection_id = ?1
+           AND lifecycle IN ('delivered', 'started')`,
+        connectionId
+      )
+    ];
+    let updated = 0;
+    for (const row of rows) {
+      this.applyTerminal(
+        row.dispatch_id,
+        buildResolvedTerminal(
+          row,
+          "AMBIGUOUS",
+          "Bridge connection lost after delivery before terminal return.",
+          nowIso,
+          row.started_at || nowIso
+        )
+      );
+      updated += 1;
+    }
+
+    return updated;
+  }
+
+  getDispatch(dispatchId) {
+    return this.first(this.sql.exec("SELECT * FROM dispatches WHERE dispatch_id = ?1", dispatchId)) || null;
+  }
+
+  applyTerminal(dispatchId, result) {
     this.sql.exec(
       `UPDATE dispatches
        SET lifecycle = 'terminal',
@@ -385,21 +471,23 @@ export class SqliteRelayRepository {
            terminal_correlation_id = ?3,
            terminal_evidence = ?4,
            terminal_payload_json = ?5,
-           completed_at = ?6
+           started_at = ?6,
+           completed_at = ?7,
+           bridge_runtime = ?8,
+           bridge_version = ?9,
+           result_class = ?10
        WHERE dispatch_id = ?1 AND terminal_status IS NULL`,
       dispatchId,
       result.terminalStatus,
       result.correlationId,
       result.evidence,
       JSON.stringify(result.payload),
-      nowIso
+      result.startedAt,
+      result.completedAt,
+      result.bridgeRuntime,
+      result.bridgeVersion,
+      result.resultClass
     );
-
-    return { ok: true, result };
-  }
-
-  getDispatch(dispatchId) {
-    return this.first(this.sql.exec("SELECT * FROM dispatches WHERE dispatch_id = ?1", dispatchId)) || null;
   }
 
   first(iterable) {
@@ -460,14 +548,67 @@ export class InMemoryRelayRepository {
       return { ok: false, error: "already-terminal" };
     }
 
+    if (typeof payload?.idempotencyKey !== "string" || payload.idempotencyKey.length === 0) {
+      return { ok: false, error: "missing-idempotency-key" };
+    }
+
+    if (payload.idempotencyKey !== row.idempotency_key) {
+      return { ok: false, error: "idempotency-mismatch" };
+    }
+
     const result = finalizeTerminal(row, connectionId, payload, nowIso);
-    row.lifecycle = "terminal";
-    row.terminal_status = result.terminalStatus;
-    row.terminal_correlation_id = result.correlationId;
-    row.terminal_evidence = result.evidence;
-    row.terminal_payload_json = JSON.stringify(result.payload);
-    row.completed_at = nowIso;
+    applyInMemoryTerminal(row, result);
     return { ok: true, result };
+  }
+
+  resolveNonterminal(nowIso) {
+    let updated = 0;
+    for (const row of this.dispatches.values()) {
+      if (row.terminal_status) {
+        continue;
+      }
+
+      const resolution = buildExpiryResolution(row, nowIso);
+      if (!resolution) {
+        continue;
+      }
+
+      applyInMemoryTerminal(row, resolution);
+      updated += 1;
+    }
+
+    return updated;
+  }
+
+  resolveConnectionLoss(connectionId, nowIso) {
+    if (typeof connectionId !== "string" || connectionId.length === 0) {
+      return 0;
+    }
+
+    let updated = 0;
+    for (const row of this.dispatches.values()) {
+      if (row.terminal_status || row.delivery_connection_id !== connectionId) {
+        continue;
+      }
+
+      if (row.lifecycle !== "delivered" && row.lifecycle !== "started") {
+        continue;
+      }
+
+      applyInMemoryTerminal(
+        row,
+        buildResolvedTerminal(
+          row,
+          "AMBIGUOUS",
+          "Bridge connection lost after delivery before terminal return.",
+          nowIso,
+          row.started_at || nowIso
+        )
+      );
+      updated += 1;
+    }
+
+    return updated;
   }
 
   getDispatch(dispatchId) {
@@ -544,7 +685,11 @@ export function normalizeDispatchPayload(payload, nowIso) {
       terminal_correlation_id: null,
       terminal_evidence: null,
       terminal_payload_json: null,
-      completed_at: null
+      started_at: null,
+      completed_at: null,
+      bridge_runtime: null,
+      bridge_version: null,
+      result_class: null
     }
   };
 }
@@ -572,15 +717,91 @@ export function finalizeTerminal(row, connectionId, payload, nowIso) {
     resultPayload = {};
   }
 
+  const startedAt = normalizeIsoTimestamp(payload?.startedAt) || nowIso;
+  const bridgeRuntime = boundBridgeRuntime(payload?.bridgeRuntime);
+  const bridgeVersion = boundBridgeVersion(payload?.bridgeVersion);
+  const operation = typeof row.operation === "string" ? row.operation : "unknown";
+
   return {
     dispatchId: row.dispatch_id,
     idempotencyKey: row.idempotency_key,
     correlationId: row.correlation_id,
+    bridgeRuntime,
+    bridgeVersion,
+    operation,
+    resultClass: terminalStatus,
     terminalStatus,
+    startedAt,
     completedAt: nowIso,
     evidence: boundEvidence(evidence),
     payload: resultPayload
   };
+}
+
+function buildExpiryResolution(row, nowIso) {
+  const expiresAtMs = Date.parse(row.expires_at);
+  const nowMs = Date.parse(nowIso);
+  if (!Number.isFinite(expiresAtMs) || !Number.isFinite(nowMs) || nowMs <= expiresAtMs) {
+    return null;
+  }
+
+  if (row.lifecycle === "started" || row.started_at) {
+    return buildResolvedTerminal(
+      row,
+      "AMBIGUOUS",
+      "Connection dropped before correlated terminal result.",
+      nowIso,
+      row.started_at || nowIso
+    );
+  }
+
+  if (row.lifecycle === "delivered") {
+    return buildResolvedTerminal(
+      row,
+      "AMBIGUOUS",
+      "Dispatch expired after delivery without terminal return.",
+      nowIso,
+      row.started_at || nowIso
+    );
+  }
+
+  return buildResolvedTerminal(
+    row,
+    "STALE",
+    "Dispatch expired before execution start.",
+    nowIso,
+    nowIso
+  );
+}
+
+function buildResolvedTerminal(row, terminalStatus, evidence, nowIso, startedAt) {
+  return {
+    dispatchId: row.dispatch_id,
+    idempotencyKey: row.idempotency_key,
+    correlationId: row.correlation_id,
+    bridgeRuntime: BRIDGE_RUNTIME,
+    bridgeVersion: BRIDGE_RUNTIME_VERSION,
+    operation: typeof row.operation === "string" ? row.operation : "unknown",
+    resultClass: terminalStatus,
+    terminalStatus,
+    startedAt,
+    completedAt: nowIso,
+    evidence: boundEvidence(evidence),
+    payload: {}
+  };
+}
+
+function applyInMemoryTerminal(row, result) {
+  row.lifecycle = "terminal";
+  row.terminal_status = result.terminalStatus;
+  row.terminal_correlation_id = result.correlationId;
+  row.terminal_evidence = result.evidence;
+  row.terminal_payload_json = JSON.stringify(result.payload);
+  row.started_at = result.startedAt;
+  row.completed_at = result.completedAt;
+  row.bridge_runtime = result.bridgeRuntime;
+  row.bridge_version = result.bridgeVersion;
+  row.result_class = result.resultClass;
 }
 
 function buildDeliveryEnvelope(record) {
@@ -630,7 +851,11 @@ function sanitizeSiteDispatchRecord(record) {
     terminal_correlation_id: record.terminal_correlation_id,
     terminal_evidence: record.terminal_evidence,
     terminal_payload_json: record.terminal_payload_json,
-    completed_at: record.completed_at
+    started_at: record.started_at,
+    completed_at: record.completed_at,
+    bridge_runtime: record.bridge_runtime,
+    bridge_version: record.bridge_version,
+    result_class: record.result_class
     // delivery_connection_id intentionally omitted from Site-facing views
   };
 }
@@ -690,6 +915,25 @@ function normalizeTerminalPayload(payload) {
 function boundEvidence(evidence) {
   const value = typeof evidence === "string" && evidence.trim().length > 0 ? evidence.trim() : "No evidence provided.";
   return value.length > MAX_EVIDENCE_LENGTH ? value.slice(0, MAX_EVIDENCE_LENGTH) : value;
+}
+
+function boundBridgeRuntime(runtime) {
+  const value = typeof runtime === "string" && runtime.trim().length > 0 ? runtime.trim() : BRIDGE_RUNTIME;
+  return value.length > MAX_BRIDGE_RUNTIME_LENGTH ? value.slice(0, MAX_BRIDGE_RUNTIME_LENGTH) : value;
+}
+
+function boundBridgeVersion(version) {
+  const value = typeof version === "string" && version.trim().length > 0 ? version.trim() : BRIDGE_RUNTIME_VERSION;
+  return value.length > MAX_BRIDGE_VERSION_LENGTH ? value.slice(0, MAX_BRIDGE_VERSION_LENGTH) : value;
+}
+
+function normalizeIsoTimestamp(value) {
+  if (typeof value !== "string" || value.length === 0) {
+    return null;
+  }
+
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
 }
 
 function safeDeserializeAttachment(ws) {

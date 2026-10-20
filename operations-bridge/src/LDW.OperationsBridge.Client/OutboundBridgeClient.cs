@@ -44,7 +44,28 @@ public sealed class OutboundBridgeClient
                 return;
             }
 
-            var result = await ExecuteReadOnlyOperationAsync(request, cancellationToken).ConfigureAwait(false);
+            BridgeDispatchResult result;
+            try
+            {
+                result = await ExecuteReadOnlyOperationAsync(request, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                var failedAt = DateTimeOffset.UtcNow;
+                result = new BridgeDispatchResult(
+                    request.DispatchId,
+                    request.IdempotencyKey,
+                    request.CorrelationId,
+                    BridgeProtocol.BridgeRuntime,
+                    BridgeProtocol.BridgeRuntimeVersion,
+                    request.Operation,
+                    DispatchTerminalStatus.Failed,
+                    now,
+                    failedAt,
+                    BridgeProtocol.BoundEvidence($"Adapter exception: {ex.GetType().Name}"),
+                    BridgeProtocol.BoundPayload(null));
+            }
+
             await transport.SendResultAsync(result, cancellationToken).ConfigureAwait(false);
         };
     }
@@ -116,6 +137,9 @@ public sealed class OutboundBridgeClient
             request.DispatchId,
             request.IdempotencyKey,
             request.CorrelationId,
+            BridgeProtocol.BridgeRuntime,
+            BridgeProtocol.BridgeRuntimeVersion,
+            request.Operation,
             status,
             startedAt,
             completedAt,
@@ -136,6 +160,9 @@ public sealed class OutboundBridgeClient
             request.DispatchId,
             request.IdempotencyKey,
             request.CorrelationId,
+            BridgeProtocol.BridgeRuntime,
+            BridgeProtocol.BridgeRuntimeVersion,
+            request.Operation,
             status,
             now,
             now,

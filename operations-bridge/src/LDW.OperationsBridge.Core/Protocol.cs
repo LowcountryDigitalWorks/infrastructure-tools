@@ -3,11 +3,15 @@ namespace LDW.OperationsBridge.Core;
 public static class BridgeProtocol
 {
     public const string Version = "1.0";
+    public const string BridgeRuntime = "ldw-operations-bridge";
+    public const string BridgeRuntimeVersion = "1.0.0";
     public const int MaxEvidenceLength = 512;
     public const int MaxPayloadEntries = 32;
     public const int MaxPayloadValueLength = 256;
     public const int MaxArgEntries = 16;
     public const int MaxArgValueLength = 256;
+    public const int MaxBridgeRuntimeLength = 64;
+    public const int MaxBridgeVersionLength = 32;
 
     public static readonly IReadOnlySet<BridgeOperation> AllowedReadOnlyOperations =
         new HashSet<BridgeOperation>
@@ -128,6 +132,18 @@ public static class BridgeProtocol
         var value = string.IsNullOrWhiteSpace(evidence) ? "No evidence provided." : evidence.Trim();
         return value.Length > MaxEvidenceLength ? value[..MaxEvidenceLength] : value;
     }
+
+    public static string BoundBridgeRuntime(string? runtime)
+    {
+        var value = string.IsNullOrWhiteSpace(runtime) ? BridgeRuntime : runtime.Trim();
+        return value.Length > MaxBridgeRuntimeLength ? value[..MaxBridgeRuntimeLength] : value;
+    }
+
+    public static string BoundBridgeVersion(string? version)
+    {
+        var value = string.IsNullOrWhiteSpace(version) ? BridgeRuntimeVersion : version.Trim();
+        return value.Length > MaxBridgeVersionLength ? value[..MaxBridgeVersionLength] : value;
+    }
 }
 
 public enum BridgeOperation
@@ -170,11 +186,18 @@ public sealed record BridgeDispatchResult(
     Guid DispatchId,
     string IdempotencyKey,
     string CorrelationId,
+    string BridgeRuntime,
+    string BridgeVersion,
+    BridgeOperation Operation,
     DispatchTerminalStatus TerminalStatus,
     DateTimeOffset StartedAt,
     DateTimeOffset CompletedAt,
     string Evidence,
-    IReadOnlyDictionary<string, string> Payload);
+    IReadOnlyDictionary<string, string> Payload)
+{
+    public string ResultClass => BridgeProtocol.ToWireTerminalStatus(TerminalStatus);
+    public string OperationClass => BridgeProtocol.ToWireOperation(Operation);
+}
 
 public sealed record BrowserTabMetadata(
     string TabId,
