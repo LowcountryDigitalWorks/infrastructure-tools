@@ -222,9 +222,9 @@ internal sealed class HyperVObserverPipeServer(
         var pipe = SecurePipeFactory.CreateServer(permittedCallerSids);
         try
         {
-            await pipe.WaitForConnectionAsync(cancellationToken);
             try
             {
+                await pipe.WaitForConnectionAsync(cancellationToken);
                 await HandleClientAsync(pipe, cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -233,7 +233,7 @@ internal sealed class HyperVObserverPipeServer(
             }
             catch (Exception)
             {
-                // Contain one connected client's read/observation/write failure. A disconnected client
+                // Contain client connection/read/observation/write failure. A disconnected client
                 // must not terminate the long-running observer or expose exception details.
             }
         }
@@ -243,10 +243,13 @@ internal sealed class HyperVObserverPipeServer(
             {
                 await pipe.DisposeAsync();
             }
-            catch (IOException)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                // Peer disconnect during response/flush can surface again during pipe cleanup. That
-                // cleanup failure belongs to the client session; unexpected non-I/O failures still escape.
+                throw;
+            }
+            catch (Exception)
+            {
+                // Peer disconnect or cleanup failure during pipe disposal belongs to the client session.
             }
         }
     }
