@@ -14,6 +14,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LDW.HostAgent.HyperVObserve
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LDW.HostAgent.HyperVObserver.Tests", "tests\LDW.HostAgent.HyperVObserver.Tests\LDW.HostAgent.HyperVObserver.Tests.csproj", "{391AAE73-A5E9-48A6-8BA4-D357FDAE478E}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LDW.HostAgent.AdminBroker.Core", "src\LDW.HostAgent.AdminBroker.Core\LDW.HostAgent.AdminBroker.Core.csproj", "{5EB45022-DE04-4BE3-961E-C21B6C77134D}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LDW.HostAgent.AdminBroker.Tests", "tests\LDW.HostAgent.AdminBroker.Tests\LDW.HostAgent.AdminBroker.Tests.csproj", "{58374350-ADCF-47BA-91C2-753B1AAED0A4}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -42,7 +46,15 @@ Global
 		{9374218D-D4DB-4E37-94F4-EFB77DF38B01}.Release|Any CPU.Build.0 = Release|Any CPU
 		{391AAE73-A5E9-48A6-8BA4-D357FDAE478E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{391AAE73-A5E9-48A6-8BA4-D357FDAE478E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5EB45022-DE04-4BE3-961E-C21B6C77134D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5EB45022-DE04-4BE3-961E-C21B6C77134D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{58374350-ADCF-47BA-91C2-753B1AAED0A4}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{58374350-ADCF-47BA-91C2-753B1AAED0A4}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{391AAE73-A5E9-48A6-8BA4-D357FDAE478E}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{391AAE73-A5E9-48A6-8BA4-D357FDAE478E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5EB45022-DE04-4BE3-961E-C21B6C77134D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5EB45022-DE04-4BE3-961E-C21B6C77134D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{58374350-ADCF-47BA-91C2-753B1AAED0A4}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{58374350-ADCF-47BA-91C2-753B1AAED0A4}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal

@@ -48,6 +48,10 @@ The tray refuses to start elevated. There are no service/VM/power controls, remo
 
 The helper's machine-local allowlist defaults to `%ProgramData%\LowcountryDigitalWorks\HostAgent\hyperv-observer.Local.json`; an explicit local path may be supplied with `--config <path>`. Use `config/hyperv-observer.Local.example.json` only as the public shape. Real SIDs remain machine-local and `*.Local.json` is gitignored.
 
+## Admin broker source candidate
+
+The initial contract and current-user DPAPI secret-storage primitives for issue #52 are described in [the Admin Broker candidate note](docs/ADMIN_BROKER_CANDIDATE.md). They are not a running broker and do not add a listener, operation handlers, startup registration, or a deployment path.
+
 This repository slice does **not** install/register/start a persistent privileged service or task. Persistent installation and live elevated proof remain explicit post-review gates.
 
 ## Machine-local Host Agent configuration
