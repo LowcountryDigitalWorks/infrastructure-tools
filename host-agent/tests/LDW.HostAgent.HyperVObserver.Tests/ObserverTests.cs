@@ -136,9 +136,38 @@ if (OperatingSystem.IsWindows())
     recoveryTimeout.Cancel();
     await resilientTask;
     Assert(recoverySource.Calls == 2, "server survived one client fault and observed the next valid request exactly once");
+
+    using var brokenPipeTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+    var disconnectSource = new BlockingObservationSource(running with { AddressCandidates = ["192.0.2.66"] });
+    var disconnectServer = new HyperVObserverPipeServer([currentSid], disconnectSource);
+    var disconnectServerTask = disconnectServer.RunAsync(brokenPipeTimeout.Token);
+    await DisconnectBeforeResponseAsync(disconnectSource);
+    var postDisconnectResponse = await RoundTripAsync(HyperVObserverContract.CreateRequestJson());
+    Assert(HyperVObserverContract.TryParseResponse(postDisconnectResponse, out var postDisconnect)
+           && postDisconnect?.AddressCandidates.SequenceEqual(["192.0.2.66"]) == true,
+        "server serves a later authorized client after the preceding client disconnects before response write");
+    brokenPipeTimeout.Cancel();
+    await disconnectServerTask;
+    Assert(disconnectSource.Calls == 2,
+        "broken response pipe is contained to one client and the next request is observed exactly once");
 }
 
 Console.WriteLine($"Hyper-V observer tests passed ({assertions} assertions).");
+
+async Task DisconnectBeforeResponseAsync(BlockingObservationSource source)
+{
+    await using var pipe = new NamedPipeClientStream(
+        ".", HyperVObserverContract.PipeName, PipeDirection.InOut,
+        PipeOptions.Asynchronous, TokenImpersonationLevel.Identification);
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+    await pipe.ConnectAsync(2000, timeout.Token);
+    var bytes = Encoding.UTF8.GetBytes(HyperVObserverContract.CreateRequestJson() + "\n");
+    await pipe.WriteAsync(bytes, timeout.Token);
+    await pipe.FlushAsync(timeout.Token);
+    await source.Entered.WaitAsync(timeout.Token);
+    pipe.Close();
+    source.Release();
+}
 
 async Task<string> RoundTripAsync(string request)
 {
@@ -170,6 +199,27 @@ sealed class FakeObservationSource(HyperVObservationResponse response) : IHyperV
         Calls++;
         return ValueTask.FromResult(response);
     }
+}
+
+sealed class BlockingObservationSource(HyperVObservationResponse response) : IHyperVObservationSource
+{
+    private readonly TaskCompletionSource _entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public int Calls { get; private set; }
+    public Task Entered => _entered.Task;
+
+    public async ValueTask<HyperVObservationResponse> ObserveAsync(CancellationToken cancellationToken)
+    {
+        Calls++;
+        if (Calls == 1)
+        {
+            _entered.TrySetResult();
+            await _release.Task.WaitAsync(cancellationToken);
+        }
+        return response;
+    }
+
+    public void Release() => _release.TrySetResult();
 }
 
 sealed class ThrowOnceObservationSource(HyperVObservationResponse response) : IHyperVObservationSource
