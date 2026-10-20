@@ -1,0 +1,15 @@
+name: Security CodeQL JS
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  codeql-js:
+    uses: LowcountryDigitalWorks/.github/.github/workflows/security-codeql-js.yml@ea28529418ac13b0d529db499ae0168da2a48e4d
