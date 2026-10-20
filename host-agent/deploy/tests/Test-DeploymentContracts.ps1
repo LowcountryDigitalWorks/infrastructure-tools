@@ -21,6 +21,11 @@ function Assert-Throws([scriptblock]$Action, [string]$Message) {
 }
 
 $constants = Get-HyperVObserverDeploymentConstants
+$zeroTaskResult = Convert-HyperVObserverTaskResult -Value ([uint32]0)
+Assert-True ($zeroTaskResult -is [uint32] -and $zeroTaskResult -eq 0) 'task result conversion must preserve zero as UInt32'
+$highTaskResult = Convert-HyperVObserverTaskResult -Value ([uint32]3762504530)
+Assert-True ($highTaskResult -is [uint32] -and $highTaskResult -eq [uint32]3762504530) 'task result conversion must preserve high-bit UInt32 values without signed overflow'
+Assert-Throws { Convert-HyperVObserverTaskResult -Value ([int64]4294967296) | Out-Null } 'task result conversion must reject values above UInt32 max'
 Assert-True ($constants.TaskName -eq 'HyperVObserver') 'task name must be deterministic'
 Assert-True ($constants.TaskPath -eq '\LowcountryDigitalWorks\HostAgent\') 'task path must be deterministic and namespaced'
 Assert-True ($constants.InstallRoot.StartsWith($env:ProgramFiles, [StringComparison]::OrdinalIgnoreCase)) 'install root must be under Program Files'

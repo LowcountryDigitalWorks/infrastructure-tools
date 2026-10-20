@@ -355,6 +355,13 @@ function Get-HyperVObserverConfiguredSid {
     $sid
 }
 
+function Convert-HyperVObserverTaskResult {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][object]$Value)
+
+    try { return [uint32]$Value }
+    catch { throw 'Task Scheduler LastTaskResult is not a valid UInt32 value.' }
+}
 function Get-HyperVObserverScheduledTask {
     $constants = Get-HyperVObserverDeploymentConstants
     Get-ScheduledTask -TaskPath $constants.TaskPath -TaskName $constants.TaskName -ErrorAction SilentlyContinue
@@ -419,6 +426,7 @@ Export-ModuleMember -Function @(
     'Write-HyperVObserverProtectedJson',
     'Read-HyperVObserverDeploymentState',
     'Get-HyperVObserverConfiguredSid',
+    'Convert-HyperVObserverTaskResult',
     'Get-HyperVObserverScheduledTask',
     'Get-HyperVObserverValidatedContext'
 )
