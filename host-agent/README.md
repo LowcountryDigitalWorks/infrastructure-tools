@@ -9,6 +9,14 @@ Host Agent is a device-first, local status surface for owner-controlled LDW comp
 - Intentionally stopped/disabled/on-demand components remain healthy when that matches desired state. `RunningAfterLogin` uses explicit owner-session context.
 - Dependency availability is checked while a dependent component is expected to be active; intentionally inactive pre-login/on-demand components do not fail merely because their dependencies are also inactive.
 
+## Local Admin Broker & Secret Handoff
+
+`src/LDW.AdminBroker` and `src/LDW.LocalSecretStore` provide a deterministic local broker and DPAPI secret handoff for reviewed owner-authorized operations on LDW01 (`LDW01-OWNER-ADMIN-BROKER-001`).
+
+- **Typed Operations:** `CODYNC_BOT_CREATE`, `CODYNC_BOT_UPDATE`, `CODYNC_BOT_DELETE`, `HOST_AGENT_STATUS`, `HOST_AGENT_RESTART_REVIEWED_COMPONENT`, `HOST_AGENT_REPAIR_REVIEWED_INSTALL`.
+- **Secret Handoff:** Windows DPAPI protected secret entry (`CORSAIR_NEON_DATABASE_URL`) with bounded in-memory injection for Corsair/Neon proof execution without revealing credentials in logs, command-line arguments, or transcripts.
+- See [Admin Broker documentation](docs/ADMIN_BROKER.md).
+
 ## Normal-user tray autostart
 
 `deploy/Manage-TrayAutostart.ps1` validates and manages an already-accepted exact user-logon task when one exists; it never creates a new task. When none exists, it delegates to the exact-readback current-user Run-key lifecycle in `deploy/Manage-TrayAutostartRunKey.ps1`. See [normal-user tray autostart](docs/TRAY_AUTOSTART.md). Source validation does not install or mutate startup state on LDW01.
@@ -70,7 +78,8 @@ Use the .NET 10 SDK. From this directory:
 dotnet build LDW.HostAgent.sln -c Release
 dotnet run --project tests/LDW.HostAgent.Core.Tests/LDW.HostAgent.Core.Tests.csproj -c Release
 dotnet run --project tests/LDW.HostAgent.HyperVObserver.Tests/LDW.HostAgent.HyperVObserver.Tests.csproj -c Release
+dotnet run --project tests/LDW.AdminBroker.Tests/LDW.AdminBroker.Tests.csproj -c Release
 dotnet run --project tools/LDW.HostAgent.LiveProbe/LDW.HostAgent.LiveProbe.csproj -c Release
 ```
 
-The live-probe tool is read-only and emits sanitized component summaries for bounded local validation. Contract tests use only synthetic/documentation address values and do not query Hyper-V. No external NuGet packages are required.
+The live-probe tool is read-only and emits sanitized component summaries for bounded local validation. Contract tests use only synthetic/documentation address values and do not query Hyper-V.

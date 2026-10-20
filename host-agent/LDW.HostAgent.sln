@@ -14,6 +14,12 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LDW.HostAgent.HyperVObserve
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LDW.HostAgent.HyperVObserver.Tests", "tests\LDW.HostAgent.HyperVObserver.Tests\LDW.HostAgent.HyperVObserver.Tests.csproj", "{391AAE73-A5E9-48A6-8BA4-D357FDAE478E}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LDW.LocalSecretStore", "src\LDW.LocalSecretStore\LDW.LocalSecretStore.csproj", "{12345678-ABCD-1234-ABCD-123456789012}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LDW.AdminBroker", "src\LDW.AdminBroker\LDW.AdminBroker.csproj", "{23456789-BCDE-2345-BCDE-234567890123}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LDW.AdminBroker.Tests", "tests\LDW.AdminBroker.Tests\LDW.AdminBroker.Tests.csproj", "{34567890-CDEF-3456-CDEF-345678901234}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -44,5 +50,17 @@ Global
 		{391AAE73-A5E9-48A6-8BA4-D357FDAE478E}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{391AAE73-A5E9-48A6-8BA4-D357FDAE478E}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{391AAE73-A5E9-48A6-8BA4-D357FDAE478E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{12345678-ABCD-1234-ABCD-123456789012}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{12345678-ABCD-1234-ABCD-123456789012}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{12345678-ABCD-1234-ABCD-123456789012}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{12345678-ABCD-1234-ABCD-123456789012}.Release|Any CPU.Build.0 = Release|Any CPU
+		{23456789-BCDE-2345-BCDE-234567890123}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{23456789-BCDE-2345-BCDE-234567890123}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{23456789-BCDE-2345-BCDE-234567890123}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{23456789-BCDE-2345-BCDE-234567890123}.Release|Any CPU.Build.0 = Release|Any CPU
+		{34567890-CDEF-3456-CDEF-345678901234}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{34567890-CDEF-3456-CDEF-345678901234}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{34567890-CDEF-3456-CDEF-345678901234}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{34567890-CDEF-3456-CDEF-345678901234}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
