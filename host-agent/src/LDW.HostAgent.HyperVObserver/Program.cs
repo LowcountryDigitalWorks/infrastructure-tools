@@ -217,19 +217,37 @@ internal sealed class HyperVObserverPipeServer(
 
     internal async Task ServeOneAsync(CancellationToken cancellationToken)
     {
-        await using var pipe = SecurePipeFactory.CreateServer(permittedCallerSids);
-        await pipe.WaitForConnectionAsync(cancellationToken);
+        // Keep secure pipe creation outside the client-failure containment boundary so ACL/identity
+        // setup defects still fail closed instead of becoming a silent privileged retry loop.
+        var pipe = SecurePipeFactory.CreateServer(permittedCallerSids);
         try
         {
-            await HandleClientAsync(pipe, cancellationToken);
+            await pipe.WaitForConnectionAsync(cancellationToken);
+            try
+            {
+                await HandleClientAsync(pipe, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                // Contain one connected client's read/observation/write failure. A disconnected client
+                // must not terminate the long-running observer or expose exception details.
+            }
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        finally
         {
-            throw;
-        }
-        catch (Exception)
-        {
-            // Contain a single client's pipe/observation failure; the next accepted client gets a fresh pipe.
+            try
+            {
+                await pipe.DisposeAsync();
+            }
+            catch (IOException)
+            {
+                // Peer disconnect during response/flush can surface again during pipe cleanup. That
+                // cleanup failure belongs to the client session; unexpected non-I/O failures still escape.
+            }
         }
     }
 
