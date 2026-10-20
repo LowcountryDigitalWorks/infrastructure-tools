@@ -11,7 +11,7 @@ Host Agent is a device-first, local status surface for owner-controlled LDW comp
 
 ## Normal-user tray autostart
 
-`deploy/Manage-TrayAutostart.ps1` provides a bounded exact-readback user-logon lifecycle for the unelevated tray. See [normal-user tray autostart](docs/TRAY_AUTOSTART.md). Source validation does not install or mutate the task on LDW01.
+`deploy/Manage-TrayAutostart.ps1` validates and manages an already-accepted exact user-logon task when one exists; it never creates a new task. When none exists, it delegates to the exact-readback current-user Run-key lifecycle in `deploy/Manage-TrayAutostartRunKey.ps1`. See [normal-user tray autostart](docs/TRAY_AUTOSTART.md). Source validation does not install or mutate startup state on LDW01.
 
 ## Read-only live-adapter slice
 

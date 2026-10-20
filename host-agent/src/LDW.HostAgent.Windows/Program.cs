@@ -5,6 +5,12 @@ internal static class Program
     [STAThread]
     private static void Main()
     {
+        using var instanceMutex = new Mutex(
+            initiallyOwned: false,
+            name: @"Local\LowcountryDigitalWorks.HostAgent.Windows",
+            createdNew: out var createdNew);
+        if (!createdNew) return;
+
         ApplicationConfiguration.Initialize();
         if (WindowsPrivilege.IsElevated())
         {
