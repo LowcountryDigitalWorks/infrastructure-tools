@@ -8,9 +8,20 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'TrayAutostartDeployment.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'TrayRunKeyDeployment.psm1') -Force
 
 $spec = Get-TrayAutostartSpec -OwnerSid $OwnerSid
 $task = Get-TrayAutostartTask
+$runEntry = Get-TrayAutostartRunEntry
+if ($null -ne $task -and $runEntry.Present) {
+    throw 'Both the accepted Scheduled Task and Run-key startup value exist; no mutation was performed.'
+}
+
+if ($null -eq $task) {
+    Assert-TrayAutostartCurrentOwner -OwnerSid $spec.OwnerSid
+    & (Join-Path $PSScriptRoot 'Manage-TrayAutostartRunKey.ps1') -Action $Action
+    return
+}
 
 if ($Action -eq 'Plan') {
     $drift = @()
@@ -60,35 +71,14 @@ Assert-TrayAutostartAdministrator
 
 if ($Action -eq 'Install') {
     $installDisposition = Get-TrayAutostartInstallDisposition -Task $task -Spec $spec
-    if ($installDisposition -ne 'Register') {
-        $null = Assert-TrayAutostartTask -Spec $spec
-        if ($installDisposition -eq 'Enable') { Enable-ScheduledTask -TaskPath $spec.TaskPath -TaskName $spec.TaskName | Out-Null }
-        $verified = Assert-TrayAutostartTask -Spec $spec
-        if (-not (Test-TrayAutostartEnabled -Task $verified)) { throw 'Idempotent install could not verify the existing task is enabled.' }
-        [pscustomobject]@{ Installed = $true; AlreadyInstalled = $true; Enabled = $true; MutationPerformed = ($installDisposition -eq 'Enable'); TaskName = $spec.TaskName; TaskPath = $spec.TaskPath; RunLevel = $spec.RunLevel; IncrementalRuntimeCostUsd = 0 }
-        return
+    $null = Assert-TrayAutostartTask -Spec $spec
+    if ($installDisposition -eq 'Enable') {
+        Enable-ScheduledTask -TaskPath $spec.TaskPath -TaskName $spec.TaskName -ErrorAction Stop | Out-Null
     }
-
-    $registered = $false
-    try {
-        $definition = New-TrayAutostartTaskDefinition -Spec $spec
-        Register-ScheduledTask -TaskPath $spec.TaskPath -TaskName $spec.TaskName -InputObject $definition -ErrorAction Stop | Out-Null
-        $registered = $true
-        $verified = Assert-TrayAutostartTask -Spec $spec
-        if (-not (Test-TrayAutostartEnabled -Task $verified)) { throw 'Registered tray task did not read back as enabled.' }
-        [pscustomobject]@{ Installed = $true; AlreadyInstalled = $false; Enabled = $true; MutationPerformed = $true; TaskName = $spec.TaskName; TaskPath = $spec.TaskPath; RunLevel = $spec.RunLevel; IncrementalRuntimeCostUsd = 0 }
-        return
-    } catch {
-        $installError = $_
-        if ($registered) {
-            $rollbackTask = Get-TrayAutostartTask
-            if ($null -eq $rollbackTask -or @(Get-TrayAutostartIdentityProblems -Task $rollbackTask -Spec $spec).Count -ne 0) {
-                throw "Install failed and exact task ownership could not be proven; task was left untouched for manual reconciliation. Original error: $($installError.Exception.Message)"
-            }
-            Unregister-ScheduledTask -TaskPath $spec.TaskPath -TaskName $spec.TaskName -Confirm:$false -ErrorAction Stop
-        }
-        throw $installError
-    }
+    $verified = Assert-TrayAutostartTask -Spec $spec
+    if (-not (Test-TrayAutostartEnabled -Task $verified)) { throw 'Install readback failed; accepted task is not enabled.' }
+    [pscustomobject]@{ Installed = $true; AlreadyInstalled = $true; Enabled = $true; MutationPerformed = ($installDisposition -eq 'Enable'); TaskName = $spec.TaskName; TaskPath = $spec.TaskPath; RunLevel = $spec.RunLevel; IncrementalRuntimeCostUsd = 0 }
+    return
 }
 
 $task = Assert-TrayAutostartTask -Spec $spec

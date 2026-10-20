@@ -93,7 +93,12 @@ function Get-TrayAutostartIdentityProblems {
 }
 
 function Get-TrayAutostartTask {
-    Get-ScheduledTask -TaskPath $script:TaskPath -TaskName $script:TaskName -ErrorAction SilentlyContinue
+    try {
+        return Get-ScheduledTask -TaskPath $script:TaskPath -TaskName $script:TaskName -ErrorAction Stop
+    } catch {
+        if ($_.FullyQualifiedErrorId -eq 'CmdletizationQuery_NotFound,Get-ScheduledTask') { return $null }
+        throw
+    }
 }
 
 function Assert-TrayAutostartTask {

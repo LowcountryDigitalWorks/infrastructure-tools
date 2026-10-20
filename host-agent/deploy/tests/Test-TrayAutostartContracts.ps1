@@ -5,6 +5,7 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $modulePath = Join-Path (Join-Path $repoRoot 'deploy') 'TrayAutostartDeployment.psm1'
 Import-Module $modulePath -Force
+Import-Module (Join-Path (Join-Path $repoRoot 'deploy') 'TrayRunKeyDeployment.psm1') -Force
 
 function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw "ASSERTION FAILED: $Message" }
@@ -87,11 +88,42 @@ try {
     Assert-Throws { Get-TrayAutostartSpec -OwnerSid 'S-1-5-18' } 'SYSTEM/service principal must not be accepted for tray'
     Assert-Throws { Get-TrayAutostartSpec -OwnerSid $sid -ExecutablePath (Join-Path $tempRoot 'untrusted.exe') } 'unmanaged executable path must not be accepted'
 
-    $manager = Get-Content (Join-Path $repoRoot 'deploy\Manage-TrayAutostart.ps1') -Raw
-    foreach ($mutation in @('Register-ScheduledTask','Enable-ScheduledTask','Disable-ScheduledTask','Stop-ScheduledTask','Unregister-ScheduledTask')) {
-        Assert-True ($manager.Contains($mutation, [StringComparison]::Ordinal)) "managed lifecycle must explicitly handle $mutation"
+    $runKeyPath = 'HKCU:\Software\LDW.HostAgent.ContractTests.' + [Guid]::NewGuid().ToString('N')
+    try {
+        $runCommand = Get-TrayAutostartRunCommand -ExecutablePath $currentSpec.ExecutablePath
+        $runEntry = Get-TrayAutostartRunEntry -Path $runKeyPath
+        Assert-True (-not $runEntry.Present) 'test Run-key registration must begin absent'
+
+        $install = Set-TrayAutostartRunEntry -ExecutablePath $currentSpec.ExecutablePath -Path $runKeyPath
+        Assert-True ($install.Changed) 'first Run-key install must register exactly once'
+        $repeatInstall = Set-TrayAutostartRunEntry -ExecutablePath $currentSpec.ExecutablePath -Path $runKeyPath
+        Assert-True (-not $repeatInstall.Changed) 'repeated Run-key install must be a no-op'
+
+        $runEntry = Get-TrayAutostartRunEntry -Path $runKeyPath
+        Assert-True ($runEntry.Present -and (Test-TrayAutostartRunEntryMatches -Value $runEntry.Value -ExpectedValue $runCommand)) 'Run-key readback must match the quoted executable with no arguments'
+
+        $drifted = $runCommand + ' -unexpected'
+        Set-ItemProperty -LiteralPath $runKeyPath -Name 'LDW.HostAgent.Windows' -Value $drifted
+        Assert-Throws { Set-TrayAutostartRunEntry -ExecutablePath $currentSpec.ExecutablePath -Path $runKeyPath } 'Run-key install must refuse unexpected arguments'
+        Assert-Throws { Remove-TrayAutostartRunEntry -ExecutablePath $currentSpec.ExecutablePath -Path $runKeyPath } 'Run-key removal must refuse drift'
+        Assert-True ((Get-TrayAutostartRunEntry -Path $runKeyPath).Value -eq $drifted) 'drifted Run-key entry must remain untouched'
+
+        Set-ItemProperty -LiteralPath $runKeyPath -Name 'LDW.HostAgent.Windows' -Value $runCommand
+        $remove = Remove-TrayAutostartRunEntry -ExecutablePath $currentSpec.ExecutablePath -Path $runKeyPath
+        Assert-True ($remove.Changed -and -not (Get-TrayAutostartRunEntry -Path $runKeyPath).Present) 'Run-key removal must verify the value is absent'
+    } finally {
+        if (Test-Path -LiteralPath $runKeyPath -PathType Container) { Remove-Item -LiteralPath $runKeyPath -Recurse -Force }
     }
-    Assert-True ($manager.IndexOf('Assert-TrayAutostartCurrentOwner', [StringComparison]::Ordinal) -lt $manager.IndexOf('Assert-TrayAutostartAdministrator', [StringComparison]::Ordinal)) 'owner identity must be checked before privileged lifecycle changes'
+
+    $manager = Get-Content (Join-Path $repoRoot 'deploy\Manage-TrayAutostart.ps1') -Raw
+    $runManager = Get-Content (Join-Path $repoRoot 'deploy\Manage-TrayAutostartRunKey.ps1') -Raw
+    foreach ($mutation in @('Enable-ScheduledTask','Disable-ScheduledTask','Stop-ScheduledTask','Unregister-ScheduledTask')) {
+        Assert-True ($manager.Contains($mutation, [StringComparison]::Ordinal)) "accepted-task lifecycle must explicitly handle $mutation"
+    }
+    Assert-True (-not $manager.Contains('Register-ScheduledTask', [StringComparison]::Ordinal)) 'selector must never create a Scheduled Task'
+    Assert-True ($manager.Contains('Manage-TrayAutostartRunKey.ps1', [StringComparison]::Ordinal)) 'selector must use the Run-key path when the accepted task is absent'
+    Assert-True (-not $runManager.Contains('Register-ScheduledTask', [StringComparison]::Ordinal)) 'Run-key lifecycle must not create a Scheduled Task'
+    Assert-True ($manager.IndexOf('Assert-TrayAutostartCurrentOwner', [StringComparison]::Ordinal) -lt $manager.IndexOf('Assert-TrayAutostartAdministrator', [StringComparison]::Ordinal)) 'owner identity must be checked before privileged accepted-task mutations'
     Assert-True ($manager.Contains('Get-TrayAutostartIdentityProblems', [StringComparison]::Ordinal)) 'task identity must be read before mutations'
 } finally {
     $env:ProgramFiles = $originalProgramFiles
