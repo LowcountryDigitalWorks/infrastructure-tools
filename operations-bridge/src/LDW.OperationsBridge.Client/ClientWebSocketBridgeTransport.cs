@@ -156,22 +156,31 @@ public sealed class ClientWebSocketBridgeTransport : IBridgeTransport, IAsyncDis
     }
 
     public static object ToTerminalWireMessage(BridgeDispatchResult result)
-        => new
+    {
+        if (!result.StartedAt.HasValue ||
+            !BridgeProtocol.TryObserveBridgeRuntime(result.BridgeRuntime, out var runtime) ||
+            !BridgeProtocol.TryObserveBridgeVersion(result.BridgeVersion, out var version))
+        {
+            throw new InvalidOperationException("Client terminal wire requires observed startedAt/runtime/version.");
+        }
+
+        return new
         {
             type = "terminal",
             dispatchId = result.DispatchId.ToString("D"),
             idempotencyKey = result.IdempotencyKey,
             correlationId = result.CorrelationId,
-            bridgeRuntime = BridgeProtocol.BoundBridgeRuntime(result.BridgeRuntime),
-            bridgeVersion = BridgeProtocol.BoundBridgeVersion(result.BridgeVersion),
+            bridgeRuntime = runtime,
+            bridgeVersion = version,
             operation = result.OperationClass,
             resultClass = result.ResultClass,
             status = BridgeProtocol.ToWireTerminalStatus(result.TerminalStatus),
-            startedAt = result.StartedAt.ToString("O"),
+            startedAt = result.StartedAt.Value.ToString("O"),
             completedAt = result.CompletedAt.ToString("O"),
             evidence = BridgeProtocol.BoundEvidence(result.Evidence),
             payload = BridgeProtocol.BoundPayload(result.Payload)
         };
+    }
 
     private async Task ReceiveLoopAsync(CancellationToken cancellationToken)
     {

@@ -133,16 +133,46 @@ public static class BridgeProtocol
         return value.Length > MaxEvidenceLength ? value[..MaxEvidenceLength] : value;
     }
 
-    public static string BoundBridgeRuntime(string? runtime)
+    public static string BoundBridgeRuntime(string runtime)
     {
-        var value = string.IsNullOrWhiteSpace(runtime) ? BridgeRuntime : runtime.Trim();
+        var value = runtime.Trim();
         return value.Length > MaxBridgeRuntimeLength ? value[..MaxBridgeRuntimeLength] : value;
     }
 
-    public static string BoundBridgeVersion(string? version)
+    public static string BoundBridgeVersion(string version)
     {
-        var value = string.IsNullOrWhiteSpace(version) ? BridgeRuntimeVersion : version.Trim();
+        var value = version.Trim();
         return value.Length > MaxBridgeVersionLength ? value[..MaxBridgeVersionLength] : value;
+    }
+
+    /// <summary>
+    /// Observe executor-supplied runtime only; never invent a default constant.
+    /// </summary>
+    public static bool TryObserveBridgeRuntime(string? runtime, out string observed)
+    {
+        if (string.IsNullOrWhiteSpace(runtime))
+        {
+            observed = string.Empty;
+            return false;
+        }
+
+        observed = BoundBridgeRuntime(runtime);
+        return observed.Length > 0;
+    }
+
+    /// <summary>
+    /// Observe executor-supplied version only; never invent a default constant.
+    /// </summary>
+    public static bool TryObserveBridgeVersion(string? version, out string observed)
+    {
+        if (string.IsNullOrWhiteSpace(version))
+        {
+            observed = string.Empty;
+            return false;
+        }
+
+        observed = BoundBridgeVersion(version);
+        return observed.Length > 0;
     }
 }
 
@@ -186,17 +216,18 @@ public sealed record BridgeDispatchResult(
     Guid DispatchId,
     string IdempotencyKey,
     string CorrelationId,
-    string BridgeRuntime,
-    string BridgeVersion,
+    string? BridgeRuntime,
+    string? BridgeVersion,
     BridgeOperation Operation,
     DispatchTerminalStatus TerminalStatus,
-    DateTimeOffset StartedAt,
+    DateTimeOffset? StartedAt,
     DateTimeOffset CompletedAt,
     string Evidence,
     IReadOnlyDictionary<string, string> Payload)
 {
     public string ResultClass => BridgeProtocol.ToWireTerminalStatus(TerminalStatus);
     public string OperationClass => BridgeProtocol.ToWireOperation(Operation);
+    public bool ExecutionStartObserved => StartedAt.HasValue;
 }
 
 public sealed record BrowserTabMetadata(

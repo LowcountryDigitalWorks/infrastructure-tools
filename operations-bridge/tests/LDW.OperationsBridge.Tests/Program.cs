@@ -29,7 +29,10 @@ Assert(
         DispatchTerminalStatus.Pass,
         now.AddSeconds(3),
         "ok",
-        new Dictionary<string, string> { ["tab_count"] = "1" }),
+        new Dictionary<string, string> { ["tab_count"] = "1" },
+        BridgeProtocol.BridgeRuntime,
+        BridgeProtocol.BridgeRuntimeVersion,
+        now.AddSeconds(2)),
     "accepts correlated pass result");
 Assert(store.Get(validRequest.DispatchId)?.TerminalResult?.TerminalStatus == DispatchTerminalStatus.Pass, "stores PASS terminal result exactly once");
 Assert(store.Get(validRequest.DispatchId)?.TerminalResult?.BridgeRuntime == BridgeProtocol.BridgeRuntime, "PASS terminal preserves bridge runtime");
@@ -44,7 +47,10 @@ Assert(
         DispatchTerminalStatus.Failed,
         now.AddSeconds(4),
         "late duplicate",
-        new Dictionary<string, string>()),
+        new Dictionary<string, string>(),
+        BridgeProtocol.BridgeRuntime,
+        BridgeProtocol.BridgeRuntimeVersion,
+        now.AddSeconds(2)),
     "rejects second terminal completion for same dispatch");
 
 var duplicate = store.Accept(
@@ -106,7 +112,10 @@ Assert(
         DispatchTerminalStatus.Pass,
         now.AddSeconds(10),
         "should not pass",
-        new Dictionary<string, string> { ["ready"] = "true" }),
+        new Dictionary<string, string> { ["ready"] = "true" },
+        BridgeProtocol.BridgeRuntime,
+        BridgeProtocol.BridgeRuntimeVersion,
+        now),
     "completion still records terminal under fail-closed conversion");
 Assert(store.Get(lostCorrelation.DispatchId)?.TerminalResult?.TerminalStatus == DispatchTerminalStatus.Ambiguous, "lost correlation becomes AMBIGUOUS, never PASS");
 Assert(store.Get(lostCorrelation.DispatchId)?.TerminalResult?.CorrelationId == "corr-7", "lost correlation preserves original correlation identity");
@@ -123,13 +132,16 @@ Assert(store.TryMarkDelivered(disconnectBeforeTerminal.DispatchId, "conn-drop", 
 Assert(store.TryMarkStarted(disconnectBeforeTerminal.DispatchId, "conn-drop", now), "starts request before disconnect");
 Assert(store.ResolveExpired(now.AddSeconds(3)) > 0, "expiry resolver marks timed-out dispatches terminal");
 Assert(store.Get(disconnectBeforeTerminal.DispatchId)?.TerminalResult?.TerminalStatus == DispatchTerminalStatus.Ambiguous, "connection loss does not manufacture PASS");
+Assert(store.Get(disconnectBeforeTerminal.DispatchId)?.TerminalResult?.ExecutionStartObserved == true, "started dispatch preserves observed start on relay resolution");
+Assert(store.Get(disconnectBeforeTerminal.DispatchId)?.TerminalResult?.BridgeRuntime is null, "relay resolution does not invent bridge runtime");
 
 var adapter = new CountingBrowserAdapter(
 [
-    new BrowserTabMetadata("1", "CHATGPT_MAIN", "ChatGPT | Operations", "https://chatgpt.com/c/123"),
+    new BrowserTabMetadata("1", "CHATGPT_MAIN", "ChatGPT | Operations", "https://chatgpt.com/c/123?access_token=secret#frag"),
     new BrowserTabMetadata("2", "NOT_ALLOWLISTED", "Bank", "https://bank.example.com/private"),
     new BrowserTabMetadata("3", "LOOKALIKE", "Fake GPT", "https://evilchatgpt.com/prompt"),
-    new BrowserTabMetadata("4", "SUBDOMAIN_OK", "OpenAI", "https://status.openai.com/")
+    new BrowserTabMetadata("4", "SUBDOMAIN_OK", "OpenAI", "https://status.openai.com/"),
+    new BrowserTabMetadata("5", "USERINFO", "Creds", "https://user:pass@chatgpt.com/c/safe")
 ]);
 
 var client = new OutboundBridgeClient(bridgeId, adapter, validator);
@@ -151,6 +163,10 @@ Assert(transport.Results[0].Payload.ContainsKey("tab_0_url"), "result includes s
 Assert(!transport.Results[0].Payload.Values.Any(value => value.Contains("bank.example.com", StringComparison.OrdinalIgnoreCase)), "non-allowlisted tab metadata is filtered");
 Assert(!transport.Results[0].Payload.Values.Any(value => value.Contains("evilchatgpt.com", StringComparison.OrdinalIgnoreCase)), "lookalike host is filtered from allowlist");
 Assert(transport.Results[0].Payload.Values.Any(value => value.Contains("status.openai.com", StringComparison.OrdinalIgnoreCase)), "allowlisted subdomain remains visible");
+Assert(transport.Results[0].Payload.Values.Any(value => value.Equals("https://chatgpt.com/c/123", StringComparison.Ordinal)), "allowlisted URL query/fragment are redacted before egress");
+Assert(!transport.Results[0].Payload.Values.Any(value => value.Contains("access_token", StringComparison.OrdinalIgnoreCase)), "secret-bearing query values never leave LDW01");
+Assert(!transport.Results[0].Payload.Values.Any(value => value.Contains("user:pass@", StringComparison.OrdinalIgnoreCase)), "URL userinfo never leaves LDW01");
+Assert(transport.Results[0].Payload.Values.Any(value => value.Equals("https://chatgpt.com/c/safe", StringComparison.Ordinal)), "userinfo-bearing allowlisted URL is redacted to scheme/host/path");
 Assert(adapter.ListTabsCalls == 1, "allowlisted happy-path invoked adapter once");
 
 var staleClientRequest = BuildRequest(
@@ -268,7 +284,10 @@ Assert(
         DispatchTerminalStatus.Pass,
         now.AddSeconds(1),
         "missing key",
-        new Dictionary<string, string>()),
+        new Dictionary<string, string>(),
+        BridgeProtocol.BridgeRuntime,
+        BridgeProtocol.BridgeRuntimeVersion,
+        now),
     "missing idempotency key rejects terminal completion");
 Assert(
     !store.TryComplete(
@@ -279,7 +298,10 @@ Assert(
         DispatchTerminalStatus.Pass,
         now.AddSeconds(1),
         "mismatched key",
-        new Dictionary<string, string>()),
+        new Dictionary<string, string>(),
+        BridgeProtocol.BridgeRuntime,
+        BridgeProtocol.BridgeRuntimeVersion,
+        now),
     "mismatched idempotency key rejects terminal completion");
 Assert(store.Get(idemGuard.DispatchId)?.TerminalResult is null, "idempotency mismatch never records terminal PASS");
 Assert(
@@ -291,7 +313,10 @@ Assert(
         DispatchTerminalStatus.Pass,
         now.AddSeconds(2),
         "matched",
-        new Dictionary<string, string> { ["ready"] = "true" }),
+        new Dictionary<string, string> { ["ready"] = "true" },
+        BridgeProtocol.BridgeRuntime,
+        BridgeProtocol.BridgeRuntimeVersion,
+        now.AddSeconds(1)),
     "exact idempotency match accepts terminal");
 
 // MEDIUM: adapter exceptions resolve FAILED without manufacturing PASS.
@@ -311,6 +336,58 @@ Assert(store.Accept(lostConn, now).State == DispatchAcceptState.Accepted, "accep
 Assert(store.TryMarkDelivered(lostConn.DispatchId, "conn-lost", now), "delivers before connection loss");
 Assert(store.ResolveConnectionLoss("conn-lost", now.AddSeconds(1)) == 1, "connection-loss resolver updates one dispatch");
 Assert(store.Get(lostConn.DispatchId)?.TerminalResult?.TerminalStatus == DispatchTerminalStatus.Ambiguous, "connection loss resolves AMBIGUOUS not PASS");
+Assert(store.Get(lostConn.DispatchId)?.TerminalResult?.ExecutionStartObserved == false, "delivered-only loss keeps execution start unobserved");
+Assert(store.Get(lostConn.DispatchId)?.TerminalResult?.StartedAt is null, "delivered-only loss does not invent startedAt");
+Assert(store.Get(lostConn.DispatchId)?.TerminalResult?.BridgeRuntime is null, "delivered-only loss does not invent bridge runtime");
+
+// MEDIUM: client terminal without observed provenance is rejected.
+var provenanceGuard = BuildRequest(bridgeId, BridgeOperation.BrowserHealth, now, now.AddMinutes(2), "idem-prov", "corr-prov");
+Assert(store.Accept(provenanceGuard, now).State == DispatchAcceptState.Accepted, "accepts provenance guard dispatch");
+Assert(store.TryMarkDelivered(provenanceGuard.DispatchId, "conn-prov", now), "delivers provenance guard");
+Assert(store.TryMarkStarted(provenanceGuard.DispatchId, "conn-prov", now), "starts provenance guard");
+Assert(
+    !store.TryComplete(
+        provenanceGuard.DispatchId,
+        "conn-prov",
+        "corr-prov",
+        "idem-prov",
+        DispatchTerminalStatus.Pass,
+        now.AddSeconds(1),
+        "missing runtime",
+        new Dictionary<string, string>(),
+        bridgeRuntime: null,
+        bridgeVersion: BridgeProtocol.BridgeRuntimeVersion,
+        startedAt: now),
+    "missing bridgeRuntime rejects client terminal");
+Assert(
+    !store.TryComplete(
+        provenanceGuard.DispatchId,
+        "conn-prov",
+        "corr-prov",
+        "idem-prov",
+        DispatchTerminalStatus.Pass,
+        now.AddSeconds(1),
+        "future start",
+        new Dictionary<string, string>(),
+        BridgeProtocol.BridgeRuntime,
+        BridgeProtocol.BridgeRuntimeVersion,
+        now.AddMinutes(5)),
+    "startedAt after completedAt rejects client terminal");
+Assert(store.Get(provenanceGuard.DispatchId)?.TerminalResult is null, "unobserved provenance never records PASS");
+Assert(
+    store.TryComplete(
+        provenanceGuard.DispatchId,
+        "conn-prov",
+        "corr-prov",
+        "idem-prov",
+        DispatchTerminalStatus.Pass,
+        now.AddSeconds(2),
+        "observed",
+        new Dictionary<string, string> { ["ready"] = "true" },
+        BridgeProtocol.BridgeRuntime,
+        BridgeProtocol.BridgeRuntimeVersion,
+        now.AddSeconds(1)),
+    "observed provenance accepts client terminal");
 
 Console.WriteLine($"Operations bridge deterministic tests passed ({assertionCount} assertions).");
 

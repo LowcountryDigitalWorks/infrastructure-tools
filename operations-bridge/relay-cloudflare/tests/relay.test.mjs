@@ -150,6 +150,27 @@ test("terminal enum/payload bounds and lost correlation never PASS", () => {
     expires_at: new Date(Date.now() + 60_000).toISOString()
   };
 
+  const nowIso = new Date().toISOString();
+  const observedProvenance = {
+    bridgeRuntime: "ldw-operations-bridge",
+    bridgeVersion: "1.0.0",
+    startedAt: new Date(Date.now() - 500).toISOString()
+  };
+
+  const missingProvenance = finalizeTerminal(
+    row,
+    "conn-1",
+    {
+      correlationId: "corr-term",
+      idempotencyKey: "idem-term",
+      status: "PASS",
+      evidence: "missing provenance"
+    },
+    nowIso
+  );
+  assert.equal(missingProvenance.ok, false);
+  assert.equal(missingProvenance.error, "missing-started-at");
+
   const unsupported = finalizeTerminal(
     row,
     "conn-1",
@@ -158,12 +179,14 @@ test("terminal enum/payload bounds and lost correlation never PASS", () => {
       idempotencyKey: "idem-term",
       status: "SUCCESS",
       evidence: "unsupported",
-      payload: { ready: "true" }
+      payload: { ready: "true" },
+      ...observedProvenance
     },
-    new Date().toISOString()
+    nowIso
   );
-  assert.equal(unsupported.terminalStatus, "FAILED");
-  assert.deepEqual(unsupported.payload, {});
+  assert.equal(unsupported.ok, true);
+  assert.equal(unsupported.result.terminalStatus, "FAILED");
+  assert.deepEqual(unsupported.result.payload, {});
 
   const bounded = finalizeTerminal(
     row,
@@ -174,19 +197,18 @@ test("terminal enum/payload bounds and lost correlation never PASS", () => {
       status: "BLOCKED",
       evidence: "x".repeat(600),
       payload: { a: "1", b: "2", huge: "y".repeat(400) },
-      bridgeRuntime: "ldw-operations-bridge",
-      bridgeVersion: "1.0.0",
-      startedAt: new Date().toISOString()
+      ...observedProvenance
     },
-    new Date().toISOString()
+    nowIso
   );
-  assert.equal(bounded.terminalStatus, "BLOCKED");
-  assert.ok(bounded.evidence.length <= 512);
-  assert.ok(bounded.payload.huge.length <= 256);
-  assert.equal(bounded.bridgeRuntime, "ldw-operations-bridge");
-  assert.equal(bounded.operation, "browser.list_tabs");
-  assert.equal(bounded.resultClass, "BLOCKED");
-  assert.ok(bounded.startedAt);
+  assert.equal(bounded.ok, true);
+  assert.equal(bounded.result.terminalStatus, "BLOCKED");
+  assert.ok(bounded.result.evidence.length <= 512);
+  assert.ok(bounded.result.payload.huge.length <= 256);
+  assert.equal(bounded.result.bridgeRuntime, "ldw-operations-bridge");
+  assert.equal(bounded.result.operation, "browser.list_tabs");
+  assert.equal(bounded.result.resultClass, "BLOCKED");
+  assert.equal(bounded.result.startedAt, new Date(observedProvenance.startedAt).toISOString());
 
   const lost = finalizeTerminal(
     row,
@@ -196,13 +218,15 @@ test("terminal enum/payload bounds and lost correlation never PASS", () => {
       idempotencyKey: "idem-term",
       status: "PASS",
       evidence: "forged",
-      payload: { ready: "true" }
+      payload: { ready: "true" },
+      ...observedProvenance
     },
-    new Date().toISOString()
+    nowIso
   );
-  assert.equal(lost.terminalStatus, "AMBIGUOUS");
-  assert.equal(lost.correlationId, "corr-term");
-  assert.deepEqual(lost.payload, {});
+  assert.equal(lost.ok, true);
+  assert.equal(lost.result.terminalStatus, "AMBIGUOUS");
+  assert.equal(lost.result.correlationId, "corr-term");
+  assert.deepEqual(lost.result.payload, {});
 });
 
 test("duplicate idempotency and immutable one terminal via hibernated socket path", async () => {
@@ -331,6 +355,58 @@ test("SQLite path resolves expiry and disconnect without manufacturing PASS", as
   assert.equal(afterClose.terminal_status, "AMBIGUOUS");
   assert.equal(afterClose.result_class, "AMBIGUOUS");
   assert.notEqual(afterClose.terminal_status, "PASS");
+  assert.equal(afterClose.started_at, null);
+  assert.equal(afterClose.bridge_runtime, null);
+  assert.equal(afterClose.bridge_version, null);
+});
+
+test("client terminal without observed provenance is rejected; relay resolution keeps start unobserved", async () => {
+  const env = buildEnv();
+  const { durable, socket } = attachSocket(env, "ldw01-bridge");
+  const dispatch = buildDispatch({ idempotencyKey: "idem-obs-prov" });
+  await sendWithToken(env, env.SITE_DISPATCH_TOKEN, "/relay/dispatch", "POST", dispatch);
+
+  const missingRuntime = durable.repository.completeFromClient(
+    socket.deserializeAttachment().connectionId,
+    {
+      dispatchId: dispatch.dispatchId,
+      idempotencyKey: dispatch.idempotencyKey,
+      correlationId: dispatch.correlationId,
+      status: "PASS",
+      startedAt: new Date().toISOString(),
+      bridgeVersion: "1.0.0",
+      evidence: "no runtime"
+    },
+    new Date().toISOString()
+  );
+  assert.equal(missingRuntime.ok, false);
+  assert.equal(missingRuntime.error, "missing-bridge-runtime");
+  assert.equal(durable.repository.getDispatch(dispatch.dispatchId).terminal_status, null);
+
+  const futureStart = durable.repository.completeFromClient(
+    socket.deserializeAttachment().connectionId,
+    {
+      dispatchId: dispatch.dispatchId,
+      idempotencyKey: dispatch.idempotencyKey,
+      correlationId: dispatch.correlationId,
+      status: "PASS",
+      bridgeRuntime: "ldw-operations-bridge",
+      bridgeVersion: "1.0.0",
+      startedAt: new Date(Date.now() + 60_000).toISOString(),
+      evidence: "future start"
+    },
+    new Date().toISOString()
+  );
+  assert.equal(futureStart.ok, false);
+  assert.equal(futureStart.error, "invalid-started-at-order");
+  assert.equal(durable.repository.getDispatch(dispatch.dispatchId).terminal_status, null);
+
+  await durable.webSocketClose(socket, 1000, "bye");
+  const resolved = durable.repository.getDispatch(dispatch.dispatchId);
+  assert.equal(resolved.terminal_status, "AMBIGUOUS");
+  assert.equal(resolved.started_at, null);
+  assert.equal(resolved.bridge_runtime, null);
+  assert.equal(resolved.bridge_version, null);
 });
 
 test("terminal provenance fields are stored and returned to Site", async () => {

@@ -135,6 +135,18 @@ public sealed class RelayDispatchStore
             return false;
         }
 
+        // Client terminals require observed executor provenance; never invent defaults.
+        if (!startedAt.HasValue || startedAt.Value > now)
+        {
+            return false;
+        }
+
+        if (!BridgeProtocol.TryObserveBridgeRuntime(bridgeRuntime, out var observedRuntime) ||
+            !BridgeProtocol.TryObserveBridgeVersion(bridgeVersion, out var observedVersion))
+        {
+            return false;
+        }
+
         if (!BridgeProtocol.AllowedTerminalStatuses.Contains(status))
         {
             status = DispatchTerminalStatus.Failed;
@@ -159,16 +171,15 @@ public sealed class RelayDispatchStore
             payload = new Dictionary<string, string>();
         }
 
-        var effectiveStartedAt = startedAt ?? envelope.StartedAt.Value;
         var result = new BridgeDispatchResult(
             dispatchId,
             envelope.Request.IdempotencyKey,
             envelope.Request.CorrelationId,
-            BridgeProtocol.BoundBridgeRuntime(bridgeRuntime),
-            BridgeProtocol.BoundBridgeVersion(bridgeVersion),
+            observedRuntime,
+            observedVersion,
             envelope.Request.Operation,
             status,
-            effectiveStartedAt,
+            startedAt.Value,
             now,
             BridgeProtocol.BoundEvidence(evidence),
             BridgeProtocol.BoundPayload(payload));
@@ -262,16 +273,16 @@ public sealed class RelayDispatchStore
         string evidence,
         DateTimeOffset now)
     {
-        var startedAt = envelope.StartedAt ?? envelope.DeliveredAt ?? envelope.AcceptedAt;
+        // Relay-generated resolutions preserve only observed start; never invent executor identity.
         var terminal = new BridgeDispatchResult(
             envelope.Request.DispatchId,
             envelope.Request.IdempotencyKey,
             envelope.Request.CorrelationId,
-            BridgeProtocol.BridgeRuntime,
-            BridgeProtocol.BridgeRuntimeVersion,
+            BridgeRuntime: null,
+            BridgeVersion: null,
             envelope.Request.Operation,
             status,
-            startedAt,
+            envelope.StartedAt,
             now,
             BridgeProtocol.BoundEvidence(evidence),
             new Dictionary<string, string>());

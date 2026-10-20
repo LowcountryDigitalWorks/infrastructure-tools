@@ -4,8 +4,6 @@ const RELAY_PATHS = {
 };
 
 const PROTOCOL_VERSION = "1.0";
-const BRIDGE_RUNTIME = "ldw-operations-bridge";
-const BRIDGE_RUNTIME_VERSION = "1.0.0";
 const MAX_TTL_MS = 5 * 60 * 1000;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const MAX_EVIDENCE_LENGTH = 512;
@@ -406,9 +404,13 @@ export class SqliteRelayRepository {
       return { ok: false, error: "idempotency-mismatch" };
     }
 
-    const result = finalizeTerminal(row, connectionId, payload, nowIso);
-    this.applyTerminal(dispatchId, result);
-    return { ok: true, result };
+    const finalized = finalizeTerminal(row, connectionId, payload, nowIso);
+    if (!finalized.ok) {
+      return finalized;
+    }
+
+    this.applyTerminal(dispatchId, finalized.result);
+    return { ok: true, result: finalized.result };
   }
 
   resolveNonterminal(nowIso) {
@@ -449,8 +451,7 @@ export class SqliteRelayRepository {
           row,
           "AMBIGUOUS",
           "Bridge connection lost after delivery before terminal return.",
-          nowIso,
-          row.started_at || nowIso
+          nowIso
         )
       );
       updated += 1;
@@ -556,9 +557,13 @@ export class InMemoryRelayRepository {
       return { ok: false, error: "idempotency-mismatch" };
     }
 
-    const result = finalizeTerminal(row, connectionId, payload, nowIso);
-    applyInMemoryTerminal(row, result);
-    return { ok: true, result };
+    const finalized = finalizeTerminal(row, connectionId, payload, nowIso);
+    if (!finalized.ok) {
+      return finalized;
+    }
+
+    applyInMemoryTerminal(row, finalized.result);
+    return { ok: true, result: finalized.result };
   }
 
   resolveNonterminal(nowIso) {
@@ -601,8 +606,7 @@ export class InMemoryRelayRepository {
           row,
           "AMBIGUOUS",
           "Bridge connection lost after delivery before terminal return.",
-          nowIso,
-          row.started_at || nowIso
+          nowIso
         )
       );
       updated += 1;
@@ -695,6 +699,25 @@ export function normalizeDispatchPayload(payload, nowIso) {
 }
 
 export function finalizeTerminal(row, connectionId, payload, nowIso) {
+  const startedAt = normalizeIsoTimestamp(payload?.startedAt);
+  if (!startedAt) {
+    return { ok: false, error: "missing-started-at" };
+  }
+
+  if (Date.parse(startedAt) > Date.parse(nowIso)) {
+    return { ok: false, error: "invalid-started-at-order" };
+  }
+
+  const bridgeRuntime = observeBridgeRuntime(payload?.bridgeRuntime);
+  if (!bridgeRuntime) {
+    return { ok: false, error: "missing-bridge-runtime" };
+  }
+
+  const bridgeVersion = observeBridgeVersion(payload?.bridgeVersion);
+  if (!bridgeVersion) {
+    return { ok: false, error: "missing-bridge-version" };
+  }
+
   let terminalStatus = typeof payload?.status === "string" ? payload.status : "FAILED";
   let evidence = typeof payload?.evidence === "string" ? payload.evidence : "Client terminal message.";
   let resultPayload = normalizeTerminalPayload(payload?.payload);
@@ -717,24 +740,24 @@ export function finalizeTerminal(row, connectionId, payload, nowIso) {
     resultPayload = {};
   }
 
-  const startedAt = normalizeIsoTimestamp(payload?.startedAt) || nowIso;
-  const bridgeRuntime = boundBridgeRuntime(payload?.bridgeRuntime);
-  const bridgeVersion = boundBridgeVersion(payload?.bridgeVersion);
   const operation = typeof row.operation === "string" ? row.operation : "unknown";
 
   return {
-    dispatchId: row.dispatch_id,
-    idempotencyKey: row.idempotency_key,
-    correlationId: row.correlation_id,
-    bridgeRuntime,
-    bridgeVersion,
-    operation,
-    resultClass: terminalStatus,
-    terminalStatus,
-    startedAt,
-    completedAt: nowIso,
-    evidence: boundEvidence(evidence),
-    payload: resultPayload
+    ok: true,
+    result: {
+      dispatchId: row.dispatch_id,
+      idempotencyKey: row.idempotency_key,
+      correlationId: row.correlation_id,
+      bridgeRuntime,
+      bridgeVersion,
+      operation,
+      resultClass: terminalStatus,
+      terminalStatus,
+      startedAt,
+      completedAt: nowIso,
+      evidence: boundEvidence(evidence),
+      payload: resultPayload
+    }
   };
 }
 
@@ -750,8 +773,7 @@ function buildExpiryResolution(row, nowIso) {
       row,
       "AMBIGUOUS",
       "Connection dropped before correlated terminal result.",
-      nowIso,
-      row.started_at || nowIso
+      nowIso
     );
   }
 
@@ -760,8 +782,7 @@ function buildExpiryResolution(row, nowIso) {
       row,
       "AMBIGUOUS",
       "Dispatch expired after delivery without terminal return.",
-      nowIso,
-      row.started_at || nowIso
+      nowIso
     );
   }
 
@@ -769,23 +790,25 @@ function buildExpiryResolution(row, nowIso) {
     row,
     "STALE",
     "Dispatch expired before execution start.",
-    nowIso,
     nowIso
   );
 }
 
-function buildResolvedTerminal(row, terminalStatus, evidence, nowIso, startedAt) {
+function buildResolvedTerminal(row, terminalStatus, evidence, nowIso) {
+  // Relay-generated resolutions must not invent executor runtime/version or start time.
+  const observedStart = normalizeIsoTimestamp(row.started_at);
   return {
     dispatchId: row.dispatch_id,
     idempotencyKey: row.idempotency_key,
     correlationId: row.correlation_id,
-    bridgeRuntime: BRIDGE_RUNTIME,
-    bridgeVersion: BRIDGE_RUNTIME_VERSION,
+    bridgeRuntime: null,
+    bridgeVersion: null,
     operation: typeof row.operation === "string" ? row.operation : "unknown",
     resultClass: terminalStatus,
     terminalStatus,
-    startedAt,
+    startedAt: observedStart,
     completedAt: nowIso,
+    executionStartObserved: observedStart !== null,
     evidence: boundEvidence(evidence),
     payload: {}
   };
@@ -917,13 +940,21 @@ function boundEvidence(evidence) {
   return value.length > MAX_EVIDENCE_LENGTH ? value.slice(0, MAX_EVIDENCE_LENGTH) : value;
 }
 
-function boundBridgeRuntime(runtime) {
-  const value = typeof runtime === "string" && runtime.trim().length > 0 ? runtime.trim() : BRIDGE_RUNTIME;
+function observeBridgeRuntime(runtime) {
+  if (typeof runtime !== "string" || runtime.trim().length === 0) {
+    return null;
+  }
+
+  const value = runtime.trim();
   return value.length > MAX_BRIDGE_RUNTIME_LENGTH ? value.slice(0, MAX_BRIDGE_RUNTIME_LENGTH) : value;
 }
 
-function boundBridgeVersion(version) {
-  const value = typeof version === "string" && version.trim().length > 0 ? version.trim() : BRIDGE_RUNTIME_VERSION;
+function observeBridgeVersion(version) {
+  if (typeof version !== "string" || version.trim().length === 0) {
+    return null;
+  }
+
+  const value = version.trim();
   return value.length > MAX_BRIDGE_VERSION_LENGTH ? value.slice(0, MAX_BRIDGE_VERSION_LENGTH) : value;
 }
 

@@ -57,9 +57,15 @@ public sealed class SyntheticBrowserAdapter : IBridgeBrowserAdapter
             return null;
         }
 
+        // Strip userinfo/query/fragment so secret-bearing URL components never leave LDW01.
+        var redactedUrl = parsed.GetComponents(
+            UriComponents.Scheme | UriComponents.Host | UriComponents.Port | UriComponents.Path,
+            UriFormat.UriEscaped);
+
         return tab with
         {
-            Title = tab.Title.Length > 120 ? tab.Title[..120] : tab.Title
+            Title = tab.Title.Length > 120 ? tab.Title[..120] : tab.Title,
+            Url = redactedUrl
         };
     }
 
