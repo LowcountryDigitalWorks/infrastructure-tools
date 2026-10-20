@@ -3,6 +3,11 @@ namespace LDW.OperationsBridge.Core;
 public static class BridgeProtocol
 {
     public const string Version = "1.0";
+    public const int MaxEvidenceLength = 512;
+    public const int MaxPayloadEntries = 32;
+    public const int MaxPayloadValueLength = 256;
+    public const int MaxArgEntries = 16;
+    public const int MaxArgValueLength = 256;
 
     public static readonly IReadOnlySet<BridgeOperation> AllowedReadOnlyOperations =
         new HashSet<BridgeOperation>
@@ -11,6 +16,118 @@ public static class BridgeProtocol
             BridgeOperation.ListTabs,
             BridgeOperation.ReadTabMetadata
         };
+
+    public static readonly IReadOnlySet<DispatchTerminalStatus> AllowedTerminalStatuses =
+        new HashSet<DispatchTerminalStatus>
+        {
+            DispatchTerminalStatus.Pass,
+            DispatchTerminalStatus.Blocked,
+            DispatchTerminalStatus.Failed,
+            DispatchTerminalStatus.Stale,
+            DispatchTerminalStatus.Ambiguous
+        };
+
+    public static string ToWireOperation(BridgeOperation operation)
+        => operation switch
+        {
+            BridgeOperation.BrowserHealth => "browser.health",
+            BridgeOperation.ListTabs => "browser.list_tabs",
+            BridgeOperation.ReadTabMetadata => "browser.read_tab",
+            _ => "unknown"
+        };
+
+    public static bool TryParseWireOperation(string? value, out BridgeOperation operation)
+    {
+        switch (value)
+        {
+            case "browser.health":
+                operation = BridgeOperation.BrowserHealth;
+                return true;
+            case "browser.list_tabs":
+                operation = BridgeOperation.ListTabs;
+                return true;
+            case "browser.read_tab":
+                operation = BridgeOperation.ReadTabMetadata;
+                return true;
+            default:
+                operation = BridgeOperation.Unknown;
+                return false;
+        }
+    }
+
+    public static string ToWireTerminalStatus(DispatchTerminalStatus status)
+        => status switch
+        {
+            DispatchTerminalStatus.Pass => "PASS",
+            DispatchTerminalStatus.Blocked => "BLOCKED",
+            DispatchTerminalStatus.Failed => "FAILED",
+            DispatchTerminalStatus.Stale => "STALE",
+            DispatchTerminalStatus.Ambiguous => "AMBIGUOUS",
+            _ => "FAILED"
+        };
+
+    public static bool TryParseWireTerminalStatus(string? value, out DispatchTerminalStatus status)
+    {
+        switch (value)
+        {
+            case "PASS":
+                status = DispatchTerminalStatus.Pass;
+                return true;
+            case "BLOCKED":
+                status = DispatchTerminalStatus.Blocked;
+                return true;
+            case "FAILED":
+                status = DispatchTerminalStatus.Failed;
+                return true;
+            case "STALE":
+                status = DispatchTerminalStatus.Stale;
+                return true;
+            case "AMBIGUOUS":
+                status = DispatchTerminalStatus.Ambiguous;
+                return true;
+            default:
+                status = DispatchTerminalStatus.Failed;
+                return false;
+        }
+    }
+
+    public static IReadOnlyDictionary<string, string> BoundPayload(IReadOnlyDictionary<string, string>? payload)
+    {
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (payload is null)
+        {
+            return result;
+        }
+
+        foreach (var pair in payload)
+        {
+            if (result.Count >= MaxPayloadEntries)
+            {
+                break;
+            }
+
+            if (string.IsNullOrWhiteSpace(pair.Key))
+            {
+                continue;
+            }
+
+            var value = pair.Value ?? string.Empty;
+            if (value.Length > MaxPayloadValueLength)
+            {
+                value = value[..MaxPayloadValueLength];
+            }
+
+            result[pair.Key] = value;
+        }
+
+        return result;
+    }
+
+    public static string BoundEvidence(string? evidence)
+    {
+        var value = string.IsNullOrWhiteSpace(evidence) ? "No evidence provided." : evidence.Trim();
+        return value.Length > MaxEvidenceLength ? value[..MaxEvidenceLength] : value;
+    }
 }
 
 public enum BridgeOperation

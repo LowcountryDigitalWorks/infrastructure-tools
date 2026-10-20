@@ -1,65 +1,102 @@
 const RELAY_PATHS = {
   dispatch: "/relay/dispatch",
-  connect: "/relay/connect",
-  terminal: "/relay/terminal",
-  syntheticConnect: "/relay/synthetic/connect"
+  connect: "/relay/connect"
 };
+
+const PROTOCOL_VERSION = "1.0";
+const MAX_TTL_MS = 5 * 60 * 1000;
+const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
+const MAX_EVIDENCE_LENGTH = 512;
+const MAX_PAYLOAD_ENTRIES = 32;
+const MAX_PAYLOAD_VALUE_LENGTH = 256;
+const MAX_ARG_ENTRIES = 16;
+const MAX_ARG_VALUE_LENGTH = 256;
+
+const ALLOWED_OPERATIONS = new Set(["browser.health", "browser.list_tabs", "browser.read_tab"]);
+const ALLOWED_TERMINAL_STATUSES = new Set(["PASS", "BLOCKED", "FAILED", "STALE", "AMBIGUOUS"]);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export const HIBERNATION_RUNTIME_CONTRACT = Object.freeze({
+  acceptWebSocket: "state.acceptWebSocket",
+  getWebSockets: "state.getWebSockets",
+  serializeAttachment: "WebSocket.serializeAttachment",
+  deserializeAttachment: "WebSocket.deserializeAttachment",
+  webSocketMessage: "DurableObject.webSocketMessage",
+  webSocketClose: "DurableObject.webSocketClose"
+});
 
 export default {
   async fetch(request, env) {
-    if (!isAuthorized(request, env)) {
+    const role = resolveCallerRole(request, env);
+    if (!role) {
       return jsonResponse({ error: "Unauthorized" }, 401);
     }
 
     const url = new URL(request.url);
     if (url.pathname === RELAY_PATHS.dispatch && request.method === "POST") {
-      const body = await readJson(request);
-      if (!body || typeof body.bridgeId !== "string" || body.bridgeId.length === 0) {
-        return jsonResponse({ error: "bridgeId is required." }, 400);
+      if (role !== "site") {
+        return jsonResponse({ error: "Site role required for dispatch." }, 403);
       }
 
-      const response = await forwardToBridgeObject(env, body.bridgeId, "/dispatch", request.method, body);
-      return response;
+      const body = await readJson(request);
+      const boundBridgeId = requireConfiguredBridgeId(env);
+      if (!boundBridgeId.ok) {
+        return jsonResponse({ error: boundBridgeId.error }, 500);
+      }
+
+      if (!body || typeof body.bridgeId !== "string" || body.bridgeId !== boundBridgeId.bridgeId) {
+        return jsonResponse({ error: "bridgeId must match the server-bound bridge identity." }, 400);
+      }
+
+      return forwardToBridgeObject(env, boundBridgeId.bridgeId, "/dispatch", request.method, body);
     }
 
     if (url.pathname === RELAY_PATHS.connect && request.method === "GET") {
-      const bridgeId = url.searchParams.get("bridgeId");
-      const connectionId = url.searchParams.get("connectionId");
-      if (!bridgeId || !connectionId) {
-        return jsonResponse({ error: "bridgeId and connectionId are required." }, 400);
+      if (role !== "bridge") {
+        return jsonResponse({ error: "Bridge role required for connect." }, 403);
       }
 
-      const forwardPath = `/connect?bridgeId=${encodeURIComponent(bridgeId)}&connectionId=${encodeURIComponent(connectionId)}`;
-      return forwardToBridgeObject(env, bridgeId, forwardPath, request.method, null, request);
-    }
-
-    if (url.pathname === RELAY_PATHS.syntheticConnect && request.method === "POST") {
-      const body = await readJson(request);
-      if (!body || typeof body.bridgeId !== "string" || typeof body.connectionId !== "string") {
-        return jsonResponse({ error: "bridgeId and connectionId are required." }, 400);
+      const boundBridgeId = requireConfiguredBridgeId(env);
+      if (!boundBridgeId.ok) {
+        return jsonResponse({ error: boundBridgeId.error }, 500);
       }
 
-      return forwardToBridgeObject(env, body.bridgeId, "/synthetic/connect", "POST", body);
-    }
-
-    if (url.pathname === RELAY_PATHS.terminal && request.method === "POST") {
-      const body = await readJson(request);
-      if (!body || typeof body.bridgeId !== "string" || typeof body.connectionId !== "string") {
-        return jsonResponse({ error: "bridgeId and connectionId are required." }, 400);
+      const requestedBridgeId = url.searchParams.get("bridgeId");
+      if (requestedBridgeId && requestedBridgeId !== boundBridgeId.bridgeId) {
+        return jsonResponse({ error: "bridgeId does not match authenticated bridge identity." }, 403);
       }
 
-      const headers = new Headers({ "content-type": "application/json", "x-bridge-connection-id": body.connectionId });
-      return forwardToBridgeObject(env, body.bridgeId, "/synthetic/terminal", "POST", body, undefined, headers);
+      const forwardPath = `/connect?bridgeId=${encodeURIComponent(boundBridgeId.bridgeId)}`;
+      return forwardToBridgeObject(env, boundBridgeId.bridgeId, forwardPath, request.method, null, request);
     }
 
     if (url.pathname.startsWith("/relay/dispatch/") && request.method === "GET") {
-      const dispatchId = url.pathname.slice("/relay/dispatch/".length);
-      const bridgeId = url.searchParams.get("bridgeId");
-      if (!dispatchId || !bridgeId) {
-        return jsonResponse({ error: "dispatchId path and bridgeId query are required." }, 400);
+      if (role !== "site") {
+        return jsonResponse({ error: "Site role required for dispatch status." }, 403);
       }
 
-      return forwardToBridgeObject(env, bridgeId, `/dispatch/${encodeURIComponent(dispatchId)}`, "GET", null);
+      const dispatchId = url.pathname.slice("/relay/dispatch/".length);
+      const boundBridgeId = requireConfiguredBridgeId(env);
+      if (!boundBridgeId.ok) {
+        return jsonResponse({ error: boundBridgeId.error }, 500);
+      }
+
+      if (!dispatchId) {
+        return jsonResponse({ error: "dispatchId path is required." }, 400);
+      }
+
+      return forwardToBridgeObject(
+        env,
+        boundBridgeId.bridgeId,
+        `/dispatch/${encodeURIComponent(dispatchId)}`,
+        "GET",
+        null
+      );
+    }
+
+    // Explicitly closed: Site cannot submit terminal results; Bridge cannot dispatch via HTTP.
+    if (url.pathname === "/relay/terminal") {
+      return jsonResponse({ error: "Terminal submission is bridge-WebSocket only." }, 405);
     }
 
     return jsonResponse({ error: "Not found" }, 404);
@@ -70,8 +107,14 @@ export class BridgeRelayDurableObject {
   constructor(state) {
     this.state = state;
     this.repository = createRepository(state);
-    this.connections = new Map();
-    this.repository.initialize();
+    if (typeof state?.blockConcurrencyWhile === "function") {
+      state.blockConcurrencyWhile(() => {
+        this.repository.initialize();
+        return Promise.resolve();
+      });
+    } else {
+      this.repository.initialize();
+    }
   }
 
   async fetch(request) {
@@ -83,50 +126,57 @@ export class BridgeRelayDurableObject {
         return jsonResponse({ error: accepted.error }, 400);
       }
 
-      const selectedConnectionId = this.selectConnectionId(accepted.record.bridge_id);
-      if (selectedConnectionId) {
-        this.repository.markDelivered(accepted.record.dispatch_id, selectedConnectionId, new Date().toISOString());
+      if (accepted.state === "duplicate") {
+        return jsonResponse(sanitizeSiteDispatchResponse(accepted), 200);
       }
+
+      const selected = this.selectBridgeSocket(accepted.record.bridge_id);
+      if (!selected) {
+        return jsonResponse(
+          {
+            state: accepted.state,
+            dispatchId: accepted.record.dispatch_id,
+            correlationId: accepted.record.correlation_id,
+            delivery: "pending"
+          },
+          200
+        );
+      }
+
+      const envelope = buildDeliveryEnvelope(accepted.record);
+      try {
+        selected.socket.send(JSON.stringify(envelope));
+      } catch {
+        return jsonResponse(
+          {
+            state: accepted.state,
+            dispatchId: accepted.record.dispatch_id,
+            correlationId: accepted.record.correlation_id,
+            delivery: "send_failed"
+          },
+          200
+        );
+      }
+
+      this.repository.markDelivered(
+        accepted.record.dispatch_id,
+        selected.connectionId,
+        new Date().toISOString()
+      );
 
       return jsonResponse(
         {
-          state: accepted.state,
+          state: "delivered",
           dispatchId: accepted.record.dispatch_id,
           correlationId: accepted.record.correlation_id,
-          deliveryConnectionId: selectedConnectionId
+          delivery: "sent"
         },
         200
       );
     }
 
-    if (url.pathname === "/synthetic/connect" && request.method === "POST") {
-      const body = await readJson(request);
-      if (!body || typeof body.bridgeId !== "string" || typeof body.connectionId !== "string") {
-        return jsonResponse({ error: "bridgeId and connectionId are required." }, 400);
-      }
-
-      this.connections.set(body.connectionId, { bridgeId: body.bridgeId });
-      return jsonResponse({ state: "connected", connectionId: body.connectionId }, 200);
-    }
-
     if (url.pathname === "/connect" && request.method === "GET") {
       return this.handleWebSocketConnect(request, url);
-    }
-
-    if (url.pathname === "/synthetic/terminal" && request.method === "POST") {
-      const connectionId = request.headers.get("x-bridge-connection-id");
-      if (!connectionId) {
-        return jsonResponse({ error: "x-bridge-connection-id is required." }, 400);
-      }
-
-      const body = await readJson(request);
-      const completed = this.repository.completeFromClient(connectionId, body, new Date().toISOString());
-      if (!completed.ok) {
-        const status = completed.error === "not-found" ? 404 : 409;
-        return jsonResponse({ error: completed.error }, status);
-      }
-
-      return jsonResponse({ state: "terminal", result: completed.result }, 200);
     }
 
     if (url.pathname.startsWith("/dispatch/") && request.method === "GET") {
@@ -136,7 +186,7 @@ export class BridgeRelayDurableObject {
         return jsonResponse({ error: "not-found" }, 404);
       }
 
-      return jsonResponse(record, 200);
+      return jsonResponse(sanitizeSiteDispatchRecord(record), 200);
     }
 
     return jsonResponse({ error: "Not found" }, 404);
@@ -153,44 +203,86 @@ export class BridgeRelayDurableObject {
     }
 
     const bridgeId = url.searchParams.get("bridgeId");
-    const connectionId = url.searchParams.get("connectionId");
-    if (!bridgeId || !connectionId) {
-      return jsonResponse({ error: "bridgeId and connectionId are required." }, 400);
+    if (!bridgeId) {
+      return jsonResponse({ error: "bridgeId is required." }, 400);
+    }
+
+    if (typeof this.state?.acceptWebSocket !== "function") {
+      return jsonResponse({ error: "Durable Object hibernation acceptWebSocket API unavailable." }, 501);
     }
 
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];
-    server.accept();
+    const connectionId = crypto.randomUUID();
 
-    this.connections.set(connectionId, { bridgeId, socket: server });
-    server.addEventListener("message", (event) => {
-      const payload = safeParseJson(event.data);
-      if (!payload || payload.type !== "terminal") {
-        return;
-      }
-
-      this.repository.completeFromClient(connectionId, payload, new Date().toISOString());
-    });
-    server.addEventListener("close", () => {
-      this.connections.delete(connectionId);
-    });
+    // Hibernation path: attach via acceptWebSocket + attachment (not the non-hibernating accept API).
+    this.state.acceptWebSocket(server, [bridgeId]);
+    server.serializeAttachment({ bridgeId, connectionId });
 
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  selectConnectionId(bridgeId) {
-    for (const [connectionId, connection] of this.connections.entries()) {
-      if (connection.bridgeId === bridgeId) {
-        return connectionId;
+  async webSocketMessage(ws, message) {
+    const attachment = safeDeserializeAttachment(ws);
+    if (!attachment?.connectionId || !attachment?.bridgeId) {
+      return;
+    }
+
+    const text = typeof message === "string" ? message : new TextDecoder().decode(message);
+    const payload = safeParseJson(text);
+    if (!payload || payload.type !== "terminal") {
+      return;
+    }
+
+    // Exact bridge identity and connection id are bound server-side from the hibernated socket.
+    this.repository.completeFromClient(attachment.connectionId, payload, new Date().toISOString());
+  }
+
+  async webSocketClose(ws, code, reason) {
+    try {
+      ws.close(code, reason);
+    } catch {
+      // already closing/closed
+    }
+  }
+
+  async webSocketError(ws) {
+    try {
+      ws.close(1011, "error");
+    } catch {
+      // already closing/closed
+    }
+  }
+
+  selectBridgeSocket(bridgeId) {
+    if (typeof this.state?.getWebSockets !== "function") {
+      return null;
+    }
+
+    const sockets = this.state.getWebSockets(bridgeId);
+    for (const socket of sockets) {
+      const attachment = safeDeserializeAttachment(socket);
+      if (!attachment || attachment.bridgeId !== bridgeId || typeof attachment.connectionId !== "string") {
+        continue;
       }
+
+      if (typeof socket.readyState === "number" && socket.readyState !== 1) {
+        continue;
+      }
+
+      if (typeof socket.send !== "function") {
+        continue;
+      }
+
+      return { socket, connectionId: attachment.connectionId };
     }
 
     return null;
   }
 }
 
-function createRepository(state) {
+export function createRepository(state) {
   const sql = state?.storage?.sql;
   if (sql && typeof sql.exec === "function") {
     return new SqliteRelayRepository(sql);
@@ -199,7 +291,7 @@ function createRepository(state) {
   return new InMemoryRelayRepository();
 }
 
-class SqliteRelayRepository {
+export class SqliteRelayRepository {
   constructor(sql) {
     this.sql = sql;
   }
@@ -209,6 +301,9 @@ class SqliteRelayRepository {
       CREATE TABLE IF NOT EXISTS dispatches (
         dispatch_id TEXT PRIMARY KEY,
         bridge_id TEXT NOT NULL,
+        protocol_version TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        args_json TEXT NOT NULL,
         idempotency_key TEXT NOT NULL UNIQUE,
         correlation_id TEXT NOT NULL,
         issued_at TEXT NOT NULL,
@@ -225,7 +320,7 @@ class SqliteRelayRepository {
   }
 
   acceptDispatch(payload, nowIso) {
-    const normalized = normalizeDispatchPayload(payload);
+    const normalized = normalizeDispatchPayload(payload, nowIso);
     if (!normalized.ok) {
       return normalized;
     }
@@ -239,10 +334,14 @@ class SqliteRelayRepository {
 
     this.sql.exec(
       `INSERT INTO dispatches
-       (dispatch_id, bridge_id, idempotency_key, correlation_id, issued_at, expires_at, lifecycle)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
+       (dispatch_id, bridge_id, protocol_version, operation, args_json, idempotency_key, correlation_id,
+        issued_at, expires_at, lifecycle)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`,
       normalized.record.dispatch_id,
       normalized.record.bridge_id,
+      normalized.record.protocol_version,
+      normalized.record.operation,
+      normalized.record.args_json,
       normalized.record.idempotency_key,
       normalized.record.correlation_id,
       normalized.record.issued_at,
@@ -287,7 +386,7 @@ class SqliteRelayRepository {
            terminal_evidence = ?4,
            terminal_payload_json = ?5,
            completed_at = ?6
-       WHERE dispatch_id = ?1`,
+       WHERE dispatch_id = ?1 AND terminal_status IS NULL`,
       dispatchId,
       result.terminalStatus,
       result.correlationId,
@@ -312,7 +411,7 @@ class SqliteRelayRepository {
   }
 }
 
-class InMemoryRelayRepository {
+export class InMemoryRelayRepository {
   constructor() {
     this.dispatches = new Map();
     this.idempotency = new Map();
@@ -320,8 +419,8 @@ class InMemoryRelayRepository {
 
   initialize() {}
 
-  acceptDispatch(payload) {
-    const normalized = normalizeDispatchPayload(payload);
+  acceptDispatch(payload, nowIso) {
+    const normalized = normalizeDispatchPayload(payload, nowIso);
     if (!normalized.ok) {
       return normalized;
     }
@@ -376,13 +475,15 @@ class InMemoryRelayRepository {
   }
 }
 
-function normalizeDispatchPayload(payload) {
+export function normalizeDispatchPayload(payload, nowIso) {
   if (!payload || typeof payload !== "object") {
     return { ok: false, error: "invalid-dispatch-payload" };
   }
 
-  if (typeof payload.dispatchId !== "string" ||
+  if (typeof payload.protocolVersion !== "string" ||
+      typeof payload.dispatchId !== "string" ||
       typeof payload.bridgeId !== "string" ||
+      typeof payload.operation !== "string" ||
       typeof payload.idempotencyKey !== "string" ||
       typeof payload.correlationId !== "string" ||
       typeof payload.issuedAt !== "string" ||
@@ -390,11 +491,49 @@ function normalizeDispatchPayload(payload) {
     return { ok: false, error: "invalid-dispatch-envelope" };
   }
 
+  if (payload.protocolVersion !== PROTOCOL_VERSION) {
+    return { ok: false, error: "unknown-protocol" };
+  }
+
+  if (!UUID_RE.test(payload.dispatchId)) {
+    return { ok: false, error: "invalid-dispatch-id" };
+  }
+
+  if (!ALLOWED_OPERATIONS.has(payload.operation)) {
+    return { ok: false, error: "unknown-operation" };
+  }
+
+  if (typeof payload.bridgeId !== "string" || payload.bridgeId.length === 0) {
+    return { ok: false, error: "unknown-bridge" };
+  }
+
+  const issuedAtMs = Date.parse(payload.issuedAt);
+  const expiresAtMs = Date.parse(payload.expiresAt);
+  const nowMs = Date.parse(nowIso);
+  if (!Number.isFinite(issuedAtMs) || !Number.isFinite(expiresAtMs) || !Number.isFinite(nowMs)) {
+    return { ok: false, error: "invalid-timestamps" };
+  }
+
+  if (expiresAtMs <= issuedAtMs ||
+      expiresAtMs - issuedAtMs > MAX_TTL_MS ||
+      nowMs > expiresAtMs ||
+      nowMs < issuedAtMs - MAX_CLOCK_SKEW_MS) {
+    return { ok: false, error: "stale-or-expired" };
+  }
+
+  const args = normalizeArgs(payload.args);
+  if (!args.ok) {
+    return args;
+  }
+
   return {
     ok: true,
     record: {
       dispatch_id: payload.dispatchId,
       bridge_id: payload.bridgeId,
+      protocol_version: payload.protocolVersion,
+      operation: payload.operation,
+      args_json: JSON.stringify(args.value),
       idempotency_key: payload.idempotencyKey,
       correlation_id: payload.correlationId,
       issued_at: payload.issuedAt,
@@ -410,10 +549,16 @@ function normalizeDispatchPayload(payload) {
   };
 }
 
-function finalizeTerminal(row, connectionId, payload, nowIso) {
+export function finalizeTerminal(row, connectionId, payload, nowIso) {
   let terminalStatus = typeof payload?.status === "string" ? payload.status : "FAILED";
   let evidence = typeof payload?.evidence === "string" ? payload.evidence : "Client terminal message.";
-  let resultPayload = payload?.payload && typeof payload.payload === "object" ? payload.payload : {};
+  let resultPayload = normalizeTerminalPayload(payload?.payload);
+
+  if (!ALLOWED_TERMINAL_STATUSES.has(terminalStatus)) {
+    terminalStatus = "FAILED";
+    evidence = "Unsupported terminal status.";
+    resultPayload = {};
+  }
 
   if (row.delivery_connection_id !== connectionId || row.correlation_id !== payload?.correlationId) {
     terminalStatus = "AMBIGUOUS";
@@ -433,19 +578,140 @@ function finalizeTerminal(row, connectionId, payload, nowIso) {
     correlationId: row.correlation_id,
     terminalStatus,
     completedAt: nowIso,
-    evidence,
+    evidence: boundEvidence(evidence),
     payload: resultPayload
   };
 }
 
-async function forwardToBridgeObject(env, bridgeId, path, method, body, sourceRequest, overrideHeaders) {
+function buildDeliveryEnvelope(record) {
+  let args = {};
+  try {
+    args = JSON.parse(record.args_json || "{}");
+  } catch {
+    args = {};
+  }
+
+  return {
+    type: "dispatch",
+    protocolVersion: record.protocol_version,
+    dispatchId: record.dispatch_id,
+    bridgeId: record.bridge_id,
+    operation: record.operation,
+    issuedAt: record.issued_at,
+    expiresAt: record.expires_at,
+    idempotencyKey: record.idempotency_key,
+    correlationId: record.correlation_id,
+    args
+  };
+}
+
+function sanitizeSiteDispatchResponse(accepted) {
+  return {
+    state: accepted.state,
+    dispatchId: accepted.record.dispatch_id,
+    correlationId: accepted.record.correlation_id,
+    delivery: accepted.record.lifecycle === "delivered" ? "sent" : accepted.record.lifecycle
+  };
+}
+
+function sanitizeSiteDispatchRecord(record) {
+  return {
+    dispatch_id: record.dispatch_id,
+    bridge_id: record.bridge_id,
+    protocol_version: record.protocol_version,
+    operation: record.operation,
+    args_json: record.args_json,
+    idempotency_key: record.idempotency_key,
+    correlation_id: record.correlation_id,
+    issued_at: record.issued_at,
+    expires_at: record.expires_at,
+    lifecycle: record.lifecycle,
+    terminal_status: record.terminal_status,
+    terminal_correlation_id: record.terminal_correlation_id,
+    terminal_evidence: record.terminal_evidence,
+    terminal_payload_json: record.terminal_payload_json,
+    completed_at: record.completed_at
+    // delivery_connection_id intentionally omitted from Site-facing views
+  };
+}
+
+function normalizeArgs(args) {
+  if (args === undefined || args === null) {
+    return { ok: true, value: {} };
+  }
+
+  if (typeof args !== "object" || Array.isArray(args)) {
+    return { ok: false, error: "invalid-args" };
+  }
+
+  const entries = Object.entries(args);
+  if (entries.length > MAX_ARG_ENTRIES) {
+    return { ok: false, error: "args-overflow" };
+  }
+
+  const normalized = {};
+  for (const [key, value] of entries) {
+    if (typeof key !== "string" || key.length === 0 || typeof value !== "string") {
+      return { ok: false, error: "invalid-args" };
+    }
+
+    if (value.length > MAX_ARG_VALUE_LENGTH) {
+      return { ok: false, error: "arg-value-too-long" };
+    }
+
+    normalized[key] = value;
+  }
+
+  return { ok: true, value: normalized };
+}
+
+function normalizeTerminalPayload(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return {};
+  }
+
+  const result = {};
+  for (const [key, value] of Object.entries(payload)) {
+    if (Object.keys(result).length >= MAX_PAYLOAD_ENTRIES) {
+      break;
+    }
+
+    if (typeof key !== "string" || key.length === 0) {
+      continue;
+    }
+
+    const text = typeof value === "string" ? value : String(value);
+    result[key] = text.length > MAX_PAYLOAD_VALUE_LENGTH ? text.slice(0, MAX_PAYLOAD_VALUE_LENGTH) : text;
+  }
+
+  return result;
+}
+
+function boundEvidence(evidence) {
+  const value = typeof evidence === "string" && evidence.trim().length > 0 ? evidence.trim() : "No evidence provided.";
+  return value.length > MAX_EVIDENCE_LENGTH ? value.slice(0, MAX_EVIDENCE_LENGTH) : value;
+}
+
+function safeDeserializeAttachment(ws) {
+  if (!ws || typeof ws.deserializeAttachment !== "function") {
+    return null;
+  }
+
+  try {
+    return ws.deserializeAttachment();
+  } catch {
+    return null;
+  }
+}
+
+async function forwardToBridgeObject(env, bridgeId, path, method, body, sourceRequest) {
   if (!env?.BRIDGE_RELAY || typeof env.BRIDGE_RELAY.idFromName !== "function" || typeof env.BRIDGE_RELAY.get !== "function") {
     return jsonResponse({ error: "Durable Object binding BRIDGE_RELAY is missing." }, 500);
   }
 
   const id = env.BRIDGE_RELAY.idFromName(bridgeId);
   const stub = env.BRIDGE_RELAY.get(id);
-  const headers = overrideHeaders ?? sourceRequest?.headers ?? new Headers({ "content-type": "application/json" });
+  const headers = sourceRequest?.headers ?? new Headers({ "content-type": "application/json" });
   const init = { method, headers };
   if (body !== null && body !== undefined) {
     init.body = JSON.stringify(body);
@@ -455,18 +721,36 @@ async function forwardToBridgeObject(env, bridgeId, path, method, body, sourceRe
   return stub.fetch(request);
 }
 
-function isAuthorized(request, env) {
-  if (!env || typeof env.BRIDGE_SHARED_TOKEN !== "string" || env.BRIDGE_SHARED_TOKEN.length === 0) {
-    return false;
+function resolveCallerRole(request, env) {
+  const siteToken = typeof env?.SITE_DISPATCH_TOKEN === "string" ? env.SITE_DISPATCH_TOKEN : "";
+  const bridgeToken = typeof env?.BRIDGE_CLIENT_TOKEN === "string" ? env.BRIDGE_CLIENT_TOKEN : "";
+  if (!siteToken || !bridgeToken || siteToken === bridgeToken) {
+    return null;
   }
 
   const authHeader = request.headers.get("authorization");
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return false;
+    return null;
   }
 
   const supplied = authHeader.slice("Bearer ".length);
-  return supplied === env.BRIDGE_SHARED_TOKEN;
+  if (supplied === siteToken) {
+    return "site";
+  }
+
+  if (supplied === bridgeToken) {
+    return "bridge";
+  }
+
+  return null;
+}
+
+function requireConfiguredBridgeId(env) {
+  if (!env || typeof env.BRIDGE_ID !== "string" || env.BRIDGE_ID.length === 0) {
+    return { ok: false, error: "BRIDGE_ID is not configured." };
+  }
+
+  return { ok: true, bridgeId: env.BRIDGE_ID };
 }
 
 function jsonResponse(payload, status) {

@@ -12,19 +12,35 @@ public sealed class OutboundBridgeClient
 {
     private readonly string _bridgeId;
     private readonly IBridgeBrowserAdapter _browserAdapter;
+    private readonly DispatchValidator _validator;
 
-    public OutboundBridgeClient(string bridgeId, IBridgeBrowserAdapter browserAdapter)
+    public OutboundBridgeClient(
+        string bridgeId,
+        IBridgeBrowserAdapter browserAdapter,
+        DispatchValidator validator)
     {
         _bridgeId = bridgeId;
         _browserAdapter = browserAdapter;
+        _validator = validator;
     }
 
     public void Attach(IBridgeTransport transport)
     {
         transport.DispatchReceived += async (request, _, cancellationToken) =>
         {
+            var now = DateTimeOffset.UtcNow;
+            var validationError = _validator.Validate(request, now);
+            if (validationError != DispatchValidationError.None)
+            {
+                var rejected = BuildRejectedResult(request, now, validationError);
+                await transport.SendResultAsync(rejected, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
             if (!string.Equals(request.BridgeId, _bridgeId, StringComparison.Ordinal))
             {
+                var mismatched = BuildRejectedResult(request, now, DispatchValidationError.UnknownBridge);
+                await transport.SendResultAsync(mismatched, cancellationToken).ConfigureAwait(false);
                 return;
             }
 
@@ -103,7 +119,27 @@ public sealed class OutboundBridgeClient
             status,
             startedAt,
             completedAt,
-            evidence,
-            payload);
+            BridgeProtocol.BoundEvidence(evidence),
+            BridgeProtocol.BoundPayload(payload));
+    }
+
+    private static BridgeDispatchResult BuildRejectedResult(
+        BridgeDispatchRequest request,
+        DateTimeOffset now,
+        DispatchValidationError validationError)
+    {
+        var status = validationError == DispatchValidationError.StaleOrExpired
+            ? DispatchTerminalStatus.Stale
+            : DispatchTerminalStatus.Blocked;
+
+        return new BridgeDispatchResult(
+            request.DispatchId,
+            request.IdempotencyKey,
+            request.CorrelationId,
+            status,
+            now,
+            now,
+            BridgeProtocol.BoundEvidence($"Rejected before local execution: {validationError}"),
+            BridgeProtocol.BoundPayload(null));
     }
 }

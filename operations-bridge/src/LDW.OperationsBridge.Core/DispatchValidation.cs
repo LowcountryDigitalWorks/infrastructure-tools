@@ -28,7 +28,13 @@ public sealed class DispatchValidator
             request.DispatchId == Guid.Empty ||
             string.IsNullOrWhiteSpace(request.BridgeId) ||
             string.IsNullOrWhiteSpace(request.IdempotencyKey) ||
-            string.IsNullOrWhiteSpace(request.CorrelationId))
+            string.IsNullOrWhiteSpace(request.CorrelationId) ||
+            request.Args is null ||
+            request.Args.Count > BridgeProtocol.MaxArgEntries ||
+            request.Args.Any(pair =>
+                string.IsNullOrWhiteSpace(pair.Key) ||
+                pair.Value is null ||
+                pair.Value.Length > BridgeProtocol.MaxArgValueLength))
         {
             return DispatchValidationError.InvalidEnvelope;
         }
@@ -43,7 +49,7 @@ public sealed class DispatchValidator
             return DispatchValidationError.UnknownBridge;
         }
 
-        if (!_allowedOperations.Contains(request.Operation))
+        if (!_allowedOperations.Contains(request.Operation) || request.Operation == BridgeOperation.Unknown)
         {
             return DispatchValidationError.UnknownOperation;
         }

@@ -124,6 +124,13 @@ public sealed class RelayDispatchStore
             return false;
         }
 
+        if (!BridgeProtocol.AllowedTerminalStatuses.Contains(status))
+        {
+            status = DispatchTerminalStatus.Failed;
+            evidence = "Unsupported terminal status.";
+            payload = new Dictionary<string, string>();
+        }
+
         // Lost correlation or connection mismatch fails closed to AMBIGUOUS, never PASS.
         if (!string.Equals(envelope.DeliveryConnectionId, connectionId, StringComparison.Ordinal) ||
             !string.Equals(envelope.Request.CorrelationId, correlationId, StringComparison.Ordinal))
@@ -148,8 +155,8 @@ public sealed class RelayDispatchStore
             status,
             envelope.StartedAt.Value,
             now,
-            evidence,
-            payload);
+            BridgeProtocol.BoundEvidence(evidence),
+            BridgeProtocol.BoundPayload(payload));
 
         _dispatches[dispatchId] = envelope with
         {

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using LDW.OperationsBridge.Client;
 using LDW.OperationsBridge.Core;
 
@@ -118,7 +119,7 @@ Assert(store.TryMarkStarted(disconnectBeforeTerminal.DispatchId, "conn-drop", no
 Assert(store.ResolveExpired(now.AddSeconds(3)) > 0, "expiry resolver marks timed-out dispatches terminal");
 Assert(store.Get(disconnectBeforeTerminal.DispatchId)?.TerminalResult?.TerminalStatus == DispatchTerminalStatus.Ambiguous, "connection loss does not manufacture PASS");
 
-var adapter = new SyntheticBrowserAdapter(
+var adapter = new CountingBrowserAdapter(
 [
     new BrowserTabMetadata("1", "CHATGPT_MAIN", "ChatGPT | Operations", "https://chatgpt.com/c/123"),
     new BrowserTabMetadata("2", "NOT_ALLOWLISTED", "Bank", "https://bank.example.com/private"),
@@ -126,7 +127,7 @@ var adapter = new SyntheticBrowserAdapter(
     new BrowserTabMetadata("4", "SUBDOMAIN_OK", "OpenAI", "https://status.openai.com/")
 ]);
 
-var client = new OutboundBridgeClient(bridgeId, adapter);
+var client = new OutboundBridgeClient(bridgeId, adapter, validator);
 var transport = new FakeBridgeTransport();
 client.Attach(transport);
 
@@ -145,6 +146,85 @@ Assert(transport.Results[0].Payload.ContainsKey("tab_0_url"), "result includes s
 Assert(!transport.Results[0].Payload.Values.Any(value => value.Contains("bank.example.com", StringComparison.OrdinalIgnoreCase)), "non-allowlisted tab metadata is filtered");
 Assert(!transport.Results[0].Payload.Values.Any(value => value.Contains("evilchatgpt.com", StringComparison.OrdinalIgnoreCase)), "lookalike host is filtered from allowlist");
 Assert(transport.Results[0].Payload.Values.Any(value => value.Contains("status.openai.com", StringComparison.OrdinalIgnoreCase)), "allowlisted subdomain remains visible");
+Assert(adapter.ListTabsCalls == 1, "allowlisted happy-path invoked adapter once");
+
+var staleClientRequest = BuildRequest(
+    bridgeId,
+    BridgeOperation.ListTabs,
+    now.AddMinutes(-10),
+    now.AddMinutes(-1),
+    "idem-stale-client",
+    "corr-stale-client");
+var adapterCallsBeforeStale = adapter.TotalCalls;
+await transport.DeliverAsync(staleClientRequest, "conn-stale");
+Assert(adapter.TotalCalls == adapterCallsBeforeStale, "stale request blocked before adapter execution");
+Assert(transport.Results[^1].TerminalStatus == DispatchTerminalStatus.Stale, "stale client request returns STALE");
+
+var unknownClientRequest = BuildRequest(
+    bridgeId,
+    BridgeOperation.Unknown,
+    now,
+    now.AddMinutes(1),
+    "idem-unknown-client",
+    "corr-unknown-client");
+var adapterCallsBeforeUnknown = adapter.TotalCalls;
+await transport.DeliverAsync(unknownClientRequest, "conn-unknown");
+Assert(adapter.TotalCalls == adapterCallsBeforeUnknown, "unknown operation blocked before adapter execution");
+Assert(transport.Results[^1].TerminalStatus == DispatchTerminalStatus.Blocked, "unknown client operation returns BLOCKED");
+
+var wireJson = JsonSerializer.Serialize(new
+{
+    type = "dispatch",
+    protocolVersion = BridgeProtocol.Version,
+    dispatchId = Guid.NewGuid().ToString("D"),
+    bridgeId,
+    operation = "browser.health",
+    issuedAt = now.ToString("O"),
+    expiresAt = now.AddMinutes(2).ToString("O"),
+    idempotencyKey = "idem-wire",
+    correlationId = "corr-wire",
+    args = new Dictionary<string, string>()
+});
+Assert(ClientWebSocketBridgeTransport.TryParseDispatchMessage(wireJson, out var parsed, out var parseError), $"parses concrete WS dispatch envelope ({parseError})");
+Assert(parsed is not null && parsed.Operation == BridgeOperation.BrowserHealth, "wire operation maps to BrowserHealth");
+
+var terminalWire = ClientWebSocketBridgeTransport.ToTerminalWireMessage(
+    new BridgeDispatchResult(
+        parsed!.DispatchId,
+        parsed.IdempotencyKey,
+        parsed.CorrelationId,
+        DispatchTerminalStatus.Pass,
+        now,
+        now.AddSeconds(1),
+        new string('e', BridgeProtocol.MaxEvidenceLength + 40),
+        new Dictionary<string, string>
+        {
+            ["ok"] = "true",
+            ["overflow"] = new string('p', BridgeProtocol.MaxPayloadValueLength + 40)
+        }));
+var terminalJson = JsonSerializer.Serialize(terminalWire);
+using (var terminalDoc = JsonDocument.Parse(terminalJson))
+{
+    var root = terminalDoc.RootElement;
+    Assert(root.GetProperty("type").GetString() == "terminal", "terminal wire type is terminal");
+    Assert(root.GetProperty("status").GetString() == "PASS", "terminal wire status is closed PASS");
+    Assert(root.GetProperty("evidence").GetString()!.Length == BridgeProtocol.MaxEvidenceLength, "terminal evidence is bounded");
+    Assert(root.GetProperty("payload").GetProperty("overflow").GetString()!.Length == BridgeProtocol.MaxPayloadValueLength, "terminal payload values are bounded");
+}
+
+Assert(BridgeProtocol.AllowedTerminalStatuses.SetEquals(
+[
+    DispatchTerminalStatus.Pass,
+    DispatchTerminalStatus.Blocked,
+    DispatchTerminalStatus.Failed,
+    DispatchTerminalStatus.Stale,
+    DispatchTerminalStatus.Ambiguous
+]), "terminal enum is closed to PASS/BLOCKED/FAILED/STALE/AMBIGUOUS");
+
+Assert(!ClientWebSocketBridgeTransport.TryParseDispatchMessage(
+    """{"type":"dispatch","protocolVersion":"1.0","dispatchId":"bad","bridgeId":"ldw01-bridge","operation":"browser.eval","issuedAt":"2026-01-01T00:00:00Z","expiresAt":"2026-01-01T00:01:00Z","idempotencyKey":"x","correlationId":"y","args":{}}""",
+    out _,
+    out _), "unknown/invalid wire dispatch fails parse before execution");
 
 Console.WriteLine($"Operations bridge deterministic tests passed ({assertionCount} assertions).");
 
@@ -197,5 +277,37 @@ sealed class FakeBridgeTransport : IBridgeTransport
     {
         Results.Add(result);
         return Task.CompletedTask;
+    }
+}
+
+sealed class CountingBrowserAdapter : IBridgeBrowserAdapter
+{
+    private readonly SyntheticBrowserAdapter _inner;
+
+    public CountingBrowserAdapter(IEnumerable<BrowserTabMetadata> tabs)
+    {
+        _inner = new SyntheticBrowserAdapter(tabs);
+    }
+
+    public int ListTabsCalls { get; private set; }
+    public int TotalCalls { get; private set; }
+
+    public Task<BrowserHealth> GetHealthAsync(CancellationToken cancellationToken)
+    {
+        TotalCalls++;
+        return _inner.GetHealthAsync(cancellationToken);
+    }
+
+    public Task<IReadOnlyList<BrowserTabMetadata>> ListTabsAsync(CancellationToken cancellationToken)
+    {
+        TotalCalls++;
+        ListTabsCalls++;
+        return _inner.ListTabsAsync(cancellationToken);
+    }
+
+    public Task<BrowserTabMetadata?> ReadTabMetadataAsync(string tabId, CancellationToken cancellationToken)
+    {
+        TotalCalls++;
+        return _inner.ReadTabMetadataAsync(tabId, cancellationToken);
     }
 }

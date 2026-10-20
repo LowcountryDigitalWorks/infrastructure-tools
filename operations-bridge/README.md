@@ -3,11 +3,12 @@
 This folder contains the smallest read-only source candidate for OPS-BRIDGE-001 issue #43.
 
 Scope in this slice:
-- normal-user .NET bridge client skeleton with event-driven outbound transport semantics;
-- protocol/envelope and deterministic fail-closed validation;
-- transport/correlation relay state machine plus minimal Cloudflare Worker + SQLite Durable Object source mapping;
-- read-only browser adapter abstraction with sanitized allowlisted tab metadata only;
-- deterministic synthetic tests for schema/auth/replay/idempotency/reconnect/correlation behavior.
+- normal-user .NET bridge client with outbound `ClientWebSocket` transport (no local inbound listener);
+- protocol/envelope and fail-closed validation at Worker/DO acceptance and again before local execution;
+- Cloudflare Worker + SQLite Durable Object relay using WebSocket Hibernation (`acceptWebSocket` / `getWebSockets` / attachments);
+- separate Site and Bridge credentials with server-bound bridge identity;
+- read-only browser adapter abstraction with exact-domain/subdomain allowlisted metadata only;
+- deterministic synthetic tests for auth roles, delivery, replay/idempotency, correlation, hibernation rehydration, and SQLite persistence.
 
 Out of scope in this slice:
 - no Codync adapter implementation;
@@ -19,9 +20,18 @@ Out of scope in this slice:
 ## Layout
 
 - `src/LDW.OperationsBridge.Core` - protocol, validator, relay state machine, browser adapter contracts.
-- `src/LDW.OperationsBridge.Client` - outbound normal-user client and event-driven dispatch handler.
+- `src/LDW.OperationsBridge.Client` - outbound client, validation-before-execution, `ClientWebSocketBridgeTransport`.
 - `tests/LDW.OperationsBridge.Tests` - deterministic contract tests with synthetic fixtures.
-- `relay-cloudflare` - minimal authenticated Worker + SQLite Durable Object relay source with synthetic fixtures/tests.
+- `relay-cloudflare` - authenticated Worker + SQLite Durable Object hibernating relay source and fixtures.
+
+## Auth roles
+
+| Role | Credential (secret) | Allowed |
+|------|---------------------|---------|
+| Site | `SITE_DISPATCH_TOKEN` | `POST /relay/dispatch`, `GET /relay/dispatch/:id` |
+| Bridge | `BRIDGE_CLIENT_TOKEN` | `GET /relay/connect` WebSocket upgrade only |
+
+`BRIDGE_ID` is server-configured. Site callers never receive local connection IDs. Terminal results are accepted only from the authenticated hibernated WebSocket attachment, never from Site HTTP.
 
 ## Build and test
 
@@ -33,13 +43,16 @@ dotnet run --project tests/LDW.OperationsBridge.Tests/LDW.OperationsBridge.Tests
 node --test relay-cloudflare/tests/*.test.mjs
 ```
 
+Optional (no deploy): `npx wrangler deploy --dry-run` / `npx wrangler check` when wrangler is available.
+
 ## Security posture in this slice
 
-- closed operation enum (`BrowserHealth`, `ListTabs`, `ReadTabMetadata`) with fail-closed unknown operation behavior;
-- protocol/client/TTL/idempotency/correlation checks fail closed;
-- terminal result constrained to `PASS | BLOCKED | FAILED | STALE | AMBIGUOUS`;
+- closed operation enum (`browser.health`, `browser.list_tabs`, `browser.read_tab`) with fail-closed unknown operation behavior;
+- protocol/client/TTL/idempotency/correlation checks fail closed at relay and client;
+- dispatch is delivered over the connected outbound bridge socket; delivered only after successful send;
+- terminal result constrained to `PASS | BLOCKED | FAILED | STALE | AMBIGUOUS` with bounded evidence/payload;
 - disconnect/lost-correlation scenarios cannot synthesize `PASS`;
-- synthetic adapter filters to allowlisted hosts and metadata-only output.
+- synthetic adapter filters to exact allowlisted hosts/subdomains and metadata-only output.
 
 ## Rollback / cleanup
 
