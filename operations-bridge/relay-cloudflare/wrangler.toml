@@ -1,0 +1,19 @@
+name = "ldw-operations-bridge-relay"
+main = "src/relay.js"
+compatibility_date = "2026-10-01"
+
+# Secrets (set via `wrangler secret put`, never commit values):
+# - SITE_DISPATCH_TOKEN  (Operations Site -> Worker dispatch/status only)
+# - BRIDGE_CLIENT_TOKEN  (LDW01 bridge -> Worker WebSocket connect/result only)
+# Tokens must be distinct; shared tokens fail closed.
+
+[vars]
+BRIDGE_ID = "ldw01-bridge"
+
+[[durable_objects.bindings]]
+name = "BRIDGE_RELAY"
+class_name = "BridgeRelayDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["BridgeRelayDurableObject"]

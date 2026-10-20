@@ -5,6 +5,10 @@ obj/
 *.user
 *.suo
 
+# Node / Worker build output
+node_modules/
+.wrangler/
+
 # Python build artifacts
 __pycache__/
 *.pyc
