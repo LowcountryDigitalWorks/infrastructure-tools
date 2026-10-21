@@ -5,7 +5,6 @@ param(
     [string[]]$ApprovedRepositories = @('LowcountryDigitalWorks/business-operations', 'LowcountryDigitalWorks/royal-cruise-tracker'),
     [long]$WorkflowRunId, [string]$ExpectedSha,
     [string]$WorkflowPath, [string]$WorkflowBlobSha, [string]$ExpectedJobName, [string[]]$StaticLabels,
-    [string]$ProfileId, [int]$RunAttempt, [long]$ExpectedJobId,
     [string]$Root = (Join-Path $env:ProgramData 'LDW/CiRunnerEphemeral'),
     [string]$LocalRunId,
     [switch]$AllowPublicSyntheticProof,
@@ -61,7 +60,7 @@ try {
         exit 0
     }
 
-    $configuration = New-Ci7Configuration -Repository $Repository -ApprovedRepositories $approvedList -WorkflowRunId $WorkflowRunId -ExpectedSha $ExpectedSha -WorkflowPath $WorkflowPath -WorkflowBlobSha $WorkflowBlobSha -ExpectedJobName $ExpectedJobName -StaticLabels $staticLabelsList -ProfileId $ProfileId -RunAttempt $RunAttempt -ExpectedJobId $ExpectedJobId -Root $Root -AllowPublicSyntheticProof:$AllowPublicSyntheticProof -MemoryMiB $MemoryMiB -CpuCount $CpuCount -TimeoutMinutes $TimeoutMinutes
+    $configuration = New-Ci7Configuration -Repository $Repository -ApprovedRepositories $approvedList -WorkflowRunId $WorkflowRunId -ExpectedSha $ExpectedSha -WorkflowPath $WorkflowPath -WorkflowBlobSha $WorkflowBlobSha -ExpectedJobName $ExpectedJobName -StaticLabels $staticLabelsList -Root $Root -AllowPublicSyntheticProof:$AllowPublicSyntheticProof -MemoryMiB $MemoryMiB -CpuCount $CpuCount -TimeoutMinutes $TimeoutMinutes
     Assert-Ci7Capacity $configuration
     Assert-Ci7Base $Root
     $job = Get-Ci7ExpectedJob $configuration -RequireQueued
