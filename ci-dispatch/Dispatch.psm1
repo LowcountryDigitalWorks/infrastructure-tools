@@ -50,6 +50,9 @@ function Get-Ci10ManifestControllerSnapshot {
 function Get-Ci10ManifestDispatcherProvenance {
     param([Parameter(Mandatory)][string]$BundleRoot, [Parameter(Mandatory)][object]$Manifest)
     $provenancePath = Join-Path $BundleRoot 'ci-dispatch/verifier-provenance.json'
+    $dispatcherPath = Join-Path $BundleRoot 'ci-dispatch/Dispatch.psm1'
+    Assert-Ci10ProtectedPath $provenancePath
+    Assert-Ci10ProtectedPath $dispatcherPath
     if (-not (Test-Path -LiteralPath $provenancePath -PathType Leaf)) { throw 'BUNDLE_VERIFIER_PROVENANCE_MISMATCH' }
     try { $accepted = Get-Content -LiteralPath $provenancePath -Raw | ConvertFrom-Json }
     catch { throw 'BUNDLE_VERIFIER_PROVENANCE_MISMATCH' }
@@ -63,7 +66,6 @@ function Get-Ci10ManifestDispatcherProvenance {
     }
     $entry = @($Manifest.files | Where-Object path -CEQ 'ci-dispatch/Dispatch.psm1')
     if ($entry.Count -ne 1 -or $entry[0].sha256 -cne $accepted.sha256) { throw 'BUNDLE_VERIFIER_PROVENANCE_MISMATCH' }
-    $dispatcherPath = Join-Path $BundleRoot 'ci-dispatch/Dispatch.psm1'
     if ((Get-FileHash -LiteralPath $dispatcherPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $accepted.sha256) {
         throw 'BUNDLE_VERIFIER_HASH_DRIFT'
     }
