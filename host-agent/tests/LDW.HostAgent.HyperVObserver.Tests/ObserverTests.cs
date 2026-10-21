@@ -150,9 +150,71 @@ if (OperatingSystem.IsWindows())
     await disconnectServerTask;
     Assert(disconnectSource.Calls == 2,
         "broken response pipe is contained to one client and the next request is observed exactly once");
+
+    using var immediateDisconnectTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+    var immediateDisconnectSource = new FakeObservationSource(running with { AddressCandidates = ["192.0.2.77"] });
+    var immediateDisconnectServer = new HyperVObserverPipeServer([currentSid], immediateDisconnectSource);
+    var immediateDisconnectTask = immediateDisconnectServer.RunAsync(immediateDisconnectTimeout.Token);
+    await ImmediateDisconnectAsync();
+    var postImmediateDisconnectResponse = await RoundTripAsync(HyperVObserverContract.CreateRequestJson());
+    Assert(HyperVObserverContract.TryParseResponse(postImmediateDisconnectResponse, out var postImmediate)
+           && postImmediate?.AddressCandidates.SequenceEqual(["192.0.2.77"]) == true,
+        "server serves a later authorized client after the preceding client disconnects immediately upon connection");
+    immediateDisconnectTimeout.Cancel();
+    await immediateDisconnectTask;
+    Assert(immediateDisconnectSource.Calls == 1,
+        "immediate disconnect is contained and the next valid request is observed exactly once");
+
+    using var partialDisconnectTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+    var partialDisconnectSource = new FakeObservationSource(running with { AddressCandidates = ["192.0.2.88"] });
+    var partialDisconnectServer = new HyperVObserverPipeServer([currentSid], partialDisconnectSource);
+    var partialDisconnectTask = partialDisconnectServer.RunAsync(partialDisconnectTimeout.Token);
+    await PartialRequestDisconnectAsync();
+    var postPartialDisconnectResponse = await RoundTripAsync(HyperVObserverContract.CreateRequestJson());
+    Assert(HyperVObserverContract.TryParseResponse(postPartialDisconnectResponse, out var postPartial)
+           && postPartial?.AddressCandidates.SequenceEqual(["192.0.2.88"]) == true,
+        "server serves a later authorized client after the preceding client disconnects during request write");
+    partialDisconnectTimeout.Cancel();
+    await partialDisconnectTask;
+    Assert(partialDisconnectSource.Calls == 1,
+        "partial request disconnect is contained and the next valid request is observed exactly once");
+
+    var invalidServer = new HyperVObserverPipeServer(["invalid-sid-string"], new FakeObservationSource(running));
+    try
+    {
+        await invalidServer.ServeOneAsync(CancellationToken.None);
+        Assert(false, "invalid caller SID configuration in SecurePipeFactory.CreateServer must throw and fail closed");
+    }
+    catch (Exception)
+    {
+        Assert(true, "invalid security descriptor/ACL configuration fails closed out of ServeOneAsync");
+    }
 }
 
 Console.WriteLine($"Hyper-V observer tests passed ({assertions} assertions).");
+
+async Task ImmediateDisconnectAsync()
+{
+    await using var pipe = new NamedPipeClientStream(
+        ".", HyperVObserverContract.PipeName, PipeDirection.InOut,
+        PipeOptions.Asynchronous, TokenImpersonationLevel.Identification);
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+    await pipe.ConnectAsync(2000, timeout.Token);
+    pipe.Close();
+}
+
+async Task PartialRequestDisconnectAsync()
+{
+    await using var pipe = new NamedPipeClientStream(
+        ".", HyperVObserverContract.PipeName, PipeDirection.InOut,
+        PipeOptions.Asynchronous, TokenImpersonationLevel.Identification);
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+    await pipe.ConnectAsync(2000, timeout.Token);
+    var bytes = Encoding.UTF8.GetBytes("{\"ver");
+    await pipe.WriteAsync(bytes, timeout.Token);
+    await pipe.FlushAsync(timeout.Token);
+    pipe.Close();
+}
 
 async Task DisconnectBeforeResponseAsync(BlockingObservationSource source)
 {
