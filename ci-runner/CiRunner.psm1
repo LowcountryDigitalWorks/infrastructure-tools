@@ -282,6 +282,20 @@ function Get-Ci7PersistedCleanupJob {
     return $job
 }
 
+function Get-Ci7MonitoredJob {
+    param([object]$State)
+    $configuration = $State.Configuration
+    if (-not $configuration.ProfileId) { return Get-Ci7ExpectedJob $configuration }
+
+    # WQT keeps full graph and assignment enforcement until its persisted target
+    # is terminal. After that point, workflow dependencies can materialize jobs.
+    $persistedJob = Get-Ci7PersistedCleanupJob $State
+    if ($persistedJob.status -ceq 'completed') { return $persistedJob }
+    $job = Get-Ci7ExpectedJob $configuration
+    if ($job.id -ne $State.JobId) { throw 'UNEXPECTED_JOB_ASSIGNMENT' }
+    return $job
+}
+
 function Get-Ci7CleanupJob {
     param([object]$State)
     if ($State.Configuration.ProfileId) { return Get-Ci7PersistedCleanupJob $State }

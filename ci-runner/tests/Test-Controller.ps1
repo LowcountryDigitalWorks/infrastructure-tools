@@ -232,12 +232,20 @@ try {
         & $module {$script:WqtJobs=@($script:WqtJobs | Where-Object {$_.name -cne 'retention-probe-manual'});$script:WqtJob.status='completed';$script:WqtJob.conclusion='success'}
         Refuses {Get-Ci7ExpectedJob $validate -RequireQueued}
         $persisted=New-Ci7State $validate '0123456789abcdef0123456789abcdef';$persisted.JobId=701
+        & $module {$script:WqtJob.status='queued';$script:WqtJob.conclusion=$null;$script:WqtJobs=@($script:WqtJob,[pscustomobject]@{id=703;name='validate-hosted';status='completed';conclusion='skipped'},[pscustomobject]@{id=704;name='retention-probe-hosted';status='completed';conclusion='skipped'},[pscustomobject]@{id=705;name='consume-real';status='completed';conclusion='skipped'})}
+        Assert ((Get-Ci7MonitoredJob $persisted).id -eq 701)
+        & $module {$script:WqtJobs += [pscustomobject]@{id=702;name='retention-probe-pr';run_id=$script:WqtRun.id;run_attempt=1;head_sha=$script:WqtRun.head_sha;status='queued';conclusion=$null}}
+        Refuses {Get-Ci7ExpectedJob $validate}
+        Refuses {Get-Ci7MonitoredJob $persisted}
         & $module {$script:WqtJob.status='completed';$script:WqtJob.conclusion='failure';$script:WqtJobs += $script:WqtProbe; $script:WqtProbe.status='completed';$script:WqtProbe.conclusion='skipped'}
         Assert ((Get-Ci7PersistedCleanupJob $persisted).id -eq 701)
         Refuses {Get-Ci7ExpectedJob $validate}
+        & $module {$script:WqtJob.conclusion='success';$script:WqtProbe.status='queued';$script:WqtProbe.conclusion=$null}
+        Assert ((Get-Ci7MonitoredJob $persisted).id -eq 701)
+        Assert ((Get-Ci7MonitoredJob $persisted).conclusion -ceq 'success')
         foreach($field in @('id','name','run_id','run_attempt','head_sha')){
             & $module {param($field,$cfg);$script:WqtJob.id=701;$script:WqtJob.name=$cfg.ExpectedJobName;$script:WqtJob.run_id=$cfg.WorkflowRunId;$script:WqtJob.run_attempt=$cfg.RunAttempt;$script:WqtJob.head_sha=$cfg.ExpectedSha;switch($field){'id'{$script:WqtJob.id=999};'name'{$script:WqtJob.name='other'};'run_id'{$script:WqtJob.run_id++};'run_attempt'{$script:WqtJob.run_attempt++};'head_sha'{$script:WqtJob.head_sha=('0'*40)}}} $field $validate
-            Refuses {Get-Ci7PersistedCleanupJob $persisted}
+            Refuses {Get-Ci7PersistedCleanupJob $persisted};Refuses {Get-Ci7MonitoredJob $persisted}
         }
         & $module {param($cfg);$script:WqtJob.id=701;$script:WqtJob.name=$cfg.ExpectedJobName;$script:WqtJob.run_id=$cfg.WorkflowRunId;$script:WqtJob.run_attempt=$cfg.RunAttempt;$script:WqtJob.head_sha=$cfg.ExpectedSha} $validate
         $persisted.JobId=$null;Refuses {Get-Ci7PersistedCleanupJob $persisted};$persisted.JobId=701
@@ -308,6 +316,8 @@ try {
         } $royalConfig $royalHeadSha $royalBlobSha
 
         Assert ((Get-Ci7ExpectedJob $royalConfig -RequireQueued).id -eq 99)
+        $royalState=New-Ci7State $royalConfig '1123456789abcdef0123456789abcdef';$royalState.JobId=99
+        Assert ((Get-Ci7MonitoredJob $royalState).id -eq 99)
 
         & $module {$script:ApiTestRun.repository.full_name='LowcountryDigitalWorks/other'}; Refuses {Get-Ci7ExpectedJob $royalConfig}
         & $module {$script:ApiTestRun.repository.full_name='LowcountryDigitalWorks/royal-cruise-tracker'}

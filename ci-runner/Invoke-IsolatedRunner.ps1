@@ -106,7 +106,7 @@ try {
                 Write-Ci7GuestEvidence $state $stage; 'GUEST_BOOT_PHASE=' + $stage
                 if ($stage -like '*FAILED') { throw 'BOOTSTRAP_FAILURE_REPORTED' }
             }
-            $job = Get-Ci7ExpectedJob $configuration
+            $job = Get-Ci7MonitoredJob $state
             if ($job.id -ne $state.JobId -or ($job.runner_id -and $job.runner_id -ne $state.RunnerId)) { throw 'UNEXPECTED_JOB_ASSIGNMENT' }
             if ([DateTime]::UtcNow - $lastProgress -ge [TimeSpan]::FromSeconds(45)) { 'LIFECYCLE_WAIT=BOUNDED'; $lastProgress = [DateTime]::UtcNow }
             if ($job.status -ne 'completed') {
