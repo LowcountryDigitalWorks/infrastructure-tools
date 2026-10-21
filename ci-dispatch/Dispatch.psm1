@@ -51,8 +51,6 @@ function Get-Ci10ManifestDispatcherProvenance {
     param([Parameter(Mandatory)][string]$BundleRoot, [Parameter(Mandatory)][object]$Manifest)
     $provenancePath = Join-Path $BundleRoot 'ci-dispatch/verifier-provenance.json'
     $dispatcherPath = Join-Path $BundleRoot 'ci-dispatch/Dispatch.psm1'
-    Assert-Ci10ProtectedPath $provenancePath
-    Assert-Ci10ProtectedPath $dispatcherPath
     if (-not (Test-Path -LiteralPath $provenancePath -PathType Leaf)) { throw 'BUNDLE_VERIFIER_PROVENANCE_MISMATCH' }
     try { $accepted = Get-Content -LiteralPath $provenancePath -Raw | ConvertFrom-Json }
     catch { throw 'BUNDLE_VERIFIER_PROVENANCE_MISMATCH' }
@@ -173,6 +171,8 @@ function Assert-Ci10Bundle {
     if ((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $ManifestSha) { throw 'MANIFEST_HASH_DRIFT' }
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     $acceptedSnapshot = Get-Ci10ManifestControllerSnapshot $manifest
+    Assert-Ci10ProtectedPath (Join-Path $BundleRoot 'ci-dispatch/verifier-provenance.json')
+    Assert-Ci10ProtectedPath (Join-Path $BundleRoot 'ci-dispatch/Dispatch.psm1')
     $acceptedDispatcher = Get-Ci10ManifestDispatcherProvenance -BundleRoot $BundleRoot -Manifest $manifest
     if ($manifest.schema -ne 1 -or $manifest.commit -cne $Commit -or $manifest.tree -cne $Tree -or
         -not $acceptedSnapshot -or -not $acceptedDispatcher) {
