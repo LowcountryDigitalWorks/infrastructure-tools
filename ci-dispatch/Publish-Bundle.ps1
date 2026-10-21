@@ -22,6 +22,8 @@ try {
     Import-Module (Join-Path $PSScriptRoot 'Dispatch.psm1') -Force
     Import-Module (Join-Path $repo 'ci-runner/CiRunner.psm1') -Force
     Assert-Ci7Elevated
+    $sourceStatus = & git -C $repo status --porcelain 2>$null
+    if ($LASTEXITCODE -ne 0 -or $sourceStatus) { throw 'PUBLISH_SOURCE_WORKTREE_DIRTY' }
     $liveTree = & git -C $repo rev-parse ($Commit+'^{tree}') 2>$null
     if ($LASTEXITCODE -ne 0 -or $liveTree -cne $Tree) { throw 'PUBLISH_COMMIT_TREE_MISMATCH' }
     $remote = & git -C $repo remote get-url origin 2>$null
@@ -34,23 +36,28 @@ try {
     Protect-Ci10Directory $staging
     $files = @(Get-Ci10RuntimeFiles)
     $archive = Join-Path $staging 'candidate.zip'
-    & git -C $repo archive --format=zip ('--output='+$archive) $Commit -- @files 2>$null
+    $targetFiles = @($files | Where-Object { $_ -cne 'ci-dispatch/Dispatch.psm1' })
+    & git -C $repo archive --format=zip ('--output='+$archive) $Commit -- @targetFiles 2>$null
     if ($LASTEXITCODE -ne 0) { throw 'PUBLISH_ARCHIVE_FAILED' }
     $bundle = Join-Path $staging 'bundle'
     Protect-Ci10Directory $bundle
     [IO.Compression.ZipFile]::ExtractToDirectory($archive,$bundle)
+
+    # The protected release must carry this reviewed provenance verifier so it
+    # can validate the multi-snapshot manifest. All other runtime files remain
+    # sourced from the exact requested target commit/tree.
+    $dispatcherArchive = Join-Path $staging 'dispatcher-source.zip'
+    & git -C $repo archive --format=zip ('--output='+$dispatcherArchive) 'HEAD' -- 'ci-dispatch/Dispatch.psm1' 2>$null
+    if ($LASTEXITCODE -ne 0) { throw 'PUBLISH_DISPATCHER_SOURCE_FAILED' }
+    $dispatcherSource = Join-Path $staging 'dispatcher-source'
+    [IO.Compression.ZipFile]::ExtractToDirectory($dispatcherArchive,$dispatcherSource)
+    Copy-Item -LiteralPath (Join-Path $dispatcherSource 'ci-dispatch/Dispatch.psm1') -Destination (Join-Path $bundle 'ci-dispatch/Dispatch.psm1') -Force
+
     $controllerFiles = @($files | Where-Object { $_.StartsWith('ci-runner/') })
-    $acceptedArchive = Join-Path $staging 'accepted.zip'
-    & git -C $repo archive --format=zip ('--output='+$acceptedArchive) '49f39f5d3a66251ed18c2e776d843feb25f65fe1' -- @controllerFiles 2>$null
-    if ($LASTEXITCODE -ne 0) { throw 'ACCEPTED_CONTROLLER_UNAVAILABLE' }
-    $accepted = Join-Path $staging 'accepted'
-    [IO.Compression.ZipFile]::ExtractToDirectory($acceptedArchive,$accepted)
+    $matchedSnapshot = Get-Ci10MatchedControllerSnapshot -RepositoryRoot $repo -ControllerRoot $bundle -ControllerFiles $controllerFiles -StagingRoot $staging
     $entries = @($files | Sort-Object | ForEach-Object {
         $path = $_
         $hash = (Get-FileHash -LiteralPath (Join-Path $bundle $path) -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($path -cin $controllerFiles -and $hash -cne (Get-FileHash -LiteralPath (Join-Path $accepted $path) -Algorithm SHA256).Hash.ToLowerInvariant()) {
-            throw 'ACCEPTED_CONTROLLER_CHANGED'
-        }
         [ordered]@{ path=$path; sha256=$hash }
     })
     # Normalize all object owners, including files created by ZIP extraction.
@@ -60,7 +67,7 @@ try {
         Set-Acl -LiteralPath $item.FullName -AclObject $acl
     }
     $manifest = [ordered]@{ schema=1; commit=$Commit; tree=$Tree;
-        controllerCommit='49f39f5d3a66251ed18c2e776d843feb25f65fe1'; controllerTree='4d241fe9bc0fbf190daf2e36be0e9c52966c5a7b'; files=$entries }
+        controllerCommit=$matchedSnapshot.commit; controllerTree=$matchedSnapshot.tree; files=$entries }
     $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $bundle 'manifest.json') -Encoding utf8NoBOM
     $acl = Get-Acl -LiteralPath (Join-Path $bundle 'manifest.json')
     $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))

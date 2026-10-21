@@ -1,7 +1,23 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$script:ControllerCommit = '49f39f5d3a66251ed18c2e776d843feb25f65fe1'
-$script:ControllerTree = '4d241fe9bc0fbf190daf2e36be0e9c52966c5a7b'
+$script:AcceptedControllerSnapshots = @(
+    [pscustomobject]@{ commit='49f39f5d3a66251ed18c2e776d843feb25f65fe1'; tree='4d241fe9bc0fbf190daf2e36be0e9c52966c5a7b'; files=@{
+        'ci-runner/CiRunner.psm1'='9d3d39d1ba86d5986df51deef928c8ff78def460e830af7d3453440a1974883c'
+        'ci-runner/Invoke-IsolatedRunner.ps1'='a8f51372f8c32dbc178569f841222d2e9722d426b511725a204a06e6330a12a0'
+        'ci-runner/Native.cs'='48fa6136b2bea13f939119917de616f4da19f971243cce2d4563ca434bbf6425'
+        'ci-runner/guest/bootstrap.sh'='705b6581a1fecd1b22413b5709b0d90df9f80e277d5d0c94c9abbc27e7eadd80'
+        'ci-runner/guest/ci7-runner.service'='68f8a767e0cb6412b28b7e4751dd6dbe0cd586e74365099adbb20eadcdd8b368'
+        'ci-runner/guest/run-one.sh'='75f1ba052f024276d6870d84d1d02aa78effacdece41552ad000422e3d1c6db8'
+    } },
+    [pscustomobject]@{ commit='54b9343af44c70db1d1403cf7f45cfc11e8bf167'; tree='beb9b9096b2f4bfa41ad877ad4f6a41150fbcfec'; files=@{
+        'ci-runner/CiRunner.psm1'='b8860e7576f52cb756769bad9208d63ff42d45ae32073869f8406ef870810044'
+        'ci-runner/Invoke-IsolatedRunner.ps1'='04e3b69fbe24dda001963ed1aff6210e7488bb3287a9dbd0ab0969951c99baa2'
+        'ci-runner/Native.cs'='48fa6136b2bea13f939119917de616f4da19f971243cce2d4563ca434bbf6425'
+        'ci-runner/guest/bootstrap.sh'='705b6581a1fecd1b22413b5709b0d90df9f80e277d5d0c94c9abbc27e7eadd80'
+        'ci-runner/guest/ci7-runner.service'='68f8a767e0cb6412b28b7e4751dd6dbe0cd586e74365099adbb20eadcdd8b368'
+        'ci-runner/guest/run-one.sh'='75f1ba052f024276d6870d84d1d02aa78effacdece41552ad000422e3d1c6db8'
+    } }
+)
 $script:RuntimeFiles = @(
     'ci-dispatch/Dispatch.psm1', 'ci-dispatch/Invoke-Dispatcher.ps1', 'ci-dispatch/profiles.json',
     'ci-runner/CiRunner.psm1', 'ci-runner/Invoke-IsolatedRunner.ps1', 'ci-runner/Native.cs',
@@ -9,6 +25,64 @@ $script:RuntimeFiles = @(
 )
 
 function Get-Ci10RuntimeFiles { @($script:RuntimeFiles) }
+function Get-Ci10AcceptedControllerSnapshots { @($script:AcceptedControllerSnapshots) }
+
+function Get-Ci10ManifestControllerSnapshot {
+    param([Parameter(Mandatory)][object]$Manifest)
+    $snapshot = @($script:AcceptedControllerSnapshots | Where-Object {
+        $_.commit -ceq $Manifest.controllerCommit -and $_.tree -ceq $Manifest.controllerTree
+    })
+    if ($snapshot.Count -ne 1) { throw 'BUNDLE_PROVENANCE_MISMATCH' }
+    $controllerPaths = @($script:RuntimeFiles | Where-Object { $_.StartsWith('ci-runner/') })
+    if (@(Compare-Object $controllerPaths @($snapshot[0].files.Keys) -CaseSensitive).Count) {
+        throw 'BUNDLE_CONTROLLER_SNAPSHOT_MISMATCH'
+    }
+    foreach ($path in $controllerPaths) {
+        $entry = @($Manifest.files | Where-Object path -CEQ $path)
+        if ($entry.Count -ne 1 -or $entry[0].sha256 -cne $snapshot[0].files[$path]) {
+            throw 'BUNDLE_CONTROLLER_SNAPSHOT_MISMATCH'
+        }
+    }
+    $snapshot[0]
+}
+
+function Get-Ci10MatchedControllerSnapshot {
+    param(
+        [Parameter(Mandatory)][string]$RepositoryRoot,
+        [Parameter(Mandatory)][string]$ControllerRoot,
+        [Parameter(Mandatory)][string[]]$ControllerFiles,
+        [Parameter(Mandatory)][string]$StagingRoot
+    )
+    $matches = @()
+    foreach ($snapshot in $script:AcceptedControllerSnapshots) {
+        $actualTree = & git -C $RepositoryRoot rev-parse ($snapshot.commit + '^{tree}') 2>$null
+        if ($LASTEXITCODE -ne 0 -or ([string]$actualTree).Trim() -cne $snapshot.tree) { throw 'ACCEPTED_CONTROLLER_UNAVAILABLE' }
+        $snapshotRoot = Join-Path $StagingRoot ('controller-' + $snapshot.commit)
+        $archive = Join-Path $StagingRoot ('controller-' + $snapshot.commit + '.zip')
+        & git -C $RepositoryRoot archive --format=zip ('--output=' + $archive) $snapshot.commit -- @ControllerFiles 2>$null
+        if ($LASTEXITCODE -ne 0) { throw 'ACCEPTED_CONTROLLER_UNAVAILABLE' }
+        $null = New-Item -ItemType Directory -Path $snapshotRoot
+        [IO.Compression.ZipFile]::ExtractToDirectory($archive, $snapshotRoot)
+        $same = $true
+        foreach ($path in $ControllerFiles) {
+            $candidate = Join-Path $ControllerRoot $path
+            $accepted = Join-Path $snapshotRoot $path
+            if (-not (Test-Path -LiteralPath $candidate -PathType Leaf) -or
+                -not (Test-Path -LiteralPath $accepted -PathType Leaf) -or
+                (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash -cne
+                    (Get-FileHash -LiteralPath $accepted -Algorithm SHA256).Hash) {
+                $same = $false
+                break
+            }
+        }
+        if ($same) { $matches += $snapshot }
+        Remove-Item -LiteralPath $snapshotRoot -Recurse -Force
+        Remove-Item -LiteralPath $archive -Force
+    }
+    if ($matches.Count -eq 0) { throw 'ACCEPTED_CONTROLLER_CHANGED' }
+    if ($matches.Count -ne 1) { throw 'ACCEPTED_CONTROLLER_MATCH_AMBIGUOUS' }
+    $matches[0]
+}
 
 function Assert-Ci10ParentBoundary {
     param([string]$Path)
@@ -72,8 +146,9 @@ function Assert-Ci10Bundle {
     Assert-Ci10ProtectedPath $manifestPath
     if ((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $ManifestSha) { throw 'MANIFEST_HASH_DRIFT' }
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $acceptedSnapshot = Get-Ci10ManifestControllerSnapshot $manifest
     if ($manifest.schema -ne 1 -or $manifest.commit -cne $Commit -or $manifest.tree -cne $Tree -or
-        $manifest.controllerCommit -cne $script:ControllerCommit -or $manifest.controllerTree -cne $script:ControllerTree) {
+        -not $acceptedSnapshot) {
         throw 'BUNDLE_PROVENANCE_MISMATCH'
     }
     $expected = @($script:RuntimeFiles) + @('manifest.json')

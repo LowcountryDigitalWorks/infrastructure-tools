@@ -38,12 +38,23 @@ execute a real scan, install/enable a host task, or activate production routing.
 ## Protected provenance
 
 `Publish-Bundle.ps1 -Commit <exact-commit> -Tree <exact-tree>` stages an allowlisted
-Git archive in the dedicated ProgramData-style dispatcher root. It verifies the
-repository origin and commit/tree, compares every controller artifact against
-accepted main `49f39f5d3a66251ed18c2e776d843feb25f65fe1` / tree
-`4d241fe9bc0fbf190daf2e36be0e9c52966c5a7b`, and publishes a deterministic
-manifest with per-file SHA-256. No `.git`, credentials or machine settings enter
-the bundle. An existing release must already match; publication never overwrites it.
+runtime in the dedicated ProgramData-style dispatcher root. It verifies the
+repository origin and requested commit/tree. Controller acceptance comes from the
+source-controlled snapshot registry in `Dispatch.psm1`, which currently recognizes
+only the original accepted controller (`49f39f5d3a66251ed18c2e776d843feb25f65fe1`
+/ `4d241fe9bc0fbf190daf2e36be0e9c52966c5a7b`) and the independently reviewed Royal
+PR #42 controller (`54b9343af44c70db1d1403cf7f45cfc11e8bf167` /
+`beb9b9096b2f4bfa41ad877ad4f6a41150fbcfec`). The publisher hashes every controller
+runtime file and requires one complete snapshot match; unknown or mixed files fail
+closed. The manifest records that exact matched commit/tree and per-file SHA-256.
+
+For compatibility with already accepted target commits, `Dispatch.psm1` in the
+protected bundle is taken from the publisher's clean, checked-out source revision; the
+requested target's remaining allowlisted files are archived from the exact target
+commit/tree. The manifest hashes the resulting runtime file set, and the verifier
+checks both the recorded controller snapshot and each controller file hash. No
+`.git`, credentials or machine settings enter the bundle. An existing release must
+already match; publication never overwrites it.
 
 The root, release parents and contents are owned by Administrators, with only
 Administrators and SYSTEM allowed to write. Reparse paths, untrusted ownership,
@@ -105,7 +116,9 @@ GitHub retains normal job/check evidence. No raw guest diagnostics are captured.
 
 ## Proof and task packet
 
-Run `tests/Test-Dispatch.ps1` and the existing `ci-runner/tests` suites. Tests cover
+Run `tests/Test-ControllerSnapshots.ps1`, `tests/Test-Dispatch.ps1` and the existing
+`ci-runner/tests` suites. The snapshot suite runs without host ACL or Hyper-V access;
+the full dispatcher suite still requires its protected-path Windows fixture. Tests cover
 profile/queue identity, ordering, immediate re-read races, API failure, capacity,
 actual exclusive locks, stale state/ownership, provenance/hash/file-set/ACL drift,
 redaction/rotation and task acceptance guards. The live proof should:

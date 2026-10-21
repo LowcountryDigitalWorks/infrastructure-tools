@@ -15,6 +15,14 @@ function Refuses([scriptblock]$Action,[string]$Expected){
     if($Expected){Assert ($code -ceq $Expected)}
 }
 function Clone($Object){$Object|ConvertTo-Json -Depth 15|ConvertFrom-Json}
+function New-ControllerFixture([string]$Commit,[string]$Destination){
+    $paths=@(Get-Ci10RuntimeFiles|Where-Object{$_.StartsWith('ci-runner/')})
+    $zip=$Destination+'.zip'
+    & git -C $repo archive --format=zip ('--output='+$zip) $Commit -- @paths 2>$null
+    if($LASTEXITCODE -ne 0){throw 'TEST_SNAPSHOT_ARCHIVE_FAILED'}
+    [IO.Compression.ZipFile]::ExtractToDirectory($zip,$Destination)
+    Remove-Item -LiteralPath $zip -Force
+}
 function Protect([string]$Path){
     $null=New-Item -ItemType Directory -Path $Path -Force
     if ($env:OS -eq 'Windows_NT') {
@@ -287,8 +295,14 @@ $bad.event='push'
         $null=New-Item -ItemType Directory -Path (Split-Path $target -Parent) -Force
         Copy-Item -LiteralPath (Join-Path $repo $path) -Destination $target
     }
-    $manifest=[ordered]@{schema=1;commit=('a'*40);tree=('b'*40);controllerCommit='49f39f5d3a66251ed18c2e776d843feb25f65fe1';
-        controllerTree='4d241fe9bc0fbf190daf2e36be0e9c52966c5a7b';files=@(Get-Ci10RuntimeFiles|ForEach-Object{
+    $royalController=Join-Path $fixture 'manifest-royal-controller'
+    New-Item -ItemType Directory -Path $royalController -Force|Out-Null
+    New-ControllerFixture '54b9343af44c70db1d1403cf7f45cfc11e8bf167' $royalController
+    foreach($path in @(Get-Ci10RuntimeFiles|Where-Object{$_.StartsWith('ci-runner/')})){
+        Copy-Item -LiteralPath (Join-Path $royalController $path) -Destination (Join-Path $bundle $path) -Force
+    }
+    $manifest=[ordered]@{schema=1;commit=('a'*40);tree=('b'*40);controllerCommit='54b9343af44c70db1d1403cf7f45cfc11e8bf167';
+        controllerTree='beb9b9096b2f4bfa41ad877ad4f6a41150fbcfec';files=@(Get-Ci10RuntimeFiles|ForEach-Object{
             [ordered]@{path=$_;sha256=(Get-FileHash -LiteralPath (Join-Path $bundle $_) -Algorithm SHA256).Hash.ToLowerInvariant()}
         })}
     $manifestFile=Join-Path $bundle 'manifest.json'
@@ -299,6 +313,11 @@ $bad.event='push'
         }
     }
     $manifestSha=(Get-FileHash -LiteralPath $manifestFile -Algorithm SHA256).Hash.ToLowerInvariant()
+    Check 'manifest controller identity equals exact matched Royal snapshot' {
+        $null=Assert-Ci10Bundle $bundle $manifestSha ('a'*40) ('b'*40)
+        Assert ($manifest.controllerCommit -ceq '54b9343af44c70db1d1403cf7f45cfc11e8bf167' -and
+            $manifest.controllerTree -ceq 'beb9b9096b2f4bfa41ad877ad4f6a41150fbcfec')
+    }
     if ($env:OS -eq 'Windows_NT') {
         Check 'protected exact bundle verifies' {$null=Assert-Ci10Bundle $bundle $manifestSha ('a'*40) ('b'*40)}
         Check 'dispatcher file hash drift refused' {
