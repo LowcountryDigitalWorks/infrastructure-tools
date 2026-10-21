@@ -94,6 +94,8 @@ internal sealed class StatusForm : Form
 
     public void ShowError(string message)
     {
+        _live = StatusPresentation.SampleForDisplay(_live, observationSucceeded: false);
+        _groups.Controls.Clear();
         SetOverall(StatusColor.Gray, string.IsNullOrWhiteSpace(message) ? "Status is unavailable." : "Status refresh failed; sensitive details are suppressed.");
         _refreshed.Text = "Last refreshed: unavailable";
     }
