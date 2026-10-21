@@ -54,7 +54,8 @@ function Get-Ci10ManifestDispatcherProvenance {
     if (-not (Test-Path -LiteralPath $provenancePath -PathType Leaf)) { throw 'BUNDLE_VERIFIER_PROVENANCE_MISMATCH' }
     try { $accepted = Get-Content -LiteralPath $provenancePath -Raw | ConvertFrom-Json }
     catch { throw 'BUNDLE_VERIFIER_PROVENANCE_MISMATCH' }
-    $actual = $Manifest.dispatcher
+    $dispatcherProperty = $Manifest.PSObject.Properties['dispatcher']
+    $actual = if ($dispatcherProperty) { $dispatcherProperty.Value } else { $null }
     if (-not $actual -or $accepted.schema -ne 1 -or
         $accepted.commit -cnotmatch '^[a-f0-9]{40}$' -or $accepted.tree -cnotmatch '^[a-f0-9]{40}$' -or
         $accepted.blob -cnotmatch '^[a-f0-9]{40}$' -or $accepted.sha256 -cnotmatch '^[a-f0-9]{64}$' -or
