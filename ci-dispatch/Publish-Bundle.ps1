@@ -6,11 +6,11 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $script:AcceptedDispatcherSource = [pscustomobject]@{
-    commit='805b71f36232412e072b0c860c1f4d665511d347'; tree='9fcb587f14282a00d794acf65fda3177f824bb5c'
+    path='ci-dispatch/Dispatch.psm1'
     blob='662981a2955a3cd3f3526aeb666e185f989c4a18'; sha256='bf8da2a7ed95887bb7b7e3ddbf1ba10fe97f9a3ff9eb384ae9e16740674241ef'
 }
 $script:AcceptedVerifierRecordSource = [pscustomobject]@{
-    commit='7c856daf5a8e4dc4d101ab088259008a78fc68f2'; tree='0f1773ca820e344ce10c82c07fa03fcdfa00f873'
+    path='ci-dispatch/verifier-provenance.json'
     blob='f2635eb0eaa24b9da7919c3d0c30fa23f4ea919b'; sha256='b810c526b641c8ed0447863aaf0acba35c753887889d4c55c4e1ac0fe14d3b77'
 }
 $root = Join-Path $env:ProgramData 'LDW/CiRunnerDispatch'
@@ -47,28 +47,32 @@ function Protect-Ci10Directory([string]$Path) {
     }
     Set-Acl -LiteralPath $Path -AclObject $acl
 }
-function Export-Ci10PinnedSourceFile([string]$Commit, [string]$Tree, [string]$Blob, [string]$Sha256,
-    [string]$Repository, [string]$Path, [string]$Destination, [string]$StageRoot) {
-    $actualTree = & git -C $Repository rev-parse ($Commit+'^{tree}') 2>$null
-    $actualBlob = & git -C $Repository rev-parse ($Commit+':'+$Path) 2>$null
-    if ($LASTEXITCODE -ne 0 -or ([string]$actualTree).Trim() -cne $Tree -or ([string]$actualBlob).Trim() -cne $Blob) {
+function Export-Ci10PinnedSourceFile([string]$Repository, [string]$Path, [string]$Destination, [string]$StageRoot) {
+    $acceptedSource = @(@($script:AcceptedDispatcherSource, $script:AcceptedVerifierRecordSource) | Where-Object { $_.path -ceq $Path })
+    if ($acceptedSource.Count -ne 1) { throw 'PUBLISH_VERIFIER_PROVENANCE_REFUSED' }
+    $source = $acceptedSource[0]
+    $actualBlob = & git -C $Repository rev-parse ('HEAD:'+ $source.path) 2>$null
+    if ($LASTEXITCODE -ne 0 -or ([string]$actualBlob).Trim() -cne $source.blob) {
         throw 'PUBLISH_VERIFIER_PROVENANCE_REFUSED'
     }
-    $archive = Join-Path $StageRoot ('source-'+$Blob+'.zip')
-    & git -C $Repository archive --format=zip ('--output='+$archive) $Commit -- $Path 2>$null
+    $archive = Join-Path $StageRoot ('source-'+$source.blob+'.zip')
+    & git -C $Repository archive --format=zip ('--output='+$archive) HEAD -- $source.path 2>$null
     if ($LASTEXITCODE -ne 0) { throw 'PUBLISH_VERIFIER_SOURCE_FAILED' }
-    $extract = Join-Path $StageRoot ('source-'+$Blob)
+    $extract = Join-Path $StageRoot ('source-'+$source.blob)
     [IO.Compression.ZipFile]::ExtractToDirectory($archive,$extract)
-    $source = Join-Path $extract $Path
-    if (-not (Test-Path -LiteralPath $source -PathType Leaf) -or
-        (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant() -cne $Sha256) {
+    $sourcePath = Join-Path $extract $source.path
+    if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf) -or
+        (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $source.sha256) {
         throw 'PUBLISH_VERIFIER_PROVENANCE_REFUSED'
     }
-    Copy-Item -LiteralPath $source -Destination $Destination -Force
+    Copy-Item -LiteralPath $sourcePath -Destination $Destination -Force
 }
 function Assert-Ci10AcceptedHeadDispatcherSource([string]$Repository) {
-    $headBlob = & git -C $Repository rev-parse 'HEAD:ci-dispatch/Dispatch.psm1' 2>$null
-    if ($LASTEXITCODE -ne 0 -or ([string]$headBlob).Trim() -cne $script:AcceptedDispatcherSource.blob) {
+    $headBlob = & git -C $Repository rev-parse ('HEAD:'+ $script:AcceptedDispatcherSource.path) 2>$null
+    $dispatcherPath = Join-Path $Repository $script:AcceptedDispatcherSource.path
+    if ($LASTEXITCODE -ne 0 -or ([string]$headBlob).Trim() -cne $script:AcceptedDispatcherSource.blob -or
+        -not (Test-Path -LiteralPath $dispatcherPath -PathType Leaf) -or
+        (Get-FileHash -LiteralPath $dispatcherPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $script:AcceptedDispatcherSource.sha256) {
         throw 'PUBLISH_VERIFIER_PROVENANCE_REFUSED'
     }
 }
@@ -98,18 +102,13 @@ try {
     Protect-Ci10Directory $bundle
     [IO.Compression.ZipFile]::ExtractToDirectory($archive,$bundle)
 
-    # Compatibility verifier and its provenance record are loaded only from
-    # fixed reviewed commit/tree/blob/SHA-256 identities, never ambient HEAD.
-    Export-Ci10PinnedSourceFile $script:AcceptedDispatcherSource.commit $script:AcceptedDispatcherSource.tree `
-        $script:AcceptedDispatcherSource.blob $script:AcceptedDispatcherSource.sha256 $repo 'ci-dispatch/Dispatch.psm1' `
-        (Join-Path $bundle 'ci-dispatch/Dispatch.psm1') $staging
-    Export-Ci10PinnedSourceFile $script:AcceptedVerifierRecordSource.commit $script:AcceptedVerifierRecordSource.tree `
-        $script:AcceptedVerifierRecordSource.blob $script:AcceptedVerifierRecordSource.sha256 $repo `
-        'ci-dispatch/verifier-provenance.json' `
-        (Join-Path $bundle 'ci-dispatch/verifier-provenance.json') $staging
+    # Compatibility verifier and its record resolve from fixed reviewed path/blob/SHA-256 identities.
+    Export-Ci10PinnedSourceFile $repo $script:AcceptedDispatcherSource.path `
+        (Join-Path $bundle $script:AcceptedDispatcherSource.path) $staging
+    Export-Ci10PinnedSourceFile $repo $script:AcceptedVerifierRecordSource.path `
+        (Join-Path $bundle $script:AcceptedVerifierRecordSource.path) $staging
     $dispatcherProvenance = Get-Content -LiteralPath (Join-Path $bundle 'ci-dispatch/verifier-provenance.json') -Raw | ConvertFrom-Json
-    if ($dispatcherProvenance.schema -ne 1 -or $dispatcherProvenance.commit -cne $script:AcceptedDispatcherSource.commit -or
-        $dispatcherProvenance.tree -cne $script:AcceptedDispatcherSource.tree -or
+    if ($dispatcherProvenance.schema -ne 1 -or
         $dispatcherProvenance.blob -cne $script:AcceptedDispatcherSource.blob -or
         $dispatcherProvenance.sha256 -cne $script:AcceptedDispatcherSource.sha256) { throw 'PUBLISH_VERIFIER_PROVENANCE_REFUSED' }
 

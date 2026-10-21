@@ -49,14 +49,17 @@ runtime file and requires one complete snapshot match; unknown or mixed files fa
 closed. The manifest records that exact matched commit/tree and per-file SHA-256.
 
 For compatibility with already accepted target commits, the publisher sources
-`Dispatch.psm1` and `verifier-provenance.json` only from their exact source-controlled
-commit/tree/blob/SHA-256 identities. It does not infer verifier bytes from the current
-branch or checkout. The provenance record identifies the immutable verifier revision
-and digest; the protected manifest records that identity, and `Assert-Ci10Bundle`
-checks the record, manifest fields, and actual verifier file hash. All other runtime
-files remain sourced from the exact requested target commit/tree. The manifest hashes
-the complete runtime file set. No `.git`, credentials or machine settings enter the
-bundle. An existing release must already match; publication never overwrites it.
+`Dispatch.psm1` and `verifier-provenance.json` only when the accepted repository paths
+resolve at `HEAD` to their fixed reviewed Git blob IDs and SHA-256 digests. The
+publisher archives those exact `HEAD` paths and checks their bytes before use. This
+identity survives squash merge and a main-only checkout because it pins the durable
+file blobs, not transient PR-history commits. The provenance record identifies the
+dispatcher blob and digest; the protected manifest records that identity, and
+`Assert-Ci10Bundle` checks the record, manifest fields, and actual verifier file hash.
+All other runtime files remain sourced from the exact requested target commit/tree.
+The manifest hashes the complete runtime file set. No `.git`, credentials or machine
+settings enter the bundle. An existing release must already match; publication never
+overwrites it.
 
 The publisher defines its minimal elevation and owned-path/reparse-point guards
 locally. It never imports `ci-runner/CiRunner.psm1` from the ambient checkout;
