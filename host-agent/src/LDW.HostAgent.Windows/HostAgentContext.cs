@@ -47,6 +47,7 @@ internal sealed class HostAgentContext : ApplicationContext
         }
         catch
         {
+            ClearSnapshotAfterObservationFailure(ref _lastSnapshot);
             _summaryItem.Text = "Status unavailable";
             _trayIcon.Text = "LDW Host Agent — Unknown";
             ReplaceTrayIcon(StatusColor.Gray);
@@ -57,6 +58,8 @@ internal sealed class HostAgentContext : ApplicationContext
             _refreshGate.Release();
         }
     }
+
+    internal static void ClearSnapshotAfterObservationFailure(ref HostAgentLiveSnapshot? snapshot) => snapshot = null;
 
     private void ShowStatus()
     {

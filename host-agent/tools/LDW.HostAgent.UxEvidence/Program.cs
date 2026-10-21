@@ -37,6 +37,7 @@ var snapshots = new[]
     ("attention-unknown", StatusColor.Yellow, HealthState.Degraded, "Remote access needs attention. Linux node status is unknown.", StatusColor.Yellow),
     ("failed", StatusColor.Red, HealthState.Failed, "A required component has failed.", StatusColor.Red),
 };
+HostAgentLiveSnapshot? priorHealthySnapshot = null;
 foreach (var (file, overallColor, health, summary, exceptionColor) in snapshots)
 {
     var observations = definitions.Select((component, index) =>
@@ -52,6 +53,7 @@ foreach (var (file, overallColor, health, summary, exceptionColor) in snapshots)
     }).ToArray();
     var snapshot = new DeviceSnapshot("fixture", DateTimeOffset.Now, observations, health, overallColor, summary);
     var live = new HostAgentLiveSnapshot(device, snapshot, systemTelemetry, new RuntimeContext(OwnerSessionState.Active), new HostAgentSettingsLoadResult(new HostAgentSettings(), false, true, "Synthetic fixture."), null, null);
+    if (file == "healthy") priorHealthySnapshot = live;
     using var form = new StatusForm(() => { }, () => { });
     form.UpdateSnapshot(live);
     form.Show();
@@ -61,6 +63,10 @@ foreach (var (file, overallColor, health, summary, exceptionColor) in snapshots)
     image.Save(Path.Combine(args[0], $"{file}.png"));
     form.Hide();
 }
+
+HostAgentContext.ClearSnapshotAfterObservationFailure(ref priorHealthySnapshot);
+if (priorHealthySnapshot is not null)
+    throw new InvalidOperationException("A failed observation must not retain a prior healthy snapshot for reopen or diagnostics copy.");
 
 using (var sheet = new Bitmap(680, 112))
 using (var graphics = Graphics.FromImage(sheet))
