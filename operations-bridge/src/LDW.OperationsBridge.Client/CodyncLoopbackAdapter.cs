@@ -368,7 +368,7 @@ public sealed class CodyncLoopbackAdapter : ICodyncBridgeAdapter, IDisposable
     private static long ReadInt64(JsonElement element, string name)
         => element.TryGetProperty(name, out var value) && value.TryGetInt64(out var result) ? result : 0;
     private static long? ReadNullableInt64(JsonElement element, string name)
-        => element.TryGetProperty(name, out var value) && value.TryGetInt64(out var result) ? result : null;
+        => element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var result) ? result : null;
     private static string[] ReadStringArray(JsonElement element, string name)
         => element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Array
             ? value.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString() ?? string.Empty).ToArray()
