@@ -243,6 +243,25 @@ try {
         & $module {$script:WqtJob.conclusion='success';$script:WqtProbe.status='queued';$script:WqtProbe.conclusion=$null}
         Assert ((Get-Ci7MonitoredJob $persisted).id -eq 701)
         Assert ((Get-Ci7MonitoredJob $persisted).conclusion -ceq 'success')
+        foreach($field in @('Repository','WorkflowPath','ExpectedJobName','ProfileRoutingLabel','StaticLabels','ReadPermissions','WorkflowSecrets','PrivateProductionState','Docker')){
+            $original=$validate.$field
+            switch($field){
+                'Repository'{$validate.Repository='LowcountryDigitalWorks/other-repo'}
+                'WorkflowPath'{$validate.WorkflowPath='.github/workflows/other.yml'}
+                'ExpectedJobName'{$validate.ExpectedJobName='other'}
+                'ProfileRoutingLabel'{$validate.ProfileRoutingLabel='other'}
+                'StaticLabels'{$validate.StaticLabels=@('self-hosted','Linux','X64','ldw01','ldw-ephemeral','ldw-isolated','security-isolated','other')}
+                'ReadPermissions'{$validate.ReadPermissions=@('contents:write')}
+                default{$validate.$field=$true}
+            }
+            Refuses {Get-Ci7PersistedCleanupJob $persisted}
+            $validate.$field=$original
+        }
+        foreach($field in @('id','repository','head_repository','path','event','run_attempt','head_sha','pull_requests')){
+            & $module {param($field,$cfg,$sha);switch($field){'id'{$script:WqtRun.id++};'repository'{$script:WqtRun.repository.full_name='other/repo'};'head_repository'{$script:WqtRun.head_repository.full_name='other/repo'};'path'{$script:WqtRun.path='other.yml'};'event'{$script:WqtRun.event='push'};'run_attempt'{$script:WqtRun.run_attempt++};'head_sha'{$script:WqtRun.head_sha='0'*40};'pull_requests'{$script:WqtRun.pull_requests=@([pscustomobject]@{head=[pscustomobject]@{sha='0'*40}})}}} $field $validate $sha
+            Refuses {Get-Ci7PersistedCleanupJob $persisted}
+            & $module {param($cfg,$sha);$script:WqtRun=[pscustomobject]@{id=$cfg.WorkflowRunId;status='completed';conclusion='success';run_attempt=1;head_sha=$sha;path=$cfg.WorkflowPath;repository=[pscustomobject]@{full_name=$cfg.Repository};head_repository=[pscustomobject]@{full_name=$cfg.Repository};event='pull_request';pull_requests=@([pscustomobject]@{head=[pscustomobject]@{sha=$sha}})}} $validate $validate.ExpectedSha
+        }
         foreach($field in @('id','name','run_id','run_attempt','head_sha')){
             & $module {param($field,$cfg);$script:WqtJob.id=701;$script:WqtJob.name=$cfg.ExpectedJobName;$script:WqtJob.run_id=$cfg.WorkflowRunId;$script:WqtJob.run_attempt=$cfg.RunAttempt;$script:WqtJob.head_sha=$cfg.ExpectedSha;switch($field){'id'{$script:WqtJob.id=999};'name'{$script:WqtJob.name='other'};'run_id'{$script:WqtJob.run_id++};'run_attempt'{$script:WqtJob.run_attempt++};'head_sha'{$script:WqtJob.head_sha=('0'*40)}}} $field $validate
             Refuses {Get-Ci7PersistedCleanupJob $persisted};Refuses {Get-Ci7MonitoredJob $persisted}

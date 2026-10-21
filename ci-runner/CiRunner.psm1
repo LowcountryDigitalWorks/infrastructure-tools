@@ -275,6 +275,28 @@ function Get-Ci7PersistedCleanupJob {
     if (-not $State.JobId -or [long]$State.JobId -le 0 -or $configuration.ExpectedJobId -ne $State.JobId -or
         [string]::IsNullOrWhiteSpace($configuration.ExpectedJobName) -or $configuration.WorkflowRunId -le 0 -or
         $configuration.RunAttempt -lt 1 -or $configuration.ExpectedSha -cnotmatch '^[a-f0-9]{40}$') { throw 'PERSISTED_JOB_IDENTITY_MISSING' }
+    if ($configuration.ProfileId) {
+        $profiles = @((Get-Ci7ClosedProfiles) | Where-Object ProfileId -CEQ $configuration.ProfileId)
+        if ($profiles.Count -ne 1) { throw 'WQT_CLOSED_PROFILE_REQUIRED' }
+        $profile = $profiles[0]
+        $expectedLabels = @($script:SafeLabels) + @($profile.RoutingLabel)
+        if ($configuration.Repository -cne $profile.Repository -or $configuration.WorkflowPath -cne $profile.WorkflowPath -or
+            $configuration.ExpectedJobName -cne $profile.JobName -or $configuration.ProfileRoutingLabel -cne $profile.RoutingLabel -or
+            @($configuration.StaticLabels).Count -ne $expectedLabels.Count -or
+            @(Compare-Object $expectedLabels @($configuration.StaticLabels) -CaseSensitive).Count -or
+            @($configuration.ReadPermissions).Count -ne @($profile.ReadPermissions).Count -or
+            @(Compare-Object @($profile.ReadPermissions) @($configuration.ReadPermissions) -CaseSensitive).Count -or
+            $configuration.WorkflowSecrets -ne $profile.WorkflowSecrets -or
+            $configuration.PrivateProductionState -ne $profile.PrivateProductionState -or $configuration.Docker -ne $profile.Docker) {
+            throw 'WQT_PROFILE_IDENTITY_REFUSED'
+        }
+        $run = Invoke-Ci7Api ('repos/' + $configuration.Repository + '/actions/runs/' + $configuration.WorkflowRunId)
+        if ($run.id -ne $configuration.WorkflowRunId -or $run.repository.full_name -cne $profile.Repository -or
+            $run.head_repository.full_name -cne $profile.Repository -or $run.path -cne $profile.WorkflowPath -or
+            $run.event -cne 'pull_request' -or $run.run_attempt -ne $configuration.RunAttempt -or
+            $run.head_sha -cne $configuration.ExpectedSha -or @($run.pull_requests).Count -ne 1 -or
+            $run.pull_requests[0].head.sha -cne $configuration.ExpectedSha) { throw 'WQT_RUN_IDENTITY_MISMATCH' }
+    }
     $job = Invoke-Ci7Api ('repos/' + $configuration.Repository + '/actions/jobs/' + $State.JobId)
     if ($job.id -ne $State.JobId -or $job.name -cne $configuration.ExpectedJobName -or
         $job.run_id -ne $configuration.WorkflowRunId -or $job.run_attempt -ne $configuration.RunAttempt -or
