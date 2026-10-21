@@ -10,10 +10,18 @@ PowerShell 7 on the approved Hyper-V host, using the existing `gh` session.
 
 ## Security boundary
 
-- The normal repository allowlist starts with `business-operations`. An operator
-  can supply an explicit approved private-repository allowlist for future accepted
-  workflows. The implementation is parameterized; this is not acceptance of any
-  additional workflow or credential use.
+- Accepted private workload classes are closed profiles. The existing
+  `business-operations` and Royal profiles retain their exact workflow contracts;
+  WQT accepts only `wqt-validation`, `wqt-semantic-validate`, and
+  `wqt-semantic-retention-probe` for the exact repository/workflow/event/job
+  combinations defined in `CiRunner.psm1`. An approved repository list alone
+  cannot authorize another private workflow or job.
+- WQT one-shot invocations must supply the exact profile ID, workflow path/blob
+  SHA, run ID/attempt, target job ID, and frozen PR head SHA. The controller checks the PR
+  association, complete latest job graph, exact profile labels, and (for the
+  retention probe) successful `validate-pr` completion before launch. All WQT
+  jobs retain the existing read-only permission ceiling and receive no custom
+  workflow secrets or private production state.
 - The public implementation repository has a narrowly scoped synthetic exception:
   its exact proof workflow, a push to the implementation branch, one job, exact
   head SHA, and the expected isolation labels. No production workload or secret

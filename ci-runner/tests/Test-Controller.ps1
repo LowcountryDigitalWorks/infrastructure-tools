@@ -36,8 +36,7 @@ try {
         Refuses { New-Ci7Configuration -Repository 'LowcountryDigitalWorks/business-operations' -WorkflowRunId 1 -ExpectedSha ('a' * 40) -Root $root -AllowPublicSyntheticProof }
         $public = New-Ci7Configuration -Repository 'LowcountryDigitalWorks/infrastructure-tools' -WorkflowRunId 1 -ExpectedSha ('a' * 40) -Root $root -AllowPublicSyntheticProof
         Assert $public.PublicSyntheticProof
-        $future = New-Ci7Configuration -Repository 'LowcountryDigitalWorks/wqt-operations' -ApprovedRepositories @('LowcountryDigitalWorks/wqt-operations') -WorkflowRunId 1 -ExpectedSha ('a' * 40) -Root $root
-        Assert-Ci7State (New-Ci7State $future) $root
+        Refuses { New-Ci7Configuration -Repository 'LowcountryDigitalWorks/wqt-operations' -ApprovedRepositories @('LowcountryDigitalWorks/wqt-operations') -WorkflowRunId 1 -ExpectedSha ('a' * 40) -Root $root }
     }
     Check 'configuration bounds and exact revision validation' {
         foreach ($memory in @(0,1024,4097)) { Refuses { New-Ci7Configuration -Repository $config.Repository -WorkflowRunId 1 -ExpectedSha ('a' * 40) -Root $root -MemoryMiB $memory } }
@@ -138,6 +137,53 @@ try {
         & $module {$script:ApiTestRepo.private=$true;$script:ApiTestCount=2}; Refuses {Get-Ci7ExpectedJob $config}
         & $module {$script:ApiTestCount=1;$script:ApiTestJob.runner_id=42}; Refuses {Get-Ci7ExpectedJob $config -RequireQueued}
         & $module {$script:ApiTestJob.runner_id=0;$script:ApiTestJob.labels=@('self-hosted','ldw-light')}; Refuses {Get-Ci7ExpectedJob $config}
+    }
+
+    Check 'closed WQT profile rejects non-exact identity, graph, and attempt inputs' {
+        $sha='a'*40; $blobSha='b'*40; $runId=88001
+        $profiles=@(& $module { Get-Ci7ClosedProfiles })
+        Assert ($profiles.Count -eq 3)
+        $profile=@($profiles | Where-Object ProfileId -CEQ 'wqt-validation')[0]
+        $wqt=New-Ci7Configuration -Repository $profile.Repository -ApprovedRepositories @($profile.Repository) -WorkflowRunId $runId -ExpectedSha $sha -WorkflowPath $profile.WorkflowPath -WorkflowBlobSha $blobSha -ExpectedJobName $profile.JobName -ProfileId $profile.ProfileId -RunAttempt 2 -ExpectedJobId 501 -Root $root
+        Assert ('wqt-validation' -cin $wqt.StaticLabels)
+        & $module {
+            param($c,$sha,$blobSha)
+            $script:WqtRepo=[pscustomobject]@{private=$true}; $script:WqtBlob=[pscustomobject]@{sha=$blobSha}
+            $script:WqtRun=[pscustomobject]@{id=$c.WorkflowRunId;status='in_progress';conclusion=$null;run_attempt=2;head_sha=$sha;path=$c.WorkflowPath;repository=[pscustomobject]@{full_name=$c.Repository};head_repository=[pscustomobject]@{full_name=$c.Repository};event='pull_request';pull_requests=@([pscustomobject]@{head=[pscustomobject]@{sha=$sha}})}
+            $script:WqtJob=[pscustomobject]@{id=501;name='validate-pr';run_id=$c.WorkflowRunId;run_attempt=2;head_sha=$sha;status='queued';runner_id=0;labels=@(Get-Ci7Labels $c.WorkflowRunId $c)}
+            $script:WqtJobs=@($script:WqtJob,[pscustomobject]@{id=502;name='validate-manual';status='completed';conclusion='skipped'},[pscustomobject]@{id=503;name='scan';status='completed';conclusion='skipped'})
+            function script:Invoke-Ci7Api {param($Path,$Method='GET',$Body); if($Path -match '/jobs\?'){[pscustomobject]@{total_count=$script:WqtJobs.Count;jobs=$script:WqtJobs}}elseif($Path -match '/actions/runs/\d+$'){$script:WqtRun}elseif($Path -match '/contents/'){$script:WqtBlob}else{$script:WqtRepo}}
+        } $wqt $sha $blobSha
+        Assert ((Get-Ci7ExpectedJob $wqt -RequireQueued).id -eq 501)
+        $wrongJobId=New-Ci7Configuration -Repository $profile.Repository -ApprovedRepositories @($profile.Repository) -WorkflowRunId $runId -ExpectedSha $sha -WorkflowPath $profile.WorkflowPath -WorkflowBlobSha $blobSha -ExpectedJobName $profile.JobName -ProfileId $profile.ProfileId -RunAttempt 2 -ExpectedJobId 599 -Root $root
+        Refuses { Get-Ci7ExpectedJob $wrongJobId }
+        & $module {$script:WqtRun.run_attempt=1}; Refuses {Get-Ci7ExpectedJob $wqt}
+        & $module {$script:WqtRun.run_attempt=2;$script:WqtRun.pull_requests=@()}; Refuses {Get-Ci7ExpectedJob $wqt}
+        & $module {$script:WqtRun.pull_requests=@([pscustomobject]@{head=[pscustomobject]@{sha=$script:WqtRun.head_sha}});$script:WqtJob.run_id=99}; Refuses {Get-Ci7ExpectedJob $wqt}
+        & $module {param($id,$cfg);$script:WqtJob.run_id=$id;$script:WqtJob.run_attempt=2;$script:WqtJob.labels=@(Get-Ci7Labels $id $cfg | Where-Object {$_ -cne 'wqt-validation'})} $runId $wqt; Refuses {Get-Ci7ExpectedJob $wqt}
+        & $module {param($id,$cfg,$blob);$script:WqtJob.labels=@(Get-Ci7Labels $id $cfg);$script:WqtBlob.sha='c'*40} $runId $wqt $blobSha; Refuses {Get-Ci7ExpectedJob $wqt}
+        & $module {param($blob);$script:WqtBlob.sha=$blob;$script:WqtJobs += [pscustomobject]@{id=504;name='unknown-job';status='completed';conclusion='skipped'}} $blobSha; Refuses {Get-Ci7ExpectedJob $wqt}
+        & $module {$script:WqtJobs=@($script:WqtJob,[pscustomobject]@{id=502;name='validate-manual';status='completed';conclusion='skipped'},[pscustomobject]@{id=503;name='scan';status='queued';conclusion=$null})}; Refuses {Get-Ci7ExpectedJob $wqt}
+        Refuses {New-Ci7Configuration -Repository $profile.Repository -ApprovedRepositories @($profile.Repository) -WorkflowRunId $runId -ExpectedSha $sha -WorkflowPath $profile.WorkflowPath -WorkflowBlobSha $blobSha -ExpectedJobName $profile.JobName -Root $root}
+        Refuses {New-Ci7Configuration -Repository $profile.Repository -ApprovedRepositories @($profile.Repository) -WorkflowRunId $runId -ExpectedSha $sha -WorkflowPath $profile.WorkflowPath -WorkflowBlobSha $blobSha -ExpectedJobName $profile.JobName -ProfileId 'generic-private' -RunAttempt 2 -Root $root}
+        foreach($p in $profiles){Refuses {New-Ci7Configuration -Repository $p.Repository -ApprovedRepositories @($p.Repository) -WorkflowRunId $runId -ExpectedSha $sha -WorkflowPath $p.WorkflowPath -WorkflowBlobSha $blobSha -ExpectedJobName $p.JobName -ProfileId $p.ProfileId -RunAttempt 0 -Root $root}}
+    }
+    Check 'semantic retention probe requires exact successful validate-pr dependency' {
+        $sha='d'*40;$blobSha='e'*40;$runId=88002
+        $profile=@((& $module {Get-Ci7ClosedProfiles}) | Where-Object ProfileId -CEQ 'wqt-semantic-retention-probe')[0]
+        $probe=New-Ci7Configuration -Repository $profile.Repository -ApprovedRepositories @($profile.Repository) -WorkflowRunId $runId -ExpectedSha $sha -WorkflowPath $profile.WorkflowPath -WorkflowBlobSha $blobSha -ExpectedJobName $profile.JobName -ProfileId $profile.ProfileId -RunAttempt 1 -ExpectedJobId 602 -Root $root
+        Assert ('wqt-semantic-retention-probe' -cin $probe.StaticLabels -and 'wqt-semantic-validate' -cnotin $probe.StaticLabels)
+        & $module {
+            param($c,$sha,$blobSha)
+            $script:WqtRepo=[pscustomobject]@{private=$true};$script:WqtBlob=[pscustomobject]@{sha=$blobSha}
+            $script:WqtRun=[pscustomobject]@{id=$c.WorkflowRunId;status='in_progress';conclusion=$null;run_attempt=1;head_sha=$sha;path=$c.WorkflowPath;repository=[pscustomobject]@{full_name=$c.Repository};head_repository=[pscustomobject]@{full_name=$c.Repository};event='pull_request';pull_requests=@([pscustomobject]@{head=[pscustomobject]@{sha=$sha}})}
+            $script:WqtValidate=[pscustomobject]@{id=601;name='validate-pr';run_id=$c.WorkflowRunId;run_attempt=1;head_sha=$sha;status='completed';conclusion='success'}
+            $script:WqtJob=[pscustomobject]@{id=602;name='retention-probe-pr';run_id=$c.WorkflowRunId;run_attempt=1;head_sha=$sha;status='queued';runner_id=0;labels=@(Get-Ci7Labels $c.WorkflowRunId $c)}
+            $script:WqtJobs=@($script:WqtValidate,$script:WqtJob,[pscustomobject]@{id=603;name='validate-manual';status='completed';conclusion='skipped'},[pscustomobject]@{id=604;name='retention-probe-manual';status='completed';conclusion='skipped'},[pscustomobject]@{id=605;name='consume-real';status='completed';conclusion='skipped'})
+            function script:Invoke-Ci7Api {param($Path,$Method='GET',$Body);if($Path -match '/jobs\?'){[pscustomobject]@{total_count=$script:WqtJobs.Count;jobs=$script:WqtJobs}}elseif($Path -match '/actions/runs/\d+$'){$script:WqtRun}elseif($Path -match '/contents/'){$script:WqtBlob}else{$script:WqtRepo}}
+        } $probe $sha $blobSha
+        Assert ((Get-Ci7ExpectedJob $probe -RequireQueued).id -eq 602)
+        & $module {$script:WqtValidate.conclusion='failure'};Refuses {Get-Ci7ExpectedJob $probe}
     }
 
     Check 'Royal PR release-gate profile is exact and isolated from production deploy' {
