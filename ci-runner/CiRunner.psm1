@@ -275,7 +275,8 @@ function Get-Ci7PersistedCleanupJob {
     if (-not $State.JobId -or [long]$State.JobId -le 0 -or $configuration.ExpectedJobId -ne $State.JobId -or
         [string]::IsNullOrWhiteSpace($configuration.ExpectedJobName) -or $configuration.WorkflowRunId -le 0 -or
         $configuration.RunAttempt -lt 1 -or $configuration.ExpectedSha -cnotmatch '^[a-f0-9]{40}$') { throw 'PERSISTED_JOB_IDENTITY_MISSING' }
-    if ($configuration.ProfileId) {
+    if ($configuration.Repository -ceq 'LowcountryDigitalWorks/wqt-operations') {
+        if ([string]::IsNullOrWhiteSpace($configuration.ProfileId)) { throw 'WQT_CLOSED_PROFILE_REQUIRED' }
         $profiles = @((Get-Ci7ClosedProfiles) | Where-Object ProfileId -CEQ $configuration.ProfileId)
         if ($profiles.Count -ne 1) { throw 'WQT_CLOSED_PROFILE_REQUIRED' }
         $profile = $profiles[0]
@@ -307,7 +308,7 @@ function Get-Ci7PersistedCleanupJob {
 function Get-Ci7MonitoredJob {
     param([object]$State)
     $configuration = $State.Configuration
-    if (-not $configuration.ProfileId) { return Get-Ci7ExpectedJob $configuration }
+    if ($configuration.Repository -cne 'LowcountryDigitalWorks/wqt-operations') { return Get-Ci7ExpectedJob $configuration }
 
     # WQT keeps full graph and assignment enforcement until its persisted target
     # is terminal. After that point, workflow dependencies can materialize jobs.
@@ -320,7 +321,7 @@ function Get-Ci7MonitoredJob {
 
 function Get-Ci7CleanupJob {
     param([object]$State)
-    if ($State.Configuration.ProfileId) { return Get-Ci7PersistedCleanupJob $State }
+    if ($State.Configuration.Repository -ceq 'LowcountryDigitalWorks/wqt-operations') { return Get-Ci7PersistedCleanupJob $State }
     $job = Get-Ci7ExpectedJob $State.Configuration
     if ($State.JobId -and $job.id -ne $State.JobId) { throw 'INTERRUPTED_JOB_IDENTITY_CHANGED' }
     return $job

@@ -243,6 +243,14 @@ try {
         & $module {$script:WqtJob.conclusion='success';$script:WqtProbe.status='queued';$script:WqtProbe.conclusion=$null}
         Assert ((Get-Ci7MonitoredJob $persisted).id -eq 701)
         Assert ((Get-Ci7MonitoredJob $persisted).conclusion -ceq 'success')
+        $savedProfileId=$validate.ProfileId
+        $validate.ProfileId=$null
+        Refuses {Get-Ci7MonitoredJob $persisted}
+        Refuses {Get-Ci7CleanupJob $persisted}
+        $validate.ProfileId=''
+        Refuses {Get-Ci7MonitoredJob $persisted}
+        Refuses {Get-Ci7CleanupJob $persisted}
+        $validate.ProfileId=$savedProfileId
         foreach($field in @('Repository','WorkflowPath','ExpectedJobName','ProfileRoutingLabel','StaticLabels','ReadPermissions','WorkflowSecrets','PrivateProductionState','Docker')){
             $original=$validate.$field
             switch($field){
@@ -337,6 +345,7 @@ try {
         Assert ((Get-Ci7ExpectedJob $royalConfig -RequireQueued).id -eq 99)
         $royalState=New-Ci7State $royalConfig '1123456789abcdef0123456789abcdef';$royalState.JobId=99
         Assert ((Get-Ci7MonitoredJob $royalState).id -eq 99)
+        Assert ((Get-Ci7CleanupJob $royalState).id -eq 99)
 
         & $module {$script:ApiTestRun.repository.full_name='LowcountryDigitalWorks/other'}; Refuses {Get-Ci7ExpectedJob $royalConfig}
         & $module {$script:ApiTestRun.repository.full_name='LowcountryDigitalWorks/royal-cruise-tracker'}
