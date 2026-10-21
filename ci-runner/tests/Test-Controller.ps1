@@ -154,7 +154,7 @@ try {
             param($c,$sha,$blobSha)
             $script:WqtRepo=[pscustomobject]@{private=$true}; $script:WqtBlob=[pscustomobject]@{sha=$blobSha}
             $script:WqtRun=[pscustomobject]@{id=$c.WorkflowRunId;status='in_progress';conclusion=$null;run_attempt=2;head_sha=$sha;path=$c.WorkflowPath;repository=[pscustomobject]@{full_name=$c.Repository};head_repository=[pscustomobject]@{full_name=$c.Repository};event='pull_request';pull_requests=@([pscustomobject]@{head=[pscustomobject]@{sha=$sha}})}
-            $script:WqtJob=[pscustomobject]@{id=501;name='validate-pr';run_id=$c.WorkflowRunId;run_attempt=2;head_sha=$sha;status='queued';runner_id=0;labels=@(Get-Ci7Labels $c.WorkflowRunId $c)}
+            $script:WqtJob=[pscustomobject]@{id=501;name='validate-pr';run_id=$c.WorkflowRunId;run_attempt=2;head_sha=$sha;status='queued';runner_id=0;runner_name=$null;runner_group_id=0;labels=@(Get-Ci7Labels $c.WorkflowRunId $c)}
             $script:WqtJobs=@($script:WqtJob,[pscustomobject]@{id=502;name='validate-hosted';status='completed';conclusion='skipped'},[pscustomobject]@{id=503;name='scan';status='completed';conclusion='skipped'})
             function script:Invoke-Ci7Api {param($Path,$Method='GET',$Body); if($Path -match '/jobs\?'){[pscustomobject]@{total_count=$script:WqtJobs.Count;jobs=$script:WqtJobs}}elseif($Path -match '/actions/runs/\d+$'){$script:WqtRun}elseif($Path -match '/contents/'){$script:WqtBlob}else{$script:WqtRepo}}
         } $wqt $sha $blobSha
@@ -170,6 +170,10 @@ try {
         & $module {param($id,$cfg,$blob);$script:WqtJob.labels=@(Get-Ci7Labels $id $cfg);$script:WqtBlob.sha='c'*40} $runId $wqt $blobSha; Refuses {Get-Ci7ExpectedJob $wqt}
         & $module {param($blob);$script:WqtBlob.sha=$blob;$script:WqtJobs += [pscustomobject]@{id=504;name='unknown-job';status='completed';conclusion='skipped'}} $blobSha; Refuses {Get-Ci7ExpectedJob $wqt}
         & $module {$script:WqtJobs=@($script:WqtJob,[pscustomobject]@{id=502;name='validate-hosted';status='completed';conclusion='skipped'},[pscustomobject]@{id=503;name='scan';status='queued';conclusion=$null})}; Refuses {Get-Ci7ExpectedJob $wqt}
+        & $module {$script:WqtJobs=@($script:WqtJob,[pscustomobject]@{id=502;name='validate-manual';status='completed';conclusion='skipped'},[pscustomobject]@{id=503;name='scan';status='completed';conclusion='skipped'})}; Refuses {Get-Ci7ExpectedJob $wqt}
+        & $module {$script:WqtJobs=@($script:WqtJob,[pscustomobject]@{id=502;name='validate-hosted';status='completed';conclusion='skipped'},[pscustomobject]@{id=503;name='scan';status='completed';conclusion='skipped'});$script:WqtJob.runner_name='runner-a'}; Refuses {Get-Ci7ExpectedJob $wqt -RequireQueued}
+        & $module {$script:WqtJob.runner_name=$null;$script:WqtJob.runner_group_id=4}; Refuses {Get-Ci7ExpectedJob $wqt -RequireQueued}
+        & $module {$script:WqtJob.runner_group_id=0}; Assert ((Get-Ci7ExpectedJob $wqt -RequireQueued).id -eq 501)
         Refuses {New-Ci7Configuration -Repository $profile.Repository -ApprovedRepositories @($profile.Repository) -WorkflowRunId $runId -ExpectedSha $sha -WorkflowPath $profile.WorkflowPath -WorkflowBlobSha $blobSha -ExpectedJobName $profile.JobName -Root $root}
         Refuses {New-Ci7Configuration -Repository $profile.Repository -ApprovedRepositories @($profile.Repository) -WorkflowRunId $runId -ExpectedSha $sha -WorkflowPath $profile.WorkflowPath -WorkflowBlobSha $blobSha -ExpectedJobName $profile.JobName -ProfileId 'generic-private' -RunAttempt 2 -Root $root}
         foreach($p in $profiles){Refuses {New-Ci7Configuration -Repository $p.Repository -ApprovedRepositories @($p.Repository) -WorkflowRunId $runId -ExpectedSha $sha -WorkflowPath $p.WorkflowPath -WorkflowBlobSha $blobSha -ExpectedJobName $p.JobName -ProfileId $p.ProfileId -RunAttempt 0 -Root $root}}
@@ -185,14 +189,16 @@ try {
             $script:WqtRepo=[pscustomobject]@{private=$true};$script:WqtBlob=[pscustomobject]@{sha=$blobSha}
             $script:WqtRun=[pscustomobject]@{id=$c.WorkflowRunId;status='in_progress';conclusion=$null;run_attempt=1;head_sha=$sha;path=$c.WorkflowPath;repository=[pscustomobject]@{full_name=$c.Repository};head_repository=[pscustomobject]@{full_name=$c.Repository};event='pull_request';pull_requests=@([pscustomobject]@{head=[pscustomobject]@{sha=$sha}})}
             $script:WqtValidate=[pscustomobject]@{id=601;name='validate-pr';run_id=$c.WorkflowRunId;run_attempt=1;head_sha=$sha;status='completed';conclusion='success'}
-            $script:WqtJob=[pscustomobject]@{id=602;name='retention-probe-pr';run_id=$c.WorkflowRunId;run_attempt=1;head_sha=$sha;status='queued';runner_id=0;labels=@(Get-Ci7Labels $c.WorkflowRunId $c)}
+            $script:WqtJob=[pscustomobject]@{id=602;name='retention-probe-pr';run_id=$c.WorkflowRunId;run_attempt=1;head_sha=$sha;status='queued';conclusion=$null;runner_id=0;runner_name=$null;runner_group_id=0;labels=@(Get-Ci7Labels $c.WorkflowRunId $c)}
             $script:WqtJobs=@($script:WqtValidate,$script:WqtJob,[pscustomobject]@{id=603;name='validate-hosted';status='completed';conclusion='skipped'},[pscustomobject]@{id=604;name='retention-probe-hosted';status='completed';conclusion='skipped'},[pscustomobject]@{id=605;name='consume-real';status='completed';conclusion='skipped'})
             function script:Invoke-Ci7Api {param($Path,$Method='GET',$Body);if($Path -match '/jobs\?'){[pscustomobject]@{total_count=$script:WqtJobs.Count;jobs=$script:WqtJobs}}elseif($Path -match '/actions/runs/\d+$'){$script:WqtRun}elseif($Path -match '/contents/'){$script:WqtBlob}else{$script:WqtRepo}}
         } $probe $sha $blobSha
         Assert ((Get-Ci7ExpectedJob $probe -RequireQueued).id -eq 602)
         & $module {$script:WqtValidate.conclusion='failure'};Refuses {Get-Ci7ExpectedJob $probe}
+        & $module {$script:WqtValidate.conclusion='success';$script:WqtJob.runner_name='runner-a'};Refuses {Get-Ci7ExpectedJob $probe -RequireQueued}
+        & $module {$script:WqtJob.runner_name=$null;$script:WqtJob.runner_group_id=9};Refuses {Get-Ci7ExpectedJob $probe -RequireQueued}
     }
-    Check 'semantic validation profile accepts only dependency-blocked retention state classes' {
+    Check 'semantic validation profile accepts only absent retention job before eligibility' {
         $sha='f'*40;$blobSha='1'*40;$runId=88003
         $profile=@((& $module {Get-Ci7ClosedProfiles}) | Where-Object ProfileId -CEQ 'wqt-semantic-validate')[0]
         $validate=New-Ci7Configuration -Repository $profile.Repository -ApprovedRepositories @($profile.Repository) -WorkflowRunId $runId -ExpectedSha $sha -WorkflowPath $profile.WorkflowPath -WorkflowBlobSha $blobSha -ExpectedJobName $profile.JobName -ProfileId $profile.ProfileId -RunAttempt 1 -ExpectedJobId 701 -Root $root
@@ -201,14 +207,18 @@ try {
             $script:WqtRepo=[pscustomobject]@{private=$true};$script:WqtBlob=[pscustomobject]@{sha=$blobSha}
             $script:WqtRun=[pscustomobject]@{id=$c.WorkflowRunId;status='in_progress';conclusion=$null;run_attempt=1;head_sha=$sha;path=$c.WorkflowPath;repository=[pscustomobject]@{full_name=$c.Repository};head_repository=[pscustomobject]@{full_name=$c.Repository};event='pull_request';pull_requests=@([pscustomobject]@{head=[pscustomobject]@{sha=$sha}})}
             $script:WqtJob=[pscustomobject]@{id=701;name='validate-pr';run_id=$c.WorkflowRunId;run_attempt=1;head_sha=$sha;status='queued';conclusion=$null;runner_id=0;labels=@(Get-Ci7Labels $c.WorkflowRunId $c)}
-            $script:WqtProbe=[pscustomobject]@{id=702;name='retention-probe-pr';run_id=$c.WorkflowRunId;run_attempt=1;head_sha=$sha;status='waiting';runner_id=0;labels=@()}
-            $script:WqtJobs=@($script:WqtJob,[pscustomobject]@{id=703;name='validate-hosted';status='completed';conclusion='skipped'},$script:WqtProbe,[pscustomobject]@{id=704;name='retention-probe-hosted';status='completed';conclusion='skipped'},[pscustomobject]@{id=705;name='consume-real';status='completed';conclusion='skipped'})
+            $script:WqtProbe=[pscustomobject]@{id=702;name='retention-probe-pr';run_id=$c.WorkflowRunId;run_attempt=1;head_sha=$sha;status='waiting';conclusion=$null;runner_id=0;runner_name=$null;runner_group_id=0;labels=@()}
+            $script:WqtJobs=@($script:WqtJob,[pscustomobject]@{id=703;name='validate-hosted';status='completed';conclusion='skipped'},[pscustomobject]@{id=704;name='retention-probe-hosted';status='completed';conclusion='skipped'},[pscustomobject]@{id=705;name='consume-real';status='completed';conclusion='skipped'})
             function script:Invoke-Ci7Api {param($Path,$Method='GET',$Body);if($Path -match '/jobs\?'){[pscustomobject]@{total_count=$script:WqtJobs.Count;jobs=$script:WqtJobs}}elseif($Path -match '/actions/runs/\d+$'){$script:WqtRun}elseif($Path -match '/contents/'){$script:WqtBlob}else{$script:WqtRepo}}
         } $validate $sha $blobSha
         Assert ((Get-Ci7ExpectedJob $validate -RequireQueued).id -eq 701)
-        & $module {$script:WqtProbe.status='in_progress'};Refuses {Get-Ci7ExpectedJob $validate}
-        & $module {$script:WqtProbe.status='queued';$script:WqtJob.status='completed';$script:WqtJob.conclusion='success'}
-        Assert ((Get-Ci7ExpectedJob $validate).id -eq 701)
+        foreach($status in @('queued','waiting','pending','requested','in_progress','completed')){
+            & $module {param($s);$script:WqtJobs=@($script:WqtJobs | Where-Object {$_.name -cne 'retention-probe-pr'});$script:WqtProbe.status=$s;if($s -eq 'completed'){$script:WqtProbe.conclusion='skipped'}else{$script:WqtProbe.conclusion=$null};$script:WqtJobs += $script:WqtProbe} $status
+            Refuses {Get-Ci7ExpectedJob $validate}
+        }
+        & $module {$script:WqtJobs=@($script:WqtJobs | Where-Object {$_.name -cne 'retention-probe-pr'});$script:WqtJobs += [pscustomobject]@{id=702;name='retention-probe-manual';status='completed';conclusion='skipped'}}
+        Refuses {Get-Ci7ExpectedJob $validate}
+        & $module {$script:WqtJobs=@($script:WqtJobs | Where-Object {$_.name -cne 'retention-probe-manual'});$script:WqtJob.status='completed';$script:WqtJob.conclusion='success'}
         Refuses {Get-Ci7ExpectedJob $validate -RequireQueued}
     }
 

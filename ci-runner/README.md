@@ -23,6 +23,16 @@ PowerShell 7 on the approved Hyper-V host, using the existing `gh` session.
   labels, and (for the retention probe) successful `validate-pr` completion
   before launch. Profiles encode the accepted read-only permission class;
   custom workflow secrets, Docker, and private production state are disabled.
+- During `wqt-semantic-validate`, `retention-probe-pr` must not yet appear in
+  the Jobs API result. The API has no dependency-reason field, and its
+  `queued`, `waiting`, `pending`, and `requested` states do not prove that a
+  job is dependency-blocked. Any visible retention job therefore fails closed
+  until Stage-B canary evidence establishes an exact safe state representation.
+  The frozen Stage-B workflow blob and its dependency declaration remain part
+  of the authorization boundary.
+- A final queued target check treats `runner_id`, `runner_name`, and
+  `runner_group_id` as assignment indicators; any populated assignment refuses
+  launch.
 - The public implementation repository has a narrowly scoped synthetic exception:
   its exact proof workflow, a push to the implementation branch, one job, exact
   head SHA, and the expected isolation labels. No production workload or secret

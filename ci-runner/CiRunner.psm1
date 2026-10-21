@@ -142,6 +142,24 @@ function Get-Ci7Labels {
     @($static) + @('ci7-run-' + $WorkflowRunId)
 }
 
+function Get-Ci7JobField {
+    param([object]$Job, [string]$Name)
+    $property = $Job.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
+function Test-Ci7JobUnassigned {
+    param([object]$Job)
+    $runnerId = Get-Ci7JobField $Job 'runner_id'
+    $runnerName = Get-Ci7JobField $Job 'runner_name'
+    $runnerGroupId = Get-Ci7JobField $Job 'runner_group_id'
+    if ($null -ne $runnerId -and [string]$runnerId -notin @('', '0')) { return $false }
+    if (-not [string]::IsNullOrEmpty([string]$runnerName)) { return $false }
+    if ($null -ne $runnerGroupId -and [string]$runnerGroupId -notin @('', '0')) { return $false }
+    return $true
+}
+
 function Invoke-Ci7Api {
     param([string]$Path, [ValidateSet('GET', 'POST', 'DELETE')][string]$Method = 'GET', [object]$Body)
     if ($Path -notmatch '^repos/LowcountryDigitalWorks/[a-z0-9-]+(/|$)') { throw 'API_TARGET_NOT_APPROVED' }
@@ -190,16 +208,20 @@ function Get-Ci7ExpectedJob {
         if ($targets.Count -ne 1) { throw 'WQT_TARGET_JOB_COUNT_MISMATCH' }
         $validateJobs = @($allJobs | Where-Object { $_.name -ceq 'validate-pr' })
         if ($validateJobs.Count -ne 1) { throw 'WQT_VALIDATE_JOB_COUNT_MISMATCH' }
+        if ($Configuration.ProfileId -ceq 'wqt-semantic-validate' -and
+            @($allJobs | Where-Object { $_.name -ceq 'retention-probe-pr' }).Count -ne 0) {
+            # The Jobs API has no dependency-reason field. Until validation succeeds,
+            # accept only the API representation where the `needs: validate-pr`
+            # dependent job is not yet present. Any exposed non-target state (queued,
+            # waiting, pending, requested, or otherwise) is ambiguous and fails closed.
+            throw 'WQT_RETENTION_NOT_DEPENDENCY_BLOCKED'
+        }
         foreach ($other in @($allJobs | Where-Object { $_.id -ne $targets[0].id })) {
             $isExactSkipped = $other.status -ceq 'completed' -and $other.conclusion -ceq 'skipped'
             $isExactValidationDependency = $Configuration.ProfileId -ceq 'wqt-semantic-retention-probe' -and $other.name -ceq 'validate-pr' -and
                 $other.status -ceq 'completed' -and $other.conclusion -ceq 'success' -and
                 $other.run_id -eq $run.id -and $other.run_attempt -eq $run.run_attempt -and $other.head_sha -ceq $Configuration.ExpectedSha
-            $isExactRetentionDependency = $Configuration.WorkflowPath -ceq '.github/workflows/wqt-semantic-consumer.yml' -and $other.name -ceq 'retention-probe-pr' -and
-                $other.status -in @('queued','waiting','pending','requested') -and -not $other.runner_id -and
-                $validateJobs[0].status -in @('queued','in_progress','completed') -and
-                ($validateJobs[0].status -cne 'completed' -or $validateJobs[0].conclusion -ceq 'success')
-            if (-not ($isExactValidationDependency -or $isExactRetentionDependency -or $isExactSkipped)) { throw 'WQT_NON_TARGET_JOB_RUNNABLE' }
+            if (-not ($isExactValidationDependency -or $isExactSkipped)) { throw 'WQT_NON_TARGET_JOB_RUNNABLE' }
         }
         $job = $targets[0]
         if ($job.id -ne $Configuration.ExpectedJobId -or $job.run_id -ne $run.id -or $job.run_attempt -ne $run.run_attempt -or $job.head_sha -cne $Configuration.ExpectedSha) { throw 'JOB_IDENTITY_MISMATCH' }
@@ -209,7 +231,7 @@ function Get-Ci7ExpectedJob {
             if ($validateJobs[0].status -cne 'completed' -or $validateJobs[0].conclusion -cne 'success' -or
                 $validateJobs[0].run_id -ne $run.id -or $validateJobs[0].run_attempt -ne $run.run_attempt -or $validateJobs[0].head_sha -cne $Configuration.ExpectedSha) { throw 'WQT_RETENTION_DEPENDENCY_REQUIRED' }
         }
-        if ($RequireQueued -and ($job.status -cne 'queued' -or $job.runner_id)) { throw 'UNASSIGNED_QUEUED_JOB_REQUIRED' }
+        if ($RequireQueued -and ($job.status -cne 'queued' -or -not (Test-Ci7JobUnassigned $job))) { throw 'UNASSIGNED_QUEUED_JOB_REQUIRED' }
         return $job
     }
 
@@ -242,7 +264,7 @@ function Get-Ci7ExpectedJob {
          $job.run_attempt -ne $run.run_attempt -or $job.head_sha -cne $run.head_sha)) { throw 'JOB_IDENTITY_MISMATCH' }
     $expected = @(Get-Ci7Labels $Configuration.WorkflowRunId $Configuration)
     if (@($job.labels).Count -ne $expected.Count -or @(Compare-Object $expected @($job.labels) -CaseSensitive).Count -ne 0) { throw 'ISOLATED_JOB_LABELS_REQUIRED' }
-    if ($RequireQueued -and ($job.status -cne 'queued' -or $job.runner_id)) { throw 'UNASSIGNED_QUEUED_JOB_REQUIRED' }
+    if ($RequireQueued -and ($job.status -cne 'queued' -or -not (Test-Ci7JobUnassigned $job))) { throw 'UNASSIGNED_QUEUED_JOB_REQUIRED' }
     $job
 }
 
