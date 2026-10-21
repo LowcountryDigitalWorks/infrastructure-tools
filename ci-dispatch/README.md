@@ -51,12 +51,15 @@ closed. The manifest records that exact matched commit/tree and per-file SHA-256
 For compatibility with already accepted target commits, the publisher sources
 `Dispatch.psm1` and `verifier-provenance.json` only when the accepted repository paths
 resolve at `HEAD` to their fixed reviewed Git blob IDs and SHA-256 digests. The
-publisher archives those exact `HEAD` paths and checks their bytes before use. This
-identity survives squash merge and a main-only checkout because it pins the durable
-file blobs, not transient PR-history commits. The provenance record identifies the
-dispatcher blob and digest; the protected manifest records that identity, and
-`Assert-Ci10Bundle` checks the record, manifest fields, and actual verifier file hash.
-All other runtime files remain sourced from the exact requested target commit/tree.
+publisher extracts those exact `HEAD` blobs into protected staging, checks their
+SHA-256 digests, and imports the dispatcher only from that verified staged path. It
+never executes the ambient working-tree dispatcher, even when a hidden
+`skip-worktree` edit leaves Git status clean. This identity survives squash merge and
+a main-only checkout because it pins durable file blobs, not transient PR-history
+commits. The provenance record identifies the dispatcher blob and digest; the
+protected manifest records that identity, and `Assert-Ci10Bundle` checks the record,
+manifest fields, and actual verifier file hash. All other runtime files remain
+sourced from the exact requested target commit/tree.
 The manifest hashes the complete runtime file set. No `.git`, credentials or machine
 settings enter the bundle. An existing release must already match; publication never
 overwrites it.

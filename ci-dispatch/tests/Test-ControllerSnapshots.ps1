@@ -103,9 +103,11 @@ try {
         if($parseErrors.Count){throw 'TEST_PUBLISHER_PARSE_FAILED'}
         $function=$ast.FindAll({param($node)$node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Export-Ci10PinnedSourceFile'},$false)
         $guard=$ast.FindAll({param($node)$node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Assert-Ci10AcceptedHeadDispatcherSource'},$false)
-        Assert ($function.Count -eq 1 -and $guard.Count -eq 1)
+        $materializer=$ast.FindAll({param($node)$node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Get-Ci10VerifiedDispatcherPath'},$false)
+        Assert ($function.Count -eq 1 -and $guard.Count -eq 1 -and $materializer.Count -eq 1)
         Invoke-Expression $function[0].Extent.Text
         Invoke-Expression $guard[0].Extent.Text
+        Invoke-Expression $materializer[0].Extent.Text
         $script:AcceptedDispatcherSource=[pscustomobject]@{path='ci-dispatch/Dispatch.psm1';blob='662981a2955a3cd3f3526aeb666e185f989c4a18';sha256='bf8da2a7ed95887bb7b7e3ddbf1ba10fe97f9a3ff9eb384ae9e16740674241ef'}
         $script:AcceptedVerifierRecordSource=[pscustomobject]@{path='ci-dispatch/verifier-provenance.json';blob='f2635eb0eaa24b9da7919c3d0c30fa23f4ea919b';sha256='b810c526b641c8ed0447863aaf0acba35c753887889d4c55c4e1ac0fe14d3b77'}
         $mainOnly=Join-Path $root 'squash-equivalent-main-only'
@@ -135,6 +137,18 @@ try {
             Export-Ci10PinnedSourceFile $mainOnly $source.path $destination $stage
             Assert ((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $source.sha256)
         }
+        $marker=Join-Path $root 'hidden-dispatcher-executed.txt'
+        [IO.File]::WriteAllText((Join-Path $mainOnly $script:AcceptedDispatcherSource.path),
+            "[IO.File]::WriteAllText('$marker','executed'); throw 'HIDDEN_DISPATCHER_EXECUTED'")
+        & git -C $mainOnly update-index --skip-worktree ci-dispatch/Dispatch.psm1
+        if($LASTEXITCODE -ne 0 -or (& git -C $mainOnly status --porcelain)){throw 'TEST_HIDDEN_DISPATCHER_SETUP_FAILED'}
+        $stagedDispatcher=Get-Ci10VerifiedDispatcherPath $mainOnly $stage
+        Assert ($stagedDispatcher -ceq (Join-Path $stage 'verified-dispatcher/ci-dispatch/Dispatch.psm1'))
+        Assert ((Get-FileHash -LiteralPath $stagedDispatcher -Algorithm SHA256).Hash.ToLowerInvariant() -ceq
+            $script:AcceptedDispatcherSource.sha256)
+        Import-Module $stagedDispatcher -Force
+        Assert (-not (Test-Path -LiteralPath $marker))
+        Assert ((Get-Command Get-Ci10RuntimeFiles).Source -ceq 'Dispatch')
         Refuses {Export-Ci10PinnedSourceFile $mainOnly 'ci-dispatch/Dispatch.psm1.bak' (Join-Path $root 'wrong-path') $stage} 'PUBLISH_VERIFIER_PROVENANCE_REFUSED'
         $missing=Join-Path $root 'missing-source-repository';$null=New-Item -ItemType Directory -Path $missing
         & git init $missing 2>$null
@@ -204,18 +218,19 @@ try {
         if($LASTEXITCODE -ne 0 -or (& git -C $unacceptedRecord status --porcelain)){throw 'TEST_UNACCEPTED_RECORD_COMMIT_FAILED'}
         Refuses {Export-Ci10PinnedSourceFile $unacceptedRecord $script:AcceptedVerifierRecordSource.path (Join-Path $root 'wrong-record-output') $stage} 'PUBLISH_VERIFIER_PROVENANCE_REFUSED'
     }
-    Check 'clean accepted-dispatcher checkout with modified controller module is refused without importing it' {
+    Check 'publisher entrypoint refuses hostile controller and hidden dispatcher before executing either' {
         $publisherPath=Join-Path $PSScriptRoot '../Publish-Bundle.ps1'
         $tokens=$null;$parseErrors=$null
         $ast=[System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $publisherPath),[ref]$tokens,[ref]$parseErrors)
         if($parseErrors.Count){throw 'TEST_PUBLISHER_PARSE_FAILED'}
-        $source=[IO.File]::ReadAllText((Resolve-Path $publisherPath))
-        Assert ($source.Contains('function Assert-Ci10PublisherElevated'))
-        Assert ($source.Contains('function Assert-Ci10PublisherPath'))
         $moduleImports=@($ast.FindAll({param($node)$node -is [System.Management.Automation.Language.CommandAst] -and
             $node.GetCommandName() -ceq 'Import-Module'},$true))
-        Assert ($moduleImports.Count -eq 1 -and $moduleImports[0].Extent.Text.Contains("'Dispatch.psm1'"))
-        Assert (-not ($moduleImports[0].Extent.Text -match 'CiRunner'))
+        Assert ($moduleImports.Count -eq 1 -and $moduleImports[0].Extent.Text.Contains('$stagedDispatcherPath'))
+        # Scan all command extents so Import-Module, dot-source and call-operator forms are covered.
+        $ciRunnerCommands=@($ast.FindAll({param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and $node.Extent.Text -match 'CiRunner\.psm1'
+        },$true))
+        Assert ($ciRunnerCommands.Count -eq 0)
 
         $untrusted=Join-Path $root 'untrusted-controller-repository'
         $null=New-Item -ItemType Directory -Path (Join-Path $untrusted 'ci-dispatch'),(Join-Path $untrusted 'ci-runner') -Force
@@ -224,7 +239,9 @@ try {
         & git -C $untrusted config user.name 'CI-10 deterministic test'
         & git -C $untrusted config user.email 'ci10-test@example.invalid'
         $marker=Join-Path $root 'untrusted-module-executed.txt'
+        $dispatcherMarker=Join-Path $root 'hidden-dispatcher-entrypoint-executed.txt'
         Copy-Item -LiteralPath (Join-Path $repo 'ci-dispatch/Dispatch.psm1') -Destination (Join-Path $untrusted 'ci-dispatch/Dispatch.psm1')
+        Copy-Item -LiteralPath (Join-Path $repo 'ci-dispatch/Publish-Bundle.ps1') -Destination (Join-Path $untrusted 'ci-dispatch/Publish-Bundle.ps1')
         $acceptedController=Join-Path $root ('candidate-'+$snapshots[1].commit)
         Get-ChildItem -LiteralPath $acceptedController -Recurse -File|ForEach-Object{
             $relative=[IO.Path]::GetRelativePath($acceptedController,$_.FullName)
@@ -239,12 +256,22 @@ try {
         if($LASTEXITCODE -ne 0 -or (& git -C $untrusted status --porcelain)){throw 'TEST_UNTRUSTED_CONTROLLER_SETUP_FAILED'}
         Assert ((git -C $untrusted rev-parse 'HEAD:ci-dispatch/Dispatch.psm1').Trim() -ceq
             '662981a2955a3cd3f3526aeb666e185f989c4a18')
-        $module=Join-Path $untrusted 'ci-runner/CiRunner.psm1'
-        Refuses {Get-Ci10MatchedControllerSnapshot -RepositoryRoot $repo -ControllerRoot $untrusted `
-            -ControllerFiles @(Get-Ci10RuntimeFiles|Where-Object{$_.StartsWith('ci-runner/')}) -StagingRoot $root} `
-            'ACCEPTED_CONTROLLER_CHANGED'
+        [IO.File]::WriteAllText((Join-Path $untrusted 'ci-dispatch/Dispatch.psm1'),
+            "[IO.File]::WriteAllText('$dispatcherMarker','executed'); throw 'HIDDEN_DISPATCHER_EXECUTED'")
+        & git -C $untrusted update-index --skip-worktree ci-dispatch/Dispatch.psm1
+        if($LASTEXITCODE -ne 0 -or (& git -C $untrusted status --porcelain)){throw 'TEST_HIDDEN_DISPATCHER_ENTRY_SETUP_FAILED'}
+        $tree=(& git -C $untrusted rev-parse 'HEAD^{tree}').Trim()
+        $oldProgramData=$env:ProgramData
+        $env:ProgramData=$root
+        try {
+            $entryOutput=& pwsh -NoLogo -NoProfile -File (Join-Path $untrusted 'ci-dispatch/Publish-Bundle.ps1') `
+                -Commit ((& git -C $untrusted rev-parse HEAD).Trim()) -Tree $tree 2>&1
+            $entryExit=$LASTEXITCODE
+        } finally { $env:ProgramData=$oldProgramData }
+        Assert ($entryExit -ne 0)
+        Assert ($entryOutput -join "`n" -match 'BUNDLE_PUBLISHED=FAIL')
         Assert (-not (Test-Path -LiteralPath $marker))
-        Assert ((Get-FileHash -LiteralPath $module -Algorithm SHA256).Hash.Length -eq 64)
+        Assert (-not (Test-Path -LiteralPath $dispatcherMarker))
     }
     Check 'publisher has no caller-selected controller or dispatcher acceptance path' {
         $source=Get-Content -LiteralPath (Join-Path $PSScriptRoot '../Publish-Bundle.ps1') -Raw
@@ -259,7 +286,7 @@ try {
         Assert (-not ($source.Contains('7c856daf5a8e4dc4d101ab088259008a78fc68f2')))
         Assert ($source.Contains('Export-Ci10PinnedSourceFile'))
         $guardPosition=$source.IndexOf('Assert-Ci10AcceptedHeadDispatcherSource $repo',[StringComparison]::Ordinal)
-        $importPosition=$source.IndexOf("Import-Module (Join-Path `$PSScriptRoot 'Dispatch.psm1')",[StringComparison]::Ordinal)
+        $importPosition=$source.IndexOf('Import-Module $stagedDispatcherPath',[StringComparison]::Ordinal)
         Assert ($guardPosition -ge 0 -and $guardPosition -lt $importPosition)
         Assert (-not ($source -match 'Import-Module\s+\(Join-Path `\$repo\s+''ci-runner/CiRunner\.psm1''\)'))
         $blobCheckPosition=$source.IndexOf("rev-parse ('HEAD:'+ `$source.path)",[StringComparison]::Ordinal)
