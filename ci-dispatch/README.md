@@ -48,13 +48,15 @@ PR #42 controller (`54b9343af44c70db1d1403cf7f45cfc11e8bf167` /
 runtime file and requires one complete snapshot match; unknown or mixed files fail
 closed. The manifest records that exact matched commit/tree and per-file SHA-256.
 
-For compatibility with already accepted target commits, `Dispatch.psm1` in the
-protected bundle is taken from the publisher's clean, checked-out source revision; the
-requested target's remaining allowlisted files are archived from the exact target
-commit/tree. The manifest hashes the resulting runtime file set, and the verifier
-checks both the recorded controller snapshot and each controller file hash. No
-`.git`, credentials or machine settings enter the bundle. An existing release must
-already match; publication never overwrites it.
+For compatibility with already accepted target commits, the publisher sources
+`Dispatch.psm1` and `verifier-provenance.json` only from their exact source-controlled
+commit/tree/blob/SHA-256 identities. It does not infer verifier bytes from the current
+branch or checkout. The provenance record identifies the immutable verifier revision
+and digest; the protected manifest records that identity, and `Assert-Ci10Bundle`
+checks the record, manifest fields, and actual verifier file hash. All other runtime
+files remain sourced from the exact requested target commit/tree. The manifest hashes
+the complete runtime file set. No `.git`, credentials or machine settings enter the
+bundle. An existing release must already match; publication never overwrites it.
 
 The root, release parents and contents are owned by Administrators, with only
 Administrators and SYSTEM allowed to write. Reparse paths, untrusted ownership,
@@ -119,7 +121,8 @@ GitHub retains normal job/check evidence. No raw guest diagnostics are captured.
 Run `tests/Test-ControllerSnapshots.ps1`, `tests/Test-Dispatch.ps1` and the existing
 `ci-runner/tests` suites. The snapshot suite runs without host ACL or Hyper-V access;
 the full dispatcher suite still requires its protected-path Windows fixture. Tests cover
-profile/queue identity, ordering, immediate re-read races, API failure, capacity,
+verifier source immutability, verifier manifest/hash drift, profile/queue identity,
+ordering, immediate re-read races, API failure, capacity,
 actual exclusive locks, stale state/ownership, provenance/hash/file-set/ACL drift,
 redaction/rotation and task acceptance guards. The live proof should:
 

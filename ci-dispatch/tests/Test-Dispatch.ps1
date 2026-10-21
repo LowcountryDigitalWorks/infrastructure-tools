@@ -301,7 +301,8 @@ $bad.event='push'
     foreach($path in @(Get-Ci10RuntimeFiles|Where-Object{$_.StartsWith('ci-runner/')})){
         Copy-Item -LiteralPath (Join-Path $royalController $path) -Destination (Join-Path $bundle $path) -Force
     }
-    $manifest=[ordered]@{schema=1;commit=('a'*40);tree=('b'*40);controllerCommit='54b9343af44c70db1d1403cf7f45cfc11e8bf167';
+    $dispatcherProvenance=Get-Content -LiteralPath (Join-Path $bundle 'ci-dispatch/verifier-provenance.json') -Raw|ConvertFrom-Json
+    $manifest=[ordered]@{schema=1;commit=('a'*40);tree=('b'*40);dispatcher=$dispatcherProvenance;controllerCommit='54b9343af44c70db1d1403cf7f45cfc11e8bf167';
         controllerTree='beb9b9096b2f4bfa41ad877ad4f6a41150fbcfec';files=@(Get-Ci10RuntimeFiles|ForEach-Object{
             [ordered]@{path=$_;sha256=(Get-FileHash -LiteralPath (Join-Path $bundle $_) -Algorithm SHA256).Hash.ToLowerInvariant()}
         })}
