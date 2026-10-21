@@ -70,7 +70,9 @@ controller files enter a release only from one complete accepted snapshot, and
 unknown or mixed controller files are refused before publication.
 
 The root, release parents and contents are owned by Administrators, with only
-Administrators and SYSTEM allowed to write. Reparse paths, untrusted ownership,
+Administrators and SYSTEM allowed to write. Before it creates staging or imports
+the verified dispatcher, the publisher checks the root parent and grandparent
+owners and rejects user replacement rights. Reparse paths, untrusted ownership,
 missing required ACL principals, missing/extra files, manifest/hash drift and
 commit/tree/controller provenance mismatch are refused. The entry authenticates
 the manifest and dispatcher scripts before module import, then verifies the full

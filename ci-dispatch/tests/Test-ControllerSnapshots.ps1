@@ -96,6 +96,55 @@ try {
         Assert ($matched.commit -ceq '54b9343af44c70db1d1403cf7f45cfc11e8bf167' -and
             $matched.tree -ceq 'beb9b9096b2f4bfa41ad877ad4f6a41150fbcfec')
     }
+    Check 'publisher parent boundary rejects replaceable staging ancestors' {
+        $publisherPath=Join-Path $PSScriptRoot '../Publish-Bundle.ps1'
+        $tokens=$null;$parseErrors=$null
+        $ast=[System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $publisherPath),[ref]$tokens,[ref]$parseErrors)
+        if($parseErrors.Count){throw 'TEST_PUBLISHER_PARSE_FAILED'}
+        $function=$ast.FindAll({param($node)$node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Assert-Ci10PublisherParentBoundary'},$false)
+        Assert ($function.Count -eq 1)
+        Invoke-Expression $function[0].Extent.Text
+        $source=Get-Content -LiteralPath $publisherPath -Raw
+        $parentCheck=$source.IndexOf('Assert-Ci10PublisherParentBoundary $rootParent',[StringComparison]::Ordinal)
+        $stageCreate=$source.IndexOf('$staging = Join-Path $root',[StringComparison]::Ordinal)
+        $dispatcherImport=$source.IndexOf('Import-Module $stagedDispatcherPath',[StringComparison]::Ordinal)
+        Assert ($parentCheck -ge 0 -and $parentCheck -lt $stageCreate -and $parentCheck -lt $dispatcherImport)
+
+        function global:Get-Acl { param([string]$LiteralPath) $global:ci10ParentAclFixture }
+        try {
+            $admin=[Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+            $users=[Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
+            $trusted=[Security.AccessControl.DirectorySecurity]::new()
+            $trusted.SetOwner($admin)
+            $trusted.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                $admin,[Security.AccessControl.FileSystemRights]::FullControl,
+                [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit,
+                [Security.AccessControl.PropagationFlags]::None,[Security.AccessControl.AccessControlType]::Allow))
+            $trusted.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                $users,[Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles,
+                [Security.AccessControl.InheritanceFlags]::ContainerInherit,[Security.AccessControl.PropagationFlags]::InheritOnly,
+                [Security.AccessControl.AccessControlType]::Allow))
+            $global:ci10ParentAclFixture=$trusted
+            Assert-Ci10PublisherParentBoundary 'fixture-parent'
+
+            $replaceable=[Security.AccessControl.DirectorySecurity]::new()
+            $replaceable.SetOwner($admin)
+            $replaceable.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                $admin,[Security.AccessControl.FileSystemRights]::FullControl,
+                [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit,
+                [Security.AccessControl.PropagationFlags]::None,[Security.AccessControl.AccessControlType]::Allow))
+            $replaceable.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                $users,[Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles,
+                [Security.AccessControl.InheritanceFlags]::None,[Security.AccessControl.PropagationFlags]::None,
+                [Security.AccessControl.AccessControlType]::Allow))
+            $global:ci10ParentAclFixture=$replaceable
+            Refuses {Assert-Ci10PublisherParentBoundary 'fixture-parent'} 'BUNDLE_PARENT_REPLACEMENT_UNTRUSTED'
+        } finally {
+            Remove-Item Function:\Get-Acl -ErrorAction SilentlyContinue
+            Remove-Variable ci10ParentAclFixture -Scope Global -ErrorAction SilentlyContinue
+        }
+    }
     Check 'squash-equivalent main-only checkout resolves exact accepted verifier blobs' {
         $publisherPath=Join-Path $PSScriptRoot '../Publish-Bundle.ps1'
         $tokens=$null;$parseErrors=$null

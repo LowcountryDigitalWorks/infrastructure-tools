@@ -77,6 +77,25 @@ function Assert-Ci10PublisherProtectedPath([string]$Path) {
         }
     }
 }
+function Assert-Ci10PublisherParentBoundary([string]$Path) {
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return }
+    $acl = Get-Acl -LiteralPath $Path
+    if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @('S-1-5-18','S-1-5-32-544')) {
+        throw 'BUNDLE_PARENT_OWNER_UNTRUSTED'
+    }
+    $replace = [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership
+    foreach ($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -eq 'Allow' -and
+            -not ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -and
+            ($rule.FileSystemRights -band $replace) -and
+            $rule.IdentityReference.Value -notin @('S-1-5-18','S-1-5-32-544')) {
+            throw 'BUNDLE_PARENT_REPLACEMENT_UNTRUSTED'
+        }
+    }
+}
 function Export-Ci10PinnedSourceFile([string]$Repository, [string]$Path, [string]$Destination, [string]$StageRoot) {
     $acceptedSource = @(@($script:AcceptedDispatcherSource, $script:AcceptedVerifierRecordSource) | Where-Object { $_.path -ceq $Path })
     if ($acceptedSource.Count -ne 1) { throw 'PUBLISH_VERIFIER_PROVENANCE_REFUSED' }
@@ -115,6 +134,9 @@ try {
     if ($LASTEXITCODE -ne 0 -or $sourceStatus) { throw 'PUBLISH_SOURCE_WORKTREE_DIRTY' }
     Assert-Ci10AcceptedHeadDispatcherSource $repo
     Assert-Ci10PublisherElevated
+    $rootParent = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($root))
+    Assert-Ci10PublisherParentBoundary $rootParent
+    Assert-Ci10PublisherParentBoundary ([IO.Path]::GetDirectoryName($rootParent))
     $liveTree = & git -C $repo rev-parse ($Commit+'^{tree}') 2>$null
     if ($LASTEXITCODE -ne 0 -or $liveTree -cne $Tree) { throw 'PUBLISH_COMMIT_TREE_MISMATCH' }
     $remote = & git -C $repo remote get-url origin 2>$null
