@@ -46,8 +46,7 @@ try {
             catch { throw 'ACTIVE_CONTROLLER_OR_LOCK_UNCERTAIN' }
             try {
                 Remove-Ci7LocalResources $state
-                $job = Get-Ci7ExpectedJob $state.Configuration
-                if ($state.JobId -and $job.id -ne $state.JobId) { throw 'INTERRUPTED_JOB_IDENTITY_CHANGED' }
+                $job = Get-Ci7CleanupJob $state
                 if ($job.status -ne 'completed') { Invoke-Ci7Api ('repos/' + $state.Configuration.Repository + '/actions/runs/' + $state.Configuration.WorkflowRunId + '/cancel') POST }
                 Remove-Ci7Runner $state -Interrupted
                 $lock.Dispose(); $lock = $null
@@ -107,7 +106,7 @@ try {
                 Write-Ci7GuestEvidence $state $stage; 'GUEST_BOOT_PHASE=' + $stage
                 if ($stage -like '*FAILED') { throw 'BOOTSTRAP_FAILURE_REPORTED' }
             }
-            $job = Get-Ci7ExpectedJob $configuration
+            $job = Get-Ci7MonitoredJob $state
             if ($job.id -ne $state.JobId -or ($job.runner_id -and $job.runner_id -ne $state.RunnerId)) { throw 'UNEXPECTED_JOB_ASSIGNMENT' }
             if ([DateTime]::UtcNow - $lastProgress -ge [TimeSpan]::FromSeconds(45)) { 'LIFECYCLE_WAIT=BOUNDED'; $lastProgress = [DateTime]::UtcNow }
             if ($job.status -ne 'completed') {
@@ -145,7 +144,7 @@ try {
         if (-not $cleanupComplete) {
             try {
                 Remove-Ci7LocalResources $state
-                $current = Get-Ci7ExpectedJob $configuration
+                $current = Get-Ci7CleanupJob $state
                 if ($current.status -ne 'completed') { Invoke-Ci7Api ('repos/' + $Repository + '/actions/runs/' + $WorkflowRunId + '/cancel') POST }
                 Remove-Ci7Runner $state -Interrupted
                 if ($lock) { $lock.Dispose(); $lock = $null }
