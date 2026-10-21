@@ -18,10 +18,11 @@ PowerShell 7 on the approved Hyper-V host, using the existing `gh` session.
   cannot authorize another private workflow or job.
 - WQT one-shot invocations must supply the exact profile ID, workflow path/blob
   SHA, run ID/attempt, target job ID, and frozen PR head SHA. The controller checks the PR
-  association, complete latest job graph, exact profile labels, and (for the
-  retention probe) successful `validate-pr` completion before launch. All WQT
-  jobs retain the existing read-only permission ceiling and receive no custom
-  workflow secrets or private production state.
+  association, complete latest job graph (`validate-hosted`, `scan`,
+  `retention-probe-hosted`, and `consume-real` must be skipped), exact profile
+  labels, and (for the retention probe) successful `validate-pr` completion
+  before launch. Profiles encode the accepted read-only permission class;
+  custom workflow secrets, Docker, and private production state are disabled.
 - The public implementation repository has a narrowly scoped synthetic exception:
   its exact proof workflow, a push to the implementation branch, one job, exact
   head SHA, and the expected isolation labels. No production workload or secret

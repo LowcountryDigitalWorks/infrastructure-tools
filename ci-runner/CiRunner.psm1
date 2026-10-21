@@ -118,14 +118,16 @@ function New-Ci7Configuration {
     [pscustomobject]@{ Repository = $Repository; WorkflowRunId = $WorkflowRunId; ExpectedSha = $ExpectedSha;
         Root = [IO.Path]::GetFullPath($Root); ApprovedRepositories = @($ApprovedRepositories); PublicSyntheticProof = [bool]$proof; MemoryMiB = $MemoryMiB; CpuCount = $CpuCount;
         TimeoutMinutes = $TimeoutMinutes; WorkflowPath = $resolvedWorkflowPath; WorkflowBlobSha = $WorkflowBlobSha; ExpectedJobName = $ExpectedJobName; StaticLabels = @($resolvedStaticLabels);
-        ProfileId = if ($profile) { $profile.ProfileId } else { $null }; RunAttempt = $RunAttempt; ExpectedJobId = $ExpectedJobId; ProfileRoutingLabel = if ($profile) { $profile.RoutingLabel } else { $null } }
+        ProfileId = if ($profile) { $profile.ProfileId } else { $null }; RunAttempt = $RunAttempt; ExpectedJobId = $ExpectedJobId; ProfileRoutingLabel = if ($profile) { $profile.RoutingLabel } else { $null };
+        ReadPermissions = if ($profile) { @($profile.ReadPermissions) } else { @() }; WorkflowSecrets = if ($profile) { $profile.WorkflowSecrets } else { $false };
+        PrivateProductionState = if ($profile) { $profile.PrivateProductionState } else { $false }; Docker = if ($profile) { $profile.Docker } else { $false } }
 }
 
 function Get-Ci7ClosedProfiles {
     @(
-        [pscustomobject]@{ ProfileId='wqt-validation'; Repository='LowcountryDigitalWorks/wqt-operations'; WorkflowPath='.github/workflows/wqt.yml'; Event='pull_request'; JobName='validate-pr'; RoutingLabel='wqt-validation'; AllowedJobs=@('validate-pr','validate-manual','scan') },
-        [pscustomobject]@{ ProfileId='wqt-semantic-validate'; Repository='LowcountryDigitalWorks/wqt-operations'; WorkflowPath='.github/workflows/wqt-semantic-consumer.yml'; Event='pull_request'; JobName='validate-pr'; RoutingLabel='wqt-semantic-validate'; AllowedJobs=@('validate-pr','validate-manual','retention-probe-pr','retention-probe-manual','consume-real') },
-        [pscustomobject]@{ ProfileId='wqt-semantic-retention-probe'; Repository='LowcountryDigitalWorks/wqt-operations'; WorkflowPath='.github/workflows/wqt-semantic-consumer.yml'; Event='pull_request'; JobName='retention-probe-pr'; RoutingLabel='wqt-semantic-retention-probe'; AllowedJobs=@('validate-pr','validate-manual','retention-probe-pr','retention-probe-manual','consume-real') }
+        [pscustomobject]@{ ProfileId='wqt-validation'; Repository='LowcountryDigitalWorks/wqt-operations'; WorkflowPath='.github/workflows/wqt.yml'; Event='pull_request'; JobName='validate-pr'; RoutingLabel='wqt-validation'; AllowedJobs=@('validate-pr','validate-hosted','scan'); ReadPermissions=@('contents:read'); WorkflowSecrets=$false; PrivateProductionState=$false; Docker=$false },
+        [pscustomobject]@{ ProfileId='wqt-semantic-validate'; Repository='LowcountryDigitalWorks/wqt-operations'; WorkflowPath='.github/workflows/wqt-semantic-consumer.yml'; Event='pull_request'; JobName='validate-pr'; RoutingLabel='wqt-semantic-validate'; AllowedJobs=@('validate-pr','validate-hosted','retention-probe-pr','retention-probe-hosted','consume-real'); ReadPermissions=@('contents:read'); WorkflowSecrets=$false; PrivateProductionState=$false; Docker=$false },
+        [pscustomobject]@{ ProfileId='wqt-semantic-retention-probe'; Repository='LowcountryDigitalWorks/wqt-operations'; WorkflowPath='.github/workflows/wqt-semantic-consumer.yml'; Event='pull_request'; JobName='retention-probe-pr'; RoutingLabel='wqt-semantic-retention-probe'; AllowedJobs=@('validate-pr','validate-hosted','retention-probe-pr','retention-probe-hosted','consume-real'); ReadPermissions=@('contents:read','actions:read'); WorkflowSecrets=$false; PrivateProductionState=$false; Docker=$false }
     )
 }
 
@@ -181,21 +183,31 @@ function Get-Ci7ExpectedJob {
             if ($allJobs.Count -ge $expectedCount) { break }
         }
         if ($null -eq $expectedCount -or $expectedCount -lt 1 -or $expectedCount -gt 1000 -or $allJobs.Count -ne $expectedCount) { throw 'WQT_JOB_GRAPH_INCOMPLETE' }
+        $jobIds = @($allJobs | ForEach-Object { $_.id })
+        if (@($jobIds | Where-Object { $_ -isnot [ValueType] -or $_ -le 0 }).Count -or @($jobIds | Sort-Object -Unique).Count -ne $jobIds.Count) { throw 'WQT_JOB_GRAPH_IDENTITY_INVALID' }
         if (@($allJobs | Where-Object { $_.name -cnotin $profile.AllowedJobs }).Count) { throw 'WQT_UNKNOWN_GRAPH_JOB' }
         $targets = @($allJobs | Where-Object { $_.name -ceq $profile.JobName })
         if ($targets.Count -ne 1) { throw 'WQT_TARGET_JOB_COUNT_MISMATCH' }
+        $validateJobs = @($allJobs | Where-Object { $_.name -ceq 'validate-pr' })
+        if ($validateJobs.Count -ne 1) { throw 'WQT_VALIDATE_JOB_COUNT_MISMATCH' }
         foreach ($other in @($allJobs | Where-Object { $_.id -ne $targets[0].id })) {
-            $isExactDependency = $Configuration.ProfileId -ceq 'wqt-semantic-retention-probe' -and $other.name -ceq 'validate-pr' -and $other.status -ceq 'completed' -and $other.conclusion -ceq 'success'
             $isExactSkipped = $other.status -ceq 'completed' -and $other.conclusion -ceq 'skipped'
-            if (-not ($isExactDependency -or $isExactSkipped)) { throw 'WQT_NON_TARGET_JOB_RUNNABLE' }
+            $isExactValidationDependency = $Configuration.ProfileId -ceq 'wqt-semantic-retention-probe' -and $other.name -ceq 'validate-pr' -and
+                $other.status -ceq 'completed' -and $other.conclusion -ceq 'success' -and
+                $other.run_id -eq $run.id -and $other.run_attempt -eq $run.run_attempt -and $other.head_sha -ceq $Configuration.ExpectedSha
+            $isExactRetentionDependency = $Configuration.WorkflowPath -ceq '.github/workflows/wqt-semantic-consumer.yml' -and $other.name -ceq 'retention-probe-pr' -and
+                $other.status -in @('queued','waiting','pending','requested') -and -not $other.runner_id -and
+                $validateJobs[0].status -in @('queued','in_progress','completed') -and
+                ($validateJobs[0].status -cne 'completed' -or $validateJobs[0].conclusion -ceq 'success')
+            if (-not ($isExactValidationDependency -or $isExactRetentionDependency -or $isExactSkipped)) { throw 'WQT_NON_TARGET_JOB_RUNNABLE' }
         }
         $job = $targets[0]
         if ($job.id -ne $Configuration.ExpectedJobId -or $job.run_id -ne $run.id -or $job.run_attempt -ne $run.run_attempt -or $job.head_sha -cne $Configuration.ExpectedSha) { throw 'JOB_IDENTITY_MISMATCH' }
         $expectedLabels = @(Get-Ci7Labels $Configuration.WorkflowRunId $Configuration)
         if (@($job.labels).Count -ne $expectedLabels.Count -or @(Compare-Object $expectedLabels @($job.labels) -CaseSensitive).Count) { throw 'ISOLATED_JOB_LABELS_REQUIRED' }
         if ($Configuration.ProfileId -ceq 'wqt-semantic-retention-probe') {
-            $deps = @($allJobs | Where-Object { $_.name -ceq 'validate-pr' })
-            if ($deps.Count -ne 1 -or $deps[0].status -cne 'completed' -or $deps[0].conclusion -cne 'success') { throw 'WQT_RETENTION_DEPENDENCY_REQUIRED' }
+            if ($validateJobs[0].status -cne 'completed' -or $validateJobs[0].conclusion -cne 'success' -or
+                $validateJobs[0].run_id -ne $run.id -or $validateJobs[0].run_attempt -ne $run.run_attempt -or $validateJobs[0].head_sha -cne $Configuration.ExpectedSha) { throw 'WQT_RETENTION_DEPENDENCY_REQUIRED' }
         }
         if ($RequireQueued -and ($job.status -cne 'queued' -or $job.runner_id)) { throw 'UNASSIGNED_QUEUED_JOB_REQUIRED' }
         return $job
