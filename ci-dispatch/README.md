@@ -38,15 +38,41 @@ execute a real scan, install/enable a host task, or activate production routing.
 ## Protected provenance
 
 `Publish-Bundle.ps1 -Commit <exact-commit> -Tree <exact-tree>` stages an allowlisted
-Git archive in the dedicated ProgramData-style dispatcher root. It verifies the
-repository origin and commit/tree, compares every controller artifact against
-accepted main `49f39f5d3a66251ed18c2e776d843feb25f65fe1` / tree
-`4d241fe9bc0fbf190daf2e36be0e9c52966c5a7b`, and publishes a deterministic
-manifest with per-file SHA-256. No `.git`, credentials or machine settings enter
-the bundle. An existing release must already match; publication never overwrites it.
+runtime in the dedicated ProgramData-style dispatcher root. It verifies the
+repository origin and requested commit/tree. Controller acceptance comes from the
+source-controlled snapshot registry in `Dispatch.psm1`, which currently recognizes
+only the original accepted controller (`49f39f5d3a66251ed18c2e776d843feb25f65fe1`
+/ `4d241fe9bc0fbf190daf2e36be0e9c52966c5a7b`) and the independently reviewed Royal
+PR #42 controller (`54b9343af44c70db1d1403cf7f45cfc11e8bf167` /
+`beb9b9096b2f4bfa41ad877ad4f6a41150fbcfec`). The publisher hashes every controller
+runtime file and requires one complete snapshot match; unknown or mixed files fail
+closed. The manifest records that exact matched commit/tree and per-file SHA-256.
+
+For compatibility with already accepted target commits, the publisher sources
+`Dispatch.psm1` and `verifier-provenance.json` only when the accepted repository paths
+resolve at `HEAD` to their fixed reviewed Git blob IDs and SHA-256 digests. The
+publisher extracts those exact `HEAD` blobs into protected staging, checks their
+SHA-256 digests, and imports the dispatcher only from that verified staged path. It
+never executes the ambient working-tree dispatcher, even when a hidden
+`skip-worktree` edit leaves Git status clean. This identity survives squash merge and
+a main-only checkout because it pins durable file blobs, not transient PR-history
+commits. The provenance record identifies the dispatcher blob and digest; the
+protected manifest records that identity, and `Assert-Ci10Bundle` checks the record,
+manifest fields, and actual verifier file hash. All other runtime files remain
+sourced from the exact requested target commit/tree.
+The manifest hashes the complete runtime file set. No `.git`, credentials or machine
+settings enter the bundle. An existing release must already match; publication never
+overwrites it.
+
+The publisher defines its minimal elevation and owned-path/reparse-point guards
+locally. It never imports `ci-runner/CiRunner.psm1` from the ambient checkout;
+controller files enter a release only from one complete accepted snapshot, and
+unknown or mixed controller files are refused before publication.
 
 The root, release parents and contents are owned by Administrators, with only
-Administrators and SYSTEM allowed to write. Reparse paths, untrusted ownership,
+Administrators and SYSTEM allowed to write. Before it creates staging or imports
+the verified dispatcher, the publisher checks the root parent and grandparent
+owners and rejects user replacement rights. Reparse paths, untrusted ownership,
 missing required ACL principals, missing/extra files, manifest/hash drift and
 commit/tree/controller provenance mismatch are refused. The entry authenticates
 the manifest and dispatcher scripts before module import, then verifies the full
@@ -105,8 +131,11 @@ GitHub retains normal job/check evidence. No raw guest diagnostics are captured.
 
 ## Proof and task packet
 
-Run `tests/Test-Dispatch.ps1` and the existing `ci-runner/tests` suites. Tests cover
-profile/queue identity, ordering, immediate re-read races, API failure, capacity,
+Run `tests/Test-ControllerSnapshots.ps1`, `tests/Test-Dispatch.ps1` and the existing
+`ci-runner/tests` suites. The snapshot suite runs without host ACL or Hyper-V access;
+the full dispatcher suite still requires its protected-path Windows fixture. Tests cover
+verifier source immutability, verifier manifest/hash drift, profile/queue identity,
+ordering, immediate re-read races, API failure, capacity,
 actual exclusive locks, stale state/ownership, provenance/hash/file-set/ACL drift,
 redaction/rotation and task acceptance guards. The live proof should:
 

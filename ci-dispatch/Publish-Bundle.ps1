@@ -5,8 +5,37 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
+$script:AcceptedDispatcherSource = [pscustomobject]@{
+    path='ci-dispatch/Dispatch.psm1'
+    blob='662981a2955a3cd3f3526aeb666e185f989c4a18'; sha256='bf8da2a7ed95887bb7b7e3ddbf1ba10fe97f9a3ff9eb384ae9e16740674241ef'
+}
+$script:AcceptedVerifierRecordSource = [pscustomobject]@{
+    path='ci-dispatch/verifier-provenance.json'
+    blob='f2635eb0eaa24b9da7919c3d0c30fa23f4ea919b'; sha256='b810c526b641c8ed0447863aaf0acba35c753887889d4c55c4e1ac0fe14d3b77'
+}
 $root = Join-Path $env:ProgramData 'LDW/CiRunnerDispatch'
 $staging = $null
+function Assert-Ci10PublisherElevated {
+    if ($env:OS -ne 'Windows_NT') { return }
+    $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'ELEVATED_CONTROLLER_REQUIRED' }
+}
+function Assert-Ci10PublisherPath([string]$Root, [string]$Path) {
+    $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    if (-not $fullPath.StartsWith($fullRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'PATH_OUTSIDE_OWNED_ROOT'
+    }
+    $cursor = $fullPath
+    while ($cursor) {
+        if ((Test-Path -LiteralPath $cursor) -and ((Get-Item -LiteralPath $cursor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'REPARSE_PATH_REFUSED'
+        }
+        $parent = [IO.Path]::GetDirectoryName($cursor)
+        if ($parent -eq $cursor) { break }
+        $cursor = $parent
+    }
+}
 function Protect-Ci10Directory([string]$Path) {
     $null = New-Item -ItemType Directory -Path $Path -Force
     $acl = [Security.AccessControl.DirectorySecurity]::new()
@@ -18,39 +47,133 @@ function Protect-Ci10Directory([string]$Path) {
     }
     Set-Acl -LiteralPath $Path -AclObject $acl
 }
+function Assert-Ci10PublisherProtectedPath([string]$Path) {
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return }
+    $full = [IO.Path]::GetFullPath($Path)
+    $cursor = $full
+    while ($cursor) {
+        $item = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'REPARSE_PATH_REFUSED' }
+        $cursor = [IO.Path]::GetDirectoryName($cursor)
+    }
+    $acl = Get-Acl -LiteralPath $full
+    if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @('S-1-5-18','S-1-5-32-544')) {
+        throw 'BUNDLE_OWNER_UNTRUSTED'
+    }
+    $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+    $write = [Security.AccessControl.FileSystemRights]::Write -bor
+        [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership
+    foreach ($rule in $rules) {
+        if ($rule.AccessControlType -eq 'Allow' -and ($rule.FileSystemRights -band $write) -and
+            $rule.IdentityReference.Value -notin @('S-1-5-18','S-1-5-32-544')) { throw 'BUNDLE_ACL_UNTRUSTED_WRITE' }
+    }
+    foreach ($sid in @('S-1-5-18','S-1-5-32-544')) {
+        if (-not @($rules | Where-Object { $_.IdentityReference.Value -eq $sid -and $_.AccessControlType -eq 'Allow' -and
+            ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -eq [Security.AccessControl.FileSystemRights]::FullControl }).Count) {
+            throw 'BUNDLE_ACL_REQUIRED_PRINCIPAL_MISSING'
+        }
+    }
+}
+function Assert-Ci10PublisherParentBoundary([string]$Path) {
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return }
+    $acl = Get-Acl -LiteralPath $Path
+    if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @('S-1-5-18','S-1-5-32-544')) {
+        throw 'BUNDLE_PARENT_OWNER_UNTRUSTED'
+    }
+    $replace = [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership
+    foreach ($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -eq 'Allow' -and
+            -not ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -and
+            ($rule.FileSystemRights -band $replace) -and
+            $rule.IdentityReference.Value -notin @('S-1-5-18','S-1-5-32-544')) {
+            throw 'BUNDLE_PARENT_REPLACEMENT_UNTRUSTED'
+        }
+    }
+}
+function Export-Ci10PinnedSourceFile([string]$Repository, [string]$Path, [string]$Destination, [string]$StageRoot) {
+    $acceptedSource = @(@($script:AcceptedDispatcherSource, $script:AcceptedVerifierRecordSource) | Where-Object { $_.path -ceq $Path })
+    if ($acceptedSource.Count -ne 1) { throw 'PUBLISH_VERIFIER_PROVENANCE_REFUSED' }
+    $source = $acceptedSource[0]
+    $actualBlob = & git -C $Repository rev-parse ('HEAD:'+ $source.path) 2>$null
+    if ($LASTEXITCODE -ne 0 -or ([string]$actualBlob).Trim() -cne $source.blob) {
+        throw 'PUBLISH_VERIFIER_PROVENANCE_REFUSED'
+    }
+    $archive = Join-Path $StageRoot ('source-'+$source.blob+'.zip')
+    & git -C $Repository archive --format=zip ('--output='+$archive) HEAD -- $source.path 2>$null
+    if ($LASTEXITCODE -ne 0) { throw 'PUBLISH_VERIFIER_SOURCE_FAILED' }
+    $extract = Join-Path $StageRoot ('source-'+$source.blob+'-'+[guid]::NewGuid().ToString('N'))
+    [IO.Compression.ZipFile]::ExtractToDirectory($archive,$extract)
+    $sourcePath = Join-Path $extract $source.path
+    if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf) -or
+        (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $source.sha256) {
+        throw 'PUBLISH_VERIFIER_PROVENANCE_REFUSED'
+    }
+    Copy-Item -LiteralPath $sourcePath -Destination $Destination -Force
+}
+function Get-Ci10VerifiedDispatcherPath([string]$Repository, [string]$StageRoot) {
+    $destinationRoot = Join-Path $StageRoot 'verified-dispatcher'
+    $destination = Join-Path $destinationRoot $script:AcceptedDispatcherSource.path
+    $null = New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force
+    Export-Ci10PinnedSourceFile $Repository $script:AcceptedDispatcherSource.path $destination $StageRoot
+    $destination
+}
+function Assert-Ci10AcceptedHeadDispatcherSource([string]$Repository) {
+    $headBlob = & git -C $Repository rev-parse ('HEAD:'+ $script:AcceptedDispatcherSource.path) 2>$null
+    if ($LASTEXITCODE -ne 0 -or ([string]$headBlob).Trim() -cne $script:AcceptedDispatcherSource.blob) {
+        throw 'PUBLISH_VERIFIER_PROVENANCE_REFUSED'
+    }
+}
 try {
-    Import-Module (Join-Path $PSScriptRoot 'Dispatch.psm1') -Force
-    Import-Module (Join-Path $repo 'ci-runner/CiRunner.psm1') -Force
-    Assert-Ci7Elevated
+    $sourceStatus = & git -C $repo status --porcelain 2>$null
+    if ($LASTEXITCODE -ne 0 -or $sourceStatus) { throw 'PUBLISH_SOURCE_WORKTREE_DIRTY' }
+    Assert-Ci10AcceptedHeadDispatcherSource $repo
+    Assert-Ci10PublisherElevated
+    $rootParent = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($root))
+    Assert-Ci10PublisherParentBoundary $rootParent
+    Assert-Ci10PublisherParentBoundary ([IO.Path]::GetDirectoryName($rootParent))
     $liveTree = & git -C $repo rev-parse ($Commit+'^{tree}') 2>$null
     if ($LASTEXITCODE -ne 0 -or $liveTree -cne $Tree) { throw 'PUBLISH_COMMIT_TREE_MISMATCH' }
     $remote = & git -C $repo remote get-url origin 2>$null
     if ($LASTEXITCODE -ne 0 -or $remote -cnotmatch '^(https://github\.com/|git@github\.com:)LowcountryDigitalWorks/infrastructure-tools(\.git)?$') { throw 'PUBLISH_REPOSITORY_REFUSED' }
-    Assert-Ci7Path (Split-Path $root -Parent) $root
-    if (Test-Path -LiteralPath $root) { Assert-Ci10ProtectedPath $root } else { Protect-Ci10Directory $root }
+    Assert-Ci10PublisherPath (Split-Path $root -Parent) $root
+    if (Test-Path -LiteralPath $root) { Assert-Ci10PublisherProtectedPath $root } else { Protect-Ci10Directory $root }
     $releases = Join-Path $root 'releases'
-    if (Test-Path -LiteralPath $releases) { Assert-Ci10ProtectedPath $releases } else { Protect-Ci10Directory $releases }
+    if (Test-Path -LiteralPath $releases) { Assert-Ci10PublisherProtectedPath $releases } else { Protect-Ci10Directory $releases }
     $staging = Join-Path $root ('stage-'+[guid]::NewGuid().ToString('N'))
     Protect-Ci10Directory $staging
+    $stagedDispatcherPath = Get-Ci10VerifiedDispatcherPath $repo $staging
+    Import-Module $stagedDispatcherPath -Force
     $files = @(Get-Ci10RuntimeFiles)
     $archive = Join-Path $staging 'candidate.zip'
-    & git -C $repo archive --format=zip ('--output='+$archive) $Commit -- @files 2>$null
+    $verifierPaths = @('ci-dispatch/Dispatch.psm1','ci-dispatch/verifier-provenance.json')
+    $targetFiles = @($files | Where-Object { $_ -cnotin $verifierPaths })
+    & git -C $repo archive --format=zip ('--output='+$archive) $Commit -- @targetFiles 2>$null
     if ($LASTEXITCODE -ne 0) { throw 'PUBLISH_ARCHIVE_FAILED' }
     $bundle = Join-Path $staging 'bundle'
     Protect-Ci10Directory $bundle
     [IO.Compression.ZipFile]::ExtractToDirectory($archive,$bundle)
+
+    # Compatibility verifier and its record resolve from fixed reviewed path/blob/SHA-256 identities.
+    Export-Ci10PinnedSourceFile $repo $script:AcceptedDispatcherSource.path `
+        (Join-Path $bundle $script:AcceptedDispatcherSource.path) $staging
+    Export-Ci10PinnedSourceFile $repo $script:AcceptedVerifierRecordSource.path `
+        (Join-Path $bundle $script:AcceptedVerifierRecordSource.path) $staging
+    $dispatcherProvenance = Get-Content -LiteralPath (Join-Path $bundle 'ci-dispatch/verifier-provenance.json') -Raw | ConvertFrom-Json
+    if ($dispatcherProvenance.schema -ne 1 -or
+        $dispatcherProvenance.blob -cne $script:AcceptedDispatcherSource.blob -or
+        $dispatcherProvenance.sha256 -cne $script:AcceptedDispatcherSource.sha256) { throw 'PUBLISH_VERIFIER_PROVENANCE_REFUSED' }
+
     $controllerFiles = @($files | Where-Object { $_.StartsWith('ci-runner/') })
-    $acceptedArchive = Join-Path $staging 'accepted.zip'
-    & git -C $repo archive --format=zip ('--output='+$acceptedArchive) '49f39f5d3a66251ed18c2e776d843feb25f65fe1' -- @controllerFiles 2>$null
-    if ($LASTEXITCODE -ne 0) { throw 'ACCEPTED_CONTROLLER_UNAVAILABLE' }
-    $accepted = Join-Path $staging 'accepted'
-    [IO.Compression.ZipFile]::ExtractToDirectory($acceptedArchive,$accepted)
+    $matchedSnapshot = Get-Ci10MatchedControllerSnapshot -RepositoryRoot $repo -ControllerRoot $bundle -ControllerFiles $controllerFiles -StagingRoot $staging
     $entries = @($files | Sort-Object | ForEach-Object {
         $path = $_
         $hash = (Get-FileHash -LiteralPath (Join-Path $bundle $path) -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($path -cin $controllerFiles -and $hash -cne (Get-FileHash -LiteralPath (Join-Path $accepted $path) -Algorithm SHA256).Hash.ToLowerInvariant()) {
-            throw 'ACCEPTED_CONTROLLER_CHANGED'
-        }
         [ordered]@{ path=$path; sha256=$hash }
     })
     # Normalize all object owners, including files created by ZIP extraction.
@@ -59,8 +182,8 @@ try {
         $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
         Set-Acl -LiteralPath $item.FullName -AclObject $acl
     }
-    $manifest = [ordered]@{ schema=1; commit=$Commit; tree=$Tree;
-        controllerCommit='49f39f5d3a66251ed18c2e776d843feb25f65fe1'; controllerTree='4d241fe9bc0fbf190daf2e36be0e9c52966c5a7b'; files=$entries }
+    $manifest = [ordered]@{ schema=1; commit=$Commit; tree=$Tree; dispatcher=$dispatcherProvenance;
+        controllerCommit=$matchedSnapshot.commit; controllerTree=$matchedSnapshot.tree; files=$entries }
     $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $bundle 'manifest.json') -Encoding utf8NoBOM
     $acl = Get-Acl -LiteralPath (Join-Path $bundle 'manifest.json')
     $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
@@ -85,9 +208,9 @@ try {
 } finally {
     if ($staging -and (Test-Path -LiteralPath $staging)) {
         # Only the exact fresh stage directory created above is disposable.
-        Assert-Ci7Path $root $staging
+        Assert-Ci10PublisherPath $root $staging
         if ((Split-Path $staging -Leaf) -cnotmatch '^stage-[a-f0-9]{32}$') { throw 'STAGING_CLEANUP_OWNERSHIP_INVALID' }
-        foreach ($item in @(Get-ChildItem -LiteralPath $staging -Recurse -Force)) { Assert-Ci7Path $root $item.FullName }
+        foreach ($item in @(Get-ChildItem -LiteralPath $staging -Recurse -Force)) { Assert-Ci10PublisherPath $root $item.FullName }
         Remove-Item -LiteralPath $staging -Recurse -Force
     }
 }
