@@ -142,6 +142,13 @@ state is an explicit blocker, never automatic deletion authority. There is no
 scheduled reap service in this candidate. The controller refuses another run
 until stale resources are reconciled.
 
+WQT recovery reads the single Actions job named by the persisted repository
+and job ID, then requires its name, workflow run, attempt, and head SHA to match
+the persisted target identity. Accepted non-WQT configurations retain their
+existing expected-job lookup and require its job ID to equal the persisted job
+ID. These cleanup lookups do not authorize selection or provisioning;
+incomplete targets are cancelled only through the persisted workflow run.
+
 ## Validation and proof procedure
 
 ```powershell

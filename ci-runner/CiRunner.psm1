@@ -268,6 +268,28 @@ function Get-Ci7ExpectedJob {
     $job
 }
 
+function Get-Ci7PersistedCleanupJob {
+    param([object]$State)
+    Assert-Ci7State $State $State.Configuration.Root
+    $configuration = $State.Configuration
+    if (-not $State.JobId -or [long]$State.JobId -le 0 -or $configuration.ExpectedJobId -ne $State.JobId -or
+        [string]::IsNullOrWhiteSpace($configuration.ExpectedJobName) -or $configuration.WorkflowRunId -le 0 -or
+        $configuration.RunAttempt -lt 1 -or $configuration.ExpectedSha -cnotmatch '^[a-f0-9]{40}$') { throw 'PERSISTED_JOB_IDENTITY_MISSING' }
+    $job = Invoke-Ci7Api ('repos/' + $configuration.Repository + '/actions/jobs/' + $State.JobId)
+    if ($job.id -ne $State.JobId -or $job.name -cne $configuration.ExpectedJobName -or
+        $job.run_id -ne $configuration.WorkflowRunId -or $job.run_attempt -ne $configuration.RunAttempt -or
+        $job.head_sha -cne $configuration.ExpectedSha) { throw 'PERSISTED_JOB_IDENTITY_MISMATCH' }
+    return $job
+}
+
+function Get-Ci7CleanupJob {
+    param([object]$State)
+    if ($State.Configuration.ProfileId) { return Get-Ci7PersistedCleanupJob $State }
+    $job = Get-Ci7ExpectedJob $State.Configuration
+    if ($State.JobId -and $job.id -ne $State.JobId) { throw 'INTERRUPTED_JOB_IDENTITY_CHANGED' }
+    return $job
+}
+
 function Assert-Ci7Capacity {
     param([object]$Configuration)
     $os = Get-CimInstance Win32_OperatingSystem

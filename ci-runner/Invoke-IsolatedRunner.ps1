@@ -46,8 +46,7 @@ try {
             catch { throw 'ACTIVE_CONTROLLER_OR_LOCK_UNCERTAIN' }
             try {
                 Remove-Ci7LocalResources $state
-                $job = Get-Ci7ExpectedJob $state.Configuration
-                if ($state.JobId -and $job.id -ne $state.JobId) { throw 'INTERRUPTED_JOB_IDENTITY_CHANGED' }
+                $job = Get-Ci7CleanupJob $state
                 if ($job.status -ne 'completed') { Invoke-Ci7Api ('repos/' + $state.Configuration.Repository + '/actions/runs/' + $state.Configuration.WorkflowRunId + '/cancel') POST }
                 Remove-Ci7Runner $state -Interrupted
                 $lock.Dispose(); $lock = $null
@@ -145,7 +144,7 @@ try {
         if (-not $cleanupComplete) {
             try {
                 Remove-Ci7LocalResources $state
-                $current = Get-Ci7ExpectedJob $configuration
+                $current = Get-Ci7CleanupJob $state
                 if ($current.status -ne 'completed') { Invoke-Ci7Api ('repos/' + $Repository + '/actions/runs/' + $WorkflowRunId + '/cancel') POST }
                 Remove-Ci7Runner $state -Interrupted
                 if ($lock) { $lock.Dispose(); $lock = $null }
