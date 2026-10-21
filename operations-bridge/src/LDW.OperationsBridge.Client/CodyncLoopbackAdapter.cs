@@ -239,15 +239,16 @@ public sealed class CodyncLoopbackAdapter : ICodyncBridgeAdapter, IDisposable
                     if (string.IsNullOrEmpty(workingChat)) workingChat = botId;
                     var epoch = ReadNullableInt64(eventBot, "startedAt");
                     var observedStart = epoch is null ? (DateTimeOffset?)null : DateTimeOffset.FromUnixTimeMilliseconds(epoch.Value);
-                    var workingTurn = ReadNullableInt64(eventBot, "workingTurn") ?? ReadNullableInt64(eventBot, "turn");
-                    if (botId == expectedAuthorId && workingChat == receipt.DestinationId && workingTurn == receipt.RootTurn &&
+                    var eventRevision = ReadNullableInt64(root, "rev");
+                    if (botId == expectedAuthorId && workingChat == receipt.DestinationId &&
+                        eventRevision is not null && eventRevision > receipt.RootRevision &&
                         observedStart is not null && observedStart >= receipt.SubmittedAt && ReadString(eventBot, "status") is "working" or "needsInput")
                     {
                         startObserved = true;
                         needsInput = ReadString(eventBot, "status") == "needsInput";
                         startedAt ??= observedStart;
                         if (needsInput)
-                            return new CodyncWaitResult(true, true, null, "needs_input", "The expected provider is awaiting input in the exact destination.");
+                            return new CodyncWaitResult(true, true, null, "needs_input", "The expected provider is awaiting input in the exact destination after the correlated root revision.");
                     }
                 }
                 if (ReadString(root, "type") != "entry" || !root.TryGetProperty("entry", out var entry) ||
@@ -266,7 +267,7 @@ public sealed class CodyncLoopbackAdapter : ICodyncBridgeAdapter, IDisposable
                 return new CodyncWaitResult(startObserved, false,
                     new CodyncCorrelatedReply(receipt.DestinationId, receipt.DestinationName, receipt.RootEntryId,
                         authorId, text, ReadInt64(entry, "seq"), startedAt ?? completed, completed, false),
-                    "reply", startObserved ? "Provider start and exact correlated final reply observed." : "Exact correlated final reply observed; provider start event was not observed.");
+                    "reply", startObserved ? "Provider start after the exact root revision and exact correlated final reply observed." : "Exact correlated final reply observed; a matching post-root provider-start event was not observed.");
             }
         }
         catch (OperationCanceledException) when (bounded.IsCancellationRequested && !cancellationToken.IsCancellationRequested)

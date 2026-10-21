@@ -188,12 +188,26 @@ foreach (var failureMode in new[] { "wrong_author", "wrong_sequence", "wrong_tur
     Assert(wait.Reply is null && wait.State == "connection_lost", $"Codync rejects {failureMode} final evidence");
 }
 
+using (var missingRevisionAdapter = new CodyncLoopbackAdapter(_ => ValueTask.FromResult("unit-test-bearer-never-return"), new FakeCodyncHttpHandler(failureMode: "missing_start_revision")))
+{
+    var receipt = await missingRevisionAdapter.SendExactAsync(codyncBot.Id, codyncBot.Name, "Fixture only.", "ldw-test-missing-start-revision", [], CancellationToken.None);
+    var wait = await missingRevisionAdapter.WaitReadExactAsync(receipt, codyncBot.Id, TimeSpan.FromSeconds(5), CancellationToken.None);
+    Assert(!wait.ProviderStartObserved && wait.Reply is not null, "Codync reply without a post-root start revision remains non-provider-positive");
+}
+
 using (var wrongRootAdapter = new CodyncLoopbackAdapter(_ => ValueTask.FromResult("unit-test-bearer-never-return"), new FakeCodyncHttpHandler(failureMode: "wrong_root")))
 {
     var receipt = await wrongRootAdapter.SendExactAsync(codyncBot.Id, codyncBot.Name, "Fixture only.", "ldw-test-wrong-root", [], CancellationToken.None);
     await AssertThrowsAsync<InvalidOperationException>(
         () => wrongRootAdapter.WaitReadExactAsync(receipt, codyncBot.Id, TimeSpan.FromSeconds(5), CancellationToken.None),
         "Codync rejects stale or mismatched history root correlation");
+}
+
+using (var partialRosterAdapter = new CodyncLoopbackAdapter(_ => ValueTask.FromResult("unit-test-bearer-never-return"), new FakeCodyncHttpHandler(partialRosterCount: 1)))
+{
+    await AssertThrowsAsync<InvalidOperationException>(
+        () => partialRosterAdapter.ListApprovedBotsGroupsAsync(CancellationToken.None),
+        "partial Codync roster catch-up fails closed");
 }
 
 var unknownBridge = store.Accept(
@@ -677,7 +691,7 @@ sealed class FakeCodyncAdapter(CodyncWaitResult? configuredWait = null) : ICodyn
             "reply", "Provider start and exact correlated final reply observed."));
 }
 
-sealed class FakeCodyncHttpHandler(bool malformedRoster = false, bool rosterOnly = false, string? failureMode = null) : HttpMessageHandler
+sealed class FakeCodyncHttpHandler(bool malformedRoster = false, bool rosterOnly = false, string? failureMode = null, int? partialRosterCount = null) : HttpMessageHandler
 {
     public const string RootEntryId = "d54b9631-2aa7-41e9-94af-0a15039abd43";
     private int _eventRequestCount;
@@ -698,7 +712,7 @@ sealed class FakeCodyncHttpHandler(bool malformedRoster = false, bool rosterOnly
                 return Events("data: {not-json}\n\n");
             if (rosterOnly || _sendSeen || _eventRequestCount == 1)
             {
-                var roster = CodyncApprovedDestinations.All.Select(item => new
+                var roster = CodyncApprovedDestinations.All.Take(partialRosterCount ?? CodyncApprovedDestinations.All.Count).Select(item => new
                 {
                     type = "bot",
                     bot = new
@@ -716,7 +730,8 @@ sealed class FakeCodyncHttpHandler(bool malformedRoster = false, bool rosterOnly
             if (request.RequestUri.Query.Contains("since=42", StringComparison.Ordinal))
             {
                 var startedAt = DateTimeOffset.UtcNow.AddMinutes(1).ToUnixTimeMilliseconds();
-                var start = new { type = "bot", bot = new { id = _botId, workingChat = _botId, workingTurn = 3, startedAt, status = "working" } };
+                var startRev = failureMode == "missing_start_revision" ? (long?)null : 44L;
+                var start = new { type = "bot", rev = startRev, bot = new { id = _botId, workingChat = _botId, startedAt, status = "working" } };
                 if (failureMode == "stream_loss") return Events("data: " + JsonSerializer.Serialize(start) + "\n\n");
                 var author = failureMode == "wrong_author" ? CodyncApprovedDestinations.All[1].Id : _botId;
                 var sequence = failureMode == "wrong_sequence" ? 10 : 11;
