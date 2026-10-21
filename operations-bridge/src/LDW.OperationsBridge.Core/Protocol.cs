@@ -9,6 +9,7 @@ public static class BridgeProtocol
     public const int MaxPayloadEntries = 32;
     public const int MaxPayloadValueLength = 256;
     public const int MaxCodyncReplyLength = 8192;
+    public const int MaxCodyncRosterLength = 8192;
     public const int MaxArgEntries = 16;
     public const int MaxArgValueLength = 256;
     public const int MaxCodyncSendTextLength = 8192;
@@ -140,7 +141,9 @@ public static class BridgeProtocol
             var value = pair.Value ?? string.Empty;
             var maxLength = operation == BridgeOperation.CodyncWaitReadExact && pair.Key == "reply_text"
                 ? MaxCodyncReplyLength
-                : MaxPayloadValueLength;
+                : operation == BridgeOperation.CodyncListApprovedBotsGroups && pair.Key == "approved_destinations_json"
+                    ? MaxCodyncRosterLength
+                    : MaxPayloadValueLength;
             if (value.Length > maxLength)
             {
                 value = value[..maxLength];

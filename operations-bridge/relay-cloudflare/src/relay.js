@@ -12,6 +12,9 @@ const MAX_PAYLOAD_ENTRIES = 32;
 const MAX_PAYLOAD_VALUE_LENGTH = 256;
 const MAX_ARG_ENTRIES = 16;
 const MAX_ARG_VALUE_LENGTH = 256;
+const MAX_CODYNC_SEND_TEXT_LENGTH = 8192;
+const MAX_CODYNC_REPLY_LENGTH = 8192;
+const MAX_CODYNC_ROSTER_LENGTH = 8192;
 const MAX_BRIDGE_RUNTIME_LENGTH = 64;
 const MAX_BRIDGE_VERSION_LENGTH = 32;
 
@@ -931,7 +934,7 @@ function normalizeArgs(args, operation = "unknown") {
       return { ok: false, error: "invalid-args" };
     }
 
-    const maxLength = operation === "codync.send_exact" && key === "text" ? 8192 : MAX_ARG_VALUE_LENGTH;
+    const maxLength = operation === "codync.send_exact" && key === "text" ? MAX_CODYNC_SEND_TEXT_LENGTH : MAX_ARG_VALUE_LENGTH;
     if (value.length > maxLength) {
       return { ok: false, error: "arg-value-too-long" };
     }
@@ -950,7 +953,7 @@ function validOperationArgs(operation, args) {
   }
   if (operation === "codync.send_exact") {
     const keys = ["destination_id", "destination_name", "text", "mentioned_member_ids"];
-    if (!exact(keys) || !required(["destination_id", "destination_name", "text"]) || args.text.length > MAX_ARG_VALUE_LENGTH ||
+    if (!exact(keys) || !required(["destination_id", "destination_name", "text"]) || args.text.length > MAX_CODYNC_SEND_TEXT_LENGTH ||
         /@all|@everyone/i.test(args.text)) return false;
     const mentions = (args.mentioned_member_ids || "").split(",").filter(Boolean);
     return mentions.every((id) => UUID_RE.test(id.trim())) && new Set(mentions.map((id) => id.trim())).size === mentions.length;
@@ -983,7 +986,9 @@ function normalizeTerminalPayload(payload, operation = "unknown") {
     }
 
     const text = typeof value === "string" ? value : String(value);
-    const maxLength = operation.startsWith("codync.") && key === "reply_text" ? 8192 : MAX_PAYLOAD_VALUE_LENGTH;
+    const maxLength = operation === "codync.wait_read_exact" && key === "reply_text" ? MAX_CODYNC_REPLY_LENGTH :
+      operation === "codync.list_approved_bots_groups" && key === "approved_destinations_json" ? MAX_CODYNC_ROSTER_LENGTH :
+      MAX_PAYLOAD_VALUE_LENGTH;
     result[key] = text.length > maxLength ? text.slice(0, maxLength) : text;
   }
 

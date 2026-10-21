@@ -157,8 +157,6 @@ using (var liveAdapter = new CodyncLoopbackAdapter(_ => ValueTask.FromResult("un
 {
     var health = await liveAdapter.GetHealthAsync(CancellationToken.None);
     Assert(health.Ready && health.Version == "2.20.4", "Codync adapter parses host health through its fixed loopback API");
-    var approved = await liveAdapter.ListApprovedBotsGroupsAsync(CancellationToken.None);
-    Assert(approved.Count == CodyncApprovedDestinations.All.Count, "Codync adapter resolves the full exact approved roster from SSE");
     var sentAt = DateTimeOffset.UtcNow;
     var liveReceipt = await liveAdapter.SendExactAsync(codyncBot.Id, codyncBot.Name, "Read-only deterministic fixture.", "ldw-test-nonce", [], CancellationToken.None);
     Assert(liveReceipt.SubmittedAt >= sentAt && liveReceipt.RootEntryId == FakeCodyncHttpHandler.RootEntryId, "Codync adapter returns exact root receipt and original send time");
@@ -168,9 +166,34 @@ using (var liveAdapter = new CodyncLoopbackAdapter(_ => ValueTask.FromResult("un
     Assert(!safeResult.Contains("unit-test-bearer-never-return", StringComparison.Ordinal), "Codync bearer never appears in adapter result");
 }
 
+using (var rosterAdapter = new CodyncLoopbackAdapter(_ => ValueTask.FromResult("unit-test-bearer-never-return"), new FakeCodyncHttpHandler(rosterOnly: true)))
+{
+    var approved = await rosterAdapter.ListApprovedBotsGroupsAsync(CancellationToken.None);
+    Assert(approved.Count == CodyncApprovedDestinations.All.Count, "Codync adapter resolves the full exact approved roster from SSE");
+    var serialized = JsonSerializer.Serialize(approved, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+    var boundedRoster = BridgeProtocol.BoundPayload(new Dictionary<string, string> { ["approved_destinations_json"] = serialized }, BridgeOperation.CodyncListApprovedBotsGroups);
+    Assert(boundedRoster["approved_destinations_json"].Length == serialized.Length, "approved Codync roster is not truncated in terminal payload");
+}
+
 using (var malformedAdapter = new CodyncLoopbackAdapter(_ => ValueTask.FromResult("unit-test-bearer-never-return"), new FakeCodyncHttpHandler(malformedRoster: true)))
 {
     await AssertThrowsAsync<JsonException>(() => malformedAdapter.ListApprovedBotsGroupsAsync(CancellationToken.None), "malformed Codync SSE JSON fails closed");
+}
+
+foreach (var failureMode in new[] { "wrong_author", "wrong_sequence", "wrong_turn", "stream_loss" })
+{
+    using var failureAdapter = new CodyncLoopbackAdapter(_ => ValueTask.FromResult("unit-test-bearer-never-return"), new FakeCodyncHttpHandler(failureMode: failureMode));
+    var receipt = await failureAdapter.SendExactAsync(codyncBot.Id, codyncBot.Name, "Fixture only.", "ldw-test-" + failureMode, [], CancellationToken.None);
+    var wait = await failureAdapter.WaitReadExactAsync(receipt, codyncBot.Id, TimeSpan.FromSeconds(5), CancellationToken.None);
+    Assert(wait.Reply is null && wait.State == "connection_lost", $"Codync rejects {failureMode} final evidence");
+}
+
+using (var wrongRootAdapter = new CodyncLoopbackAdapter(_ => ValueTask.FromResult("unit-test-bearer-never-return"), new FakeCodyncHttpHandler(failureMode: "wrong_root")))
+{
+    var receipt = await wrongRootAdapter.SendExactAsync(codyncBot.Id, codyncBot.Name, "Fixture only.", "ldw-test-wrong-root", [], CancellationToken.None);
+    await AssertThrowsAsync<InvalidOperationException>(
+        () => wrongRootAdapter.WaitReadExactAsync(receipt, codyncBot.Id, TimeSpan.FromSeconds(5), CancellationToken.None),
+        "Codync rejects stale or mismatched history root correlation");
 }
 
 var unknownBridge = store.Accept(
@@ -654,12 +677,13 @@ sealed class FakeCodyncAdapter(CodyncWaitResult? configuredWait = null) : ICodyn
             "reply", "Provider start and exact correlated final reply observed."));
 }
 
-sealed class FakeCodyncHttpHandler(bool malformedRoster = false) : HttpMessageHandler
+sealed class FakeCodyncHttpHandler(bool malformedRoster = false, bool rosterOnly = false, string? failureMode = null) : HttpMessageHandler
 {
     public const string RootEntryId = "d54b9631-2aa7-41e9-94af-0a15039abd43";
     private int _eventRequestCount;
     private string _nonce = string.Empty;
     private readonly string _botId = CodyncApprovedDestinations.All[0].Id;
+    private bool _sendSeen;
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
@@ -672,7 +696,7 @@ sealed class FakeCodyncHttpHandler(bool malformedRoster = false) : HttpMessageHa
             _eventRequestCount++;
             if (malformedRoster && _eventRequestCount == 1)
                 return Events("data: {not-json}\n\n");
-            if (_eventRequestCount is 1 or 2 or 5)
+            if (rosterOnly || _sendSeen || _eventRequestCount == 1)
             {
                 var roster = CodyncApprovedDestinations.All.Select(item => new
                 {
@@ -687,24 +711,33 @@ sealed class FakeCodyncHttpHandler(bool malformedRoster = false) : HttpMessageHa
                 });
                 return Events(string.Join("\n", roster.Select(item => "data: " + JsonSerializer.Serialize(item))) + "\n\n");
             }
-            if (_eventRequestCount == 3)
+            if (_eventRequestCount == 2)
                 return Events("data: {\"type\":\"hello\",\"rev\":42}\n\n");
-            var startedAt = DateTimeOffset.UtcNow.AddMinutes(1).ToUnixTimeMilliseconds();
-            var start = new { type = "bot", bot = new { id = _botId, workingChat = _botId, workingTurn = 3, startedAt, status = "working" } };
-            var final = new { type = "entry", entry = new { botId = _botId, id = Guid.NewGuid().ToString("D"), seq = 11, turn = 3, kind = "agent", data = new { final = true, author = _botId, text = "PASS LDW-CODYNC-FAKE" } } };
-            return Events("data: " + JsonSerializer.Serialize(start) + "\n\ndata: " + JsonSerializer.Serialize(final) + "\n\n");
+            if (request.RequestUri.Query.Contains("since=42", StringComparison.Ordinal))
+            {
+                var startedAt = DateTimeOffset.UtcNow.AddMinutes(1).ToUnixTimeMilliseconds();
+                var start = new { type = "bot", bot = new { id = _botId, workingChat = _botId, workingTurn = 3, startedAt, status = "working" } };
+                if (failureMode == "stream_loss") return Events("data: " + JsonSerializer.Serialize(start) + "\n\n");
+                var author = failureMode == "wrong_author" ? CodyncApprovedDestinations.All[1].Id : _botId;
+                var sequence = failureMode == "wrong_sequence" ? 10 : 11;
+                var turn = failureMode == "wrong_turn" ? 4 : 3;
+                var final = new { type = "entry", entry = new { botId = _botId, id = Guid.NewGuid().ToString("D"), seq = sequence, turn, kind = "agent", data = new { final = true, author, text = "PASS LDW-CODYNC-FAKE" } } };
+                return Events("data: " + JsonSerializer.Serialize(start) + "\n\ndata: " + JsonSerializer.Serialize(final) + "\n\n");
+            }
         }
         if (request.Method == HttpMethod.Post && request.RequestUri?.AbsolutePath == "/api/send")
         {
             var body = await request.Content!.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             using var document = JsonDocument.Parse(body);
             _nonce = document.RootElement.GetProperty("clientNonce").GetString()!;
+            _sendSeen = true;
             var entry = new { entry = new { id = RootEntryId, botId = _botId, seq = 10, turn = 3, rev = 43, kind = "user", data = new { clientNonce = _nonce } } };
             return Json(HttpStatusCode.OK, JsonSerializer.Serialize(entry));
         }
         if (request.Method == HttpMethod.Post && request.RequestUri?.AbsolutePath == "/api/history")
         {
-            var history = new { entries = new[] { new { id = RootEntryId, botId = _botId, seq = 10, turn = 3, kind = "user", data = new { clientNonce = _nonce } } } };
+            var rootId = failureMode == "wrong_root" ? "00000000-0000-4000-8000-000000000001" : RootEntryId;
+            var history = new { entries = new[] { new { id = rootId, botId = _botId, seq = 10, turn = 3, kind = "user", data = new { clientNonce = _nonce } } } };
             return Json(HttpStatusCode.OK, JsonSerializer.Serialize(history));
         }
         return Json(HttpStatusCode.NotFound, "{}");
