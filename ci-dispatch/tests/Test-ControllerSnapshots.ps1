@@ -120,8 +120,10 @@ try {
         $ast=[System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $publisherPath),[ref]$tokens,[ref]$parseErrors)
         if($parseErrors.Count){throw 'TEST_PUBLISHER_PARSE_FAILED'}
         $function=$ast.FindAll({param($node)$node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Export-Ci10PinnedSourceFile'},$false)
-        Assert ($function.Count -eq 1)
+        $guard=$ast.FindAll({param($node)$node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Assert-Ci10AcceptedHeadDispatcherSource'},$false)
+        Assert ($function.Count -eq 1 -and $guard.Count -eq 1)
         Invoke-Expression $function[0].Extent.Text
+        Invoke-Expression $guard[0].Extent.Text
         $unaccepted=Join-Path $root 'unaccepted-repository'
         & git clone --shared --no-checkout $repo $unaccepted 2>$null
         if($LASTEXITCODE -ne 0){throw 'TEST_UNACCEPTED_CLONE_FAILED'}
@@ -133,6 +135,8 @@ try {
         & git -C $unaccepted add ci-dispatch/Dispatch.psm1
         & git -C $unaccepted commit -m 'Create unaccepted clean verifier head' 2>$null
         if($LASTEXITCODE -ne 0 -or (& git -C $unaccepted status --porcelain)){throw 'TEST_UNACCEPTED_HEAD_SETUP_FAILED'}
+        $script:AcceptedDispatcherSource=[pscustomobject]@{blob='662981a2955a3cd3f3526aeb666e185f989c4a18'}
+        Refuses {Assert-Ci10AcceptedHeadDispatcherSource $unaccepted} 'PUBLISH_VERIFIER_PROVENANCE_REFUSED'
         $stage=Join-Path $root 'stage-unaccepted'
         $null=New-Item -ItemType Directory -Path $stage -Force
         $destination=Join-Path $root 'pinned-source/ci-dispatch/Dispatch.psm1'
@@ -153,6 +157,9 @@ try {
         Assert ($source.Contains('805b71f36232412e072b0c860c1f4d665511d347'))
         Assert ($source.Contains('7c856daf5a8e4dc4d101ab088259008a78fc68f2'))
         Assert ($source.Contains('Export-Ci10PinnedSourceFile'))
+        $guardPosition=$source.IndexOf('Assert-Ci10AcceptedHeadDispatcherSource $repo',[StringComparison]::Ordinal)
+        $importPosition=$source.IndexOf("Import-Module (Join-Path `$PSScriptRoot 'Dispatch.psm1')",[StringComparison]::Ordinal)
+        Assert ($guardPosition -ge 0 -and $guardPosition -lt $importPosition)
         Assert (-not ($source -match "git archive[^\r\n]*'HEAD'[^\r\n]*Dispatch\.psm1"))
         Assert (-not ($parameters -match 'Dispatcher|Verifier|Blob|Provenance'))
     }

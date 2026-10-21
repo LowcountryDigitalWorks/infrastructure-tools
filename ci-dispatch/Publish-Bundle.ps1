@@ -45,12 +45,19 @@ function Export-Ci10PinnedSourceFile([string]$Commit, [string]$Tree, [string]$Bl
     }
     Copy-Item -LiteralPath $source -Destination $Destination -Force
 }
+function Assert-Ci10AcceptedHeadDispatcherSource([string]$Repository) {
+    $headBlob = & git -C $Repository rev-parse 'HEAD:ci-dispatch/Dispatch.psm1' 2>$null
+    if ($LASTEXITCODE -ne 0 -or ([string]$headBlob).Trim() -cne $script:AcceptedDispatcherSource.blob) {
+        throw 'PUBLISH_VERIFIER_PROVENANCE_REFUSED'
+    }
+}
 try {
+    $sourceStatus = & git -C $repo status --porcelain 2>$null
+    if ($LASTEXITCODE -ne 0 -or $sourceStatus) { throw 'PUBLISH_SOURCE_WORKTREE_DIRTY' }
+    Assert-Ci10AcceptedHeadDispatcherSource $repo
     Import-Module (Join-Path $PSScriptRoot 'Dispatch.psm1') -Force
     Import-Module (Join-Path $repo 'ci-runner/CiRunner.psm1') -Force
     Assert-Ci7Elevated
-    $sourceStatus = & git -C $repo status --porcelain 2>$null
-    if ($LASTEXITCODE -ne 0 -or $sourceStatus) { throw 'PUBLISH_SOURCE_WORKTREE_DIRTY' }
     $liveTree = & git -C $repo rev-parse ($Commit+'^{tree}') 2>$null
     if ($LASTEXITCODE -ne 0 -or $liveTree -cne $Tree) { throw 'PUBLISH_COMMIT_TREE_MISMATCH' }
     $remote = & git -C $repo remote get-url origin 2>$null
