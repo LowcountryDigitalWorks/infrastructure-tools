@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -6,11 +7,15 @@ namespace LDW.LocalSecretStore;
 public sealed record SecretStatus(
     bool Exists,
     string SecretId,
-    DateTime? LastUpdatedUtc);
+    DateTime? LastUpdatedUtc,
+    int ValueLength,
+    string? Sha256Fingerprint);
 
 public sealed record SecretEntryPayload(
     string SecretId,
     DateTime LastUpdatedUtc,
+    int Length,
+    string Sha256Fingerprint,
     string EncryptedDataB64);
 
 public sealed record SecretStoreFileContent(
@@ -51,12 +56,16 @@ public sealed class LocalSecretStore
             var plaintextBytes = Encoding.UTF8.GetBytes(plaintextValue);
             try
             {
+                var hashBytes = SHA256.HashData(plaintextBytes);
+                var fingerprint = Convert.ToHexStringLower(hashBytes)[..16]; // 16-char sanitized thumbprint
                 var encryptedBytes = _protector.Protect(plaintextBytes);
                 var encryptedB64 = Convert.ToBase64String(encryptedBytes);
 
                 var entry = new SecretEntryPayload(
                     secretId,
                     DateTime.UtcNow,
+                    plaintextValue.Length,
+                    fingerprint,
                     encryptedB64);
 
                 fileContent.Secrets[secretId] = entry;
@@ -79,10 +88,10 @@ public sealed class LocalSecretStore
             var fileContent = LoadStoreFile();
             if (!fileContent.Secrets.TryGetValue(secretId, out var entry))
             {
-                return new SecretStatus(false, secretId, null);
+                return new SecretStatus(false, secretId, null, 0, null);
             }
 
-            return new SecretStatus(true, entry.SecretId, entry.LastUpdatedUtc);
+            return new SecretStatus(true, entry.SecretId, entry.LastUpdatedUtc, entry.Length, entry.Sha256Fingerprint);
         }
     }
 
@@ -143,8 +152,6 @@ public sealed class LocalSecretStore
 
         if (!secretId.All(c => char.IsLetterOrDigit(c) || c == '_' || c == '-'))
             throw new ArgumentException("Secret ID contains invalid characters.", nameof(secretId));
-        if (!string.Equals(secretId, FixedSecretIdCorsairNeon, StringComparison.Ordinal))
-            throw new ArgumentException("Only the fixed Corsair/Neon secret ID is supported.", nameof(secretId));
     }
 
     private SecretStoreFileContent LoadStoreFile()

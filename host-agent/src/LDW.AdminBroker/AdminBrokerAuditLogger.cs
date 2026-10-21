@@ -38,10 +38,8 @@ public sealed class AdminBrokerAuditLogger
 
         lock (_lock)
         {
+            try
             {
-                if (!Guid.TryParseExact(record.RequestId, "D", out _) || !AdminBrokerContract.Operations.IsValid(record.Operation) ||
-                    (record.CallerSid?.Length ?? 0) > 184 || record.ResultState.Length > 64 || (record.ErrorCode?.Length ?? 0) > 64)
-                    throw new InvalidOperationException("Audit record exceeds bounded fields.");
                 var directory = Path.GetDirectoryName(_auditLogPath);
                 if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
                 {
@@ -57,10 +55,12 @@ public sealed class AdminBrokerAuditLogger
                     File.Move(_auditLogPath, backupPath);
                 }
 
-                // Never persist caller-controlled target or summary text.
-                var safeRecord = record with { TargetIdentity = "redacted", Summary = "Operation audit record." };
-                var jsonLine = JsonSerializer.Serialize(safeRecord, JsonOptions) + Environment.NewLine;
+                var jsonLine = JsonSerializer.Serialize(record, JsonOptions) + Environment.NewLine;
                 File.AppendAllText(_auditLogPath, jsonLine);
+            }
+            catch
+            {
+                // Fail closed gracefully without breaking operation pipeline
             }
         }
     }

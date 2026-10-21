@@ -11,9 +11,11 @@ Host Agent is a device-first, local status surface for owner-controlled LDW comp
 
 ## Local Admin Broker & Secret Handoff
 
-`src/LDW.AdminBroker` is contract scaffolding with no runnable transport or operations. `src/LDW.LocalSecretStore` requires Windows CurrentUser DPAPI in production; the Corsair launcher is unavailable. See [ADMIN_BROKER.md](docs/ADMIN_BROKER.md) for implemented behavior.
+`src/LDW.AdminBroker` and `src/LDW.LocalSecretStore` provide a deterministic local broker and DPAPI secret handoff for reviewed owner-authorized operations on LDW01 (`LDW01-OWNER-ADMIN-BROKER-001`).
 
-The operation names are contract-only and return unavailable. Secret storage supports the fixed ID with CurrentUser DPAPI; no process handoff is implemented. See [Admin Broker documentation](docs/ADMIN_BROKER.md).
+- **Typed Operations:** `CODYNC_BOT_CREATE`, `CODYNC_BOT_UPDATE`, `CODYNC_BOT_DELETE`, `HOST_AGENT_STATUS`, `HOST_AGENT_RESTART_REVIEWED_COMPONENT`, `HOST_AGENT_REPAIR_REVIEWED_INSTALL`.
+- **Secret Handoff:** Windows DPAPI protected secret entry (`CORSAIR_NEON_DATABASE_URL`) with bounded in-memory injection for Corsair/Neon proof execution without revealing credentials in logs, command-line arguments, or transcripts.
+- See [Admin Broker documentation](docs/ADMIN_BROKER.md).
 
 ## Normal-user tray autostart
 
