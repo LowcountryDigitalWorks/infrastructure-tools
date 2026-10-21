@@ -7,9 +7,11 @@ public static class BridgeProtocol
     public const string BridgeRuntimeVersion = "1.0.0";
     public const int MaxEvidenceLength = 512;
     public const int MaxPayloadEntries = 32;
-    public const int MaxPayloadValueLength = 8192;
+    public const int MaxPayloadValueLength = 256;
+    public const int MaxCodyncReplyLength = 8192;
     public const int MaxArgEntries = 16;
-    public const int MaxArgValueLength = 8192;
+    public const int MaxArgValueLength = 256;
+    public const int MaxCodyncSendTextLength = 8192;
     public const int MaxBridgeRuntimeLength = 64;
     public const int MaxBridgeVersionLength = 32;
 
@@ -115,7 +117,7 @@ public static class BridgeProtocol
         }
     }
 
-    public static IReadOnlyDictionary<string, string> BoundPayload(IReadOnlyDictionary<string, string>? payload)
+    public static IReadOnlyDictionary<string, string> BoundPayload(IReadOnlyDictionary<string, string>? payload, BridgeOperation operation = BridgeOperation.Unknown)
     {
         var result = new Dictionary<string, string>(StringComparer.Ordinal);
         if (payload is null)
@@ -136,9 +138,12 @@ public static class BridgeProtocol
             }
 
             var value = pair.Value ?? string.Empty;
-            if (value.Length > MaxPayloadValueLength)
+            var maxLength = operation == BridgeOperation.CodyncWaitReadExact && pair.Key == "reply_text"
+                ? MaxCodyncReplyLength
+                : MaxPayloadValueLength;
+            if (value.Length > maxLength)
             {
-                value = value[..MaxPayloadValueLength];
+                value = value[..maxLength];
             }
 
             result[pair.Key] = value;

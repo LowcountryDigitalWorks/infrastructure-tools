@@ -3,7 +3,7 @@ namespace LDW.OperationsBridge.Core;
 public static class CodyncOperationSchema
 {
     private static readonly string[] SendKeys = ["destination_id", "destination_name", "text", "mentioned_member_ids"];
-    private static readonly string[] WaitKeys = ["destination_id", "destination_name", "send_dispatch_id", "client_nonce", "root_entry_id", "root_sequence", "root_turn", "root_revision", "expected_author_id", "timeout_seconds"];
+    private static readonly string[] WaitKeys = ["destination_id", "destination_name", "send_dispatch_id", "client_nonce", "root_entry_id", "root_sequence", "root_turn", "root_revision", "submitted_at", "expected_author_id", "timeout_seconds"];
 
     public static bool IsValid(BridgeOperation operation, IReadOnlyDictionary<string, string> args)
     {
@@ -12,7 +12,7 @@ public static class CodyncOperationSchema
         if (operation == BridgeOperation.CodyncSendExact)
         {
             if (!HasOnly(args, SendKeys) || !Has(args, "destination_id", "destination_name", "text")) return false;
-            if (args["text"].Length is 0 or > BridgeProtocol.MaxArgValueLength) return false;
+            if (args["text"].Length is 0 or > BridgeProtocol.MaxCodyncSendTextLength) return false;
             var mentions = Get(args, "mentioned_member_ids").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             if (mentions.Distinct(StringComparer.Ordinal).Count() != mentions.Length ||
                 Get(args, "text").Contains("@all", StringComparison.OrdinalIgnoreCase) ||
@@ -34,6 +34,7 @@ public static class CodyncOperationSchema
             return long.TryParse(Get(args, "root_sequence"), out var sequence) && sequence >= 0 &&
                    long.TryParse(Get(args, "root_turn"), out var turn) && turn >= 0 &&
                    long.TryParse(Get(args, "root_revision"), out var revision) && revision >= 0 &&
+                   DateTimeOffset.TryParse(Get(args, "submitted_at"), out _) &&
                    int.TryParse(Get(args, "timeout_seconds"), out var seconds) && seconds is >= 1 and <= 240;
         }
         return true;

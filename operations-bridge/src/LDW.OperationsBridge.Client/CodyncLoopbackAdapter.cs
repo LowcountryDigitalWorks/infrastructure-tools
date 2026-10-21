@@ -21,14 +21,19 @@ public sealed class CodyncLoopbackAdapter : ICodyncBridgeAdapter, IDisposable
     private readonly ConcurrentDictionary<string, CodyncEventSubscription> _subscriptions = new(StringComparer.Ordinal);
 
     public CodyncLoopbackAdapter(Func<CancellationToken, ValueTask<string>> readBearer)
-    {
-        _http = new HttpClient(new SocketsHttpHandler
+        : this(readBearer, new SocketsHttpHandler
         {
             AllowAutoRedirect = false,
             UseCookies = false,
             UseProxy = false,
             PooledConnectionLifetime = TimeSpan.FromMinutes(5)
         })
+    {
+    }
+
+    internal CodyncLoopbackAdapter(Func<CancellationToken, ValueTask<string>> readBearer, HttpMessageHandler handler)
+    {
+        _http = new HttpClient(handler)
         {
             Timeout = Timeout.InfiniteTimeSpan
         };
@@ -58,7 +63,7 @@ public sealed class CodyncLoopbackAdapter : ICodyncBridgeAdapter, IDisposable
 
     public async Task<IReadOnlyList<CodyncDestination>> ListApprovedBotsGroupsAsync(CancellationToken cancellationToken)
     {
-        var found = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        var found = new List<JsonElement>();
         using var bounded = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         bounded.CancelAfter(TimeSpan.FromSeconds(10));
         using var request = await AuthorizedRequestAsync(HttpMethod.Get, "events?since=0", bounded.Token).ConfigureAwait(false);
@@ -94,20 +99,20 @@ public sealed class CodyncLoopbackAdapter : ICodyncBridgeAdapter, IDisposable
                 continue;
             }
             var id = ReadString(bot, "id");
-            if (CodyncApprovedDestinations.All.Any(item => item.Id == id))
+            if (CodyncApprovedDestinations.All.Any(item => item.Name == ReadString(bot, "name")))
             {
-                if (found.ContainsKey(id))
+                if (found.Any(existing => ReadString(existing, "id") == id))
                 {
-                    throw new InvalidOperationException("Codync returned a duplicate approved bot identity.");
+                    throw new InvalidOperationException("Codync returned a duplicate reviewer destination identity.");
                 }
-                found.Add(id, bot.Clone());
+                found.Add(bot.Clone());
             }
         }
 
         var result = new List<CodyncDestination>(CodyncApprovedDestinations.All.Count);
         foreach (var approved in CodyncApprovedDestinations.All)
         {
-            var matches = found.Values.Where(bot => ReadString(bot, "name") == approved.Name).ToArray();
+            var matches = found.Where(bot => ReadString(bot, "name") == approved.Name).ToArray();
             if (matches.Length != 1 || ReadString(matches[0], "id") != approved.Id || ReadString(matches[0], "kind") != (approved.Kind == "group" ? "group" : "agent"))
             {
                 throw new InvalidOperationException("An approved Codync destination is missing, duplicated, or has a changed identity.");
@@ -130,7 +135,7 @@ public sealed class CodyncLoopbackAdapter : ICodyncBridgeAdapter, IDisposable
         IReadOnlyList<string> mentionedMemberIds,
         CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(text) || text.Length > BridgeProtocol.MaxArgValueLength || string.IsNullOrWhiteSpace(clientNonce))
+        if (string.IsNullOrWhiteSpace(text) || text.Length > BridgeProtocol.MaxCodyncSendTextLength || string.IsNullOrWhiteSpace(clientNonce))
         {
             throw new InvalidOperationException("Codync send arguments are invalid or exceed the bound.");
         }
@@ -234,7 +239,8 @@ public sealed class CodyncLoopbackAdapter : ICodyncBridgeAdapter, IDisposable
                     if (string.IsNullOrEmpty(workingChat)) workingChat = botId;
                     var epoch = ReadNullableInt64(eventBot, "startedAt");
                     var observedStart = epoch is null ? (DateTimeOffset?)null : DateTimeOffset.FromUnixTimeMilliseconds(epoch.Value);
-                    if (botId == expectedAuthorId && workingChat == receipt.DestinationId &&
+                    var workingTurn = ReadNullableInt64(eventBot, "workingTurn") ?? ReadNullableInt64(eventBot, "turn");
+                    if (botId == expectedAuthorId && workingChat == receipt.DestinationId && workingTurn == receipt.RootTurn &&
                         observedStart is not null && observedStart >= receipt.SubmittedAt && ReadString(eventBot, "status") is "working" or "needsInput")
                     {
                         startObserved = true;
@@ -255,7 +261,7 @@ public sealed class CodyncLoopbackAdapter : ICodyncBridgeAdapter, IDisposable
                 if (string.IsNullOrEmpty(authorId)) authorId = receipt.DestinationId;
                 if (authorId != expectedAuthorId) continue;
                 var text = ReadString(data, "text");
-                if (text.Length > BridgeProtocol.MaxPayloadValueLength) text = text[..BridgeProtocol.MaxPayloadValueLength];
+                if (text.Length > BridgeProtocol.MaxCodyncReplyLength) text = text[..BridgeProtocol.MaxCodyncReplyLength];
                 var completed = DateTimeOffset.UtcNow;
                 return new CodyncWaitResult(startObserved, false,
                     new CodyncCorrelatedReply(receipt.DestinationId, receipt.DestinationName, receipt.RootEntryId,
@@ -416,7 +422,6 @@ public sealed class CodyncLoopbackAdapter : ICodyncBridgeAdapter, IDisposable
             }
             finally
             {
-                _stop.Dispose();
             }
         }
 
@@ -427,6 +432,7 @@ public sealed class CodyncLoopbackAdapter : ICodyncBridgeAdapter, IDisposable
             _reader.Dispose();
             _response.Dispose();
             _events.Writer.TryComplete();
+            _stop.Dispose();
         }
     }
 }

@@ -35,7 +35,9 @@ public sealed class DispatchValidator
             request.Args.Any(pair =>
                 string.IsNullOrWhiteSpace(pair.Key) ||
                 pair.Value is null ||
-                pair.Value.Length > BridgeProtocol.MaxArgValueLength))
+                pair.Value.Length > (request.Operation == BridgeOperation.CodyncSendExact && pair.Key == "text"
+                    ? BridgeProtocol.MaxCodyncSendTextLength
+                    : BridgeProtocol.MaxArgValueLength)))
         {
             return DispatchValidationError.InvalidEnvelope;
         }

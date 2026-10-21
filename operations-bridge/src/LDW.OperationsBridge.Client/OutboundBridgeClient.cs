@@ -156,6 +156,7 @@ public sealed class OutboundBridgeClient
                 var mentionIds = Arg(request, "mentioned_member_ids").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
                 var nonce = $"ldw-operations-{request.DispatchId:D}";
                 var receipt = await _codyncAdapter.SendExactAsync(destinationId, destinationName, text, nonce, mentionIds, cancellationToken).ConfigureAwait(false);
+                status = DispatchTerminalStatus.Blocked;
                 payload["stage"] = "accepted_send";
                 payload["destination_id"] = receipt.DestinationId;
                 payload["destination_name"] = receipt.DestinationName;
@@ -164,6 +165,7 @@ public sealed class OutboundBridgeClient
                 payload["root_sequence"] = receipt.RootSequence.ToString();
                 payload["root_turn"] = receipt.RootTurn.ToString();
                 payload["root_revision"] = receipt.RootRevision.ToString();
+                payload["submitted_at"] = receipt.SubmittedAt.ToString("O");
                 evidence = "Codync accepted the exact nonce-correlated message; this is not provider-start or reply evidence.";
                 break;
             }
@@ -181,7 +183,8 @@ public sealed class OutboundBridgeClient
                     return CodyncBlocked(request, startedAt, "Wait correlation arguments are invalid or outside the allowed bound.");
                 }
                 var rootTurnText = Arg(request, "root_turn");
-                if (!long.TryParse(rootTurnText, out var rootTurn) || string.IsNullOrWhiteSpace(Arg(request, "root_entry_id")))
+                if (!long.TryParse(rootTurnText, out var rootTurn) || string.IsNullOrWhiteSpace(Arg(request, "root_entry_id")) ||
+                    !DateTimeOffset.TryParse(Arg(request, "submitted_at"), out var submittedAt))
                     return CodyncBlocked(request, startedAt, "Root entry/turn correlation is invalid.");
                 var expectedNonce = $"ldw-operations-{sendDispatchId:D}";
                 if (!string.Equals(Arg(request, "client_nonce"), expectedNonce, StringComparison.Ordinal))
@@ -189,7 +192,7 @@ public sealed class OutboundBridgeClient
                 var expectedAuthorId = Arg(request, "expected_author_id");
                 if (destination.Kind == "group" ? !destination.Members.Contains(expectedAuthorId, StringComparer.Ordinal) : destination.Id != expectedAuthorId)
                     return CodyncBlocked(request, startedAt, "Expected reply author is outside the exact destination identity.");
-                var receipt = new CodyncSendReceipt(destination.Id, destination.Name, expectedNonce, Arg(request, "root_entry_id"), rootSequence, rootTurn, rootRevision, DateTimeOffset.UtcNow);
+                var receipt = new CodyncSendReceipt(destination.Id, destination.Name, expectedNonce, Arg(request, "root_entry_id"), rootSequence, rootTurn, rootRevision, submittedAt);
                 var result = await _codyncAdapter.WaitReadExactAsync(receipt, expectedAuthorId, TimeSpan.FromSeconds(timeoutSeconds), cancellationToken).ConfigureAwait(false);
                 payload["provider_start_observed"] = result.ProviderStartObserved ? "true" : "false";
                 payload["needs_input"] = result.NeedsInput ? "true" : "false";
@@ -201,6 +204,8 @@ public sealed class OutboundBridgeClient
                     payload["reply_text"] = reply.Text;
                 }
                 if (result.NeedsInput || result.State == "needs_input") status = DispatchTerminalStatus.Blocked;
+                else if (result.State == "stale_identity") status = DispatchTerminalStatus.Stale;
+                else if (result.State is "timeout" or "connection_lost" or "subscription_missing") status = DispatchTerminalStatus.Failed;
                 else if (!result.ProviderStartObserved || result.Reply is null) status = DispatchTerminalStatus.Ambiguous;
                 evidence = BridgeProtocol.BoundEvidence(result.Evidence);
                 break;
@@ -223,7 +228,7 @@ public sealed class OutboundBridgeClient
             startedAt,
             completedAt,
             BridgeProtocol.BoundEvidence(evidence),
-            BridgeProtocol.BoundPayload(payload));
+            BridgeProtocol.BoundPayload(payload, request.Operation));
     }
 
     private static BridgeDispatchResult CodyncUnavailable(BridgeDispatchRequest request, DateTimeOffset startedAt)

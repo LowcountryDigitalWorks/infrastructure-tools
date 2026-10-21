@@ -9,9 +9,9 @@ const MAX_QUEUED_DELIVERIES_PER_CONNECTION = 32;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const MAX_EVIDENCE_LENGTH = 512;
 const MAX_PAYLOAD_ENTRIES = 32;
-const MAX_PAYLOAD_VALUE_LENGTH = 8192;
+const MAX_PAYLOAD_VALUE_LENGTH = 256;
 const MAX_ARG_ENTRIES = 16;
-const MAX_ARG_VALUE_LENGTH = 8192;
+const MAX_ARG_VALUE_LENGTH = 256;
 const MAX_BRIDGE_RUNTIME_LENGTH = 64;
 const MAX_BRIDGE_VERSION_LENGTH = 32;
 
@@ -685,7 +685,7 @@ export function normalizeDispatchPayload(payload, nowIso) {
     return { ok: false, error: "stale-or-expired" };
   }
 
-  const args = normalizeArgs(payload.args);
+  const args = normalizeArgs(payload.args, payload.operation);
   if (!args.ok) {
     return args;
   }
@@ -742,7 +742,7 @@ export function finalizeTerminal(row, connectionId, payload, nowIso) {
 
   let terminalStatus = typeof payload?.status === "string" ? payload.status : "FAILED";
   let evidence = typeof payload?.evidence === "string" ? payload.evidence : "Client terminal message.";
-  let resultPayload = normalizeTerminalPayload(payload?.payload);
+  let resultPayload = normalizeTerminalPayload(payload?.payload, row.operation);
 
   if (!ALLOWED_TERMINAL_STATUSES.has(terminalStatus)) {
     terminalStatus = "FAILED";
@@ -763,6 +763,12 @@ export function finalizeTerminal(row, connectionId, payload, nowIso) {
   }
 
   const operation = typeof row.operation === "string" ? row.operation : "unknown";
+
+  if (operation === "codync.send_exact" && terminalStatus === "PASS") {
+    terminalStatus = "BLOCKED";
+    evidence = "Codync accepted-send evidence cannot establish provider completion.";
+    resultPayload = {};
+  }
 
   return {
     ok: true,
@@ -905,7 +911,7 @@ function sanitizeSiteDispatchRecord(record) {
   };
 }
 
-function normalizeArgs(args) {
+function normalizeArgs(args, operation = "unknown") {
   if (args === undefined || args === null) {
     return { ok: true, value: {} };
   }
@@ -925,7 +931,8 @@ function normalizeArgs(args) {
       return { ok: false, error: "invalid-args" };
     }
 
-    if (value.length > MAX_ARG_VALUE_LENGTH) {
+    const maxLength = operation === "codync.send_exact" && key === "text" ? 8192 : MAX_ARG_VALUE_LENGTH;
+    if (value.length > maxLength) {
       return { ok: false, error: "arg-value-too-long" };
     }
 
@@ -949,18 +956,18 @@ function validOperationArgs(operation, args) {
     return mentions.every((id) => UUID_RE.test(id.trim())) && new Set(mentions.map((id) => id.trim())).size === mentions.length;
   }
   if (operation === "codync.wait_read_exact") {
-    const keys = ["destination_id", "destination_name", "send_dispatch_id", "client_nonce", "root_entry_id", "root_sequence", "root_turn", "root_revision", "expected_author_id", "timeout_seconds"];
+  const keys = ["destination_id", "destination_name", "send_dispatch_id", "client_nonce", "root_entry_id", "root_sequence", "root_turn", "root_revision", "submitted_at", "expected_author_id", "timeout_seconds"];
     if (!exact(keys) || !required(keys) || !UUID_RE.test(args.send_dispatch_id) || !UUID_RE.test(args.root_entry_id) ||
         args.client_nonce !== `ldw-operations-${args.send_dispatch_id}` ||
         !/^\d+$/.test(args.root_sequence) || !/^\d+$/.test(args.root_turn) || !/^\d+$/.test(args.root_revision) ||
-        !/^\d+$/.test(args.timeout_seconds)) return false;
+        !/^\d+$/.test(args.timeout_seconds) || !Number.isFinite(Date.parse(args.submitted_at))) return false;
     const seconds = Number(args.timeout_seconds);
     return Number.isSafeInteger(seconds) && seconds >= 1 && seconds <= 240;
   }
   return true;
 }
 
-function normalizeTerminalPayload(payload) {
+function normalizeTerminalPayload(payload, operation = "unknown") {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return {};
   }
@@ -976,7 +983,8 @@ function normalizeTerminalPayload(payload) {
     }
 
     const text = typeof value === "string" ? value : String(value);
-    result[key] = text.length > MAX_PAYLOAD_VALUE_LENGTH ? text.slice(0, MAX_PAYLOAD_VALUE_LENGTH) : text;
+    const maxLength = operation.startsWith("codync.") && key === "reply_text" ? 8192 : MAX_PAYLOAD_VALUE_LENGTH;
+    result[key] = text.length > maxLength ? text.slice(0, maxLength) : text;
   }
 
   return result;

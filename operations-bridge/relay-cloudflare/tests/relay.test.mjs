@@ -254,6 +254,7 @@ test("Codync operations accept only their typed bounded argument schemas", () =>
       root_sequence: "4",
       root_turn: "2",
       root_revision: "9",
+      submitted_at: new Date().toISOString(),
       expected_author_id: destinationId,
       timeout_seconds: "120"
     }
@@ -325,7 +326,7 @@ test("terminal enum/payload bounds and lost correlation never PASS", () => {
   assert.equal(bounded.ok, true);
   assert.equal(bounded.result.terminalStatus, "BLOCKED");
   assert.ok(bounded.result.evidence.length <= 512);
-  assert.ok(bounded.result.payload.huge.length <= 8192);
+  assert.ok(bounded.result.payload.huge.length <= 256);
   assert.equal(bounded.result.bridgeRuntime, "ldw-operations-bridge");
   assert.equal(bounded.result.operation, "browser.list_tabs");
   assert.equal(bounded.result.resultClass, "BLOCKED");
@@ -348,6 +349,23 @@ test("terminal enum/payload bounds and lost correlation never PASS", () => {
   assert.equal(lost.result.terminalStatus, "AMBIGUOUS");
   assert.equal(lost.result.correlationId, "corr-term");
   assert.deepEqual(lost.result.payload, {});
+
+  const acceptedSendOnly = finalizeTerminal(
+    { ...row, operation: "codync.send_exact" },
+    "conn-1",
+    {
+      correlationId: "corr-term",
+      idempotencyKey: "idem-term",
+      status: "PASS",
+      evidence: "provider replied",
+      payload: { root_entry_id: crypto.randomUUID() },
+      ...observedProvenance
+    },
+    nowIso
+  );
+  assert.equal(acceptedSendOnly.ok, true);
+  assert.equal(acceptedSendOnly.result.terminalStatus, "BLOCKED");
+  assert.deepEqual(acceptedSendOnly.result.payload, {});
 });
 
 test("duplicate idempotency and immutable one terminal via hibernated socket path", async () => {
