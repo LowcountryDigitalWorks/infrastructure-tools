@@ -7,6 +7,7 @@ public enum DispatchValidationError
     UnknownBridge,
     UnknownOperation,
     InvalidEnvelope,
+    InvalidOperationArgs,
     StaleOrExpired
 }
 
@@ -52,6 +53,11 @@ public sealed class DispatchValidator
         if (!_allowedOperations.Contains(request.Operation) || request.Operation == BridgeOperation.Unknown)
         {
             return DispatchValidationError.UnknownOperation;
+        }
+
+        if (!CodyncOperationSchema.IsValid(request.Operation, request.Args))
+        {
+            return DispatchValidationError.InvalidOperationArgs;
         }
 
         if (request.ExpiresAt <= request.IssuedAt ||

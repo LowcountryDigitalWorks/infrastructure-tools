@@ -9,13 +9,16 @@ const MAX_QUEUED_DELIVERIES_PER_CONNECTION = 32;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const MAX_EVIDENCE_LENGTH = 512;
 const MAX_PAYLOAD_ENTRIES = 32;
-const MAX_PAYLOAD_VALUE_LENGTH = 256;
+const MAX_PAYLOAD_VALUE_LENGTH = 8192;
 const MAX_ARG_ENTRIES = 16;
-const MAX_ARG_VALUE_LENGTH = 256;
+const MAX_ARG_VALUE_LENGTH = 8192;
 const MAX_BRIDGE_RUNTIME_LENGTH = 64;
 const MAX_BRIDGE_VERSION_LENGTH = 32;
 
-const ALLOWED_OPERATIONS = new Set(["browser.health", "browser.list_tabs", "browser.read_tab"]);
+const ALLOWED_OPERATIONS = new Set([
+  "browser.health", "browser.list_tabs", "browser.read_tab",
+  "codync.health", "codync.list_approved_bots_groups", "codync.send_exact", "codync.wait_read_exact"
+]);
 const ALLOWED_TERMINAL_STATUSES = new Set(["PASS", "BLOCKED", "FAILED", "STALE", "AMBIGUOUS"]);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -686,6 +689,9 @@ export function normalizeDispatchPayload(payload, nowIso) {
   if (!args.ok) {
     return args;
   }
+  if (!validOperationArgs(payload.operation, args.value)) {
+    return { ok: false, error: "invalid-operation-args" };
+  }
 
   return {
     ok: true,
@@ -927,6 +933,31 @@ function normalizeArgs(args) {
   }
 
   return { ok: true, value: normalized };
+}
+
+function validOperationArgs(operation, args) {
+  const exact = (keys) => Object.keys(args).every((key) => keys.includes(key));
+  const required = (keys) => keys.every((key) => typeof args[key] === "string" && args[key].trim().length > 0);
+  if (operation === "codync.health" || operation === "codync.list_approved_bots_groups") {
+    return Object.keys(args).length === 0;
+  }
+  if (operation === "codync.send_exact") {
+    const keys = ["destination_id", "destination_name", "text", "mentioned_member_ids"];
+    if (!exact(keys) || !required(["destination_id", "destination_name", "text"]) || args.text.length > MAX_ARG_VALUE_LENGTH ||
+        /@all|@everyone/i.test(args.text)) return false;
+    const mentions = (args.mentioned_member_ids || "").split(",").filter(Boolean);
+    return mentions.every((id) => UUID_RE.test(id.trim())) && new Set(mentions.map((id) => id.trim())).size === mentions.length;
+  }
+  if (operation === "codync.wait_read_exact") {
+    const keys = ["destination_id", "destination_name", "send_dispatch_id", "client_nonce", "root_entry_id", "root_sequence", "root_turn", "root_revision", "expected_author_id", "timeout_seconds"];
+    if (!exact(keys) || !required(keys) || !UUID_RE.test(args.send_dispatch_id) || !UUID_RE.test(args.root_entry_id) ||
+        args.client_nonce !== `ldw-operations-${args.send_dispatch_id}` ||
+        !/^\d+$/.test(args.root_sequence) || !/^\d+$/.test(args.root_turn) || !/^\d+$/.test(args.root_revision) ||
+        !/^\d+$/.test(args.timeout_seconds)) return false;
+    const seconds = Number(args.timeout_seconds);
+    return Number.isSafeInteger(seconds) && seconds >= 1 && seconds <= 240;
+  }
+  return true;
 }
 
 function normalizeTerminalPayload(payload) {

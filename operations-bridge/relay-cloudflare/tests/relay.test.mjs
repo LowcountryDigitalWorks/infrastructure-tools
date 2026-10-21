@@ -220,6 +220,47 @@ test("stale and unknown envelopes are rejected before persistence", () => {
   assert.equal(unknown.error, "unknown-operation");
 });
 
+test("Codync operations accept only their typed bounded argument schemas", () => {
+  const now = new Date().toISOString();
+  const dispatchId = crypto.randomUUID();
+  const destinationId = crypto.randomUUID();
+  const validSend = normalizeDispatchPayload(buildDispatch({
+    operation: "codync.send_exact",
+    args: { destination_id: destinationId, destination_name: "Reviewer", text: "Read-only sentinel", mentioned_member_ids: "" }
+  }), now);
+  assert.equal(validSend.ok, true);
+
+  const unsafeGroup = normalizeDispatchPayload(buildDispatch({
+    operation: "codync.send_exact",
+    args: { destination_id: destinationId, destination_name: "Board", text: "@all review this", mentioned_member_ids: "" }
+  }), now);
+  assert.equal(unsafeGroup.ok, false);
+  assert.equal(unsafeGroup.error, "invalid-operation-args");
+
+  const genericRpc = normalizeDispatchPayload(buildDispatch({
+    operation: "codync.send_exact",
+    args: { destination_id: destinationId, destination_name: "Reviewer", text: "Read-only", method: "createBot" }
+  }), now);
+  assert.equal(genericRpc.ok, false);
+
+  const wait = normalizeDispatchPayload(buildDispatch({
+    operation: "codync.wait_read_exact",
+    args: {
+      destination_id: destinationId,
+      destination_name: "Reviewer",
+      send_dispatch_id: dispatchId,
+      client_nonce: `ldw-operations-${dispatchId}`,
+      root_entry_id: crypto.randomUUID(),
+      root_sequence: "4",
+      root_turn: "2",
+      root_revision: "9",
+      expected_author_id: destinationId,
+      timeout_seconds: "120"
+    }
+  }), now);
+  assert.equal(wait.ok, true);
+});
+
 test("terminal enum/payload bounds and lost correlation never PASS", () => {
   const row = {
     dispatch_id: crypto.randomUUID(),
@@ -284,7 +325,7 @@ test("terminal enum/payload bounds and lost correlation never PASS", () => {
   assert.equal(bounded.ok, true);
   assert.equal(bounded.result.terminalStatus, "BLOCKED");
   assert.ok(bounded.result.evidence.length <= 512);
-  assert.ok(bounded.result.payload.huge.length <= 256);
+  assert.ok(bounded.result.payload.huge.length <= 8192);
   assert.equal(bounded.result.bridgeRuntime, "ldw-operations-bridge");
   assert.equal(bounded.result.operation, "browser.list_tabs");
   assert.equal(bounded.result.resultClass, "BLOCKED");

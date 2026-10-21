@@ -71,6 +71,58 @@ var unknownOp = store.Accept(
 Assert(unknownOp.State == DispatchAcceptState.Blocked, "unknown operation fails closed");
 Assert(unknownOp.Envelope.TerminalResult?.TerminalStatus == DispatchTerminalStatus.Blocked, "unknown operation becomes BLOCKED terminal");
 
+var codyncBot = CodyncApprovedDestinations.All.Single(item => item.Name == "LDW IR - Cursor");
+var codyncGroup = CodyncApprovedDestinations.All.Single(item => item.Name == "LDW Review Board — Cursor");
+var validCodyncSend = BuildRequest(bridgeId, BridgeOperation.CodyncSendExact, now, now.AddMinutes(1), "idem-codync-send", "corr-codync-send") with
+{
+    Args = new Dictionary<string, string> { ["destination_id"] = codyncBot.Id, ["destination_name"] = codyncBot.Name, ["text"] = "Return the harmless sentinel." }
+};
+Assert(store.Accept(validCodyncSend, now).State == DispatchAcceptState.Accepted, "accepts an exact approved Codync bot send schema");
+var unsafeCodyncSend = validCodyncSend with { DispatchId = Guid.NewGuid(), IdempotencyKey = "idem-codync-all", Args = new Dictionary<string, string> { ["destination_id"] = codyncGroup.Id, ["destination_name"] = codyncGroup.Name, ["text"] = "@all answer" } };
+Assert(store.Accept(unsafeCodyncSend, now).State == DispatchAcceptState.Blocked, "unmentioned all-member group send fails closed");
+var unknownCodyncArg = validCodyncSend with { DispatchId = Guid.NewGuid(), IdempotencyKey = "idem-codync-rpc", Args = new Dictionary<string, string>(validCodyncSend.Args) { ["method"] = "createBot" } };
+Assert(store.Accept(unknownCodyncArg, now).State == DispatchAcceptState.Blocked, "Codync operation rejects generic method arguments");
+
+var codyncAdapter = new FakeCodyncAdapter();
+var codyncClient = new OutboundBridgeClient(bridgeId, new SyntheticBrowserAdapter([]), validator, codyncAdapter);
+var codyncTransport = new FakeBridgeTransport();
+codyncClient.Attach(codyncTransport);
+var groupSendId = Guid.NewGuid();
+var groupSend = BuildRequest(bridgeId, BridgeOperation.CodyncSendExact, now, now.AddMinutes(2), "idem-group-send", "corr-group-send") with
+{
+    DispatchId = groupSendId,
+    Args = new Dictionary<string, string>
+    {
+        ["destination_id"] = codyncGroup.Id,
+        ["destination_name"] = codyncGroup.Name,
+        ["text"] = "@LDW IR - Cursor reply PASS LDW644-SMOKE",
+        ["mentioned_member_ids"] = codyncBot.Id
+    }
+};
+await codyncTransport.DeliverAsync(groupSend, "conn-codync");
+Assert(codyncTransport.Results[^1].TerminalStatus == DispatchTerminalStatus.Pass, "exact Codync send returns an accepted-send terminal");
+Assert(codyncTransport.Results[^1].Payload["stage"] == "accepted_send", "Codync send clearly labels accepted-send stage");
+Assert(codyncTransport.Results[^1].Payload["client_nonce"] == $"ldw-operations-{groupSendId:D}", "Codync client nonce is derived deterministically from dispatch ID");
+
+var waitArgs = new Dictionary<string, string>
+{
+    ["destination_id"] = codyncGroup.Id,
+    ["destination_name"] = codyncGroup.Name,
+    ["send_dispatch_id"] = groupSendId.ToString("D"),
+    ["client_nonce"] = $"ldw-operations-{groupSendId:D}",
+    ["root_entry_id"] = "d54b9631-2aa7-41e9-94af-0a15039abd43",
+    ["root_sequence"] = "10",
+    ["root_turn"] = "3",
+    ["root_revision"] = "42",
+    ["expected_author_id"] = codyncBot.Id,
+    ["timeout_seconds"] = "120"
+};
+var waitRequest = BuildRequest(bridgeId, BridgeOperation.CodyncWaitReadExact, now, now.AddMinutes(3), "idem-codync-wait", "corr-codync-wait") with { Args = waitArgs };
+await codyncTransport.DeliverAsync(waitRequest, "conn-codync");
+Assert(codyncTransport.Results[^1].TerminalStatus == DispatchTerminalStatus.Pass, "Codync wait passes only with provider start plus exact final reply");
+Assert(codyncTransport.Results[^1].Payload["provider_start_observed"] == "true", "Codync wait exposes provider-positive start evidence");
+Assert(codyncTransport.Results[^1].Payload["reply_author_id"] == codyncBot.Id, "Codync wait correlates the exact member author");
+
 var unknownBridge = store.Accept(
     BuildRequest("unknown", BridgeOperation.ListTabs, now, now.AddMinutes(1), "idem-3", "corr-4"),
     now);
@@ -514,4 +566,22 @@ sealed class ThrowingBrowserAdapter : IBridgeBrowserAdapter
 
     public Task<BrowserTabMetadata?> ReadTabMetadataAsync(string tabId, CancellationToken cancellationToken)
         => throw new InvalidOperationException("synthetic adapter fault");
+}
+
+sealed class FakeCodyncAdapter : ICodyncBridgeAdapter
+{
+    public Task<CodyncHostHealth> GetHealthAsync(CancellationToken cancellationToken)
+        => Task.FromResult(new CodyncHostHealth(true, "2.20.4", false));
+
+    public Task<IReadOnlyList<CodyncDestination>> ListApprovedBotsGroupsAsync(CancellationToken cancellationToken)
+        => Task.FromResult(CodyncApprovedDestinations.All);
+
+    public Task<CodyncSendReceipt> SendExactAsync(string destinationId, string destinationName, string text, string clientNonce, IReadOnlyList<string> mentionedMemberIds, CancellationToken cancellationToken)
+        => Task.FromResult(new CodyncSendReceipt(destinationId, destinationName, clientNonce, "d54b9631-2aa7-41e9-94af-0a15039abd43", 10, 3, 42, DateTimeOffset.UtcNow));
+
+    public Task<CodyncWaitResult> WaitReadExactAsync(CodyncSendReceipt receipt, string expectedAuthorId, TimeSpan timeout, CancellationToken cancellationToken)
+        => Task.FromResult(new CodyncWaitResult(true, false,
+            new CodyncCorrelatedReply(receipt.DestinationId, receipt.DestinationName, receipt.RootEntryId, expectedAuthorId,
+                "PASS LDW644-SMOKE", 11, DateTimeOffset.UtcNow.AddSeconds(-1), DateTimeOffset.UtcNow, false),
+            "reply", "Provider start and exact correlated final reply observed."));
 }
