@@ -15,6 +15,27 @@ $script:AcceptedVerifierRecordSource = [pscustomobject]@{
 }
 $root = Join-Path $env:ProgramData 'LDW/CiRunnerDispatch'
 $staging = $null
+function Assert-Ci10PublisherElevated {
+    if ($env:OS -ne 'Windows_NT') { return }
+    $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'ELEVATED_CONTROLLER_REQUIRED' }
+}
+function Assert-Ci10PublisherPath([string]$Root, [string]$Path) {
+    $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    if (-not $fullPath.StartsWith($fullRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'PATH_OUTSIDE_OWNED_ROOT'
+    }
+    $cursor = $fullPath
+    while ($cursor) {
+        if ((Test-Path -LiteralPath $cursor) -and ((Get-Item -LiteralPath $cursor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'REPARSE_PATH_REFUSED'
+        }
+        $parent = [IO.Path]::GetDirectoryName($cursor)
+        if ($parent -eq $cursor) { break }
+        $cursor = $parent
+    }
+}
 function Protect-Ci10Directory([string]$Path) {
     $null = New-Item -ItemType Directory -Path $Path -Force
     $acl = [Security.AccessControl.DirectorySecurity]::new()
@@ -56,13 +77,12 @@ try {
     if ($LASTEXITCODE -ne 0 -or $sourceStatus) { throw 'PUBLISH_SOURCE_WORKTREE_DIRTY' }
     Assert-Ci10AcceptedHeadDispatcherSource $repo
     Import-Module (Join-Path $PSScriptRoot 'Dispatch.psm1') -Force
-    Import-Module (Join-Path $repo 'ci-runner/CiRunner.psm1') -Force
-    Assert-Ci7Elevated
+    Assert-Ci10PublisherElevated
     $liveTree = & git -C $repo rev-parse ($Commit+'^{tree}') 2>$null
     if ($LASTEXITCODE -ne 0 -or $liveTree -cne $Tree) { throw 'PUBLISH_COMMIT_TREE_MISMATCH' }
     $remote = & git -C $repo remote get-url origin 2>$null
     if ($LASTEXITCODE -ne 0 -or $remote -cnotmatch '^(https://github\.com/|git@github\.com:)LowcountryDigitalWorks/infrastructure-tools(\.git)?$') { throw 'PUBLISH_REPOSITORY_REFUSED' }
-    Assert-Ci7Path (Split-Path $root -Parent) $root
+    Assert-Ci10PublisherPath (Split-Path $root -Parent) $root
     if (Test-Path -LiteralPath $root) { Assert-Ci10ProtectedPath $root } else { Protect-Ci10Directory $root }
     $releases = Join-Path $root 'releases'
     if (Test-Path -LiteralPath $releases) { Assert-Ci10ProtectedPath $releases } else { Protect-Ci10Directory $releases }
@@ -132,9 +152,9 @@ try {
 } finally {
     if ($staging -and (Test-Path -LiteralPath $staging)) {
         # Only the exact fresh stage directory created above is disposable.
-        Assert-Ci7Path $root $staging
+        Assert-Ci10PublisherPath $root $staging
         if ((Split-Path $staging -Leaf) -cnotmatch '^stage-[a-f0-9]{32}$') { throw 'STAGING_CLEANUP_OWNERSHIP_INVALID' }
-        foreach ($item in @(Get-ChildItem -LiteralPath $staging -Recurse -Force)) { Assert-Ci7Path $root $item.FullName }
+        foreach ($item in @(Get-ChildItem -LiteralPath $staging -Recurse -Force)) { Assert-Ci10PublisherPath $root $item.FullName }
         Remove-Item -LiteralPath $staging -Recurse -Force
     }
 }

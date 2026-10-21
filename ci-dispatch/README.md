@@ -58,6 +58,11 @@ files remain sourced from the exact requested target commit/tree. The manifest h
 the complete runtime file set. No `.git`, credentials or machine settings enter the
 bundle. An existing release must already match; publication never overwrites it.
 
+The publisher defines its minimal elevation and owned-path/reparse-point guards
+locally. It never imports `ci-runner/CiRunner.psm1` from the ambient checkout;
+controller files enter a release only from one complete accepted snapshot, and
+unknown or mixed controller files are refused before publication.
+
 The root, release parents and contents are owned by Administrators, with only
 Administrators and SYSTEM allowed to write. Reparse paths, untrusted ownership,
 missing required ACL principals, missing/extra files, manifest/hash drift and

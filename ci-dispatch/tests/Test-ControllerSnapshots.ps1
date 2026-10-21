@@ -149,6 +149,41 @@ try {
             'bf8da2a7ed95887bb7b7e3ddbf1ba10fe97f9a3ff9eb384ae9e16740674241ef')
         Assert ((git -C $unaccepted rev-parse HEAD).Trim() -cne '805b71f36232412e072b0c860c1f4d665511d347')
     }
+    Check 'clean accepted-dispatcher checkout with modified controller module is refused without importing it' {
+        $publisherPath=Join-Path $PSScriptRoot '../Publish-Bundle.ps1'
+        $tokens=$null;$parseErrors=$null
+        $ast=[System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $publisherPath),[ref]$tokens,[ref]$parseErrors)
+        if($parseErrors.Count){throw 'TEST_PUBLISHER_PARSE_FAILED'}
+        $source=[IO.File]::ReadAllText((Resolve-Path $publisherPath))
+        Assert ($source.Contains('function Assert-Ci10PublisherElevated'))
+        Assert ($source.Contains('function Assert-Ci10PublisherPath'))
+        $moduleImports=@($ast.FindAll({param($node)$node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -ceq 'Import-Module'},$true))
+        Assert ($moduleImports.Count -eq 1 -and $moduleImports[0].Extent.Text.Contains("'Dispatch.psm1'"))
+        Assert (-not ($moduleImports[0].Extent.Text -match 'CiRunner'))
+
+        $untrusted=Join-Path $root 'untrusted-controller-repository'
+        & git clone --shared --no-checkout $repo $untrusted 2>$null
+        if($LASTEXITCODE -ne 0){throw 'TEST_UNTRUSTED_CONTROLLER_CLONE_FAILED'}
+        & git -C $untrusted checkout -b untrusted-controller $((git -C $repo rev-parse HEAD).Trim()) 2>$null
+        if($LASTEXITCODE -ne 0){throw 'TEST_UNTRUSTED_CONTROLLER_CHECKOUT_FAILED'}
+        & git -C $untrusted config user.name 'CI-10 deterministic test'
+        & git -C $untrusted config user.email 'ci10-test@example.invalid'
+        $marker=Join-Path $root 'untrusted-module-executed.txt'
+        [IO.File]::WriteAllText((Join-Path $untrusted 'ci-runner/CiRunner.psm1'),
+            "[IO.File]::WriteAllText('$marker','executed'); throw 'UNTRUSTED_MODULE_EXECUTED'")
+        & git -C $untrusted add ci-runner/CiRunner.psm1
+        & git -C $untrusted commit -m 'Create clean unaccepted controller module' 2>$null
+        if($LASTEXITCODE -ne 0 -or (& git -C $untrusted status --porcelain)){throw 'TEST_UNTRUSTED_CONTROLLER_SETUP_FAILED'}
+        Assert ((git -C $untrusted rev-parse 'HEAD:ci-dispatch/Dispatch.psm1').Trim() -ceq
+            '662981a2955a3cd3f3526aeb666e185f989c4a18')
+        $module=Join-Path $untrusted 'ci-runner/CiRunner.psm1'
+        Refuses {Get-Ci10MatchedControllerSnapshot -RepositoryRoot $repo -ControllerRoot $untrusted `
+            -ControllerFiles @(Get-Ci10RuntimeFiles|Where-Object{$_.StartsWith('ci-runner/')}) -StagingRoot $root} `
+            'ACCEPTED_CONTROLLER_CHANGED'
+        Assert (-not (Test-Path -LiteralPath $marker))
+        Assert ((Get-FileHash -LiteralPath $module -Algorithm SHA256).Hash.Length -eq 64)
+    }
     Check 'publisher has no caller-selected controller or dispatcher acceptance path' {
         $source=Get-Content -LiteralPath (Join-Path $PSScriptRoot '../Publish-Bundle.ps1') -Raw
         $parameters=([regex]::Match($source,'(?s)^.*?param\((.*?)\)')).Groups[1].Value
@@ -160,6 +195,7 @@ try {
         $guardPosition=$source.IndexOf('Assert-Ci10AcceptedHeadDispatcherSource $repo',[StringComparison]::Ordinal)
         $importPosition=$source.IndexOf("Import-Module (Join-Path `$PSScriptRoot 'Dispatch.psm1')",[StringComparison]::Ordinal)
         Assert ($guardPosition -ge 0 -and $guardPosition -lt $importPosition)
+        Assert (-not ($source -match 'Import-Module\s+\(Join-Path `\$repo\s+''ci-runner/CiRunner\.psm1''\)'))
         Assert (-not ($source -match "git archive[^\r\n]*'HEAD'[^\r\n]*Dispatch\.psm1"))
         Assert (-not ($parameters -match 'Dispatcher|Verifier|Blob|Provenance'))
     }
