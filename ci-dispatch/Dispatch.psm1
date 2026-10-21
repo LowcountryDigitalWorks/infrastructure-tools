@@ -20,6 +20,7 @@ $script:AcceptedControllerSnapshots = @(
 )
 $script:RuntimeFiles = @(
     'ci-dispatch/Dispatch.psm1', 'ci-dispatch/Invoke-Dispatcher.ps1', 'ci-dispatch/profiles.json',
+    'ci-dispatch/verifier-provenance.json',
     'ci-runner/CiRunner.psm1', 'ci-runner/Invoke-IsolatedRunner.ps1', 'ci-runner/Native.cs',
     'ci-runner/guest/bootstrap.sh', 'ci-runner/guest/ci7-runner.service', 'ci-runner/guest/run-one.sh'
 )
@@ -44,6 +45,25 @@ function Get-Ci10ManifestControllerSnapshot {
         }
     }
     $snapshot[0]
+}
+
+function Get-Ci10ManifestDispatcherProvenance {
+    param([Parameter(Mandatory)][string]$BundleRoot, [Parameter(Mandatory)][object]$Manifest)
+    $provenancePath = Join-Path $BundleRoot 'ci-dispatch/verifier-provenance.json'
+    if (-not (Test-Path -LiteralPath $provenancePath -PathType Leaf)) { throw 'BUNDLE_VERIFIER_PROVENANCE_MISMATCH' }
+    try { $accepted = Get-Content -LiteralPath $provenancePath -Raw | ConvertFrom-Json }
+    catch { throw 'BUNDLE_VERIFIER_PROVENANCE_MISMATCH' }
+    $actual = $Manifest.dispatcher
+    if (-not $actual -or $accepted.schema -ne 1 -or
+        $accepted.commit -cnotmatch '^[a-f0-9]{40}$' -or $accepted.tree -cnotmatch '^[a-f0-9]{40}$' -or
+        $accepted.blob -cnotmatch '^[a-f0-9]{40}$' -or $accepted.sha256 -cnotmatch '^[a-f0-9]{64}$' -or
+        $actual.commit -cne $accepted.commit -or $actual.tree -cne $accepted.tree -or
+        $actual.blob -cne $accepted.blob -or $actual.sha256 -cne $accepted.sha256) {
+        throw 'BUNDLE_VERIFIER_PROVENANCE_MISMATCH'
+    }
+    $entry = @($Manifest.files | Where-Object path -CEQ 'ci-dispatch/Dispatch.psm1')
+    if ($entry.Count -ne 1 -or $entry[0].sha256 -cne $accepted.sha256) { throw 'BUNDLE_VERIFIER_PROVENANCE_MISMATCH' }
+    [pscustomobject]@{ commit=$accepted.commit; tree=$accepted.tree; blob=$accepted.blob; sha256=$accepted.sha256 }
 }
 
 function Get-Ci10MatchedControllerSnapshot {
@@ -147,8 +167,9 @@ function Assert-Ci10Bundle {
     if ((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $ManifestSha) { throw 'MANIFEST_HASH_DRIFT' }
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     $acceptedSnapshot = Get-Ci10ManifestControllerSnapshot $manifest
+    $acceptedDispatcher = Get-Ci10ManifestDispatcherProvenance -BundleRoot $BundleRoot -Manifest $manifest
     if ($manifest.schema -ne 1 -or $manifest.commit -cne $Commit -or $manifest.tree -cne $Tree -or
-        -not $acceptedSnapshot) {
+        -not $acceptedSnapshot -or -not $acceptedDispatcher) {
         throw 'BUNDLE_PROVENANCE_MISMATCH'
     }
     $expected = @($script:RuntimeFiles) + @('manifest.json')
