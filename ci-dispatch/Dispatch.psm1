@@ -63,6 +63,10 @@ function Get-Ci10ManifestDispatcherProvenance {
     }
     $entry = @($Manifest.files | Where-Object path -CEQ 'ci-dispatch/Dispatch.psm1')
     if ($entry.Count -ne 1 -or $entry[0].sha256 -cne $accepted.sha256) { throw 'BUNDLE_VERIFIER_PROVENANCE_MISMATCH' }
+    $dispatcherPath = Join-Path $BundleRoot 'ci-dispatch/Dispatch.psm1'
+    if ((Get-FileHash -LiteralPath $dispatcherPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $accepted.sha256) {
+        throw 'BUNDLE_VERIFIER_HASH_DRIFT'
+    }
     [pscustomobject]@{ commit=$accepted.commit; tree=$accepted.tree; blob=$accepted.blob; sha256=$accepted.sha256 }
 }
 
