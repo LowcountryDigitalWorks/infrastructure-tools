@@ -125,7 +125,9 @@ public sealed class ClientWebSocketBridgeTransport : IBridgeTransport, IAsyncDis
                     var value = property.Value.ValueKind == JsonValueKind.String
                         ? property.Value.GetString() ?? string.Empty
                         : property.Value.ToString();
-                    if (value.Length > BridgeProtocol.MaxArgValueLength)
+                    if (value.Length > (operation == BridgeOperation.CodyncSendExact && property.Name == "text"
+                        ? BridgeProtocol.MaxCodyncSendTextLength
+                        : BridgeProtocol.MaxArgValueLength))
                     {
                         error = "arg-value-too-long";
                         return false;
@@ -178,7 +180,7 @@ public sealed class ClientWebSocketBridgeTransport : IBridgeTransport, IAsyncDis
             startedAt = result.StartedAt.Value.ToString("O"),
             completedAt = result.CompletedAt.ToString("O"),
             evidence = BridgeProtocol.BoundEvidence(result.Evidence),
-            payload = BridgeProtocol.BoundPayload(result.Payload)
+            payload = BridgeProtocol.BoundPayload(result.Payload, result.Operation)
         };
     }
 

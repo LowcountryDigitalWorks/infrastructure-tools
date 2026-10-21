@@ -220,6 +220,59 @@ test("stale and unknown envelopes are rejected before persistence", () => {
   assert.equal(unknown.error, "unknown-operation");
 });
 
+test("Codync operations accept only their typed bounded argument schemas", () => {
+  const now = new Date().toISOString();
+  const dispatchId = crypto.randomUUID();
+  const destinationId = crypto.randomUUID();
+  const validSend = normalizeDispatchPayload(buildDispatch({
+    operation: "codync.send_exact",
+    args: { destination_id: destinationId, destination_name: "Reviewer", text: "Read-only sentinel", mentioned_member_ids: "" }
+  }), now);
+  assert.equal(validSend.ok, true);
+
+  const validLongSend = normalizeDispatchPayload(buildDispatch({
+    operation: "codync.send_exact",
+    args: { destination_id: destinationId, destination_name: "Reviewer", text: "x".repeat(300), mentioned_member_ids: "" }
+  }), now);
+  assert.equal(validLongSend.ok, true);
+  const oversizedCodyncSend = normalizeDispatchPayload(buildDispatch({
+    operation: "codync.send_exact",
+    args: { destination_id: destinationId, destination_name: "Reviewer", text: "x".repeat(8193), mentioned_member_ids: "" }
+  }), now);
+  assert.equal(oversizedCodyncSend.ok, false);
+
+  const unsafeGroup = normalizeDispatchPayload(buildDispatch({
+    operation: "codync.send_exact",
+    args: { destination_id: destinationId, destination_name: "Board", text: "@all review this", mentioned_member_ids: "" }
+  }), now);
+  assert.equal(unsafeGroup.ok, false);
+  assert.equal(unsafeGroup.error, "invalid-operation-args");
+
+  const genericRpc = normalizeDispatchPayload(buildDispatch({
+    operation: "codync.send_exact",
+    args: { destination_id: destinationId, destination_name: "Reviewer", text: "Read-only", method: "createBot" }
+  }), now);
+  assert.equal(genericRpc.ok, false);
+
+  const wait = normalizeDispatchPayload(buildDispatch({
+    operation: "codync.wait_read_exact",
+    args: {
+      destination_id: destinationId,
+      destination_name: "Reviewer",
+      send_dispatch_id: dispatchId,
+      client_nonce: `ldw-operations-${dispatchId}`,
+      root_entry_id: crypto.randomUUID(),
+      root_sequence: "4",
+      root_turn: "2",
+      root_revision: "9",
+      submitted_at: new Date().toISOString(),
+      expected_author_id: destinationId,
+      timeout_seconds: "120"
+    }
+  }), now);
+  assert.equal(wait.ok, true);
+});
+
 test("terminal enum/payload bounds and lost correlation never PASS", () => {
   const row = {
     dispatch_id: crypto.randomUUID(),
@@ -307,6 +360,39 @@ test("terminal enum/payload bounds and lost correlation never PASS", () => {
   assert.equal(lost.result.terminalStatus, "AMBIGUOUS");
   assert.equal(lost.result.correlationId, "corr-term");
   assert.deepEqual(lost.result.payload, {});
+
+  const acceptedSendOnly = finalizeTerminal(
+    { ...row, operation: "codync.send_exact" },
+    "conn-1",
+    {
+      correlationId: "corr-term",
+      idempotencyKey: "idem-term",
+      status: "PASS",
+      evidence: "provider replied",
+      payload: { root_entry_id: crypto.randomUUID() },
+      ...observedProvenance
+    },
+    nowIso
+  );
+  assert.equal(acceptedSendOnly.ok, true);
+  assert.equal(acceptedSendOnly.result.terminalStatus, "BLOCKED");
+  assert.deepEqual(acceptedSendOnly.result.payload, {});
+
+  const rosterResult = finalizeTerminal(
+    { ...row, operation: "codync.list_approved_bots_groups" },
+    "conn-1",
+    {
+      correlationId: "corr-term",
+      idempotencyKey: "idem-term",
+      status: "PASS",
+      evidence: "exact roster",
+      payload: { approved_destinations_json: "r".repeat(3000) },
+      ...observedProvenance
+    },
+    nowIso
+  );
+  assert.equal(rosterResult.ok, true);
+  assert.equal(rosterResult.result.payload.approved_destinations_json.length, 3000);
 });
 
 test("duplicate idempotency and immutable one terminal via hibernated socket path", async () => {

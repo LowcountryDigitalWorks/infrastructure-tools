@@ -7,6 +7,7 @@ public enum DispatchValidationError
     UnknownBridge,
     UnknownOperation,
     InvalidEnvelope,
+    InvalidOperationArgs,
     StaleOrExpired
 }
 
@@ -34,7 +35,9 @@ public sealed class DispatchValidator
             request.Args.Any(pair =>
                 string.IsNullOrWhiteSpace(pair.Key) ||
                 pair.Value is null ||
-                pair.Value.Length > BridgeProtocol.MaxArgValueLength))
+                pair.Value.Length > (request.Operation == BridgeOperation.CodyncSendExact && pair.Key == "text"
+                    ? BridgeProtocol.MaxCodyncSendTextLength
+                    : BridgeProtocol.MaxArgValueLength)))
         {
             return DispatchValidationError.InvalidEnvelope;
         }
@@ -52,6 +55,11 @@ public sealed class DispatchValidator
         if (!_allowedOperations.Contains(request.Operation) || request.Operation == BridgeOperation.Unknown)
         {
             return DispatchValidationError.UnknownOperation;
+        }
+
+        if (!CodyncOperationSchema.IsValid(request.Operation, request.Args))
+        {
+            return DispatchValidationError.InvalidOperationArgs;
         }
 
         if (request.ExpiresAt <= request.IssuedAt ||

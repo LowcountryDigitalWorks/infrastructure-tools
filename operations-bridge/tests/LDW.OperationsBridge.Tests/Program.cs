@@ -1,4 +1,7 @@
 using System.Text.Json;
+using System.Net;
+using System.Net.Http.Headers;
+using System.Text;
 using LDW.OperationsBridge.Client;
 using LDW.OperationsBridge.Core;
 
@@ -70,6 +73,142 @@ var unknownOp = store.Accept(
     now);
 Assert(unknownOp.State == DispatchAcceptState.Blocked, "unknown operation fails closed");
 Assert(unknownOp.Envelope.TerminalResult?.TerminalStatus == DispatchTerminalStatus.Blocked, "unknown operation becomes BLOCKED terminal");
+
+var codyncBot = CodyncApprovedDestinations.All.Single(item => item.Name == "LDW IR - Cursor");
+var codyncGroup = CodyncApprovedDestinations.All.Single(item => item.Name == "LDW Review Board — Cursor");
+var validCodyncSend = BuildRequest(bridgeId, BridgeOperation.CodyncSendExact, now, now.AddMinutes(1), "idem-codync-send", "corr-codync-send") with
+{
+    Args = new Dictionary<string, string> { ["destination_id"] = codyncBot.Id, ["destination_name"] = codyncBot.Name, ["text"] = "Return the harmless sentinel." }
+};
+Assert(store.Accept(validCodyncSend, now).State == DispatchAcceptState.Accepted, "accepts an exact approved Codync bot send schema");
+var unsafeCodyncSend = validCodyncSend with { DispatchId = Guid.NewGuid(), IdempotencyKey = "idem-codync-all", Args = new Dictionary<string, string> { ["destination_id"] = codyncGroup.Id, ["destination_name"] = codyncGroup.Name, ["text"] = "@all answer" } };
+Assert(store.Accept(unsafeCodyncSend, now).State == DispatchAcceptState.Blocked, "unmentioned all-member group send fails closed");
+var unknownCodyncArg = validCodyncSend with { DispatchId = Guid.NewGuid(), IdempotencyKey = "idem-codync-rpc", Args = new Dictionary<string, string>(validCodyncSend.Args) { ["method"] = "createBot" } };
+Assert(store.Accept(unknownCodyncArg, now).State == DispatchAcceptState.Blocked, "Codync operation rejects generic method arguments");
+
+var codyncAdapter = new FakeCodyncAdapter();
+var codyncClient = new OutboundBridgeClient(bridgeId, new SyntheticBrowserAdapter([]), validator, codyncAdapter);
+var codyncTransport = new FakeBridgeTransport();
+codyncClient.Attach(codyncTransport);
+var groupSendId = Guid.NewGuid();
+var groupSend = BuildRequest(bridgeId, BridgeOperation.CodyncSendExact, now, now.AddMinutes(2), "idem-group-send", "corr-group-send") with
+{
+    DispatchId = groupSendId,
+    Args = new Dictionary<string, string>
+    {
+        ["destination_id"] = codyncGroup.Id,
+        ["destination_name"] = codyncGroup.Name,
+        ["text"] = "@LDW IR - Cursor reply PASS LDW644-SMOKE",
+        ["mentioned_member_ids"] = codyncBot.Id
+    }
+};
+await codyncTransport.DeliverAsync(groupSend, "conn-codync");
+Assert(codyncTransport.Results[^1].TerminalStatus == DispatchTerminalStatus.Blocked, "exact Codync send cannot manufacture provider PASS");
+Assert(codyncTransport.Results[^1].Payload["stage"] == "accepted_send", "Codync send clearly labels accepted-send stage");
+Assert(codyncTransport.Results[^1].Payload["client_nonce"] == $"ldw-operations-{groupSendId:D}", "Codync client nonce is derived deterministically from dispatch ID");
+
+var waitArgs = new Dictionary<string, string>
+{
+    ["destination_id"] = codyncGroup.Id,
+    ["destination_name"] = codyncGroup.Name,
+    ["send_dispatch_id"] = groupSendId.ToString("D"),
+    ["client_nonce"] = $"ldw-operations-{groupSendId:D}",
+    ["root_entry_id"] = "d54b9631-2aa7-41e9-94af-0a15039abd43",
+    ["root_sequence"] = "10",
+    ["root_turn"] = "3",
+    ["root_revision"] = "42",
+    ["submitted_at"] = now.ToString("O"),
+    ["expected_author_id"] = codyncBot.Id,
+    ["timeout_seconds"] = "120"
+};
+var waitRequest = BuildRequest(bridgeId, BridgeOperation.CodyncWaitReadExact, now, now.AddMinutes(3), "idem-codync-wait", "corr-codync-wait") with { Args = waitArgs };
+await codyncTransport.DeliverAsync(waitRequest, "conn-codync");
+Assert(codyncTransport.Results[^1].TerminalStatus == DispatchTerminalStatus.Pass, "Codync wait passes only with provider start plus exact final reply");
+Assert(codyncTransport.Results[^1].Payload["provider_start_observed"] == "true", "Codync wait exposes provider-positive start evidence");
+Assert(codyncTransport.Results[^1].Payload["reply_author_id"] == codyncBot.Id, "Codync wait correlates the exact member author");
+
+foreach (var (state, expectedStatus) in new[]
+{
+    ("stale_identity", DispatchTerminalStatus.Stale),
+    ("timeout", DispatchTerminalStatus.Failed),
+    ("connection_lost", DispatchTerminalStatus.Failed),
+    ("needs_input", DispatchTerminalStatus.Blocked)
+})
+{
+    var stateClient = new OutboundBridgeClient(bridgeId, new SyntheticBrowserAdapter([]), validator,
+        new FakeCodyncAdapter(new CodyncWaitResult(false, state == "needs_input", null, state, "synthetic state")));
+    var stateTransport = new FakeBridgeTransport();
+    stateClient.Attach(stateTransport);
+    var stateRequest = waitRequest with
+    {
+        DispatchId = Guid.NewGuid(),
+        IdempotencyKey = "idem-codync-" + state,
+        CorrelationId = "corr-codync-" + state,
+        Args = new Dictionary<string, string>(waitArgs) { ["send_dispatch_id"] = Guid.NewGuid().ToString("D") }
+    };
+    var nonceDispatchId = Guid.Parse(stateRequest.Args["send_dispatch_id"]);
+    stateRequest = stateRequest with { Args = new Dictionary<string, string>(stateRequest.Args) { ["client_nonce"] = $"ldw-operations-{nonceDispatchId:D}" } };
+    await stateTransport.DeliverAsync(stateRequest, "conn-codync-state");
+    Assert(stateTransport.Results[^1].TerminalStatus == expectedStatus, $"Codync wait state {state} maps to {expectedStatus}");
+}
+
+var localHost = new FakeCodyncHttpHandler();
+using (var liveAdapter = new CodyncLoopbackAdapter(_ => ValueTask.FromResult("unit-test-bearer-never-return"), localHost))
+{
+    var health = await liveAdapter.GetHealthAsync(CancellationToken.None);
+    Assert(health.Ready && health.Version == "2.20.4", "Codync adapter parses host health through its fixed loopback API");
+    var sentAt = DateTimeOffset.UtcNow;
+    var liveReceipt = await liveAdapter.SendExactAsync(codyncBot.Id, codyncBot.Name, "Read-only deterministic fixture.", "ldw-test-nonce", [], CancellationToken.None);
+    Assert(liveReceipt.SubmittedAt >= sentAt && liveReceipt.RootEntryId == FakeCodyncHttpHandler.RootEntryId, "Codync adapter returns exact root receipt and original send time");
+    var liveWait = await liveAdapter.WaitReadExactAsync(liveReceipt, codyncBot.Id, TimeSpan.FromSeconds(5), CancellationToken.None);
+    Assert(liveWait.ProviderStartObserved && liveWait.Reply?.AuthorId == codyncBot.Id && liveWait.Reply.Sequence == 11, "Codync adapter correlates provider start and exact final author/root turn");
+    var safeResult = JsonSerializer.Serialize(liveWait);
+    Assert(!safeResult.Contains("unit-test-bearer-never-return", StringComparison.Ordinal), "Codync bearer never appears in adapter result");
+}
+
+using (var rosterAdapter = new CodyncLoopbackAdapter(_ => ValueTask.FromResult("unit-test-bearer-never-return"), new FakeCodyncHttpHandler(rosterOnly: true)))
+{
+    var approved = await rosterAdapter.ListApprovedBotsGroupsAsync(CancellationToken.None);
+    Assert(approved.Count == CodyncApprovedDestinations.All.Count, "Codync adapter resolves the full exact approved roster from SSE");
+    var serialized = JsonSerializer.Serialize(approved, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+    var boundedRoster = BridgeProtocol.BoundPayload(new Dictionary<string, string> { ["approved_destinations_json"] = serialized }, BridgeOperation.CodyncListApprovedBotsGroups);
+    Assert(boundedRoster["approved_destinations_json"].Length == serialized.Length, "approved Codync roster is not truncated in terminal payload");
+}
+
+using (var malformedAdapter = new CodyncLoopbackAdapter(_ => ValueTask.FromResult("unit-test-bearer-never-return"), new FakeCodyncHttpHandler(malformedRoster: true)))
+{
+    await AssertThrowsAsync<JsonException>(() => malformedAdapter.ListApprovedBotsGroupsAsync(CancellationToken.None), "malformed Codync SSE JSON fails closed");
+}
+
+foreach (var failureMode in new[] { "wrong_author", "wrong_sequence", "wrong_turn", "stream_loss" })
+{
+    using var failureAdapter = new CodyncLoopbackAdapter(_ => ValueTask.FromResult("unit-test-bearer-never-return"), new FakeCodyncHttpHandler(failureMode: failureMode));
+    var receipt = await failureAdapter.SendExactAsync(codyncBot.Id, codyncBot.Name, "Fixture only.", "ldw-test-" + failureMode, [], CancellationToken.None);
+    var wait = await failureAdapter.WaitReadExactAsync(receipt, codyncBot.Id, TimeSpan.FromSeconds(5), CancellationToken.None);
+    Assert(wait.Reply is null && wait.State == "connection_lost", $"Codync rejects {failureMode} final evidence");
+}
+
+using (var missingRevisionAdapter = new CodyncLoopbackAdapter(_ => ValueTask.FromResult("unit-test-bearer-never-return"), new FakeCodyncHttpHandler(failureMode: "missing_start_revision")))
+{
+    var receipt = await missingRevisionAdapter.SendExactAsync(codyncBot.Id, codyncBot.Name, "Fixture only.", "ldw-test-missing-start-revision", [], CancellationToken.None);
+    var wait = await missingRevisionAdapter.WaitReadExactAsync(receipt, codyncBot.Id, TimeSpan.FromSeconds(5), CancellationToken.None);
+    Assert(!wait.ProviderStartObserved && wait.Reply is not null, "Codync reply without a post-root start revision remains non-provider-positive");
+}
+
+using (var wrongRootAdapter = new CodyncLoopbackAdapter(_ => ValueTask.FromResult("unit-test-bearer-never-return"), new FakeCodyncHttpHandler(failureMode: "wrong_root")))
+{
+    var receipt = await wrongRootAdapter.SendExactAsync(codyncBot.Id, codyncBot.Name, "Fixture only.", "ldw-test-wrong-root", [], CancellationToken.None);
+    await AssertThrowsAsync<InvalidOperationException>(
+        () => wrongRootAdapter.WaitReadExactAsync(receipt, codyncBot.Id, TimeSpan.FromSeconds(5), CancellationToken.None),
+        "Codync rejects stale or mismatched history root correlation");
+}
+
+using (var partialRosterAdapter = new CodyncLoopbackAdapter(_ => ValueTask.FromResult("unit-test-bearer-never-return"), new FakeCodyncHttpHandler(partialRosterCount: 1)))
+{
+    await AssertThrowsAsync<InvalidOperationException>(
+        () => partialRosterAdapter.ListApprovedBotsGroupsAsync(CancellationToken.None),
+        "partial Codync roster catch-up fails closed");
+}
 
 var unknownBridge = store.Accept(
     BuildRequest("unknown", BridgeOperation.ListTabs, now, now.AddMinutes(1), "idem-3", "corr-4"),
@@ -449,6 +588,24 @@ void AssertThrows(Action action, string description)
     }
 }
 
+async Task AssertThrowsAsync<TException>(Func<Task> action, string description) where TException : Exception
+{
+    assertionCount++;
+    try
+    {
+        await action().ConfigureAwait(false);
+        throw new InvalidOperationException($"FAILED: {description} (expected {typeof(TException).Name})");
+    }
+    catch (InvalidOperationException ex) when (ex.Message.StartsWith("FAILED:", StringComparison.Ordinal))
+    {
+        throw;
+    }
+    catch (TException)
+    {
+        // expected fail-closed rejection
+    }
+}
+
 sealed class FakeBridgeTransport : IBridgeTransport
 {
     public event Func<BridgeDispatchRequest, string, CancellationToken, Task>? DispatchReceived;
@@ -514,4 +671,99 @@ sealed class ThrowingBrowserAdapter : IBridgeBrowserAdapter
 
     public Task<BrowserTabMetadata?> ReadTabMetadataAsync(string tabId, CancellationToken cancellationToken)
         => throw new InvalidOperationException("synthetic adapter fault");
+}
+
+sealed class FakeCodyncAdapter(CodyncWaitResult? configuredWait = null) : ICodyncBridgeAdapter
+{
+    public Task<CodyncHostHealth> GetHealthAsync(CancellationToken cancellationToken)
+        => Task.FromResult(new CodyncHostHealth(true, "2.20.4", false));
+
+    public Task<IReadOnlyList<CodyncDestination>> ListApprovedBotsGroupsAsync(CancellationToken cancellationToken)
+        => Task.FromResult(CodyncApprovedDestinations.All);
+
+    public Task<CodyncSendReceipt> SendExactAsync(string destinationId, string destinationName, string text, string clientNonce, IReadOnlyList<string> mentionedMemberIds, CancellationToken cancellationToken)
+        => Task.FromResult(new CodyncSendReceipt(destinationId, destinationName, clientNonce, "d54b9631-2aa7-41e9-94af-0a15039abd43", 10, 3, 42, DateTimeOffset.UtcNow));
+
+    public Task<CodyncWaitResult> WaitReadExactAsync(CodyncSendReceipt receipt, string expectedAuthorId, TimeSpan timeout, CancellationToken cancellationToken)
+        => Task.FromResult(configuredWait ?? new CodyncWaitResult(true, false,
+            new CodyncCorrelatedReply(receipt.DestinationId, receipt.DestinationName, receipt.RootEntryId, expectedAuthorId,
+                "PASS LDW644-SMOKE", 11, DateTimeOffset.UtcNow.AddSeconds(-1), DateTimeOffset.UtcNow, false),
+            "reply", "Provider start and exact correlated final reply observed."));
+}
+
+sealed class FakeCodyncHttpHandler(bool malformedRoster = false, bool rosterOnly = false, string? failureMode = null, int? partialRosterCount = null) : HttpMessageHandler
+{
+    public const string RootEntryId = "d54b9631-2aa7-41e9-94af-0a15039abd43";
+    private int _eventRequestCount;
+    private string _nonce = string.Empty;
+    private readonly string _botId = CodyncApprovedDestinations.All[0].Id;
+    private bool _sendSeen;
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        if (request.Headers.Authorization?.Scheme != "Bearer" || request.Headers.Authorization.Parameter != "unit-test-bearer-never-return")
+            return Json(HttpStatusCode.Unauthorized, "{}");
+        if (request.Method == HttpMethod.Get && request.RequestUri?.AbsolutePath == "/health")
+            return Json(HttpStatusCode.OK, "{\"ok\":true,\"version\":\"2.20.4\",\"busy\":false}");
+        if (request.Method == HttpMethod.Get && request.RequestUri?.AbsolutePath == "/events")
+        {
+            _eventRequestCount++;
+            if (malformedRoster && _eventRequestCount == 1)
+                return Events("data: {not-json}\n\n");
+            if (rosterOnly || _sendSeen || _eventRequestCount == 1)
+            {
+                var roster = CodyncApprovedDestinations.All.Take(partialRosterCount ?? CodyncApprovedDestinations.All.Count).Select(item => new
+                {
+                    type = "bot",
+                    bot = new
+                    {
+                        id = item.Id,
+                        name = item.Name,
+                        kind = item.Kind == "group" ? "group" : "agent",
+                        members = item.Members
+                    }
+                });
+                return Events(string.Join("\n", roster.Select(item => "data: " + JsonSerializer.Serialize(item))) + "\n\n");
+            }
+            if (_eventRequestCount == 2)
+                return Events("data: {\"type\":\"hello\",\"rev\":42}\n\n");
+            if (request.RequestUri.Query.Contains("since=42", StringComparison.Ordinal))
+            {
+                var startedAt = DateTimeOffset.UtcNow.AddMinutes(1).ToUnixTimeMilliseconds();
+                var startRev = failureMode == "missing_start_revision" ? (long?)null : 44L;
+                var start = new { type = "bot", rev = startRev, bot = new { id = _botId, workingChat = _botId, startedAt, status = "working" } };
+                if (failureMode == "stream_loss") return Events("data: " + JsonSerializer.Serialize(start) + "\n\n");
+                var author = failureMode == "wrong_author" ? CodyncApprovedDestinations.All[1].Id : _botId;
+                var sequence = failureMode == "wrong_sequence" ? 10 : 11;
+                var turn = failureMode == "wrong_turn" ? 4 : 3;
+                var final = new { type = "entry", entry = new { botId = _botId, id = Guid.NewGuid().ToString("D"), seq = sequence, turn, kind = "agent", data = new { final = true, author, text = "PASS LDW-CODYNC-FAKE" } } };
+                return Events("data: " + JsonSerializer.Serialize(start) + "\n\ndata: " + JsonSerializer.Serialize(final) + "\n\n");
+            }
+        }
+        if (request.Method == HttpMethod.Post && request.RequestUri?.AbsolutePath == "/api/send")
+        {
+            var body = await request.Content!.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            using var document = JsonDocument.Parse(body);
+            _nonce = document.RootElement.GetProperty("clientNonce").GetString()!;
+            _sendSeen = true;
+            var entry = new { entry = new { id = RootEntryId, botId = _botId, seq = 10, turn = 3, rev = 43, kind = "user", data = new { clientNonce = _nonce } } };
+            return Json(HttpStatusCode.OK, JsonSerializer.Serialize(entry));
+        }
+        if (request.Method == HttpMethod.Post && request.RequestUri?.AbsolutePath == "/api/history")
+        {
+            var rootId = failureMode == "wrong_root" ? "00000000-0000-4000-8000-000000000001" : RootEntryId;
+            var history = new { entries = new[] { new { id = rootId, botId = _botId, seq = 10, turn = 3, kind = "user", data = new { clientNonce = _nonce } } } };
+            return Json(HttpStatusCode.OK, JsonSerializer.Serialize(history));
+        }
+        return Json(HttpStatusCode.NotFound, "{}");
+    }
+
+    private static HttpResponseMessage Json(HttpStatusCode status, string body)
+        => new(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+
+    private static HttpResponseMessage Events(string body)
+        => new(HttpStatusCode.OK)
+        {
+            Content = new StringContent(body, Encoding.UTF8, "text/event-stream")
+        };
 }

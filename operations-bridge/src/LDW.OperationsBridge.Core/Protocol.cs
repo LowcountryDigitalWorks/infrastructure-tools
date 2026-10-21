@@ -8,8 +8,11 @@ public static class BridgeProtocol
     public const int MaxEvidenceLength = 512;
     public const int MaxPayloadEntries = 32;
     public const int MaxPayloadValueLength = 256;
+    public const int MaxCodyncReplyLength = 8192;
+    public const int MaxCodyncRosterLength = 8192;
     public const int MaxArgEntries = 16;
     public const int MaxArgValueLength = 256;
+    public const int MaxCodyncSendTextLength = 8192;
     public const int MaxBridgeRuntimeLength = 64;
     public const int MaxBridgeVersionLength = 32;
 
@@ -18,7 +21,11 @@ public static class BridgeProtocol
         {
             BridgeOperation.BrowserHealth,
             BridgeOperation.ListTabs,
-            BridgeOperation.ReadTabMetadata
+            BridgeOperation.ReadTabMetadata,
+            BridgeOperation.CodyncHealth,
+            BridgeOperation.CodyncListApprovedBotsGroups,
+            BridgeOperation.CodyncSendExact,
+            BridgeOperation.CodyncWaitReadExact
         };
 
     public static readonly IReadOnlySet<DispatchTerminalStatus> AllowedTerminalStatuses =
@@ -37,6 +44,10 @@ public static class BridgeProtocol
             BridgeOperation.BrowserHealth => "browser.health",
             BridgeOperation.ListTabs => "browser.list_tabs",
             BridgeOperation.ReadTabMetadata => "browser.read_tab",
+            BridgeOperation.CodyncHealth => "codync.health",
+            BridgeOperation.CodyncListApprovedBotsGroups => "codync.list_approved_bots_groups",
+            BridgeOperation.CodyncSendExact => "codync.send_exact",
+            BridgeOperation.CodyncWaitReadExact => "codync.wait_read_exact",
             _ => "unknown"
         };
 
@@ -52,6 +63,18 @@ public static class BridgeProtocol
                 return true;
             case "browser.read_tab":
                 operation = BridgeOperation.ReadTabMetadata;
+                return true;
+            case "codync.health":
+                operation = BridgeOperation.CodyncHealth;
+                return true;
+            case "codync.list_approved_bots_groups":
+                operation = BridgeOperation.CodyncListApprovedBotsGroups;
+                return true;
+            case "codync.send_exact":
+                operation = BridgeOperation.CodyncSendExact;
+                return true;
+            case "codync.wait_read_exact":
+                operation = BridgeOperation.CodyncWaitReadExact;
                 return true;
             default:
                 operation = BridgeOperation.Unknown;
@@ -95,7 +118,7 @@ public static class BridgeProtocol
         }
     }
 
-    public static IReadOnlyDictionary<string, string> BoundPayload(IReadOnlyDictionary<string, string>? payload)
+    public static IReadOnlyDictionary<string, string> BoundPayload(IReadOnlyDictionary<string, string>? payload, BridgeOperation operation = BridgeOperation.Unknown)
     {
         var result = new Dictionary<string, string>(StringComparer.Ordinal);
         if (payload is null)
@@ -116,9 +139,14 @@ public static class BridgeProtocol
             }
 
             var value = pair.Value ?? string.Empty;
-            if (value.Length > MaxPayloadValueLength)
+            var maxLength = operation == BridgeOperation.CodyncWaitReadExact && pair.Key == "reply_text"
+                ? MaxCodyncReplyLength
+                : operation == BridgeOperation.CodyncListApprovedBotsGroups && pair.Key == "approved_destinations_json"
+                    ? MaxCodyncRosterLength
+                    : MaxPayloadValueLength;
+            if (value.Length > maxLength)
             {
-                value = value[..MaxPayloadValueLength];
+                value = value[..maxLength];
             }
 
             result[pair.Key] = value;
@@ -181,7 +209,11 @@ public enum BridgeOperation
     Unknown = 0,
     BrowserHealth = 1,
     ListTabs = 2,
-    ReadTabMetadata = 3
+    ReadTabMetadata = 3,
+    CodyncHealth = 4,
+    CodyncListApprovedBotsGroups = 5,
+    CodyncSendExact = 6,
+    CodyncWaitReadExact = 7
 }
 
 public enum DispatchLifecycle
