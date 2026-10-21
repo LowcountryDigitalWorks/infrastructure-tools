@@ -1,59 +1,40 @@
+using System.Collections.Concurrent;
+
 namespace LDW.AdminBroker;
 
 public sealed class AdminBrokerEngine : IAdminBrokerEngine
 {
-    private readonly CodyncBotHandler _botHandler;
-    private readonly HostAgentOperationHandler _hostAgentHandler;
+    private readonly ConcurrentDictionary<string, (DateTime Expires, AdminBrokerResponse Response)> _requests = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _requestLock = new();
+    private static readonly TimeSpan ReplayTtl = TimeSpan.FromMinutes(2);
 
-    public AdminBrokerEngine(
-        CodyncBotHandler botHandler,
-        HostAgentOperationHandler hostAgentHandler)
+    public AdminBrokerEngine(CodyncBotHandler botHandler, HostAgentOperationHandler hostAgentHandler)
     {
-        _botHandler = botHandler ?? throw new ArgumentNullException(nameof(botHandler));
-        _hostAgentHandler = hostAgentHandler ?? throw new ArgumentNullException(nameof(hostAgentHandler));
+        ArgumentNullException.ThrowIfNull(botHandler);
+        ArgumentNullException.ThrowIfNull(hostAgentHandler);
     }
 
-    public Task<AdminBrokerResponse> ProcessRequestAsync(
-        AdminBrokerRequest request,
-        string? callerSid,
-        CancellationToken cancellationToken)
+    public Task<AdminBrokerResponse> ProcessRequestAsync(AdminBrokerRequest request, string? callerSid, CancellationToken cancellationToken)
     {
-        if (request is null)
+        cancellationToken.ThrowIfCancellationRequested();
+        if (request is null) throw new ArgumentNullException(nameof(request));
+        if (!Guid.TryParseExact(request.RequestId, "D", out _))
+            return Task.FromResult(Failure(request, "InvalidRequest", "Request ID must be a UUID.", "INVALID_REQUEST_ID"));
+
+        lock (_requestLock)
         {
-            return Task.FromResult(new AdminBrokerResponse(
-                AdminBrokerContract.Version,
-                "unknown",
-                "UNKNOWN",
-                false,
-                "unknown",
-                "InvalidRequest",
-                "Null request received.",
-                "NULL_REQUEST",
-                DateTime.UtcNow,
-                null));
+            var now = DateTime.UtcNow;
+            foreach (var item in _requests)
+                if (item.Value.Expires <= now) _requests.TryRemove(item.Key, out _);
+            if (_requests.TryGetValue(request.RequestId, out var prior))
+                return Task.FromResult(prior.Response with { ResultState = "DuplicateRequest", Summary = "Request ID already processed.", ErrorCode = "DUPLICATE_REQUEST" });
+
+            var response = Failure(request, "Unavailable", "No reviewed local adapter or broker transport is available.", "NOT_IMPLEMENTED");
+            _requests[request.RequestId] = (now + ReplayTtl, response);
+            return Task.FromResult(response);
         }
-
-        AdminBrokerResponse response = request.Operation switch
-        {
-            AdminBrokerContract.Operations.CodyncBotCreate => _botHandler.HandleCreate(request),
-            AdminBrokerContract.Operations.CodyncBotUpdate => _botHandler.HandleUpdate(request),
-            AdminBrokerContract.Operations.CodyncBotDelete => _botHandler.HandleDelete(request),
-            AdminBrokerContract.Operations.HostAgentStatus => _hostAgentHandler.HandleStatus(request),
-            AdminBrokerContract.Operations.HostAgentRestartReviewedComponent => _hostAgentHandler.HandleRestart(request),
-            AdminBrokerContract.Operations.HostAgentRepairReviewedInstall => _hostAgentHandler.HandleRepair(request),
-            _ => new AdminBrokerResponse(
-                AdminBrokerContract.Version,
-                request.RequestId,
-                request.Operation,
-                false,
-                request.TargetIdentity,
-                "UnrecognizedOperation",
-                $"Operation '{request.Operation}' is not supported by Admin Broker.",
-                "UNRECOGNIZED_OPERATION",
-                DateTime.UtcNow,
-                null)
-        };
-
-        return Task.FromResult(response);
     }
+
+    private static AdminBrokerResponse Failure(AdminBrokerRequest r, string state, string summary, string code) =>
+        new(AdminBrokerContract.Version, r.RequestId, r.Operation, false, r.TargetIdentity, state, summary, code, DateTime.UtcNow, null);
 }

@@ -85,7 +85,7 @@ public static class AdminBrokerContract
 
             if (!root.TryGetProperty("requestId", out var reqIdProp)
                 || reqIdProp.ValueKind != JsonValueKind.String
-                || string.IsNullOrWhiteSpace(reqIdProp.GetString()))
+                || !Guid.TryParseExact(reqIdProp.GetString(), "D", out _))
                 return false;
 
             if (!root.TryGetProperty("operation", out var opProp)
@@ -106,10 +106,10 @@ public static class AdminBrokerContract
 
                 if (paramsProp.ValueKind == JsonValueKind.Object)
                 {
-                    var dict = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
+                    var dict = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
                     foreach (var p in paramsProp.EnumerateObject())
                     {
-                        dict[p.Name] = p.Value.Clone();
+                        if (!dict.TryAdd(p.Name, p.Value.Clone())) return false;
                     }
                     parameters = dict;
                 }
@@ -121,6 +121,16 @@ public static class AdminBrokerContract
                 opProp.GetString()!,
                 targetProp.GetString()!,
                 parameters);
+
+            var expected = opProp.GetString() switch
+            {
+                Operations.CodyncBotCreate or Operations.CodyncBotUpdate => new[] { "name", "description", "endpointUrl", "capabilities" },
+                Operations.CodyncBotDelete or Operations.HostAgentStatus or Operations.HostAgentRestartReviewedComponent or Operations.HostAgentRepairReviewedInstall => Array.Empty<string>(),
+                _ => Array.Empty<string>()
+            };
+            var supplied = parameters?.Keys.ToHashSet(StringComparer.Ordinal) ?? new HashSet<string>(StringComparer.Ordinal);
+            if (!supplied.SetEquals(expected)) return false;
+            if (expected.Length > 0 && (parameters!["name"].ValueKind != JsonValueKind.String || parameters["description"].ValueKind != JsonValueKind.String || parameters["endpointUrl"].ValueKind != JsonValueKind.String || parameters["capabilities"].ValueKind != JsonValueKind.Array)) return false;
 
             return true;
         }

@@ -1,39 +1,31 @@
 # LDW Local Admin Broker & Local Secret Handoff (LDW01-OWNER-ADMIN-BROKER-001)
 
-The Local Admin Broker (`LDW.AdminBroker`) and Local Secret Store (`LDW.LocalSecretStore`) provide a deterministic, source-controlled local execution and credential boundary on LDW01.
-
-It allows GM and approved LDW automation to invoke a narrow set of authenticated, typed, audited owner-authorized operations without exposing arbitrary shell surface or secret material through chat, Desktop Commander history, process arguments, or transcripts.
+This source contains contract scaffolding only. No runnable broker listener, ACL-backed transport, Codync adapter, Host Agent operation adapter, or Corsair proof launcher is implemented. The advertised operations return `NOT_IMPLEMENTED`; no state-changing operation is available.
 
 ## Core Scope
 
 ### 1. Admin Broker Operations Enum (`LDW.AdminBroker`)
 
-The broker accepts strictly typed requests over local secure named pipe IPC (`\\.\pipe\LDW.AdminBroker.v1`) for 6 allowed operations:
+The contract names six operations, but the named-pipe transport is unavailable. `AdminBrokerPipeServer.ServeOneAsync` throws `NotSupportedException`; it does not create a listener or DACL. Requests require a UUID request ID and bounded JSON. Create/update require exactly `name`, `description`, `endpointUrl`, and `capabilities` with string/string/string/array types; delete and Host Agent operations accept no parameters. No adapter consumes these requests.
 
-- `CODYNC_BOT_CREATE` — Registers a new Codync bot definition in local protected store with exact readback.
-- `CODYNC_BOT_UPDATE` — Updates an existing Codync bot definition with exact readback.
-- `CODYNC_BOT_DELETE` — Removes a Codync bot definition with exact readback and removal confirmation.
-- `HOST_AGENT_STATUS` — Queries status of explicitly reviewed host agent components (`TrayAutostart`, `HyperVObserver`, `LiveProbe`, `SshLinuxNode`).
-- `HOST_AGENT_RESTART_REVIEWED_COMPONENT` — Restarts an explicitly reviewed host agent component. Unapproved targets fail closed (`TARGET_MISMATCH`).
-- `HOST_AGENT_REPAIR_REVIEWED_INSTALL` — Verifies configuration integrity, file permissions, and DACL settings for reviewed host agent components.
+- Codync create/update/delete — Unavailable; no real loopback adapter is present.
+- Host Agent status/restart/repair — Unavailable; no reviewed runtime adapter is present.
 
-All requests use strict JSON parsing. Any unrecognized top-level properties, missing parameters, or invalid operation names fail closed immediately.
+The request parser rejects unknown top-level properties, duplicate properties, non-UUID request IDs, oversized requests, and any nonempty parameter object. The in-process engine caches request IDs for two minutes and reports duplicates without dispatching.
 
 ### 2. Local Secret Store & Corsair/Neon Handoff (`LDW.LocalSecretStore`)
 
 The local secret store uses Windows DPAPI (`ProtectedData.Protect` / `Unprotect` with `DataProtectionScope.CurrentUser`) to protect local secrets.
 
-- Secret ID: `CORSAIR_NEON_DATABASE_URL`
-- Operations: `SetSecret`, `GetStatus` (metadata only, no plaintext), `RotateSecret`, `RemoveSecret`.
-- Bounded Launcher (`CorsairNeonLauncher`): Decrypts `CORSAIR_NEON_DATABASE_URL` in-memory only and injects it as an environment variable into a child process for the Corsair/Neon proof. Standard output and error streams are sanitized so plaintext credentials never enter logs, arguments, or transcripts.
+- Secret ID: `CORSAIR_NEON_DATABASE_URL` only. The store exposes set/rotate/remove and status containing existence, ID, and update time. Production protection requires Windows CurrentUser DPAPI and fails closed elsewhere. Tests inject a test-only fake protector.
+- `CorsairNeonLauncher` always returns `NOT_IMPLEMENTED`; it accepts no executable or argument inputs because no frozen proof contract exists.
 
 ## Privilege & Security Model
 
 - **Unelevated Tray Surface:** Normal-user Host Agent tray remains unelevated.
-- **IPC Access Control:** IPC named pipe uses an explicit DACL granting access only to `LocalSystem`, `Administrators`, and explicitly configured owner user SIDs (`S-1-5-21-...`). Broad well-known SIDs (Everyone, Interactive, Authenticated Users) are rejected.
-- **Fail Closed:** Target mismatch, unknown JSON fields, missing secrets, or unauthorized caller SIDs fail closed.
-- **Secret Redaction:** Plaintext secrets never appear in logs, process command lines, stdout/stderr, responses, or Git diffs.
-- **Bounded Audit Log:** All operations write secret-free JSON audit entries to `%LOCALAPPDATA%\LowcountryDigitalWorks\AdminBroker\audit-log.jsonl`.
+- **Transport:** Unavailable. There is no listener or runtime ACL/caller impersonation proof.
+- **Audit:** The logger persists bounded metadata records and propagates write failures. Since no broker transport or mutations are available, it is not an execution gate for a live operation.
+- **Secrets:** This source does not launch a child process. Secret values must not be included in logs or responses.
 
 ## Build and Test Runbook
 
