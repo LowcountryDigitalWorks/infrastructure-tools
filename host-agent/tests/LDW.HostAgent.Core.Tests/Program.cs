@@ -1,6 +1,15 @@
 using LDW.HostAgent.Core;
 
 var assertionCount = 0;
+Assert(StatusPresentation.For(StatusColor.Green) == ("Healthy", "✓"), "healthy state retains a positive text and glyph cue");
+Assert(StatusPresentation.For(StatusColor.Yellow) == ("Attention", "!"), "attention state is visible without color");
+Assert(StatusPresentation.For(StatusColor.Red) == ("Failed", "×"), "failed state remains explicit");
+Assert(StatusPresentation.For(StatusColor.Gray) == ("Unknown", "?"), "unknown state remains explicit");
+Assert(StatusPresentation.For(StatusColor.Blue) == ("Active", "▶"), "active CI state remains distinct");
+Assert(StatusPresentation.For(StatusColor.Purple) == ("Boost enabled", "⚡"), "CI Boost state remains distinct");
+var priorHealthySample = new object();
+Assert(ReferenceEquals(StatusPresentation.SampleForDisplay(priorHealthySample, observationSucceeded: true), priorHealthySample), "successful observation keeps its current sample");
+Assert(StatusPresentation.SampleForDisplay(priorHealthySample, observationSucceeded: false) is null, "failed observation suppresses the prior healthy sample from display");
 var now = DateTimeOffset.UtcNow;
 var activeSession = new RuntimeContext(OwnerSessionState.Active);
 var inactiveSession = new RuntimeContext(OwnerSessionState.Inactive);

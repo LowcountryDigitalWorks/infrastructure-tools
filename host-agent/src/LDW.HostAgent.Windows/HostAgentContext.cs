@@ -25,13 +25,7 @@ internal sealed class HostAgentContext : ApplicationContext
         _summaryItem = new ToolStripMenuItem("Collecting status…") { Enabled = false };
         menu.Items.Insert(0, _summaryItem);
         menu.Items.Insert(1, new ToolStripSeparator());
-        _trayIcon = new NotifyIcon
-        {
-            Icon = SystemIcons.Application,
-            Text = "LDW Host Agent — collecting status",
-            ContextMenuStrip = menu,
-            Visible = true
-        };
+        _trayIcon = new NotifyIcon { Icon = TrayIconFactory.Create(StatusColor.Gray), Text = "LDW Host Agent — Unknown", ContextMenuStrip = menu, Visible = true };
         _trayIcon.DoubleClick += (_, _) => ShowStatus();
         _timer = new System.Windows.Forms.Timer { Interval = 15_000 };
         _timer.Tick += async (_, _) => await RefreshAsync();
@@ -41,19 +35,22 @@ internal sealed class HostAgentContext : ApplicationContext
 
     private async Task RefreshAsync()
     {
-        if (!await _refreshGate.WaitAsync(0))
-            return;
+        if (!await _refreshGate.WaitAsync(0)) return;
         try
         {
             _lastSnapshot = await _provider.ObserveAsync(CancellationToken.None);
-            _summaryItem.Text = $"{_lastSnapshot.Snapshot.Color}: {_lastSnapshot.Snapshot.Health}";
-            _trayIcon.Text = LimitTrayText($"LDW Host Agent — {_lastSnapshot.Snapshot.Color} — {_lastSnapshot.Snapshot.Health}");
+            var state = StatusPresentation.For(_lastSnapshot.Snapshot.Color);
+            _summaryItem.Text = $"{state.Word}: {_lastSnapshot.Snapshot.Summary}";
+            _trayIcon.Text = LimitTrayText($"LDW Host Agent — {state.Word}");
+            ReplaceTrayIcon(_lastSnapshot.Snapshot.Color);
             _statusForm?.UpdateSnapshot(_lastSnapshot);
         }
         catch
         {
+            ClearSnapshotAfterObservationFailure(ref _lastSnapshot);
             _summaryItem.Text = "Status unavailable";
-            _trayIcon.Text = "LDW Host Agent — status unavailable";
+            _trayIcon.Text = "LDW Host Agent — Unknown";
+            ReplaceTrayIcon(StatusColor.Gray);
             _statusForm?.ShowError("Status refresh failed.");
         }
         finally
@@ -62,12 +59,13 @@ internal sealed class HostAgentContext : ApplicationContext
         }
     }
 
+    internal static void ClearSnapshotAfterObservationFailure(ref HostAgentLiveSnapshot? snapshot) => snapshot = null;
+
     private void ShowStatus()
     {
-        _statusForm ??= new StatusForm();
+        _statusForm ??= new StatusForm(() => _ = RefreshAsync(), CopyDiagnostics);
         _statusForm.FormClosed += (_, _) => _statusForm = null;
-        if (_lastSnapshot is not null)
-            _statusForm.UpdateSnapshot(_lastSnapshot);
+        _statusForm.UpdateSnapshot(_lastSnapshot);
         _statusForm.Show();
         _statusForm.Activate();
     }
@@ -79,7 +77,6 @@ internal sealed class HostAgentContext : ApplicationContext
             Clipboard.SetText("LDW Host Agent: no sanitized telemetry sample available.");
             return;
         }
-
         var builder = new StringBuilder();
         builder.AppendLine("LDW Host Agent sanitized diagnostic snapshot");
         builder.AppendLine($"Observed (UTC): {_lastSnapshot.Snapshot.ObservedAt:O}");
@@ -96,7 +93,14 @@ internal sealed class HostAgentContext : ApplicationContext
         Clipboard.SetText(builder.ToString());
     }
 
-    private static string LimitTrayText(string value) => value.Length <= 63 ? value : value[..63];
+    private void ReplaceTrayIcon(StatusColor color)
+    {
+        var previous = _trayIcon.Icon;
+        _trayIcon.Icon = TrayIconFactory.Create(color);
+        previous?.Dispose();
+    }
+
+    private static string LimitTrayText(string text) => text.Length <= 63 ? text : text[..63];
 
     protected override void ExitThreadCore()
     {

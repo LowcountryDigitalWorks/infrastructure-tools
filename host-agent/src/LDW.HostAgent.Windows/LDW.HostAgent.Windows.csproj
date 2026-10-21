@@ -14,5 +14,8 @@
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
       <_Parameter1>LDW.HostAgent.LiveProbe</_Parameter1>
     </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>LDW.HostAgent.UxEvidence</_Parameter1>
+    </AssemblyAttribute>
   </ItemGroup>
 </Project>
