@@ -2,15 +2,12 @@ using System.Runtime.InteropServices;
 using System.Security;
 using System.Text;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 
 namespace LDW.OperationsBridge.Runner;
 
 public sealed record BridgeRunnerConfiguration(string BridgeId, Uri RelayConnectUri)
 {
-    private static readonly Regex WorkerHost = new(
-        "^ldw-operations-bridge-relay\\.[a-z0-9-]+\\.workers\\.dev$",
-        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private const string WorkerHost = "ldw-operations-bridge-relay.locodw.workers.dev";
 
     public static string StateDirectory => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LDW", "OperationsBridge");
@@ -46,7 +43,7 @@ public sealed record BridgeRunnerConfiguration(string BridgeId, Uri RelayConnect
 
         if (!Uri.TryCreate(relayElement.GetString(), UriKind.Absolute, out var relay) ||
             relay.Scheme != Uri.UriSchemeWss ||
-            !WorkerHost.IsMatch(relay.Host) ||
+            !string.Equals(relay.Host, WorkerHost, StringComparison.OrdinalIgnoreCase) ||
             relay.Port != 443 ||
             relay.UserInfo.Length != 0 ||
             relay.AbsolutePath != "/relay/connect" ||

@@ -5,20 +5,21 @@ internal static class BridgeRunnerContractTests
     public static void Run()
     {
         var config = BridgeRunnerConfiguration.Parse(
-            "{\"bridgeId\":\"ldw01-bridge\",\"relayConnectUri\":\"wss://ldw-operations-bridge-relay.account.workers.dev/relay/connect?bridgeId=ldw01-bridge\"}");
+            "{\"bridgeId\":\"ldw01-bridge\",\"relayConnectUri\":\"wss://ldw-operations-bridge-relay.locodw.workers.dev/relay/connect?bridgeId=ldw01-bridge\"}");
         Assert(config.BridgeId == "ldw01-bridge", "runner accepts exact bridge identity");
         Assert(config.RelayConnectUri.Scheme == "wss", "runner accepts secure trusted endpoint");
 
         foreach (var invalid in new[]
         {
-            "{\"bridgeId\":\"other\",\"relayConnectUri\":\"wss://ldw-operations-bridge-relay.account.workers.dev/relay/connect?bridgeId=ldw01-bridge\"}",
-            "{\"bridgeId\":\"ldw01-bridge\",\"relayConnectUri\":\"ws://ldw-operations-bridge-relay.account.workers.dev/relay/connect?bridgeId=ldw01-bridge\"}",
+            "{\"bridgeId\":\"other\",\"relayConnectUri\":\"wss://ldw-operations-bridge-relay.locodw.workers.dev/relay/connect?bridgeId=ldw01-bridge\"}",
+            "{\"bridgeId\":\"ldw01-bridge\",\"relayConnectUri\":\"ws://ldw-operations-bridge-relay.locodw.workers.dev/relay/connect?bridgeId=ldw01-bridge\"}",
             "{\"bridgeId\":\"ldw01-bridge\",\"relayConnectUri\":\"wss://evil.example/relay/connect?bridgeId=ldw01-bridge\"}",
-            "{\"bridgeId\":\"ldw01-bridge\",\"relayConnectUri\":\"wss://ldw-operations-bridge-relay.account.workers.dev/relay/dispatch?bridgeId=ldw01-bridge\"}",
-            "{\"bridgeId\":\"ldw01-bridge\",\"relayConnectUri\":\"wss://ldw-operations-bridge-relay.account.workers.dev/relay/connect?bridgeId=other\"}",
-            "{\"bridgeId\":\"ldw01-bridge\",\"relayConnectUri\":\"wss://user:pass@ldw-operations-bridge-relay.account.workers.dev/relay/connect?bridgeId=ldw01-bridge\"}",
-            "{\"bridgeId\":\"ldw01-bridge\",\"relayConnectUri\":\"wss://ldw-operations-bridge-relay.account.workers.dev/relay/connect?bridgeId=ldw01-bridge\",\"token\":\"plaintext\"}",
-            "{\"bridgeId\":\"ldw01-bridge\",\"bridgeId\":\"ldw01-bridge\",\"relayConnectUri\":\"wss://ldw-operations-bridge-relay.account.workers.dev/relay/connect?bridgeId=ldw01-bridge\"}"
+            "{\"bridgeId\":\"ldw01-bridge\",\"relayConnectUri\":\"wss://ldw-operations-bridge-relay.attacker.workers.dev/relay/connect?bridgeId=ldw01-bridge\"}",
+            "{\"bridgeId\":\"ldw01-bridge\",\"relayConnectUri\":\"wss://ldw-operations-bridge-relay.locodw.workers.dev/relay/dispatch?bridgeId=ldw01-bridge\"}",
+            "{\"bridgeId\":\"ldw01-bridge\",\"relayConnectUri\":\"wss://ldw-operations-bridge-relay.locodw.workers.dev/relay/connect?bridgeId=other\"}",
+            "{\"bridgeId\":\"ldw01-bridge\",\"relayConnectUri\":\"wss://user:pass@ldw-operations-bridge-relay.locodw.workers.dev/relay/connect?bridgeId=ldw01-bridge\"}",
+            "{\"bridgeId\":\"ldw01-bridge\",\"relayConnectUri\":\"wss://ldw-operations-bridge-relay.locodw.workers.dev/relay/connect?bridgeId=ldw01-bridge\",\"token\":\"plaintext\"}",
+            "{\"bridgeId\":\"ldw01-bridge\",\"bridgeId\":\"ldw01-bridge\",\"relayConnectUri\":\"wss://ldw-operations-bridge-relay.locodw.workers.dev/relay/connect?bridgeId=ldw01-bridge\"}"
         })
         {
             AssertThrows<Exception>(() => BridgeRunnerConfiguration.Parse(invalid), "runner rejects invalid endpoint, identity, duplicate or extra secret fields");
