@@ -3,25 +3,25 @@
 This folder contains the smallest read-only source candidate for OPS-BRIDGE-001 issue #43.
 
 Scope in this slice:
-- normal-user .NET bridge client with outbound `ClientWebSocket` transport (no local inbound listener);
+- normal-user .NET executable bridge runner with outbound `ClientWebSocket` transport (no local inbound listener);
 - protocol/envelope and fail-closed validation at Worker/DO acceptance and again before local execution;
 - Cloudflare Worker + SQLite Durable Object relay using WebSocket Hibernation (`acceptWebSocket` / `getWebSockets` / attachments);
 - separate Site and Bridge credentials with server-bound bridge identity;
-- read-only browser adapter abstraction with exact-domain/subdomain allowlisted metadata only;
+- read-only Opera DevTools MCP 0.7.0 adapter; fixed stdio client invokes only typed `list_pages` and returns sanitized metadata from the dedicated LDW profile;
 - typed Codync health/approved roster/exact send/correlated wait adapter over Codync's supported loopback HTTP/SSE API;
-- deterministic synthetic tests for auth roles, delivery, replay/idempotency, correlation, hibernation rehydration, SQLite persistence, and Codync operation schemas.
+- deterministic synthetic tests for auth roles, delivery, replay/idempotency, correlation, hibernation rehydration, SQLite persistence, Codync operation schemas, and the typed Opera adapter/runner configuration.
 
 Out of scope in this slice:
-- no executable bridge host or deployment in this source slice; an accepted normal-user runner and reviewed runtime configuration are still required;
+- no live bridge deployment, local protected-secret provisioning, startup registration, scheduled task, service install, or autostart;
 - no chat relay implementation;
-- no local startup registration, scheduled task, service install, or autostart;
 - no deployment/mutation of Cloudflare resources or secrets;
 - no browser cookie/session export, arbitrary JavaScript, shell/admin RPC, or broad filesystem access.
 
 ## Layout
 
 - `src/LDW.OperationsBridge.Core` - protocol, validator, relay state machine, browser adapter contracts.
-- `src/LDW.OperationsBridge.Client` - outbound client, validation-before-execution, `ClientWebSocketBridgeTransport`.
+- `src/LDW.OperationsBridge.Client` - outbound client, validation-before-execution, WebSocket transport, and the fixed Opera metadata adapter.
+- `src/LDW.OperationsBridge.Runner` - normal-user executable, trusted endpoint/config checks, CurrentUser DPAPI reader, reconnect lifecycle, and sanitized status readback.
 - `tests/LDW.OperationsBridge.Tests` - deterministic contract tests with synthetic fixtures.
 - `relay-cloudflare` - authenticated Worker + SQLite Durable Object hibernating relay source and fixtures.
 
@@ -33,6 +33,10 @@ Out of scope in this slice:
 | Bridge | `BRIDGE_CLIENT_TOKEN` | `GET /relay/connect` WebSocket upgrade only |
 
 `BRIDGE_ID` is server-configured. Site callers never receive local connection IDs. Terminal results are accepted only from the authenticated hibernated WebSocket attachment, never from Site HTTP.
+
+The runner reads non-secret configuration from `%LOCALAPPDATA%\LDW\OperationsBridge\config.json` and the bearer from `%LOCALAPPDATA%\LDW\OperationsBridge\bridge-token.dpapi`, protected to the current Windows user with DPAPI. The config contains only `bridgeId` and the exact `wss://<worker>.<account>.workers.dev/relay/connect?bridgeId=ldw01-bridge` URI. Run `LDW.OperationsBridge.Runner --run` manually; `--status` reports fresh, stale, or unknown sanitized lifecycle state. No CLI option accepts a bearer or arbitrary process/tool path.
+
+The browser adapter starts the fixed Node executable and `opera-devtools-mcp` 0.7.0 package entry point, verifies its manifest and MCP server identity, uses the fixed Opera binary and profile `%LOCALAPPDATA%\LDW\AutoBrowser\bridge-001a-mcp-0.7.0`, disables JavaScript evaluation and usage statistics, and calls only `list_pages`.
 
 ## Build and test
 

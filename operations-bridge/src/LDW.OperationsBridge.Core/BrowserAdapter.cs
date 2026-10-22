@@ -40,6 +40,8 @@ public sealed class SyntheticBrowserAdapter : IBridgeBrowserAdapter
         return Task.FromResult(Sanitize(tab));
     }
 
+    public static BrowserTabMetadata? SanitizeMetadata(BrowserTabMetadata tab) => Sanitize(tab);
+
     private static BrowserTabMetadata? Sanitize(BrowserTabMetadata tab)
     {
         if (!Uri.TryCreate(tab.Url, UriKind.Absolute, out var parsed))

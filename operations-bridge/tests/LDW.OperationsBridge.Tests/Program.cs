@@ -10,6 +10,8 @@ var bridgeId = "ldw01-bridge";
 var now = DateTimeOffset.UtcNow;
 var validator = new DispatchValidator([bridgeId], BridgeProtocol.AllowedReadOnlyOperations);
 var store = new RelayDispatchStore(validator);
+await OperaMcpAdapterContractTests.RunAsync();
+BridgeRunnerContractTests.Run();
 
 var validRequest = BuildRequest(
     bridgeId,

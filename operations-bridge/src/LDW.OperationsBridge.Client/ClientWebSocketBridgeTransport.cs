@@ -26,6 +26,8 @@ public sealed class ClientWebSocketBridgeTransport : IBridgeTransport, IAsyncDis
 
     public bool IsConnected => _socket.State == WebSocketState.Open;
 
+    public Task Completion => _receiveLoop ?? Task.CompletedTask;
+
     public async Task ConnectAsync(
         Uri relayConnectUri,
         string bridgeBearerToken,

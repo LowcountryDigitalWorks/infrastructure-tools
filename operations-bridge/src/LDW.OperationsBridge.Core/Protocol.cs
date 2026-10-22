@@ -266,7 +266,10 @@ public sealed record BrowserTabMetadata(
     string TabId,
     string Identity,
     string Title,
-    string Url);
+    string Url)
+{
+    public bool Selected { get; init; }
+}
 
 public sealed record BrowserHealth(
     bool Ready,

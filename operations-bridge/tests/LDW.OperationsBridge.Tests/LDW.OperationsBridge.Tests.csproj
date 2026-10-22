@@ -8,5 +8,6 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\LDW.OperationsBridge.Core\LDW.OperationsBridge.Core.csproj" />
     <ProjectReference Include="..\..\src\LDW.OperationsBridge.Client\LDW.OperationsBridge.Client.csproj" />
+    <ProjectReference Include="..\..\src\LDW.OperationsBridge.Runner\LDW.OperationsBridge.Runner.csproj" />
   </ItemGroup>
 </Project>
