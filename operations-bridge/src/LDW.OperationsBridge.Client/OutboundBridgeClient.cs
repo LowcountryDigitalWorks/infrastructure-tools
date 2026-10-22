@@ -96,8 +96,6 @@ public sealed class OutboundBridgeClient
             case BridgeOperation.ListTabs:
             {
                 var tabs = await _browserAdapter.ListTabsAsync(cancellationToken).ConfigureAwait(false);
-                if (tabs.Count > 6)
-                    throw new InvalidOperationException("Browser metadata exceeds the bounded bridge result size.");
                 payload["tab_count"] = tabs.Count.ToString();
                 for (var i = 0; i < tabs.Count; i++)
                 {
