@@ -96,6 +96,8 @@ public sealed class OutboundBridgeClient
             case BridgeOperation.ListTabs:
             {
                 var tabs = await _browserAdapter.ListTabsAsync(cancellationToken).ConfigureAwait(false);
+                if (tabs.Count > 6)
+                    throw new InvalidOperationException("Browser metadata exceeds the bounded bridge result size.");
                 payload["tab_count"] = tabs.Count.ToString();
                 for (var i = 0; i < tabs.Count; i++)
                 {
@@ -103,6 +105,7 @@ public sealed class OutboundBridgeClient
                     payload[$"tab_{i}_identity"] = tabs[i].Identity;
                     payload[$"tab_{i}_title"] = tabs[i].Title;
                     payload[$"tab_{i}_url"] = tabs[i].Url;
+                    payload[$"tab_{i}_selected"] = tabs[i].Selected ? "true" : "false";
                 }
                 break;
             }
@@ -128,6 +131,7 @@ public sealed class OutboundBridgeClient
                 payload["identity"] = tab.Identity;
                 payload["title"] = tab.Title;
                 payload["url"] = tab.Url;
+                payload["selected"] = tab.Selected ? "true" : "false";
                 break;
             }
             case BridgeOperation.CodyncHealth:
