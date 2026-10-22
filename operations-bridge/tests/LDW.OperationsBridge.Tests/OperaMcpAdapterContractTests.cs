@@ -54,6 +54,11 @@ internal static class OperaMcpAdapterContractTests
                 "missing " + missing + " page metadata is rejected");
         }
 
+        await AssertThrowsAsync<System.Text.Json.JsonException>(
+            () => new OperaDevtoolsMcpBrowserAdapter(new FakeOperaProcessFactory(InitializeResult, "{malformed"),
+                OperaDevtoolsMcpBrowserAdapter.GetDedicatedProfilePath()).ListTabsAsync(CancellationToken.None),
+            "malformed JSON response is rejected");
+
         var oversized = "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"structuredContent\":{\"pages\":[]}}}" + new string(' ', 70000);
         await AssertThrowsAsync<InvalidOperationException>(
             () => new OperaDevtoolsMcpBrowserAdapter(new FakeOperaProcessFactory(InitializeResult, oversized),

@@ -268,6 +268,10 @@ internal sealed class OperaMcpProcessFactory : IOperaMcpProcessFactory
         return new OperaMcpProcess(process);
     }
 
+    private static bool PathEquals(string first, string second)
+        => string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(first)),
+            Path.TrimEndingDirectorySeparator(Path.GetFullPath(second)), StringComparison.OrdinalIgnoreCase);
+
     private static async Task DrainStandardErrorAsync(StreamReader reader)
     {
         var buffer = new char[1024];
