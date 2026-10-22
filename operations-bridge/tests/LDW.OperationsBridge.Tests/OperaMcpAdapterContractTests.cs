@@ -27,9 +27,9 @@ internal static class OperaMcpAdapterContractTests
             !line.Contains("navigate_page", StringComparison.Ordinal) &&
             !line.Contains("click", StringComparison.Ordinal) &&
             !line.Contains("type", StringComparison.Ordinal)), "eval, snapshot, cookies, storage, navigation and input tools are unreachable");
-        Assert(goodFactory.Processes.SelectMany(process => process.Writes)
+        Assert(goodFactory.Processes.All(process => process.Writes
             .Single(line => line.Contains("\"method\":\"tools/call\"", StringComparison.Ordinal))
-            .Contains("\"name\":\"list_pages\"", StringComparison.Ordinal), "MCP tool name is a fixed literal");
+            .Contains("\"name\":\"list_pages\"", StringComparison.Ordinal)), "MCP tool name is a fixed literal for every process");
 
         var wrongProfileRejected = false;
         try { _ = new OperaDevtoolsMcpBrowserAdapter(goodFactory, Path.Combine(Path.GetTempPath(), "personal-opera")); }
