@@ -88,6 +88,21 @@ Assert(store.Accept(unsafeCodyncSend, now).State == DispatchAcceptState.Blocked,
 var unknownCodyncArg = validCodyncSend with { DispatchId = Guid.NewGuid(), IdempotencyKey = "idem-codync-rpc", Args = new Dictionary<string, string>(validCodyncSend.Args) { ["method"] = "createBot" } };
 Assert(store.Accept(unknownCodyncArg, now).State == DispatchAcceptState.Blocked, "Codync operation rejects generic method arguments");
 
+var fuzzyCodyncSend = validCodyncSend with { DispatchId = Guid.NewGuid(), IdempotencyKey = "idem-codync-fuzzy", Args = new Dictionary<string, string> { ["destination_id"] = codyncBot.Id, ["destination_name"] = "LDW IR - Cursor Fuzzy", ["text"] = "Hello" } };
+Assert(store.Accept(fuzzyCodyncSend, now).State == DispatchAcceptState.Blocked, "fuzzy destination name fails closed");
+
+var mismatchCodyncSend = validCodyncSend with { DispatchId = Guid.NewGuid(), IdempotencyKey = "idem-codync-mismatch", Args = new Dictionary<string, string> { ["destination_id"] = codyncBot.Id, ["destination_name"] = "LDW Critique - Cursor", ["text"] = "Hello" } };
+Assert(store.Accept(mismatchCodyncSend, now).State == DispatchAcceptState.Blocked, "destination ID and name mismatch fails closed");
+
+var unmentionedGroupSend = validCodyncSend with { DispatchId = Guid.NewGuid(), IdempotencyKey = "idem-codync-nomention", Args = new Dictionary<string, string> { ["destination_id"] = codyncGroup.Id, ["destination_name"] = codyncGroup.Name, ["text"] = "No mentions here" } };
+Assert(store.Accept(unmentionedGroupSend, now).State == DispatchAcceptState.Blocked, "unmentioned group send fails closed");
+
+var missingMentionArgGroupSend = validCodyncSend with { DispatchId = Guid.NewGuid(), IdempotencyKey = "idem-codync-nomentionarg", Args = new Dictionary<string, string> { ["destination_id"] = codyncGroup.Id, ["destination_name"] = codyncGroup.Name, ["text"] = "@LDW IR - Cursor reply" } };
+Assert(store.Accept(missingMentionArgGroupSend, now).State == DispatchAcceptState.Blocked, "group send missing mentioned_member_ids fails closed");
+
+var wrongMentionArgGroupSend = validCodyncSend with { DispatchId = Guid.NewGuid(), IdempotencyKey = "idem-codync-wrongmentionarg", Args = new Dictionary<string, string> { ["destination_id"] = codyncGroup.Id, ["destination_name"] = codyncGroup.Name, ["text"] = "@LDW IR - Cursor reply", ["mentioned_member_ids"] = codyncBot.Id + "," + CodyncApprovedDestinations.All[1].Id } };
+Assert(store.Accept(wrongMentionArgGroupSend, now).State == DispatchAcceptState.Blocked, "group send mentioning member outside explicit target set fails closed");
+
 var codyncAdapter = new FakeCodyncAdapter();
 var codyncClient = new OutboundBridgeClient(bridgeId, new SyntheticBrowserAdapter([]), validator, codyncAdapter);
 var codyncTransport = new FakeBridgeTransport();
@@ -128,6 +143,16 @@ await codyncTransport.DeliverAsync(waitRequest, "conn-codync");
 Assert(codyncTransport.Results[^1].TerminalStatus == DispatchTerminalStatus.Pass, "Codync wait passes only with provider start plus exact final reply");
 Assert(codyncTransport.Results[^1].Payload["provider_start_observed"] == "true", "Codync wait exposes provider-positive start evidence");
 Assert(codyncTransport.Results[^1].Payload["reply_author_id"] == codyncBot.Id, "Codync wait correlates the exact member author");
+
+var wrongNonceWaitArgs = new Dictionary<string, string>(waitArgs) { ["client_nonce"] = "ldw-operations-wrong-nonce" };
+var wrongNonceWaitRequest = BuildRequest(bridgeId, BridgeOperation.CodyncWaitReadExact, now, now.AddMinutes(3), "idem-codync-badnonce", "corr-codync-badnonce") with { Args = wrongNonceWaitArgs };
+await codyncTransport.DeliverAsync(wrongNonceWaitRequest, "conn-codync");
+Assert(codyncTransport.Results[^1].TerminalStatus == DispatchTerminalStatus.Blocked, "mismatched client_nonce in wait_read_exact fails closed");
+
+var wrongAuthorWaitArgs = new Dictionary<string, string>(waitArgs) { ["expected_author_id"] = Guid.NewGuid().ToString("D") };
+var wrongAuthorWaitRequest = BuildRequest(bridgeId, BridgeOperation.CodyncWaitReadExact, now, now.AddMinutes(3), "idem-codync-badauthor", "corr-codync-badauthor") with { Args = wrongAuthorWaitArgs };
+await codyncTransport.DeliverAsync(wrongAuthorWaitRequest, "conn-codync");
+Assert(codyncTransport.Results[^1].TerminalStatus == DispatchTerminalStatus.Blocked, "unexpected author outside destination identity fails closed");
 
 foreach (var (state, expectedStatus) in new[]
 {
