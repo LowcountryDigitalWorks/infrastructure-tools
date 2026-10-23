@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace LDW.LocalSecretStore;
 
@@ -26,6 +27,12 @@ public sealed class LocalSecretStore
 {
     public const int Version = 1;
     public const string FixedSecretIdCorsairNeon = "CORSAIR_NEON_DATABASE_URL";
+
+    private static readonly JsonSerializerOptions StoreFileJsonOptions = new()
+    {
+        AllowDuplicateProperties = false,
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
+    };
 
     private readonly string _storeFilePath;
     private readonly ISecretProtector _protector;
@@ -162,7 +169,7 @@ public sealed class LocalSecretStore
         try
         {
             var json = File.ReadAllText(_storeFilePath);
-            var parsed = JsonSerializer.Deserialize<SecretStoreFileContent>(json);
+            var parsed = JsonSerializer.Deserialize<SecretStoreFileContent>(json, StoreFileJsonOptions);
             if (parsed is null || parsed.Version != Version || parsed.Secrets is null)
                 throw new SecretStoreFileException();
 

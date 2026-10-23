@@ -35,9 +35,30 @@ try
             }
         }
     }
-    var validTimestamp = DateTime.UtcNow;
+    var validTimestamp = new DateTime(2026, 10, 22, 12, 0, 0, DateTimeKind.Utc);
+    var validPayloadJson = JsonSerializer.Serialize(new SecretEntryPayload(
+        LocalSecretStore.FixedSecretIdCorsairNeon,
+        validTimestamp,
+        "AQ=="));
+    var validStoreJson = JsonSerializer.Serialize(new SecretStoreFileContent(
+        LocalSecretStore.Version,
+        new Dictionary<string, SecretEntryPayload>
+        {
+            [LocalSecretStore.FixedSecretIdCorsairNeon] = new(
+                LocalSecretStore.FixedSecretIdCorsairNeon,
+                validTimestamp,
+                "AQ==")
+        }));
     var corruptStoreFixtures = new Dictionary<string, string>
     {
+        ["duplicate Version property"] = "{\"Version\":1,\"Version\":1,\"Secrets\":{}}",
+        ["duplicate fixed secret dictionary key"] = "{\"Version\":1,\"Secrets\":{" +
+            JsonSerializer.Serialize(LocalSecretStore.FixedSecretIdCorsairNeon) + ":" + validPayloadJson + "," +
+            JsonSerializer.Serialize(LocalSecretStore.FixedSecretIdCorsairNeon) + ":" + validPayloadJson + "}}",
+        ["unknown top-level property"] = validStoreJson[..^1] + ",\"Unexpected\":true}",
+        ["unknown SecretEntryPayload property"] = "{\"Version\":1,\"Secrets\":{" +
+            JsonSerializer.Serialize(LocalSecretStore.FixedSecretIdCorsairNeon) + ":" +
+            validPayloadJson[..^1] + ",\"Unexpected\":true}}",
         ["dictionary key differs from payload ID"] = CreateStoreJson("OTHER_SECRET_ID", new SecretEntryPayload(LocalSecretStore.FixedSecretIdCorsairNeon, validTimestamp, "AQ==")),
         ["unsupported payload ID"] = CreateStoreJson(LocalSecretStore.FixedSecretIdCorsairNeon, new SecretEntryPayload("OTHER_SECRET_ID", validTimestamp, "AQ==")),
         ["empty ciphertext"] = CreateStoreJson(LocalSecretStore.FixedSecretIdCorsairNeon, new SecretEntryPayload(LocalSecretStore.FixedSecretIdCorsairNeon, validTimestamp, string.Empty)),
