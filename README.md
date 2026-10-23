@@ -9,7 +9,7 @@ Reusable LDW-owned utilities for local computers, CI runners, and Linux nodes. T
 
 ## Current tools
 
-- [LDW Host Agent](host-agent/README.md) — the device-first, unelevated Windows tray/status surface with read-only local adapters plus strict-SSH Linux/off-site node contracts. The current slice reports state only and does not mutate services, VMs, runner registration, CI profiles, or machine power.
+- [LDW Host Agent](host-agent/README.md) — the device-first, unelevated Windows tray/status surface with read-only local adapters plus strict-SSH Linux/off-site node contracts. Admin Broker/secret-handoff code is contract scaffolding; its transport and operations are unavailable as described in the [broker document](host-agent/docs/ADMIN_BROKER.md).
 - [Operations Bridge](operations-bridge/README.md) — bounded read-only BRIDGE-001A source candidate for authenticated bridge protocol, transport correlation, and sanitized browser metadata operations.
 - [CI runner benchmarks](benchmarks/README.md) and [profiles](profiles/README.md) — reusable capacity evidence and profile documentation.
 - [Architecture and operations docs](docs/README.md).

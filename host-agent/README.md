@@ -9,6 +9,12 @@ Host Agent is a device-first, local status surface for owner-controlled LDW comp
 - Intentionally stopped/disabled/on-demand components remain healthy when that matches desired state. `RunningAfterLogin` uses explicit owner-session context.
 - Dependency availability is checked while a dependent component is expected to be active; intentionally inactive pre-login/on-demand components do not fail merely because their dependencies are also inactive.
 
+## Local Admin Broker & Secret Handoff
+
+`src/LDW.AdminBroker` is contract scaffolding with no runnable transport or operations. `src/LDW.LocalSecretStore` requires Windows CurrentUser DPAPI in production; the Corsair launcher is unavailable. See [ADMIN_BROKER.md](docs/ADMIN_BROKER.md) for implemented behavior.
+
+The operation names are contract-only and return unavailable. Secret storage supports the fixed ID with CurrentUser DPAPI; no process handoff is implemented. See [Admin Broker documentation](docs/ADMIN_BROKER.md).
+
 ## Normal-user tray autostart
 
 `deploy/Manage-TrayAutostart.ps1` validates and manages an already-accepted exact user-logon task when one exists; it never creates a new task. When none exists, it delegates to the exact-readback current-user Run-key lifecycle in `deploy/Manage-TrayAutostartRunKey.ps1`. See [normal-user tray autostart](docs/TRAY_AUTOSTART.md). Source validation does not install or mutate startup state on LDW01.
@@ -70,7 +76,8 @@ Use the .NET 10 SDK. From this directory:
 dotnet build LDW.HostAgent.sln -c Release
 dotnet run --project tests/LDW.HostAgent.Core.Tests/LDW.HostAgent.Core.Tests.csproj -c Release
 dotnet run --project tests/LDW.HostAgent.HyperVObserver.Tests/LDW.HostAgent.HyperVObserver.Tests.csproj -c Release
+dotnet run --project tests/LDW.AdminBroker.Tests/LDW.AdminBroker.Tests.csproj -c Release
 dotnet run --project tools/LDW.HostAgent.LiveProbe/LDW.HostAgent.LiveProbe.csproj -c Release
 ```
 
-The live-probe tool is read-only and emits sanitized component summaries for bounded local validation. Contract tests use only synthetic/documentation address values and do not query Hyper-V. No external NuGet packages are required.
+The live-probe tool is read-only and emits sanitized component summaries for bounded local validation. Contract tests use only synthetic/documentation address values and do not query Hyper-V.
