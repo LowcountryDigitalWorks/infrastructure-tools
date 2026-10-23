@@ -10,7 +10,7 @@ This directory contains a dependency-free, read-only Raspberry Pi sentinel candi
 - DNS resolution is given a per-probe deadline and uses at most four daemon resolver threads process-wide. TCP connection attempts share the configured timeout budget.
 - Missing/corrupt state starts `UNKNOWN`; state files contain only bounded current state and debounce counters. Atomic replacement happens on state transitions, not on healthy polling intervals.
 - Logs contain only validated logical target IDs, enumerated state/reason values, and wall-clock quality. They omit addresses, DNS answers, MACs, credentials, and probe exception text.
-- A wall clock earlier than 2020 is marked `UNSYNCHRONIZED`; debounce uses monotonic probe-cycle counts and does not rely on wall time.
+- Wall timestamps are emitted only when systemd-timesyncd has created its synchronization marker for the current boot and the epoch is plausible; otherwise events carry `UNSYNCHRONIZED`. Debounce uses monotonic probe-cycle counts and does not rely on wall time.
 - The optional WOL utility is a separate manual command. The daemon never invokes it. It accepts only a logical name from a separate local allowlist and sends one standard packet to the configured private subnet broadcast. Actual Wi-Fi/AP behavior remains a hardware-only proof.
 
 `config.example.json` contains placeholders by design and is not runnable until copied to a machine-local file and completed there. Never commit real addresses, hostnames that reveal private infrastructure, or MACs. `wol-targets.example.json` is intentionally empty.

@@ -23,10 +23,17 @@
       "parent": "ldw01-host"
     },
     {
+      "id": "plex-host",
+      "kind": "host",
+      "address": "replace-with-private-hostname-or-ip",
+      "port": 22
+    },
+    {
       "id": "plex-service",
       "kind": "tcp",
       "address": "replace-with-private-hostname-or-ip",
-      "port": 32400
+      "port": 32400,
+      "parent": "plex-host"
     }
   ]
 }

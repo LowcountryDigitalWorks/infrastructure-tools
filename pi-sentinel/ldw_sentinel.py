@@ -27,6 +27,7 @@ MAX_TIMEOUT = 5.0
 MIN_EPOCH = 1_577_836_800  # 2020-01-01 UTC; a coarse unsynchronized-clock guard.
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 HOST_RE = re.compile(r"^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*\.?$")
+RESERVED_TARGET_IDS = frozenset({"monitor", "github_runner_job_state"})
 
 
 class Health(str, enum.Enum):
@@ -162,6 +163,8 @@ def load_config(path: str | Path) -> Config:
         if not isinstance(item, dict) or set(item) - {"id", "kind", "address", "port", "parent"}:
             raise ValueError("target has unsupported fields")
         target_id = _required_string(item.get("id"), "target id", pattern=ID_RE)
+        if target_id in RESERVED_TARGET_IDS:
+            raise ValueError("target id is reserved for a synthetic health dimension")
         if target_id in ids:
             raise ValueError("target ids must be unique")
         ids.add(target_id)
@@ -195,10 +198,10 @@ def load_config(path: str | Path) -> Config:
                   recovery, state_file, tuple(targets))
 
 
-def wall_clock() -> tuple[str | None, str]:
-    """Return an ISO wall time only when the host clock is plausibly synchronized."""
+def wall_clock(synchronized_marker: str | Path = "/run/systemd/timesync/synchronized") -> tuple[str | None, str]:
+    """Return wall time only after systemd-timesyncd has marked this boot synchronized."""
     now = time.time()
-    if now < MIN_EPOCH:
+    if now < MIN_EPOCH or not Path(synchronized_marker).is_file():
         return None, "UNSYNCHRONIZED"
     return dt.datetime.fromtimestamp(now, dt.timezone.utc).isoformat(timespec="seconds"), "PLAUSIBLE"
 
@@ -253,9 +256,13 @@ def tcp_probe(address: str, port: int, timeout: float, network: str) -> Result:
             return Result(None, Reason.ADDRESS_OUTSIDE_MONITOR_NETWORK)
         ips.append(ip)
     deadline = time.monotonic() + timeout
+    refused = False
+    timed_out = False
+    other_error = False
     for (family, sockaddr), _ip in zip(resolved, ips):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            timed_out = True
             break
         try:
             with socket.socket(family, socket.SOCK_STREAM) as sock:
@@ -264,12 +271,18 @@ def tcp_probe(address: str, port: int, timeout: float, network: str) -> Result:
             return Result(True, Reason.OK)
         except OSError as exc:
             if exc.errno in (errno.ECONNREFUSED, errno.ECONNRESET, errno.ECONNABORTED):
-                return Result(False, Reason.CONNECT_REFUSED)
+                refused = True
+                continue
             if isinstance(exc, TimeoutError) or exc.errno == errno.ETIMEDOUT:
-                return Result(False, Reason.CONNECT_TIMEOUT)
+                timed_out = True
+                continue
             # A timeout, missing route, or other transport error does not prove
             # either that the host is down or that only its service is down.
-            continue
+            other_error = True
+    if refused and not timed_out and not other_error:
+        return Result(False, Reason.CONNECT_REFUSED)
+    if timed_out and not refused and not other_error:
+        return Result(False, Reason.CONNECT_TIMEOUT)
     return Result(None, Reason.PROBE_INCONCLUSIVE)
 
 
@@ -367,6 +380,15 @@ class Sentinel:
         # target_id is regex-validated config; address and probe exception text are never logged.
         self.logger.info("transition target=%s state=%s reason=%s clock=%s", target_id, state.value, reason.value, quality)
 
+    def _suppress_target(self, target_id: str, state: Health, reason: Reason,
+                         observed_at: str | None, quality: str, out: list[Transition]) -> None:
+        track = self.tracks[target_id]
+        # Suppressed samples are not observations; never carry debounce evidence
+        # across the gap and call the next sample consecutive.
+        track.failures = 0
+        track.successes = 0
+        self._transition(target_id, track, state, reason, observed_at, quality, out)
+
     def _monitor_transition(self, state: Health, reason: Reason, observed_at: str | None,
                             quality: str, out: list[Transition]) -> None:
         if self.monitor_state == state:
@@ -426,8 +448,8 @@ class Sentinel:
             else:
                 self._monitor_transition(Health.DEGRADED, Reason.SUSPECT_FAILURE, observed_at, quality, out)
             for target in self.config.targets:
-                self._transition(target.target_id, self.tracks[target.target_id], Health.UNKNOWN,
-                                 Reason.GATEWAY_UNAVAILABLE, observed_at, quality, out)
+                self._suppress_target(target.target_id, Health.UNKNOWN,
+                                      Reason.GATEWAY_UNAVAILABLE, observed_at, quality, out)
             if old_monitor_state != self.monitor_state or out:
                 self._persist()
             return tuple(out)
@@ -451,8 +473,8 @@ class Sentinel:
                     parent_state = self.tracks[target.parent].state
                     if parent_state in (Health.UNREACHABLE, Health.SERVICE_UNAVAILABLE,
                                         Health.PARENT_UNREACHABLE):
-                        self._transition(target_id, self.tracks[target_id], Health.PARENT_UNREACHABLE,
-                                         Reason.PARENT_UNAVAILABLE, observed_at, quality, out)
+                        self._suppress_target(target_id, Health.PARENT_UNREACHABLE,
+                                              Reason.PARENT_UNAVAILABLE, observed_at, quality, out)
                     else:
                         self._apply(target, self.probe(target.address, target.port, self.config.timeout,
                                                        self.config.monitor_cidr), observed_at, quality, out)

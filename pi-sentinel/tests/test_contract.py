@@ -9,7 +9,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ldw_sentinel import (
-    Config, Health, Reason, Result, Sentinel, Target, load_config, tcp_probe, wall_clock,
+    Config, Health, Reason, Result, Sentinel, Target, Track, load_config, tcp_probe, wall_clock,
 )
 from wol import magic_packet, send_allowlisted
 
@@ -95,6 +95,29 @@ class SentinelContractTests(unittest.TestCase):
         self.assertFalse(timed_out.reachable)
         self.assertEqual(timed_out.reason, Reason.CONNECT_TIMEOUT)
 
+    def test_probe_tries_later_resolved_address_after_first_refusal(self):
+        from unittest.mock import patch
+        attempts = []
+        class FakeSocket:
+            def __init__(self, sockaddr):
+                self.sockaddr = sockaddr
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def settimeout(self, _timeout):
+                pass
+            def connect(self, sockaddr):
+                attempts.append(sockaddr[0])
+                if sockaddr[0] == "10.0.0.10":
+                    raise OSError(errno.ECONNREFUSED, "synthetic")
+        with patch("ldw_sentinel._resolve", return_value=[
+            (2, ("10.0.0.10", 443)), (2, ("10.0.0.11", 443))
+        ]), patch("ldw_sentinel.socket.socket", side_effect=lambda family, kind: FakeSocket(None)):
+            result = tcp_probe("service.local", 443, 0.2, "10.0.0.0/24")
+        self.assertTrue(result.reachable)
+        self.assertEqual(attempts, ["10.0.0.10", "10.0.0.11"])
+
     def test_oversized_state_is_read_bounded_and_unknown(self):
         import ldw_sentinel
         self.state.write_bytes(b" " * (ldw_sentinel.MAX_STATE_BYTES + 1024))
@@ -157,6 +180,51 @@ class SentinelContractTests(unittest.TestCase):
             observed, quality = wall_clock()
         self.assertIsNone(observed)
         self.assertEqual(quality, "UNSYNCHRONIZED")
+
+    def test_wall_timestamp_requires_os_sync_marker(self):
+        from unittest.mock import patch
+        marker = Path(self.temp.name) / "synchronized"
+        with patch("ldw_sentinel.time.time", return_value=1_800_000_000):
+            self.assertEqual(wall_clock(marker), (None, "UNSYNCHRONIZED"))
+            marker.touch()
+            observed, quality = wall_clock(marker)
+        self.assertIsNotNone(observed)
+        self.assertEqual(quality, "PLAUSIBLE")
+
+    def test_gateway_suppression_clears_old_target_debounce(self):
+        gateway_results = iter([Result(True, Reason.OK), Result(True, Reason.OK),
+                                Result(False, Reason.CONNECT_FAILED), Result(True, Reason.OK),
+                                Result(True, Reason.OK)])
+        target_results = iter([Result(False, Reason.CONNECT_TIMEOUT)] * 3)
+        def probe(address, *_args):
+            return next(gateway_results) if address == "10.0.0.1" else next(target_results)
+        sentinel = Sentinel(make_config(self.state), probe=probe)
+        sentinel.poll_once()
+        sentinel.poll_once()
+        self.assertEqual(sentinel.tracks["host-a"].failures, 2)
+        sentinel.poll_once()  # gateway failure suppresses targets and clears their counters
+        self.assertEqual(sentinel.tracks["host-a"].failures, 0)
+        sentinel.poll_once()  # first gateway recovery sample; targets remain suppressed
+        sentinel.poll_once()  # second recovery sample; first fresh target timeout
+        self.assertEqual(sentinel.snapshot()["host-a"], Health.DEGRADED)
+        self.assertEqual(sentinel.tracks["host-a"].failures, 1)
+
+    def test_parent_suppression_clears_old_target_debounce(self):
+        targets = (Target("parent", "host", "10.0.0.2", 22),
+                   Target("child", "host", "10.0.0.3", 22, "parent"))
+        sentinel = Sentinel(make_config(self.state, targets=targets), probe=ProbeSequence([]))
+        child = sentinel.tracks["child"]
+        child.state, child.reason, child.failures = Health.DEGRADED, Reason.SUSPECT_FAILURE, 2
+        sentinel.tracks["parent"].state = Health.UNREACHABLE
+        sentinel.probe = lambda address, *_args: (Result(True, Reason.OK)
+            if address in {"10.0.0.1", "10.0.0.2"} else Result(False, Reason.CONNECT_TIMEOUT))
+        sentinel.poll_once()
+        self.assertEqual(child.state, Health.PARENT_UNREACHABLE)
+        self.assertEqual(child.failures, 0)
+        sentinel.tracks["parent"].state = Health.HEALTHY
+        sentinel.poll_once()
+        self.assertEqual(child.state, Health.DEGRADED)
+        self.assertEqual(child.failures, 1)
 
     def test_parent_suppression_and_service_down_semantics(self):
         targets = (Target("parent", "host", "10.0.0.2", 22),
@@ -251,6 +319,18 @@ class SentinelContractTests(unittest.TestCase):
         config_file.write_text(json.dumps(raw), encoding="utf-8")
         with self.assertRaises(ValueError):
             load_config(config_file)
+        for reserved in ("monitor", "github_runner_job_state"):
+            raw["targets"] = [{"id": reserved, "kind": "tcp", "address": "host-a.local", "port": 22}]
+            config_file.write_text(json.dumps(raw), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "reserved"):
+                load_config(config_file)
+
+    def test_example_separates_plex_host_from_service(self):
+        example = json.loads((Path(__file__).parents[1] / "config.example.json").read_text(encoding="utf-8"))
+        targets = {target["id"]: target for target in example["targets"]}
+        self.assertEqual(targets["plex-host"]["kind"], "host")
+        self.assertEqual(targets["plex-service"]["kind"], "tcp")
+        self.assertEqual(targets["plex-service"]["parent"], "plex-host")
 
     def test_persistence_is_atomic_and_bounded_without_history(self):
         target = Target("host-a", "host", "10.0.0.10", 22)
