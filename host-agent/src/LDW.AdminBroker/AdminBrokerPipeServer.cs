@@ -17,6 +17,15 @@ public sealed class AdminBrokerPipeServer
     private readonly AdminBrokerAuditLogger _auditLogger;
 
     public AdminBrokerPipeServer(IReadOnlyList<string> permittedCallerSids, IAdminBrokerEngine engine, AdminBrokerAuditLogger auditLogger)
+        : this(permittedCallerSids, engine, auditLogger, allowElevatedTestProcess: false)
+    {
+    }
+
+    // The hosted contract test runs on a Windows runner whose account is elevated. This
+    // internal test-only seam lets that suite exercise pipe framing and caller checks;
+    // the production constructor always enforces the unelevated-process requirement.
+    internal AdminBrokerPipeServer(IReadOnlyList<string> permittedCallerSids, IAdminBrokerEngine engine,
+        AdminBrokerAuditLogger auditLogger, bool allowElevatedTestProcess)
     {
         ArgumentNullException.ThrowIfNull(permittedCallerSids);
         _engine = engine ?? throw new ArgumentNullException(nameof(engine));
@@ -25,7 +34,7 @@ public sealed class AdminBrokerPipeServer
             throw new PlatformNotSupportedException("The Admin Broker transport requires Windows.");
 
         var processIdentity = WindowsIdentity.GetCurrent();
-        if (new WindowsPrincipal(processIdentity).IsInRole(WindowsBuiltInRole.Administrator))
+        if (!allowElevatedTestProcess && new WindowsPrincipal(processIdentity).IsInRole(WindowsBuiltInRole.Administrator))
             throw new InvalidOperationException("The Admin Broker transport must run unelevated.");
         var currentSid = processIdentity.User?.Value;
         if (currentSid is null || !AdminBrokerAuthorizationPolicy.IsSafeExplicitUserSid(currentSid)

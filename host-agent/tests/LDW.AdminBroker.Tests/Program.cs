@@ -186,9 +186,22 @@ try
     if (OperatingSystem.IsWindows())
     {
         var ownerSid = WindowsIdentity.GetCurrent().User!.Value;
+        var currentProcessIsElevated = new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
         var transportAudit = new AdminBrokerAuditLogger(Path.Combine(root, "transport-audit.jsonl"));
         var countingEngine = new CountingEngine();
-        var pipeServer = new AdminBrokerPipeServer([ownerSid], countingEngine, transportAudit);
+        if (currentProcessIsElevated)
+        {
+            try
+            {
+                _ = new AdminBrokerPipeServer([ownerSid], countingEngine, transportAudit);
+                throw new Exception("Expected the production transport constructor to reject an elevated process");
+            }
+            catch (InvalidOperationException ex)
+            {
+                Assert(ex.Message == "The Admin Broker transport must run unelevated.", "production transport constructor rejects elevated process");
+            }
+        }
+        var pipeServer = new AdminBrokerPipeServer([ownerSid], countingEngine, transportAudit, allowElevatedTestProcess: true);
         using var serverPipe = pipeServer.CreateServerPipe();
         var serveTask = pipeServer.ServeOneAsync(serverPipe, CancellationToken.None);
         using var client = new NamedPipeClientStream(".", AdminBrokerContract.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous, TokenImpersonationLevel.Impersonation);
@@ -204,7 +217,7 @@ try
         Assert(transportAudit.ReadRecords().Count == 1, "transport writes sanitized durable audit before response");
 
         var deniedEngine = new CountingEngine();
-        var deniedServer = new AdminBrokerPipeServer([ownerSid], deniedEngine, new AdminBrokerAuditLogger(Path.Combine(root, "denied-audit.jsonl")));
+        var deniedServer = new AdminBrokerPipeServer([ownerSid], deniedEngine, new AdminBrokerAuditLogger(Path.Combine(root, "denied-audit.jsonl")), allowElevatedTestProcess: true);
         using var deniedPipe = deniedServer.CreateServerPipe();
         var deniedTask = deniedServer.ServeOneAsync(deniedPipe, CancellationToken.None);
         using var deniedClient = new NamedPipeClientStream(".", AdminBrokerContract.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous, TokenImpersonationLevel.Impersonation);
