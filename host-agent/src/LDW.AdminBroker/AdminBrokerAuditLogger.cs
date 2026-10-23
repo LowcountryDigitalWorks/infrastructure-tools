@@ -19,6 +19,20 @@ public sealed class AdminBrokerAuditLogger
     private readonly object _lock = new();
     private const long MaximumLogSizeBytes = 5 * 1024 * 1024; // 5 MB limit
 
+    private static readonly HashSet<string> SafeResultStates = new(StringComparer.Ordinal)
+    {
+        "InvalidRequest",
+        "Unavailable",
+        "DuplicateRequest"
+    };
+
+    private static readonly HashSet<string> SafeErrorCodes = new(StringComparer.Ordinal)
+    {
+        "INVALID_REQUEST_ID",
+        "NOT_IMPLEMENTED",
+        "DUPLICATE_REQUEST"
+    };
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public AdminBrokerAuditLogger(string? customPath = null)
@@ -40,8 +54,9 @@ public sealed class AdminBrokerAuditLogger
         {
             {
                 if (!Guid.TryParseExact(record.RequestId, "D", out _) || !AdminBrokerContract.Operations.IsValid(record.Operation) ||
-                    (record.CallerSid?.Length ?? 0) > 184 || record.ResultState.Length > 64 || (record.ErrorCode?.Length ?? 0) > 64)
-                    throw new InvalidOperationException("Audit record exceeds bounded fields.");
+                    (record.CallerSid?.Length ?? 0) > 184 || !SafeResultStates.Contains(record.ResultState) ||
+                    (record.ErrorCode is not null && !SafeErrorCodes.Contains(record.ErrorCode)))
+                    throw new InvalidOperationException("Audit record contains unsupported fields.");
                 var directory = Path.GetDirectoryName(_auditLogPath);
                 if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
                 {
