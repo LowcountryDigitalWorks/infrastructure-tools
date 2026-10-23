@@ -77,7 +77,37 @@ Assert(unknownOp.State == DispatchAcceptState.Blocked, "unknown operation fails 
 Assert(unknownOp.Envelope.TerminalResult?.TerminalStatus == DispatchTerminalStatus.Blocked, "unknown operation becomes BLOCKED terminal");
 
 var codyncBot = CodyncApprovedDestinations.All.Single(item => item.Name == "LDW IR - Cursor");
-var codyncGroup = CodyncApprovedDestinations.All.Single(item => item.Name == "LDW Review Board — Cursor");
+var codyncGroup = CodyncApprovedDestinations.All.Single(item => item.Name == "Board Cursor");
+Assert(CodyncApprovedDestinations.All.Count == 12, "canonical Codync allowlist contains exactly 9 reviewer bots and 3 boards");
+Assert(CodyncApprovedDestinations.All.Count(item => item.Kind == "bot") == 9, "canonical Codync allowlist contains exactly 9 bots");
+Assert(CodyncApprovedDestinations.All.Count(item => item.Kind == "group") == 3, "canonical Codync allowlist contains exactly 3 boards");
+foreach (var (id, name) in new[]
+{
+    ("55a2491d-1454-478e-b44c-6f26878c95bd", "LDW IR - Cursor"),
+    ("a3ea9330-8fca-4c0f-afe2-7434a6e3c5c5", "LDW Cursor Challenge"),
+    ("e28c6540-c485-4aa5-9d87-022aa82ac67a", "LDW Critique - Cursor"),
+    ("ac0f91e7-15eb-4b93-84d0-b665ace7f639", "LDW IR - Antigravity"),
+    ("59bb9175-f1ff-4cf2-9023-31000402b098", "LDW Challenge - Antigravity"),
+    ("da449a7a-20e3-42df-9085-0090a92af952", "LDW Critique - Antigravity"),
+    ("90c4bbdd-b099-4458-8386-7923d610c495", "LDW IR - Codex"),
+    ("78b5c5a9-548e-4a12-93d9-c19009481e7b", "LDW Challenge — Codex"),
+    ("2f0be363-adeb-48ca-acb4-5eada31b4a30", "LDW Critique — Codex"),
+    ("34ddaa45-7eaa-4cbc-9f8d-b3715df83b09", "Board Cursor"),
+    ("5177b135-10ba-423f-ad6a-2b45a24aad60", "Board Codex"),
+    ("e7ff8ac2-f22d-4250-acc1-35126422725d", "Board Antigravity")
+})
+{
+    Assert(CodyncApprovedDestinations.All.Any(item => item.Id == id && item.Name == name), $"canonical Codync destination is present: {name}");
+}
+foreach (var (id, name) in new[]
+{
+    ("e6e61ff1-ca60-4d87-b468-dfdb34d1acea", "LDW Review Board — Cursor"),
+    ("7bc71416-44ba-4f0e-98e1-da0cef309a40", "LDW Review Board — Antigravity"),
+    ("729350f2-89cc-460e-9a6c-8af05037d0c4", "LDW Review Board — Cross-Provider")
+})
+{
+    Assert(!CodyncApprovedDestinations.All.Any(item => item.Id == id || item.Name == name), $"retired Codync proof group is absent: {name}");
+}
 var validCodyncSend = BuildRequest(bridgeId, BridgeOperation.CodyncSendExact, now, now.AddMinutes(1), "idem-codync-send", "corr-codync-send") with
 {
     Args = new Dictionary<string, string> { ["destination_id"] = codyncBot.Id, ["destination_name"] = codyncBot.Name, ["text"] = "Return the harmless sentinel." }
@@ -87,6 +117,16 @@ var unsafeCodyncSend = validCodyncSend with { DispatchId = Guid.NewGuid(), Idemp
 Assert(store.Accept(unsafeCodyncSend, now).State == DispatchAcceptState.Blocked, "unmentioned all-member group send fails closed");
 var unknownCodyncArg = validCodyncSend with { DispatchId = Guid.NewGuid(), IdempotencyKey = "idem-codync-rpc", Args = new Dictionary<string, string>(validCodyncSend.Args) { ["method"] = "createBot" } };
 Assert(store.Accept(unknownCodyncArg, now).State == DispatchAcceptState.Blocked, "Codync operation rejects generic method arguments");
+var fuzzyCodyncSend = validCodyncSend with { DispatchId = Guid.NewGuid(), IdempotencyKey = "idem-codync-fuzzy", Args = new Dictionary<string, string> { ["destination_id"] = codyncBot.Id, ["destination_name"] = "LDW IR - Cursor Fuzzy", ["text"] = "Hello" } };
+Assert(store.Accept(fuzzyCodyncSend, now).State == DispatchAcceptState.Blocked, "fuzzy destination name fails closed");
+var mismatchCodyncSend = validCodyncSend with { DispatchId = Guid.NewGuid(), IdempotencyKey = "idem-codync-mismatch", Args = new Dictionary<string, string> { ["destination_id"] = codyncBot.Id, ["destination_name"] = "LDW Critique - Cursor", ["text"] = "Hello" } };
+Assert(store.Accept(mismatchCodyncSend, now).State == DispatchAcceptState.Blocked, "destination ID and name mismatch fails closed");
+var unmentionedGroupSend = validCodyncSend with { DispatchId = Guid.NewGuid(), IdempotencyKey = "idem-codync-nomention", Args = new Dictionary<string, string> { ["destination_id"] = codyncGroup.Id, ["destination_name"] = codyncGroup.Name, ["text"] = "No mentions here" } };
+Assert(store.Accept(unmentionedGroupSend, now).State == DispatchAcceptState.Blocked, "unmentioned group send fails closed");
+var missingMentionArgGroupSend = validCodyncSend with { DispatchId = Guid.NewGuid(), IdempotencyKey = "idem-codync-nomentionarg", Args = new Dictionary<string, string> { ["destination_id"] = codyncGroup.Id, ["destination_name"] = codyncGroup.Name, ["text"] = "@LDW IR - Cursor reply" } };
+Assert(store.Accept(missingMentionArgGroupSend, now).State == DispatchAcceptState.Blocked, "group send missing mentioned_member_ids fails closed");
+var wrongMentionArgGroupSend = validCodyncSend with { DispatchId = Guid.NewGuid(), IdempotencyKey = "idem-codync-wrongmentionarg", Args = new Dictionary<string, string> { ["destination_id"] = codyncGroup.Id, ["destination_name"] = codyncGroup.Name, ["text"] = "@LDW IR - Cursor reply", ["mentioned_member_ids"] = codyncBot.Id + "," + CodyncApprovedDestinations.All[1].Id } };
+Assert(store.Accept(wrongMentionArgGroupSend, now).State == DispatchAcceptState.Blocked, "group send mentioning member outside canonical board fails closed");
 
 var codyncAdapter = new FakeCodyncAdapter();
 var codyncClient = new OutboundBridgeClient(bridgeId, new SyntheticBrowserAdapter([]), validator, codyncAdapter);
@@ -128,6 +168,16 @@ await codyncTransport.DeliverAsync(waitRequest, "conn-codync");
 Assert(codyncTransport.Results[^1].TerminalStatus == DispatchTerminalStatus.Pass, "Codync wait passes only with provider start plus exact final reply");
 Assert(codyncTransport.Results[^1].Payload["provider_start_observed"] == "true", "Codync wait exposes provider-positive start evidence");
 Assert(codyncTransport.Results[^1].Payload["reply_author_id"] == codyncBot.Id, "Codync wait correlates the exact member author");
+
+var wrongNonceWaitArgs = new Dictionary<string, string>(waitArgs) { ["client_nonce"] = "ldw-operations-wrong-nonce" };
+var wrongNonceWaitRequest = BuildRequest(bridgeId, BridgeOperation.CodyncWaitReadExact, now, now.AddMinutes(3), "idem-codync-badnonce", "corr-codync-badnonce") with { Args = wrongNonceWaitArgs };
+await codyncTransport.DeliverAsync(wrongNonceWaitRequest, "conn-codync");
+Assert(codyncTransport.Results[^1].TerminalStatus == DispatchTerminalStatus.Blocked, "mismatched client_nonce in wait_read_exact fails closed");
+
+var wrongAuthorWaitArgs = new Dictionary<string, string>(waitArgs) { ["expected_author_id"] = Guid.NewGuid().ToString("D") };
+var wrongAuthorWaitRequest = BuildRequest(bridgeId, BridgeOperation.CodyncWaitReadExact, now, now.AddMinutes(3), "idem-codync-badauthor", "corr-codync-badauthor") with { Args = wrongAuthorWaitArgs };
+await codyncTransport.DeliverAsync(wrongAuthorWaitRequest, "conn-codync");
+Assert(codyncTransport.Results[^1].TerminalStatus == DispatchTerminalStatus.Blocked, "unexpected author outside destination identity fails closed");
 
 foreach (var (state, expectedStatus) in new[]
 {
