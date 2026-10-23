@@ -3,6 +3,7 @@ import json
 import logging
 import tempfile
 import unittest
+import errno
 from pathlib import Path
 import sys
 
@@ -60,7 +61,7 @@ class SentinelContractTests(unittest.TestCase):
         self.assertEqual(sentinel.snapshot()["github_runner_job_state"], Health.NOT_COLLECTED)
 
     def test_three_failures_emit_one_confirmed_transition_and_recovery_once(self):
-        sequence = iter([Result(True, Reason.OK)] * 2 + [Result(False, Reason.CONNECT_FAILED)] * 4 + [Result(True, Reason.OK)] * 3)
+        sequence = iter([Result(True, Reason.OK)] * 2 + [Result(False, Reason.CONNECT_TIMEOUT)] * 4 + [Result(True, Reason.OK)] * 3)
         probe = lambda address, port, timeout, network: Result(True, Reason.OK) if address == "10.0.0.1" else next(sequence)
         sentinel = Sentinel(make_config(self.state), probe=probe)
         self.assertEqual([t.target_id for t in sentinel.poll_once()], ["monitor"])
@@ -80,6 +81,26 @@ class SentinelContractTests(unittest.TestCase):
             result = tcp_probe("missing.invalid", 443, 0.1, "10.0.0.0/24")
         self.assertIsNone(result.reachable)
         self.assertEqual(result.reason, Reason.RESOLUTION_FAILED)
+
+    def test_probe_refusal_confirms_host_but_timeout_is_inconclusive(self):
+        from unittest.mock import patch
+        with patch("ldw_sentinel._resolve", return_value=[(2, ("10.0.0.10", 22))]), \
+             patch("ldw_sentinel.socket.socket", side_effect=OSError(errno.ECONNREFUSED, "synthetic")):
+            refused = tcp_probe("host-a.local", 22, 0.1, "10.0.0.0/24")
+        self.assertFalse(refused.reachable)
+        self.assertEqual(refused.reason, Reason.CONNECT_REFUSED)
+        with patch("ldw_sentinel._resolve", return_value=[(2, ("10.0.0.10", 22))]), \
+             patch("ldw_sentinel.socket.socket", side_effect=TimeoutError()):
+            timed_out = tcp_probe("host-a.local", 22, 0.1, "10.0.0.0/24")
+        self.assertFalse(timed_out.reachable)
+        self.assertEqual(timed_out.reason, Reason.CONNECT_TIMEOUT)
+
+    def test_oversized_state_is_read_bounded_and_unknown(self):
+        import ldw_sentinel
+        self.state.write_bytes(b" " * (ldw_sentinel.MAX_STATE_BYTES + 1024))
+        sentinel = Sentinel(make_config(self.state), probe=ProbeSequence([]))
+        self.assertEqual(sentinel.snapshot()["host-a"], Health.UNKNOWN)
+        self.assertEqual(sentinel.tracks["host-a"].reason, Reason.STATE_CORRUPT)
 
     def test_target_resolution_outside_monitor_network_fails_closed(self):
         from unittest.mock import patch
@@ -140,7 +161,7 @@ class SentinelContractTests(unittest.TestCase):
     def test_parent_suppression_and_service_down_semantics(self):
         targets = (Target("parent", "host", "10.0.0.2", 22),
                    Target("service", "tcp", "10.0.0.3", 443, "parent"))
-        parent_results = iter([Result(True, Reason.OK)] * 2 + [Result(False, Reason.CONNECT_FAILED)] * 3)
+        parent_results = iter([Result(True, Reason.OK)] * 2 + [Result(False, Reason.CONNECT_TIMEOUT)] * 3)
         child_results = iter([Result(True, Reason.OK)] * 4)
         calls = []
         def probe(address, port, timeout, network):
@@ -160,8 +181,31 @@ class SentinelContractTests(unittest.TestCase):
         self.assertEqual(sentinel.snapshot()["service"], Health.PARENT_UNREACHABLE)
         self.assertEqual(sum(call[0] == "10.0.0.3" for call in calls), 4)
 
+    def test_parent_unreachable_suppresses_entire_descendant_chain(self):
+        targets = (Target("root", "host", "10.0.0.2", 22),
+                   Target("middle", "host", "10.0.0.3", 22, "root"),
+                   Target("leaf", "tcp", "10.0.0.4", 443, "middle"))
+        root_results = iter([Result(True, Reason.OK)] * 2 + [Result(False, Reason.CONNECT_TIMEOUT)] * 4)
+        calls = []
+        def probe(address, port, timeout, network):
+            calls.append(address)
+            if address == "10.0.0.1":
+                return Result(True, Reason.OK)
+            if address == "10.0.0.2":
+                return next(root_results)
+            return Result(True, Reason.OK)
+        sentinel = Sentinel(make_config(self.state, targets=targets), probe=probe)
+        for _ in range(5):
+            sentinel.poll_once()
+        self.assertEqual(sentinel.snapshot()["root"], Health.UNREACHABLE)
+        self.assertEqual(sentinel.snapshot()["middle"], Health.PARENT_UNREACHABLE)
+        self.assertEqual(sentinel.snapshot()["leaf"], Health.PARENT_UNREACHABLE)
+        leaf_calls = calls.count("10.0.0.4")
+        sentinel.poll_once()
+        self.assertEqual(calls.count("10.0.0.4"), leaf_calls)
+
         independent = (Target("service", "tcp", "10.0.0.3", 443),)
-        child_results = iter([Result(True, Reason.OK)] * 2 + [Result(False, Reason.CONNECT_FAILED)] * 3)
+        child_results = iter([Result(True, Reason.OK)] * 2 + [Result(False, Reason.CONNECT_REFUSED)] * 3)
         probe2 = lambda address, port, timeout, network: Result(True, Reason.OK) if address == "10.0.0.1" else next(child_results)
         sentinel2 = Sentinel(make_config(self.state.with_name("state2.json"), targets=independent), probe=probe2)
         for _ in range(5):
@@ -226,10 +270,32 @@ class SentinelContractTests(unittest.TestCase):
         expected_mac = bytes.fromhex("020000000001")
         self.assertEqual(packet, b"\xff" * 6 + expected_mac * 16)
         self.assertEqual(len(packet), 102)
+        config_file = Path(self.temp.name) / "wol.json"
+        config_file.write_text(json.dumps({"monitor_cidr": "10.0.0.0/24",
+                                           "targets": {"approved-host": mac}}), encoding="utf-8")
         with self.assertRaises(ValueError):
-            send_allowlisted("unlisted", {"approved-host": mac}, "10.0.0.0/24")
+            send_allowlisted("unlisted", config_file)
         with self.assertRaises(ValueError):
             magic_packet("01:00:00:00:00:01")
+
+    def test_wol_allowlist_owns_local_broadcast_destination(self):
+        config_file = Path(self.temp.name) / "wol.json"
+        config_file.write_text(json.dumps({"monitor_cidr": "10.0.0.0/24", "targets": {}}), encoding="utf-8")
+        targets, subnet = __import__("wol").load_allowlist(config_file)
+        self.assertEqual(str(subnet.broadcast_address), "10.0.0.255")
+        self.assertEqual(targets, {})
+        config_file.write_text(json.dumps({"monitor_cidr": "10.0.0.0/24",
+                                           "targets": {"approved": "02:00:00:00:00:01"}}), encoding="utf-8")
+        from unittest.mock import patch, MagicMock
+        fake_socket = MagicMock()
+        fake_socket.__enter__.return_value = fake_socket
+        with patch("wol.socket.socket", return_value=fake_socket):
+            send_allowlisted("approved", config_file)
+        self.assertEqual(fake_socket.sendto.call_args.args[1], ("10.0.0.255", 9))
+        bad_config = Path(self.temp.name) / "wol-bad.json"
+        bad_config.write_text(json.dumps({"monitor_cidr": "8.8.8.0/24", "targets": {}}), encoding="utf-8")
+        with self.assertRaises(ValueError):
+            send_allowlisted("approved", bad_config)
 
 
 if __name__ == "__main__":

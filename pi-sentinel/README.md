@@ -22,14 +22,15 @@ This directory contains a dependency-free, read-only Raspberry Pi sentinel candi
 | Gateway cannot be reached/resolved | Target polling pauses; after the configured failure threshold the monitor becomes `MONITOR_NETWORK_DEGRADED` and target states become `UNKNOWN / GATEWAY_UNAVAILABLE` |
 | Target DNS lookup fails or times out | `UNKNOWN / RESOLUTION_FAILED` |
 | Target resolves outside the private monitor CIDR | `UNKNOWN / ADDRESS_OUTSIDE_MONITOR_NETWORK` |
-| Host TCP probe has threshold failures | `UNREACHABLE` |
-| TCP service has threshold failures while observable | `SERVICE_UNAVAILABLE` |
+| Host TCP probe has threshold timeouts | `UNREACHABLE`; an explicit refusal/reset proves the host TCP stack answered and counts as host reachability |
+| TCP service explicitly refuses/resets connections at threshold | `SERVICE_UNAVAILABLE` |
+| TCP service times out or has an ambiguous routing error | `UNKNOWN`; the observer cannot tell whether the host or only the service/path failed |
 | Required parent is confirmed unavailable | Child is `PARENT_UNREACHABLE`; child probe is suppressed |
 | One failure before threshold | `DEGRADED / SUSPECT_FAILURE` |
 | Two successes after a failure (default) | Recovery to `HEALTHY` |
 | GitHub runner/job dimension | `NOT_COLLECTED` |
 
-These are observation classifications, not service-level commitments. A host probe is TCP-only and means “the configured port accepted a connection”; it does not prove general host health or application correctness.
+These are observation classifications, not service-level commitments. A host probe is TCP-only and means “the configured port accepted a connection” or “the remote TCP stack explicitly refused/reset it”; it does not prove general host health or application correctness. Host timeout requires the configured failure threshold; ambiguous path errors remain `UNKNOWN`.
 
 ## Validate and test
 
@@ -76,10 +77,10 @@ The service is deliberately constrained by systemd. It runs as non-login `ldwmon
 
 ## Manual optional WOL
 
-Only after core monitoring semantics pass and an owner has approved one exact target, create `/etc/ldw-sentinel/wol-targets.json` locally with the shape `{"targets":{"logical-name":"aa:bb:cc:dd:ee:ff"}}`. Set it root-owned and readable only by the owner-controlled invocation identity. Then use the helper manually:
+Only after core monitoring semantics pass and an owner has approved one exact target, create `/etc/ldw-sentinel/wol-targets.json` locally with the shape `{"monitor_cidr":"OWNER_APPROVED_PRIVATE_CIDR","targets":{"logical-name":"aa:bb:cc:dd:ee:ff"}}`. The configured CIDR determines the one permitted local broadcast destination; the command accepts no destination override. Set the file root-owned and readable only by the owner-controlled invocation identity. Then use the helper manually:
 
 ```sh
-sudo /usr/bin/python3 /opt/ldw-sentinel/wol.py --target logical-name --config /etc/ldw-sentinel/wol-targets.json --network OWNER_APPROVED_PRIVATE_CIDR
+sudo /usr/bin/python3 /opt/ldw-sentinel/wol.py --target logical-name --config /etc/ldw-sentinel/wol-targets.json
 ```
 
 This sends one UDP packet and has no retry or automation loop. Do not execute this during software validation. Do not place target MACs in Git, issues, GitBook, or logs.

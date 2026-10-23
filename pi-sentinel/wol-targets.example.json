@@ -1,3 +1,4 @@
 {
+  "monitor_cidr": "OWNER_APPROVED_PRIVATE_CIDR",
   "targets": {}
 }

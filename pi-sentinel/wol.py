@@ -25,10 +25,13 @@ def magic_packet(mac: str) -> bytes:
     return b"\xff" * 6 + raw * 16
 
 
-def load_allowlist(path: str | Path) -> dict[str, str]:
+def load_allowlist(path: str | Path) -> tuple[dict[str, str], ipaddress.IPv4Network]:
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
-    if not isinstance(raw, dict) or set(raw) != {"targets"} or not isinstance(raw["targets"], dict):
-        raise ValueError("allowlist schema must contain only a targets object")
+    if not isinstance(raw, dict) or set(raw) != {"targets", "monitor_cidr"} or not isinstance(raw["targets"], dict):
+        raise ValueError("allowlist schema must contain targets and monitor_cidr")
+    subnet = ipaddress.ip_network(raw["monitor_cidr"], strict=False)
+    if not isinstance(subnet, ipaddress.IPv4Network) or not subnet.is_private:
+        raise ValueError("monitor_cidr must be a private IPv4 network")
     if len(raw["targets"]) > 32:
         raise ValueError("allowlist is too large")
     clean: dict[str, str] = {}
@@ -37,15 +40,15 @@ def load_allowlist(path: str | Path) -> dict[str, str]:
             raise ValueError("invalid logical target name")
         magic_packet(mac)
         clean[name] = mac
-    return clean
+    return clean, subnet
 
 
-def send_allowlisted(name: str, allowlist: dict[str, str], network: str) -> None:
-    """Send one UDP magic packet to the configured private subnet broadcast."""
+def send_allowlisted(name: str, config_path: str | Path) -> None:
+    """Send one UDP packet using only the subnet and target in local config."""
+    allowlist, subnet = load_allowlist(config_path)
     if not isinstance(name, str) or not NAME_RE.fullmatch(name) or name not in allowlist:
         raise ValueError("target is not allowlisted")
-    subnet = ipaddress.ip_network(network, strict=False)
-    if not subnet.is_private or not isinstance(subnet, ipaddress.IPv4Network):
+    if not isinstance(subnet, ipaddress.IPv4Network) or not subnet.is_private:
         raise ValueError("WOL requires a private IPv4 monitor subnet")
     packet = magic_packet(allowlist[name])
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -57,10 +60,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", required=True, help="logical name from the local allowlist")
     parser.add_argument("--config", type=Path, required=True, help="root-managed local allowlist JSON")
-    parser.add_argument("--network", required=True, help="approved private IPv4 monitor CIDR")
     args = parser.parse_args()
     try:
-        send_allowlisted(args.target, load_allowlist(args.config), args.network)
+        send_allowlisted(args.target, args.config)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         # Error text may include local network details; emit only a safe class and exit code.
         print(f"WOL not sent ({type(exc).__name__})", file=sys.stderr)

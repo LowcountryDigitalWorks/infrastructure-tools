@@ -6,6 +6,7 @@ import argparse
 import dataclasses
 import datetime as dt
 import enum
+import errno
 import ipaddress
 import json
 import logging
@@ -43,6 +44,9 @@ class Reason(str, enum.Enum):
     OK = "OK"
     SUSPECT_FAILURE = "SUSPECT_FAILURE"
     CONNECT_FAILED = "CONNECT_FAILED"
+    CONNECT_REFUSED = "CONNECT_REFUSED"
+    CONNECT_TIMEOUT = "CONNECT_TIMEOUT"
+    PROBE_INCONCLUSIVE = "PROBE_INCONCLUSIVE"
     RESOLUTION_FAILED = "RESOLUTION_FAILED"
     ADDRESS_OUTSIDE_MONITOR_NETWORK = "ADDRESS_OUTSIDE_MONITOR_NETWORK"
     GATEWAY_UNAVAILABLE = "GATEWAY_UNAVAILABLE"
@@ -258,9 +262,15 @@ def tcp_probe(address: str, port: int, timeout: float, network: str) -> Result:
                 sock.settimeout(remaining)
                 sock.connect(sockaddr)
             return Result(True, Reason.OK)
-        except OSError:
+        except OSError as exc:
+            if exc.errno in (errno.ECONNREFUSED, errno.ECONNRESET, errno.ECONNABORTED):
+                return Result(False, Reason.CONNECT_REFUSED)
+            if isinstance(exc, TimeoutError) or exc.errno == errno.ETIMEDOUT:
+                return Result(False, Reason.CONNECT_TIMEOUT)
+            # A timeout, missing route, or other transport error does not prove
+            # either that the host is down or that only its service is down.
             continue
-    return Result(False, Reason.CONNECT_FAILED)
+    return Result(None, Reason.PROBE_INCONCLUSIVE)
 
 
 class Sentinel:
@@ -281,7 +291,8 @@ class Sentinel:
 
     def _load_state(self) -> None:
         try:
-            data = self.config.state_file.read_bytes()
+            with self.config.state_file.open("rb") as stream:
+                data = stream.read(MAX_STATE_BYTES + 1)
         except FileNotFoundError:
             for track in self.tracks.values():
                 track.reason = Reason.STATE_MISSING
@@ -369,6 +380,10 @@ class Sentinel:
     def _apply(self, target: Target, result: Result, observed_at: str | None, quality: str,
                out: list[Transition]) -> None:
         track = self.tracks[target.target_id]
+        if target.kind == "host" and result.reason == Reason.CONNECT_REFUSED:
+            # A refusal/reset means the remote TCP stack answered, so the host
+            # is reachable even though the selected port did not accept a session.
+            result = Result(True, Reason.OK)
         if result.reachable is True:
             track.successes = min(10, track.successes + 1)
             track.failures = 0
@@ -379,6 +394,13 @@ class Sentinel:
         elif result.reachable is False:
             track.failures = min(10, track.failures + 1)
             track.successes = 0
+            confirmed_failure = (target.kind == "host" and result.reason == Reason.CONNECT_TIMEOUT) or (
+                target.kind == "tcp" and result.reason == Reason.CONNECT_REFUSED)
+            if not confirmed_failure:
+                # Only an explicit refusal/reset proves the endpoint was reached.
+                self._transition(target.target_id, track, Health.UNKNOWN, result.reason,
+                                 observed_at, quality, out)
+                return
             failed_state = Health.UNREACHABLE if target.kind == "host" else Health.SERVICE_UNAVAILABLE
             if track.failures >= self.config.failure_threshold:
                 self._transition(target.target_id, track, failed_state, result.reason, observed_at, quality, out)
@@ -427,7 +449,8 @@ class Sentinel:
                     continue
                 if target.parent:
                     parent_state = self.tracks[target.parent].state
-                    if parent_state in (Health.UNREACHABLE, Health.SERVICE_UNAVAILABLE):
+                    if parent_state in (Health.UNREACHABLE, Health.SERVICE_UNAVAILABLE,
+                                        Health.PARENT_UNREACHABLE):
                         self._transition(target_id, self.tracks[target_id], Health.PARENT_UNREACHABLE,
                                          Reason.PARENT_UNAVAILABLE, observed_at, quality, out)
                     else:
@@ -463,8 +486,9 @@ def serve(config_path: Path) -> None:
         started = time.monotonic()
         try:
             sentinel.poll_once()
-        except Exception as exc:  # fail closed; exception text may contain addresses, so do not log it.
-            logger.error("poll error class=%s", type(exc).__name__)
+        except Exception as exc:  # Do not leak exception text; exit so systemd can restart us.
+            logger.error("fatal poll error class=%s", type(exc).__name__)
+            raise SystemExit(1) from None
         time.sleep(max(0.0, config.poll_interval - (time.monotonic() - started)))
 
 
