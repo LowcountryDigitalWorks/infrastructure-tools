@@ -16,16 +16,18 @@ internal static class WindowsPrivilege
 
 internal sealed class WindowsRuntimeContextProbe
 {
+    private readonly PostLoginSettleTracker _settleTracker = new();
+
     public RuntimeContext Observe()
     {
         var sessionId = Process.GetCurrentProcess().SessionId;
         if (!WTSQuerySessionInformationW(IntPtr.Zero, sessionId, WtsInfoClass.WTSConnectState,
                 out var buffer, out var bytes) || buffer == IntPtr.Zero || bytes < sizeof(int))
-            return new RuntimeContext(OwnerSessionState.Unknown);
+            return _settleTracker.Observe(OwnerSessionState.Unknown);
         try
         {
             var state = Marshal.ReadInt32(buffer);
-            return new RuntimeContext(OwnerSessionStateMapper.FromWtsConnectState(state));
+            return _settleTracker.Observe(OwnerSessionStateMapper.FromWtsConnectState(state));
         }
         finally
         {

@@ -13,7 +13,7 @@ public enum ComponentKind
     WslUbuntu, CursorWorker, LinuxNode, HyperV, GithubRunner, Custom
 }
 
-public sealed record RuntimeContext(OwnerSessionState OwnerSession);
+public sealed record RuntimeContext(OwnerSessionState OwnerSession, bool OwnerSessionSettling = false);
 
 public sealed record DeviceDefinition(
     string Id,
@@ -80,6 +80,7 @@ public static class DesiredStateEvaluator
                 {
                     OwnerSessionState.Inactive => HealthState.Healthy,
                     OwnerSessionState.Unknown => HealthState.Unknown,
+                    OwnerSessionState.Active when runtime.OwnerSessionSettling => HealthState.Initializing,
                     _ => component.Required ? HealthState.Failed : HealthState.Degraded
                 };
             }
@@ -157,7 +158,8 @@ public static class DeviceHealthAggregator
             HealthState.Degraded => "A required component needs attention.",
             HealthState.Failed => "A required component is unavailable or failed.",
             HealthState.Unknown => "Required component status is not yet known.",
-            _ => "Host Agent is collecting its first observations."
+            _ => observations.FirstOrDefault(o => o.Health == HealthState.Initializing)?.Summary
+                ?? "A required component is initializing."
         };
 
         return (aggregate, color, summary);
