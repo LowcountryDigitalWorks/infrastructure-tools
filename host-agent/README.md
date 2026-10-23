@@ -6,18 +6,18 @@ Host Agent is a device-first, local status surface for owner-controlled LDW comp
 
 - `src/LDW.HostAgent.Core` contains the platform-neutral device/component model, desired-state evaluation, runtime/session context, health aggregation, telemetry contracts, strict SSH policy, and parser/state-mapping contracts.
 - Health and CI activity are separate: Green = desired state met, Blue = active CI job, Purple = CI Boost enabled, Yellow = degraded/attention, Red = confirmed failure/down, Gray = unknown/initializing.
-- Intentionally stopped/disabled/on-demand components remain healthy when that matches desired state. `RunningAfterLogin` uses explicit owner-session context.
+- Intentionally stopped/disabled/on-demand components remain healthy when that matches desired state. `RunningAfterLogin` uses explicit owner-session context and the accepted bounded post-login settle semantics on current source.
 - Dependency availability is checked while a dependent component is expected to be active; intentionally inactive pre-login/on-demand components do not fail merely because their dependencies are also inactive.
 
 ## Local Admin Broker & Secret Handoff
 
-`src/LDW.AdminBroker` is contract scaffolding with no runnable transport or operations. `src/LDW.LocalSecretStore` requires Windows CurrentUser DPAPI in production; the Corsair launcher is unavailable. See [ADMIN_BROKER.md](docs/ADMIN_BROKER.md) for implemented behavior.
-
-The operation names are contract-only and return unavailable. Secret storage supports the fixed ID with CurrentUser DPAPI; no process handoff is implemented. See [Admin Broker documentation](docs/ADMIN_BROKER.md).
+`src/LDW.AdminBroker` and `src/LDW.LocalSecretStore` implement the reviewed local Admin Broker / secret-store contract. Runtime deployment remains separately governed by its owning issue and exact accepted source; this README does not grant broker deployment authority. See [ADMIN_BROKER.md](docs/ADMIN_BROKER.md) for the current implemented behavior and boundaries.
 
 ## Normal-user tray autostart
 
-`deploy/Manage-TrayAutostart.ps1` validates and manages an already-accepted exact user-logon task when one exists; it never creates a new task. When none exists, it delegates to the exact-readback current-user Run-key lifecycle in `deploy/Manage-TrayAutostartRunKey.ps1`. See [normal-user tray autostart](docs/TRAY_AUTOSTART.md). Source validation does not install or mutate startup state on LDW01.
+`deploy/Manage-TrayAutostart.ps1` validates and manages an already-accepted exact user-logon task when one exists; it never creates a new task. When none exists, it delegates to the exact-readback current-user Run-key lifecycle in `deploy/Manage-TrayAutostartRunKey.ps1`. See [normal-user tray autostart](docs/TRAY_AUTOSTART.md).
+
+Source validation does not itself mutate LDW01. The accepted LDW01 deployment uses the reviewed no-new-task HKCU Run fallback and has survived a later real reboot with exactly one tray process from the fixed Program Files path. Source acceptance and live deployment acceptance remain separate: a later merged Host Agent build is not considered installed until exact endpoint readback proves it.
 
 ## Read-only live-adapter slice
 
@@ -35,26 +35,30 @@ The operation names are contract-only and return unavailable. Secret storage sup
 
 The Linux SSH probe is fixed/read-only: kernel, uptime, load, MemAvailable, swap, root-disk capacity, CPU/memory PSI when supported, cached update count, reboot-required marker, and the configured runner systemd unit. It never uses `sudo` and refuses to run without explicit non-empty known-hosts and existing identity files.
 
-The tray refuses to start elevated. There are no service/VM/power controls, remote push controls, runner mutations, CI profile mutations, or TCP/HTTP listeners.
+The tray refuses to start elevated. There are no service/VM/power controls, remote push controls, runner mutations, CI profile mutations, or TCP/HTTP listeners in this tray surface.
 
 ## Read-only Hyper-V observer boundary
 
-`src/LDW.HostAgent.HyperVObserver` is a separate elevated Windows helper for the single allowlisted VM `CI-RUNNER-001`. It is not a general Hyper-V control service.
+`src/LDW.HostAgent.HyperVObserver` is a separate elevated Windows helper for the closed, source-controlled Hyper-V observation contract. It is not a general Hyper-V control service.
 
 - The helper refuses unelevated execution; the Host Agent tray remains unelevated.
 - IPC is one local named pipe created through the Windows native pipe API with an explicit protected DACL. Only LocalSystem, Administrators, and configured explicit owner-user SIDs receive pipe access; remote pipe clients are rejected. The server then independently identifies the connected client and authorizes only a configured explicit user SID, so broad groups do not become a command surface.
 - The tray connects locally using identification-level impersonation only. Before sending its fixed request it resolves the pipe server PID and verifies that server's process token is elevated and belongs either to LocalSystem or to the same explicit owner SID; a non-elevated or unexpected-user pipe server is rejected.
-- The request contract has one exact versioned operation and contains no VM name, command, script, or shell text supplied by the tray.
-- The privileged observation source uses a fixed read-only `Get-VM` / `Get-VMNetworkAdapter` script containing the allowlisted VM literal. No request value is interpolated into PowerShell.
+- The request contract has one exact versioned operation and contains no caller-supplied PowerShell or shell text.
+- Privileged observation remains fixed/read-only and source-controlled. Caller-controlled arbitrary VM names or scripts are not accepted.
 - Only authorization status, VM existence, sanitized state/running state, filtered guest-address candidates, and non-sensitive error codes cross IPC. Raw PowerShell/Hyper-V output is not returned or logged.
 - Loopback, link-local/APIPA, multicast/broadcast, invalid, duplicate, and excess candidates are rejected or bounded before SSH selection.
 - Guest addresses are transient connection targets only. They are not written to configuration, repository files, logs, status summaries, copied diagnostics, issues, or PRs.
 - When `linuxNode.useHyperVObserver` is enabled, Host Agent requires an existing `HostKeyAlias`; the helper-supplied address is used only as the network target while existing identity/known-hosts trust remains authoritative. SSH still uses strict host-key checking, `IdentitiesOnly`, `BatchMode`, and bounded timeouts.
 - If the helper is absent/unauthorized, the VM is absent/not running, no safe address exists, or strict SSH fails, Linux telemetry remains Unknown rather than weakening trust or fabricating health.
 
-The helper's machine-local allowlist defaults to `%ProgramData%\LowcountryDigitalWorks\HostAgent\hyperv-observer.Local.json`; an explicit local path may be supplied with `--config <path>`. Use `config/hyperv-observer.Local.example.json` only as the public shape. Real SIDs remain machine-local and `*.Local.json` is gitignored.
+The helper's machine-local allowlist/config remains protected machine-local state. Use public example configuration only as a shape. Real SIDs, trust material, and machine-private identifiers remain outside Git.
 
-This repository slice does **not** install/register/start a persistent privileged service or task. Persistent installation and live elevated proof remain explicit post-review gates.
+### Persistent privileged deployment status
+
+The persistent Hyper-V observer lifecycle is no longer a future-only concept. The reviewed deployment path has been accepted and deployed on LDW01 through its owning infrastructure issue, using a protected machine-local install root and a narrow LocalSystem startup lifecycle while the tray stays unelevated. The runtime has also received reviewed lifecycle corrections after live evidence.
+
+Do **not** infer from this repository statement that any arbitrary host is deployed, that the currently installed LDW01 bytes equal the latest `main`, or that new privileged operations are authorized. Installation/update remains a separate exact-source, exact-readback gate under the owning issue. Do not broaden the helper into a generic elevated command surface.
 
 ## Machine-local Host Agent configuration
 
