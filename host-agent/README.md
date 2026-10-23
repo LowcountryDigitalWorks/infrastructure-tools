@@ -54,7 +54,9 @@ The tray refuses to start elevated. There are no service/VM/power controls, remo
 
 The helper's machine-local allowlist defaults to `%ProgramData%\LowcountryDigitalWorks\HostAgent\hyperv-observer.Local.json`; an explicit local path may be supplied with `--config <path>`. Use `config/hyperv-observer.Local.example.json` only as the public shape. Real SIDs remain machine-local and `*.Local.json` is gitignored.
 
-This repository slice does **not** install/register/start a persistent privileged service or task. Persistent installation and live elevated proof remain explicit post-review gates.
+Persistent Hyper-V observer deployment is no longer future-only: the reviewed startup-task deployment path has been accepted and deployed on LDW01 through its owning infrastructure issue, with later runtime corrections reviewed separately. The tray remains unelevated and the observer remains narrow/read-only.
+
+Repository source does not establish that every host is deployed or that installed LDW01 bytes match the latest `main`. Installation/update remains a separate exact-source, exact-readback gate under the owning issue. This paragraph is not new deployment or privilege authority.
 
 ## Machine-local Host Agent configuration
 
