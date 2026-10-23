@@ -148,6 +148,20 @@ try
     log.Log(new AuditRecord(DateTime.UtcNow, request.RequestId, request.Operation, request.TargetIdentity, "synthetic", false, "Unavailable", "NOT_IMPLEMENTED", "unavailable"));
     Assert(log.ReadRecords().Count == 1, "bounded synthetic audit record persists");
     Assert(log.ReadRecords()[0].TargetIdentity == "redacted" && log.ReadRecords()[0].Summary == "Operation audit record.", "audit omits free-form target and summary");
+    Assert(log.ReadRecords()[0].ResultState == "Unavailable" && log.ReadRecords()[0].ErrorCode == "NOT_IMPLEMENTED", "audit preserves fixed result metadata");
+    const string auditCanary = "AUDIT-CANARY-secret-token-connection-string";
+    foreach (var unsafeRecord in new[]
+    {
+        new AuditRecord(DateTime.UtcNow, request.RequestId, request.Operation, request.TargetIdentity, "synthetic", false, auditCanary, "NOT_IMPLEMENTED", "unavailable"),
+        new AuditRecord(DateTime.UtcNow, request.RequestId, request.Operation, request.TargetIdentity, "synthetic", false, "Unavailable", auditCanary, "unavailable")
+    })
+    {
+        try { log.Log(unsafeRecord); throw new Exception("Expected unsafe audit metadata rejection"); }
+        catch (InvalidOperationException ex) { Assert(ex.Message == "Audit record contains unsupported fields.", "unsafe audit metadata rejection is fixed and redacted"); }
+    }
+    var auditText = File.ReadAllText(Path.Combine(root, "audit.jsonl"));
+    Assert(!auditText.Contains(auditCanary, StringComparison.Ordinal), "canary supplied through ResultState or ErrorCode is never persisted");
+    Assert(log.ReadRecords().Count == 1, "rejected audit metadata leaves existing records unchanged");
     var directoryPath = Path.Combine(root, "audit-is-directory"); Directory.CreateDirectory(directoryPath);
     try { new AdminBrokerAuditLogger(directoryPath).Log(new AuditRecord(DateTime.UtcNow, request.RequestId, request.Operation, request.TargetIdentity, null, false, "Unavailable", null, "x")); throw new Exception("Expected audit persistence error"); }
     catch (UnauthorizedAccessException) { Assert(true, "audit persistence failure propagates"); }

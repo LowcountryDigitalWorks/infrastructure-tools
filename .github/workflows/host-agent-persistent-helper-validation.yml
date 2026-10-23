@@ -69,6 +69,10 @@ jobs:
         shell: pwsh
         run: dotnet run --project ./host-agent/tests/LDW.HostAgent.HyperVObserver.Tests/LDW.HostAgent.HyperVObserver.Tests.csproj -c Release --no-build
 
+      - name: Run Admin Broker contract tests
+        shell: pwsh
+        run: dotnet run --project ./host-agent/tests/LDW.AdminBroker.Tests/LDW.AdminBroker.Tests.csproj -c Release --no-build
+
       - name: Prove bounded publish and non-mutating plan
         shell: pwsh
         run: |
