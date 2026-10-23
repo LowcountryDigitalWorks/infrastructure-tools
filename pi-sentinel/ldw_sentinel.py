@@ -420,6 +420,7 @@ class Sentinel:
                 target.kind == "tcp" and result.reason == Reason.CONNECT_REFUSED)
             if not confirmed_failure:
                 # Only an explicit refusal/reset proves the endpoint was reached.
+                track.failures = track.successes = 0
                 self._transition(target.target_id, track, Health.UNKNOWN, result.reason,
                                  observed_at, quality, out)
                 return

@@ -226,6 +226,26 @@ class SentinelContractTests(unittest.TestCase):
         self.assertEqual(child.state, Health.DEGRADED)
         self.assertEqual(child.failures, 1)
 
+    def test_ambiguous_service_sample_breaks_refusal_streak(self):
+        target = Target("service", "tcp", "10.0.0.3", 443)
+        failures = iter([Result(False, Reason.CONNECT_REFUSED)] * 2 +
+                        [Result(False, Reason.CONNECT_TIMEOUT)] +
+                        [Result(False, Reason.CONNECT_REFUSED)] * 3)
+        probe = lambda address, *_args: Result(True, Reason.OK) if address == "10.0.0.1" else next(failures)
+        sentinel = Sentinel(make_config(self.state, targets=(target,)), probe=probe)
+        sentinel.poll_once()
+        sentinel.poll_once()
+        self.assertEqual(sentinel.tracks["service"].failures, 2)
+        ambiguous = sentinel.poll_once()
+        self.assertEqual(sentinel.snapshot()["service"], Health.UNKNOWN)
+        self.assertEqual(sentinel.tracks["service"].failures, 0)
+        for _ in range(2):
+            sentinel.poll_once()
+        self.assertNotEqual(sentinel.snapshot()["service"], Health.SERVICE_UNAVAILABLE)
+        confirmed = sentinel.poll_once()
+        self.assertEqual(sentinel.snapshot()["service"], Health.SERVICE_UNAVAILABLE)
+        self.assertEqual(confirmed[0].state, Health.SERVICE_UNAVAILABLE)
+
     def test_parent_suppression_and_service_down_semantics(self):
         targets = (Target("parent", "host", "10.0.0.2", 22),
                    Target("service", "tcp", "10.0.0.3", 443, "parent"))
