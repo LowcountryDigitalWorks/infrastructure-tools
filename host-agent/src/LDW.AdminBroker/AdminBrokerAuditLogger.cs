@@ -18,19 +18,37 @@ public sealed class AdminBrokerAuditLogger
     private readonly string _auditLogPath;
     private readonly object _lock = new();
     private const long MaximumLogSizeBytes = 5 * 1024 * 1024; // 5 MB limit
+    private const int MaximumRecordCharacters = 4096;
 
     private static readonly HashSet<string> SafeResultStates = new(StringComparer.Ordinal)
     {
         "InvalidRequest",
         "Unavailable",
-        "DuplicateRequest"
+        "DuplicateRequest",
+        "Unauthorized",
+        "SecretStatus",
+        "SecretStored",
+        "SecretRemoved",
+        "ProbeSuccess",
+        "ProbeFailure"
     };
 
     private static readonly HashSet<string> SafeErrorCodes = new(StringComparer.Ordinal)
     {
         "INVALID_REQUEST_ID",
         "NOT_IMPLEMENTED",
-        "DUPLICATE_REQUEST"
+        "DUPLICATE_REQUEST",
+        "MALFORMED_REQUEST",
+        "CALLER_SID_MISMATCH",
+        "POLICY_REJECTED",
+        "SECRET_MISSING",
+        "SECRET_STORE_UNAVAILABLE",
+        "PROBE_UNAVAILABLE",
+        "PROBE_FAILED",
+        "PROBE_RESULT_INVALID",
+        "PROBE_CANCELLED",
+        "UNSUPPORTED_PLATFORM",
+        "PROBE_START_FAILED"
     };
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -53,8 +71,12 @@ public sealed class AdminBrokerAuditLogger
         lock (_lock)
         {
             {
-                if (!Guid.TryParseExact(record.RequestId, "D", out _) || !AdminBrokerContract.Operations.IsValid(record.Operation) ||
-                    (record.CallerSid?.Length ?? 0) > 184 || !SafeResultStates.Contains(record.ResultState) ||
+                if (!Guid.TryParseExact(record.RequestId, "D", out _)
+                    || (!AdminBrokerContract.Operations.IsValid(record.Operation)
+                        && record.Operation is not ("INVALID_REQUEST" or "LOCAL_SECRET_STORE" or "FIXED_SECRET_PROBE"))
+                    || (record.CallerSid?.Length ?? 0) > 184
+                    || (record.CallerSid is not null && !AdminBrokerAuthorizationPolicy.IsSafeExplicitUserSid(record.CallerSid))
+                    || !SafeResultStates.Contains(record.ResultState) ||
                     (record.ErrorCode is not null && !SafeErrorCodes.Contains(record.ErrorCode)))
                     throw new InvalidOperationException("Audit record contains unsupported fields.");
                 var directory = Path.GetDirectoryName(_auditLogPath);
@@ -75,6 +97,8 @@ public sealed class AdminBrokerAuditLogger
                 // Never persist caller-controlled target or summary text.
                 var safeRecord = record with { TargetIdentity = "redacted", Summary = "Operation audit record." };
                 var jsonLine = JsonSerializer.Serialize(safeRecord, JsonOptions) + Environment.NewLine;
+                if (jsonLine.Length > MaximumRecordCharacters)
+                    throw new InvalidOperationException("Audit record exceeds its fixed size bound.");
                 File.AppendAllText(_auditLogPath, jsonLine);
             }
         }
