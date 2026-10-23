@@ -27,6 +27,40 @@ Assert(DesiredStateEvaluator.Evaluate(afterLogin, ObservedState.Stopped, inactiv
 Assert(DesiredStateEvaluator.Evaluate(afterLogin, ObservedState.Running, activeSession) == HealthState.Healthy, "post-login running RunningAfterLogin component is healthy");
 Assert(DesiredStateEvaluator.Evaluate(afterLogin, ObservedState.Stopped, activeSession) == HealthState.Failed, "post-login stopped RunningAfterLogin component fails");
 Assert(DesiredStateEvaluator.Evaluate(afterLogin, ObservedState.Stopped, unknownSession) == HealthState.Unknown, "unknown owner-session context does not hide RunningAfterLogin state");
+var clock = new ManualTimeProvider();
+var settleTracker = new PostLoginSettleTracker(timeProvider: clock);
+var settlingRuntime = settleTracker.Observe(OwnerSessionState.Active);
+Assert(settlingRuntime.OwnerSessionSettling, "first active owner-session observation starts the settle window");
+Assert(DesiredStateEvaluator.Evaluate(afterLogin, ObservedState.Stopped, settlingRuntime) == HealthState.Initializing, "stopped RunningAfterLogin component initializes during the settle window");
+Assert(DesiredStateEvaluator.Evaluate(afterLogin, ObservedState.Disabled, settlingRuntime) == HealthState.Initializing, "disabled RunningAfterLogin component initializes during the settle window");
+Assert(DesiredStateEvaluator.Evaluate(afterLogin, ObservedState.Running, settlingRuntime) == HealthState.Healthy, "running component is healthy immediately during settle");
+Assert(DesiredStateEvaluator.Evaluate(afterLogin, ObservedState.Unknown, settlingRuntime) == HealthState.Unknown, "unknown observation stays unknown during settle");
+Assert(DesiredStateEvaluator.Evaluate(afterLogin, ObservedState.Unavailable, settlingRuntime) == HealthState.Failed, "unavailable component is not masked during settle");
+clock.Advance(TimeSpan.FromSeconds(119));
+Assert(settleTracker.Observe(OwnerSessionState.Active).OwnerSessionSettling, "refreshes do not reset the original settle start time");
+Assert(!settleTracker.Observe(OwnerSessionState.Unknown).OwnerSessionSettling, "unknown session telemetry never claims an active settle state");
+Assert(settleTracker.Observe(OwnerSessionState.Active).OwnerSessionSettling, "temporary unknown telemetry does not reset an active settle window");
+clock.Advance(TimeSpan.FromSeconds(1));
+var expiredRuntime = settleTracker.Observe(OwnerSessionState.Active);
+Assert(!expiredRuntime.OwnerSessionSettling, "settle window expires at its monotonic duration");
+Assert(DesiredStateEvaluator.Evaluate(afterLogin, ObservedState.Stopped, expiredRuntime) == HealthState.Failed, "stopped required component fails after settle expiration");
+var optionalAfterLogin = afterLogin with { Required = false };
+Assert(DesiredStateEvaluator.Evaluate(optionalAfterLogin, ObservedState.Stopped, expiredRuntime) == HealthState.Degraded, "stopped optional component degrades after settle expiration");
+Assert(!settleTracker.Observe(OwnerSessionState.Active).OwnerSessionSettling, "refreshes after expiration do not restart the window");
+settleTracker.Observe(OwnerSessionState.Inactive);
+var nextLoginRuntime = settleTracker.Observe(OwnerSessionState.Active);
+Assert(nextLoginRuntime.OwnerSessionSettling, "a known inactive-to-active transition starts a fresh settle window");
+var dependentSettleDevice = new DeviceDefinition("post-login-device", "Post-login device", DevicePlatform.Windows,
+    [new EnvironmentDefinition("automation", "Automation", [onDemand, afterLogin with { DependsOn = ["wsl"] }])]);
+var inactiveWslObservation = new ComponentObservation("wsl", ObservedState.Stopped, HealthState.Healthy, now, "On demand and intentionally inactive");
+var initializingCursor = new ComponentObservation("cursor-worker", ObservedState.Stopped, HealthState.Initializing, now,
+    "Cursor Worker is initializing after sign-in; waiting for its post-login startup window.");
+var initializingAggregate = DeviceHealthAggregator.Aggregate(dependentSettleDevice, [inactiveWslObservation, initializingCursor]);
+Assert(initializingAggregate.Health == HealthState.Initializing && initializingAggregate.Color == StatusColor.Gray, "initializing post-login dependent aggregates gray without failing on its stopped on-demand dependency");
+Assert(initializingAggregate.Summary.Contains("initializing after sign-in", StringComparison.Ordinal), "aggregate summary exposes initialization in text");
+var expiredCursor = initializingCursor with { Health = HealthState.Failed, Summary = "Cursor Worker is not active." };
+var expiredAggregate = DeviceHealthAggregator.Aggregate(dependentSettleDevice, [inactiveWslObservation, expiredCursor]);
+Assert(expiredAggregate.Health == HealthState.Failed && expiredAggregate.Color == StatusColor.Red, "stopped post-login dependent fails after the settle window");
 Assert(OwnerSessionStateMapper.FromWtsConnectState(0) == OwnerSessionState.Active, "WTS active maps to active owner session");
 Assert(OwnerSessionStateMapper.FromWtsConnectState(4) == OwnerSessionState.Inactive, "WTS disconnected maps to inactive owner session");
 Assert(OwnerSessionStateMapper.FromWtsConnectState(null) == OwnerSessionState.Unknown, "missing WTS state maps to unknown owner session");
@@ -150,4 +184,14 @@ void AssertThrows<TException>(Action action, string description) where TExceptio
         throw new InvalidOperationException($"FAILED: {description}");
     }
     catch (TException) { }
+}
+
+sealed class ManualTimeProvider : TimeProvider
+{
+    private long _timestamp;
+
+    public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+    public override long GetTimestamp() => _timestamp;
+
+    public void Advance(TimeSpan duration) => _timestamp += duration.Ticks;
 }

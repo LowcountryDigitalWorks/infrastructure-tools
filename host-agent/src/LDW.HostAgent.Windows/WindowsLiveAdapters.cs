@@ -236,7 +236,12 @@ internal sealed class WindowsLiveAdapters
         return (null, null, null);
     }
     private static ComponentObservation Observation(ComponentDefinition component, ObservedState state, RuntimeContext runtime, string summary)
-        => new(component.Id, state, DesiredStateEvaluator.Evaluate(component, state, runtime), DateTimeOffset.UtcNow, summary);
+    {
+        var health = DesiredStateEvaluator.Evaluate(component, state, runtime);
+        if (health == HealthState.Initializing && component.DesiredState == DesiredState.RunningAfterLogin)
+            summary = $"{component.Name} is initializing after sign-in; waiting for its post-login startup window.";
+        return new ComponentObservation(component.Id, state, health, DateTimeOffset.UtcNow, summary);
+    }
 
     private static ComponentObservation Unknown(ComponentDefinition component, string summary)
         => new(component.Id, ObservedState.Unknown, HealthState.Unknown, DateTimeOffset.UtcNow, summary);
