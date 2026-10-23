@@ -1,0 +1,32 @@
+{
+  "monitor_id": "replace-with-logical-monitor-id",
+  "gateway": "replace-with-local-gateway-ip",
+  "gateway_port": 443,
+  "monitor_cidr": "replace-with-private-lan-cidr",
+  "poll_interval": 60,
+  "timeout": 2.0,
+  "failure_threshold": 3,
+  "recovery_threshold": 2,
+  "state_file": "/var/lib/ldw-sentinel/state.json",
+  "targets": [
+    {
+      "id": "ldw01-host",
+      "kind": "host",
+      "address": "replace-with-private-hostname-or-ip",
+      "port": 22
+    },
+    {
+      "id": "ci-runner-001-ssh",
+      "kind": "tcp",
+      "address": "replace-with-private-hostname-or-ip",
+      "port": 22,
+      "parent": "ldw01-host"
+    },
+    {
+      "id": "plex-service",
+      "kind": "tcp",
+      "address": "replace-with-private-hostname-or-ip",
+      "port": 32400
+    }
+  ]
+}
