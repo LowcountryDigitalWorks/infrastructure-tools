@@ -85,11 +85,41 @@ public sealed record CiJitStatusSnapshot(
 
 public static class CiJitStatusResolver
 {
+    private static readonly HashSet<string> AllowedReasonCodes = new(StringComparer.Ordinal)
+    {
+        "BUSY",
+        "CAPACITY",
+        "LOCAL_STATE_STALE",
+        "LOCAL_STATE_UNAVAILABLE",
+        "MALFORMED_STATE",
+        "MULTIPLE_ACTIVE_RUNS",
+        "OWNED_RESOURCE_CONTRADICTION",
+        "POLICY_HOLD",
+        "PROVENANCE_MISMATCH",
+        "QUEUE_STALE",
+        "QUEUE_UNAVAILABLE",
+        "SOURCE_UNAVAILABLE",
+        "STALE_RESIDUE",
+        "UNKNOWN"
+    };
+
     public static CiJitStatusSnapshot Resolve(CiJitStatusInput input)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(input.SourceVersion);
+        ValidateSafeIdentifier(input.SourceVersion, nameof(input.SourceVersion), 64, allowUppercase: true, allowColon: true);
+        if (LooksLikeSha(input.SourceVersion))
+            throw new ArgumentException("SourceVersion must be a sanitized release/provenance identifier, not a raw SHA.", nameof(input.SourceVersion));
+        if (input.ReasonCode is not null && !AllowedReasonCodes.Contains(input.ReasonCode))
+            throw new ArgumentException("ReasonCode is not in the sanitized allowlist.", nameof(input.ReasonCode));
+        if (input.SelectedProfile is not null)
+        {
+            ValidateSafeIdentifier(input.SelectedProfile, nameof(input.SelectedProfile), 64, allowUppercase: false, allowColon: false);
+            if (LooksLikeSha(input.SelectedProfile))
+                throw new ArgumentException("SelectedProfile must be a bounded profile identifier, not a raw SHA.", nameof(input.SelectedProfile));
+        }
         if (input.EligibleQueuedCount is < 0) throw new ArgumentOutOfRangeException(nameof(input.EligibleQueuedCount));
         if (input.HeldQueuedCount is < 0) throw new ArgumentOutOfRangeException(nameof(input.HeldQueuedCount));
+        if (input.SelectedRunId is <= 0) throw new ArgumentOutOfRangeException(nameof(input.SelectedRunId));
+        if (input.SelectedJobId is <= 0) throw new ArgumentOutOfRangeException(nameof(input.SelectedJobId));
 
         var state = ResolveState(input);
         return new CiJitStatusSnapshot(
@@ -145,6 +175,27 @@ public static class CiJitStatusResolver
 
         return CiJitOwnerState.Idle;
     }
+
+    private static void ValidateSafeIdentifier(string value, string parameterName, int maxLength, bool allowUppercase, bool allowColon)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(value, parameterName);
+        if (value.Length > maxLength)
+            throw new ArgumentException("Sanitized identifier exceeds its maximum length.", parameterName);
+
+        foreach (var character in value)
+        {
+            var allowed = char.IsAsciiDigit(character)
+                || (character is >= 'a' and <= 'z')
+                || (allowUppercase && character is >= 'A' and <= 'Z')
+                || character is '.' or '_' or '-'
+                || (allowColon && character == ':');
+            if (!allowed)
+                throw new ArgumentException("Sanitized identifier contains a disallowed character.", parameterName);
+        }
+    }
+
+    private static bool LooksLikeSha(string value) =>
+        (value.Length is 40 or 64) && value.All(Uri.IsHexDigit);
 
     private static StatusColor ColorFor(CiJitOwnerState state) => state switch
     {
