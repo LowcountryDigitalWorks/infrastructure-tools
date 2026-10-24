@@ -121,6 +121,8 @@ public static class CiJitStatusResolver
         if (input.SelectedRunId is <= 0) throw new ArgumentOutOfRangeException(nameof(input.SelectedRunId));
         if (input.SelectedJobId is <= 0) throw new ArgumentOutOfRangeException(nameof(input.SelectedJobId));
 
+        ValidateQueueSnapshot(input);
+
         var state = ResolveState(input);
         return new CiJitStatusSnapshot(
             input.ObservedAtUtc,
@@ -137,6 +139,20 @@ public static class CiJitStatusResolver
             input.SelectedJobId,
             input.ControllerPhase,
             input.Capacity);
+    }
+
+    private static void ValidateQueueSnapshot(CiJitStatusInput input)
+    {
+        if (input.QueueState == CiJitQueueState.Fresh && input.EligibleQueuedCount is null)
+            throw new ArgumentException("Fresh queue evidence requires an explicit eligible queue count.", nameof(input.EligibleQueuedCount));
+
+        if (input.QueueState != CiJitQueueState.Fresh && (input.EligibleQueuedCount is not null || input.HeldQueuedCount is not null))
+            throw new ArgumentException("Stale or unavailable queue evidence cannot retain queue counts.", nameof(input.QueueState));
+
+        if (input.ReasonCode == "CAPACITY" && input.Capacity != CiJitCapacityState.Capacity)
+            throw new ArgumentException("CAPACITY reason requires matching capacity state.", nameof(input.ReasonCode));
+        if (input.ReasonCode == "BUSY" && input.Capacity != CiJitCapacityState.Busy)
+            throw new ArgumentException("BUSY reason requires matching capacity state.", nameof(input.ReasonCode));
     }
 
     private static CiJitOwnerState ResolveState(CiJitStatusInput input)
@@ -165,6 +181,8 @@ public static class CiJitStatusResolver
 
         if (input.EligibleQueuedCount > 0)
         {
+            if (input.ReasonCode == "POLICY_HOLD") return CiJitOwnerState.Hold;
+
             return input.Capacity switch
             {
                 CiJitCapacityState.Ready => CiJitOwnerState.Queued,
