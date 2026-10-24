@@ -1,3 +1,5 @@
+using LDW.OperationsBridge.Client;
+using LDW.OperationsBridge.Core;
 using LDW.OperationsBridge.Runner;
 
 internal static class BridgeRunnerContractTests
@@ -8,6 +10,11 @@ internal static class BridgeRunnerContractTests
             "{\"bridgeId\":\"ldw01-bridge\",\"relayConnectUri\":\"wss://ldw-operations-bridge-relay.locodw.workers.dev/relay/connect?bridgeId=ldw01-bridge\"}");
         Assert(config.BridgeId == "ldw01-bridge", "runner accepts exact bridge identity");
         Assert(config.RelayConnectUri.Scheme == "wss", "runner accepts secure trusted endpoint");
+        var connectHeaders = BridgeConnectIdentityHeaders.Create();
+        Assert(connectHeaders.Count == 3, "connect identity contains only the three fixed metadata headers");
+        Assert(connectHeaders["X-LDW-Protocol-Version"] == BridgeProtocol.Version, "connect protocol is sourced from BridgeProtocol");
+        Assert(connectHeaders["X-LDW-Bridge-Runtime"] == BridgeProtocol.BridgeRuntime, "connect runtime is sourced from BridgeProtocol");
+        Assert(connectHeaders["X-LDW-Bridge-Version"] == BridgeProtocol.BridgeRuntimeVersion, "connect runtime version is sourced from BridgeProtocol");
 
         foreach (var invalid in new[]
         {

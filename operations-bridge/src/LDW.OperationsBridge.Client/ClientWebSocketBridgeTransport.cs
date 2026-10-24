@@ -49,6 +49,10 @@ public sealed class ClientWebSocketBridgeTransport : IBridgeTransport, IAsyncDis
         }
 
         _socket.Options.SetRequestHeader("Authorization", $"Bearer {bridgeBearerToken}");
+        foreach (var header in BridgeConnectIdentityHeaders.Create())
+        {
+            _socket.Options.SetRequestHeader(header.Key, header.Value);
+        }
         await _socket.ConnectAsync(relayConnectUri, cancellationToken).ConfigureAwait(false);
 
         _receiveCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -278,4 +282,14 @@ public sealed class ClientWebSocketBridgeTransport : IBridgeTransport, IAsyncDis
         _sendGate.Dispose();
         _receiveCts?.Dispose();
     }
+}
+
+internal static class BridgeConnectIdentityHeaders
+{
+    public static IReadOnlyDictionary<string, string> Create() => new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["X-LDW-Protocol-Version"] = BridgeProtocol.Version,
+        ["X-LDW-Bridge-Runtime"] = BridgeProtocol.BridgeRuntime,
+        ["X-LDW-Bridge-Version"] = BridgeProtocol.BridgeRuntimeVersion
+    };
 }
