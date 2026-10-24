@@ -701,14 +701,76 @@ test("SQLite repository persists full envelope and enforces one terminal", () =>
   assert.equal(repository.getDispatch(dispatch.dispatchId).terminal_status, "PASS");
 });
 
-test("connect endpoint enforces WebSocket upgrade and bridge role", async () => {
+test("connect requires fixed authenticated protocol/runtime metadata after bridge role and identity checks", async () => {
   const env = buildEnv();
   const site = await sendWithToken(env, env.SITE_DISPATCH_TOKEN, "/relay/connect?bridgeId=ldw01-bridge", "GET");
   assert.equal(site.status, 403);
-
-  const bridge = await sendWithToken(env, env.BRIDGE_CLIENT_TOKEN, "/relay/connect?bridgeId=ldw01-bridge", "GET");
-  assert.equal(bridge.status, 426);
+  const missing = await sendWithToken(env, env.BRIDGE_CLIENT_TOKEN, "/relay/connect?bridgeId=ldw01-bridge", "GET");
+  assert.equal(missing.status, 400);
+  const drift = await sendWithToken(env, env.BRIDGE_CLIENT_TOKEN, "/relay/connect?bridgeId=ldw01-bridge", "GET", undefined, {"X-LDW-Protocol-Version":"9"});
+  assert.equal(drift.status, 400);
+  const bridge = await sendWithToken(env, env.BRIDGE_CLIENT_TOKEN, "/relay/connect?bridgeId=ldw01-bridge", "GET", undefined, connectIdentityHeaders());
+  assert.equal(bridge.status, 426); // Valid metadata reaches the Durable Object upgrade check.
 });
+
+test("status is Site-only, fixed-identity, bounded, and fails closed across socket states", async () => {
+  const env = buildEnv();
+  const unauthenticated = await relayWorker.fetch(new Request("https://relay.example/relay/status"), env);
+  assert.equal(unauthenticated.status, 401);
+  const bridge = await sendWithToken(env, env.BRIDGE_CLIENT_TOKEN, "/relay/status", "GET");
+  assert.equal(bridge.status, 403);
+  const query = await sendWithToken(env, env.SITE_DISPATCH_TOKEN, "/relay/status?bridgeId=other", "GET");
+  assert.equal(query.status, 400);
+
+  const first = await sendWithToken(env, env.SITE_DISPATCH_TOKEN, "/relay/status", "GET");
+  const unknown = await first.json();
+  assert.equal(unknown.state, "UNKNOWN");
+  assert.equal(unknown.freshness, "UNKNOWN");
+  assert.equal(unknown.last_authenticated_at, null);
+  const unobservedSocket = attachSocket(env, "ldw01-bridge");
+  const unobservedOnline = await (await sendWithToken(env, env.SITE_DISPATCH_TOKEN, "/relay/status", "GET")).json();
+  assert.equal(unobservedOnline.state, "UNKNOWN");
+  assert.equal(unobservedOnline.freshness, "UNKNOWN");
+  unobservedSocket.socket.readyState = 3;
+
+  const stub = env.BRIDGE_RELAY.get(env.BRIDGE_RELAY.idFromName("ldw01-bridge"));
+  const durable = stub.__durable();
+  durable.repository.saveStatusObservation("ldw01-bridge", {last_authenticated_at:"2026-10-24T12:00:00.000Z", protocol_version:"1.0", bridge_runtime:"ldw-operations-bridge", runtime_version:"1.0.0"});
+  const rehydrated = new BridgeRelayDurableObject(durable.__state);
+  assert.equal(rehydrated.repository.getStatusObservation("ldw01-bridge").last_authenticated_at, "2026-10-24T12:00:00.000Z");
+  const offline = await (await sendWithToken(env, env.SITE_DISPATCH_TOKEN, "/relay/status", "GET")).json();
+  assert.equal(offline.state, "OFFLINE");
+  durable.repository.saveStatusObservation("ldw01-bridge", {last_authenticated_at:"2026-10-24T12:00:00.000Z", protocol_version:"1.0", bridge_runtime:"ldw-operations-bridge", runtime_version:"drifted"});
+  const invalidObservation = await (await sendWithToken(env, env.SITE_DISPATCH_TOKEN, "/relay/status", "GET")).json();
+  assert.equal(invalidObservation.state, "UNKNOWN");
+  assert.equal(invalidObservation.freshness, "UNKNOWN");
+  durable.repository.saveStatusObservation("ldw01-bridge", {last_authenticated_at:"2026-10-24T12:00:00.000Z", protocol_version:"1.0", bridge_runtime:"ldw-operations-bridge", runtime_version:"1.0.0"});
+  assert.equal(offline.freshness, "STALE");
+
+  const a = attachSocket(env, "ldw01-bridge");
+  const online = await (await sendWithToken(env, env.SITE_DISPATCH_TOKEN, "/relay/status", "GET")).json();
+  assert.equal(online.state, "ONLINE");
+  assert.equal(online.freshness, "FRESH");
+  a.socket.readyState = 3;
+  const stale = await (await sendWithToken(env, env.SITE_DISPATCH_TOKEN, "/relay/status", "GET")).json();
+  assert.equal(stale.state, "OFFLINE");
+  assert.equal(stale.freshness, "STALE");
+
+  const b = attachSocket(env, "ldw01-bridge");
+  const c = attachSocket(env, "ldw01-bridge");
+  const degraded = await (await sendWithToken(env, env.SITE_DISPATCH_TOKEN, "/relay/status", "GET")).json();
+  assert.equal(degraded.state, "DEGRADED");
+  assert.equal(degraded.freshness, "UNKNOWN");
+  assert.deepEqual(Object.keys(degraded).sort(), ["bridge_id","state","protocol_version","runtime_version","last_authenticated_at","supported_operations","freshness"].sort());
+  assert.deepEqual(degraded.supported_operations, ["BROWSER_LIST_TABS","BROWSER_READ_TAB_METADATA"]);
+  assert.equal(degraded.bridge_id, "ldw01-primary");
+  assert.equal(JSON.stringify(degraded).includes("connectionId"), false);
+  assert.equal(JSON.stringify(degraded).includes("ldw01-bridge"), false);
+});
+
+function connectIdentityHeaders() {
+  return {"X-LDW-Protocol-Version":"1.0", "X-LDW-Bridge-Runtime":"ldw-operations-bridge", "X-LDW-Bridge-Version":"1.0.0"};
+}
 
 function buildEnv() {
   const namespaces = new Map();
@@ -799,6 +861,7 @@ function createFakeSocket(bridgeId) {
 function createFakeSql() {
   const rows = new Map();
   const byIdempotency = new Map();
+  const statusObservations = new Map();
 
   return {
     exec(query, ...params) {
@@ -808,6 +871,14 @@ function createFakeSql() {
         return [];
       }
 
+      if (sql.startsWith("INSERT INTO bridge_status_observations")) {
+        statusObservations.set(params[0], { bridge_id: params[0], last_authenticated_at: params[1], protocol_version: params[2], bridge_runtime: params[3], runtime_version: params[4] });
+        return [];
+      }
+      if (sql.startsWith("SELECT * FROM bridge_status_observations")) {
+        const row = statusObservations.get(params[0]);
+        return row ? [row] : [];
+      }
       if (sql.startsWith("INSERT INTO dispatches")) {
         const record = {
           dispatch_id: params[0],
@@ -913,13 +984,14 @@ function buildDispatch(overrides = {}) {
   };
 }
 
-function sendWithToken(env, token, path, method, body) {
+function sendWithToken(env, token, path, method, body, extraHeaders = {}) {
   return relayWorker.fetch(
     new Request(`https://relay.example${path}`, {
       method,
       headers: {
         authorization: `Bearer ${token}`,
-        "content-type": "application/json"
+        "content-type": "application/json",
+        ...extraHeaders
       },
       body: body === undefined ? undefined : JSON.stringify(body)
     }),
