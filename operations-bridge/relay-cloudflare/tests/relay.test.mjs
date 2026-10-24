@@ -735,16 +735,16 @@ test("status is Site-only, fixed-identity, bounded, and fails closed across sock
 
   const stub = env.BRIDGE_RELAY.get(env.BRIDGE_RELAY.idFromName("ldw01-bridge"));
   const durable = stub.__durable();
-  durable.repository.saveStatusObservation("ldw01-bridge", {last_authenticated_at:"2026-10-24T12:00:00.000Z", protocol_version:"1.0", runtime_version:"1.0.0"});
+  durable.repository.saveStatusObservation("ldw01-bridge", {last_authenticated_at:"2026-10-24T12:00:00.000Z", protocol_version:"1.0", bridge_runtime:"ldw-operations-bridge", runtime_version:"1.0.0"});
   const rehydrated = new BridgeRelayDurableObject(durable.__state);
   assert.equal(rehydrated.repository.getStatusObservation("ldw01-bridge").last_authenticated_at, "2026-10-24T12:00:00.000Z");
   const offline = await (await sendWithToken(env, env.SITE_DISPATCH_TOKEN, "/relay/status", "GET")).json();
   assert.equal(offline.state, "OFFLINE");
-  durable.repository.saveStatusObservation("ldw01-bridge", {last_authenticated_at:"2026-10-24T12:00:00.000Z", protocol_version:"1.0", runtime_version:"drifted"});
+  durable.repository.saveStatusObservation("ldw01-bridge", {last_authenticated_at:"2026-10-24T12:00:00.000Z", protocol_version:"1.0", bridge_runtime:"ldw-operations-bridge", runtime_version:"drifted"});
   const invalidObservation = await (await sendWithToken(env, env.SITE_DISPATCH_TOKEN, "/relay/status", "GET")).json();
   assert.equal(invalidObservation.state, "UNKNOWN");
   assert.equal(invalidObservation.freshness, "UNKNOWN");
-  durable.repository.saveStatusObservation("ldw01-bridge", {last_authenticated_at:"2026-10-24T12:00:00.000Z", protocol_version:"1.0", runtime_version:"1.0.0"});
+  durable.repository.saveStatusObservation("ldw01-bridge", {last_authenticated_at:"2026-10-24T12:00:00.000Z", protocol_version:"1.0", bridge_runtime:"ldw-operations-bridge", runtime_version:"1.0.0"});
   assert.equal(offline.freshness, "STALE");
 
   const a = attachSocket(env, "ldw01-bridge");
@@ -872,7 +872,7 @@ function createFakeSql() {
       }
 
       if (sql.startsWith("INSERT INTO bridge_status_observations")) {
-        statusObservations.set(params[0], { bridge_id: params[0], last_authenticated_at: params[1], protocol_version: params[2], runtime_version: params[3] });
+        statusObservations.set(params[0], { bridge_id: params[0], last_authenticated_at: params[1], protocol_version: params[2], bridge_runtime: params[3], runtime_version: params[4] });
         return [];
       }
       if (sql.startsWith("SELECT * FROM bridge_status_observations")) {

@@ -232,6 +232,7 @@ export class BridgeRelayDurableObject {
     this.repository.saveStatusObservation(bridgeId, {
       last_authenticated_at: new Date().toISOString(),
       protocol_version: identity.protocol_version,
+      bridge_runtime: identity.bridge_runtime,
       runtime_version: identity.runtime_version
     });
     this.deliverQueuedDispatches(bridgeId, connectionId, server);
@@ -363,6 +364,7 @@ export class SqliteRelayRepository {
         bridge_id TEXT PRIMARY KEY,
         last_authenticated_at TEXT NOT NULL,
         protocol_version TEXT NOT NULL,
+        bridge_runtime TEXT NOT NULL,
         runtime_version TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS dispatches (
@@ -392,11 +394,11 @@ export class SqliteRelayRepository {
 
   saveStatusObservation(bridgeId, observation) {
     this.sql.exec(
-      `INSERT INTO bridge_status_observations (bridge_id, last_authenticated_at, protocol_version, runtime_version)
-       VALUES (?1, ?2, ?3, ?4)
+      `INSERT INTO bridge_status_observations (bridge_id, last_authenticated_at, protocol_version, bridge_runtime, runtime_version)
+       VALUES (?1, ?2, ?3, ?4, ?5)
        ON CONFLICT(bridge_id) DO UPDATE SET last_authenticated_at = excluded.last_authenticated_at,
-         protocol_version = excluded.protocol_version, runtime_version = excluded.runtime_version`,
-      bridgeId, observation.last_authenticated_at, observation.protocol_version, observation.runtime_version
+         protocol_version = excluded.protocol_version, bridge_runtime = excluded.bridge_runtime, runtime_version = excluded.runtime_version`,
+      bridgeId, observation.last_authenticated_at, observation.protocol_version, observation.bridge_runtime, observation.runtime_version
     );
   }
 
@@ -1142,6 +1144,7 @@ function readValidatedConnectIdentity(headers) {
 
 function isValidStatusObservation(value) {
   return value && value.protocol_version === PROTOCOL_VERSION &&
+    value.bridge_runtime === BRIDGE_RUNTIME &&
     value.runtime_version === BRIDGE_RUNTIME_VERSION &&
     typeof value.last_authenticated_at === "string" &&
     Number.isFinite(Date.parse(value.last_authenticated_at));
