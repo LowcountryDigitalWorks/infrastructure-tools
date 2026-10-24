@@ -8,4 +8,7 @@
     <ProjectReference Include="../LDW.LocalSecretStore/LDW.LocalSecretStore.csproj" />
     <ProjectReference Include="../LDW.HostAgent.Core/LDW.HostAgent.Core.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="LDW.AdminBroker.Tests" />
+  </ItemGroup>
 </Project>

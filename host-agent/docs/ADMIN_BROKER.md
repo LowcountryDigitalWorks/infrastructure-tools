@@ -1,12 +1,14 @@
 # LDW Local Admin Broker & Local Secret Handoff (LDW01-OWNER-ADMIN-BROKER-001)
 
-This source contains contract scaffolding only. No runnable broker listener, ACL-backed transport, Codync adapter, Host Agent operation adapter, or Corsair proof launcher is implemented. The advertised operations return `NOT_IMPLEMENTED`; no state-changing operation is available.
+The first source-only runnable boundary is implemented. It provides a normal-user local named-pipe host, a fixed CurrentUser DPAPI interactive secret-store lifecycle, and a synthetic fixed child-process proof. The advertised Codync and Host Agent operations still return `NOT_IMPLEMENTED`; no state-changing broker operation is available.
 
 ## Core Scope
 
 ### 1. Admin Broker Operations Enum (`LDW.AdminBroker`)
 
-The contract names six operations, but the named-pipe transport is unavailable. `AdminBrokerPipeServer.ServeOneAsync` throws `NotSupportedException`; it does not create a listener or DACL. Requests require a UUID request ID and bounded JSON. Create/update require exactly `name`, `description`, `endpointUrl`, and `capabilities` with string/string/string/array types; delete and Host Agent operations accept no parameters. No adapter consumes these requests.
+The contract names six operations. `LDW.AdminBroker.Host` creates only the fixed `LDW.AdminBroker.v1` local pipe with `PipeOptions.CurrentUserOnly`, derives the single permitted SID from its normal-user process token, and verifies the connected caller SID through pipe impersonation before policy or engine invocation. Clients must request an impersonation-capable pipe token; a missing caller token fails closed. The byte stream is one bounded UTF-8 JSON line per connection; the server handles one client at a time. There is no elevated listener, service, startup registration, remote pipe, or caller-configurable pipe/SID/operation surface.
+
+Requests require a UUID request ID and bounded JSON. Create/update require exactly `name`, `description`, `endpointUrl`, and `capabilities` with string/string/string/array types; field lengths and capability count are bounded, endpoint credentials/fragments are rejected, and delete/Host Agent operations accept no parameters. Strict parsing and policy validation run before the engine. Every accepted request receives a short-TTL duplicate check; handlers remain unavailable and no adapter consumes requests.
 
 - Codync create/update/delete — Unavailable; no real loopback adapter is present.
 - Host Agent status/restart/repair — Unavailable; no reviewed runtime adapter is present.
@@ -23,9 +25,15 @@ The local secret store uses Windows DPAPI (`ProtectedData.Protect` / `Unprotect`
 ## Privilege & Security Model
 
 - **Unelevated Tray Surface:** Normal-user Host Agent tray remains unelevated.
-- **Transport:** Unavailable. There is no listener or runtime ACL/caller impersonation proof.
-- **Audit:** The logger persists bounded metadata records and propagates write failures. Since no broker transport or mutations are available, it is not an execution gate for a live operation.
-- **Secrets:** This source does not launch a child process. Secret values must not be included in logs or responses.
+- **Transport:** Local current-user-only named pipe with explicit owner SID caller verification. This is source and deterministic local test evidence, not proof of deployment on any machine.
+- **Audit:** The logger persists bounded, fixed metadata records, redacts target and summary text, rotates at 5 MiB, and propagates write failures before a response is sent. Interactive fixed-secret add/replace/remove is additionally gated by a durable `SecretSetRequested` / `SecretRemoveRequested` audit-intent record before the DPAPI store mutation; if that write fails, the mutation delegate is never invoked. These intent records are not success records, so a later store failure cannot be misrepresented as a completed change. There are still no live provider/broker mutating operations.
+- **Secrets:** The fixed proof launches only the companion probe. The secret value is supplied through that child's environment and is absent from arguments, response, audit, and retained output.
+
+### 3. Interactive secret lifecycle and fixed proof child
+
+Run `LDW.AdminBroker.Host.exe` with no arguments as the intended Windows owner. The menu supports status, hidden add/replace input with confirmation, explicit remove confirmation, and the broker listener. Input uses intercepted key events, never command-line arguments or console echo. Production storage uses CurrentUser DPAPI and the one fixed secret identity `CORSAIR_NEON_DATABASE_URL`.
+
+The fixed `LDW.LocalSecretProbe.exe` accepts no arguments or input/network request; it checks only whether the fixed environment variable is non-empty and emits only `SECRET_PRESENT` or a fixed failure token. `CorsairNeonLauncher` resolves this companion from its own application directory, disables shell execution, supplies no arguments, injects the secret only into the child environment, bounds and discards unexpected output, and returns only fixed tokens. This synthetic proof is not a Corsair/Neon connection and does not establish a real secret/account/resource.
 
 ## Build and Test Runbook
 
@@ -34,4 +42,8 @@ From `host-agent/`:
 ```powershell
 dotnet build LDW.HostAgent.sln -c Release
 dotnet run --project tests/LDW.AdminBroker.Tests/LDW.AdminBroker.Tests.csproj -c Release
+dotnet run --project tests/LDW.HostAgent.Core.Tests/LDW.HostAgent.Core.Tests.csproj -c Release
+dotnet run --project tests/LDW.HostAgent.HyperVObserver.Tests/LDW.HostAgent.HyperVObserver.Tests.csproj -c Release
 ```
+
+The build and tests do not install or start the host listener, write the owner DPAPI store, create secrets, or contact providers. Live broker, Codync, Host Agent repair, provider connection, deployment, and startup behavior remain separate authorization gates.

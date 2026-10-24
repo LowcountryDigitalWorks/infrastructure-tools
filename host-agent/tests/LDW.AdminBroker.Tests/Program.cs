@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.IO.Pipes;
+using System.Security.Principal;
 using LDW.AdminBroker;
 using LDW.LocalSecretStore;
 
@@ -129,6 +131,11 @@ try
     var permitted = "S-1-5-21-1234567890-1234567890-1234567890-1001";
     Assert(AdminBrokerAuthorizationPolicy.IsPermittedCaller(permitted, [permitted]), "explicit configured SID policy accepts caller");
     Assert(!AdminBrokerAuthorizationPolicy.IsPermittedCaller("S-1-5-21-1234567890-1234567890-1234567890-1002", [permitted]), "unconfigured caller rejected");
+    Assert(AdminBrokerRequestPolicy.IsAllowed(parsed!), "bounded exact request passes operation policy");
+    var longNameRequest = parsed! with { Parameters = new Dictionary<string, JsonElement>(parsed.Parameters!) { ["name"] = JsonDocument.Parse(JsonSerializer.Serialize(new string('n', 97))).RootElement.Clone() } };
+    Assert(!AdminBrokerRequestPolicy.IsAllowed(longNameRequest), "overlong operation field rejected before handler");
+    var credentialUrlRequest = parsed with { Parameters = new Dictionary<string, JsonElement>(parsed.Parameters!) { ["endpointUrl"] = JsonDocument.Parse("\"https://user:secret@example.invalid/\"").RootElement.Clone() } };
+    Assert(!AdminBrokerRequestPolicy.IsAllowed(credentialUrlRequest), "credential-bearing endpoint rejected before handler");
 
     var engine = new AdminBrokerEngine(new CodyncBotHandler(), new HostAgentOperationHandler());
     var request = parsed!;
@@ -143,17 +150,28 @@ try
     Assert((await engine.ProcessRequestAsync(host, "S-1-5-21-100", CancellationToken.None)).ErrorCode == "NOT_IMPLEMENTED", "Host Agent operation explicitly unavailable");
 
     var launcher = new CorsairNeonLauncher(store);
-    Assert((await launcher.LaunchProofProcessAsync()).ErrorCode == "NOT_IMPLEMENTED", "launcher has no caller-controlled executable interface");
+    if (OperatingSystem.IsWindows())
+    {
+        const string probeCanary = "SYNTHETIC-CORSAIR-SECRET-CANARY";
+        Assert(store.SetSecret(LocalSecretStore.FixedSecretIdCorsairNeon, probeCanary), "synthetic launcher secret stored");
+        var proof = await launcher.LaunchProofProcessAsync();
+        Assert(proof.Success && proof.SanitizedStdout == "SECRET_PRESENT" && proof.SanitizedStderr.Length == 0, "fixed child reports only the secret-presence token");
+        Assert(!JsonSerializer.Serialize(proof).Contains(probeCanary, StringComparison.Ordinal), "child result contains no secret canary");
+    }
+    else
+    {
+        Assert((await launcher.LaunchProofProcessAsync()).ErrorCode == "UNSUPPORTED_PLATFORM", "launcher fails closed off Windows");
+    }
     var log = new AdminBrokerAuditLogger(Path.Combine(root, "audit.jsonl"));
-    log.Log(new AuditRecord(DateTime.UtcNow, request.RequestId, request.Operation, request.TargetIdentity, "synthetic", false, "Unavailable", "NOT_IMPLEMENTED", "unavailable"));
+    log.Log(new AuditRecord(DateTime.UtcNow, request.RequestId, request.Operation, request.TargetIdentity, permitted, false, "Unavailable", "NOT_IMPLEMENTED", "unavailable"));
     Assert(log.ReadRecords().Count == 1, "bounded synthetic audit record persists");
     Assert(log.ReadRecords()[0].TargetIdentity == "redacted" && log.ReadRecords()[0].Summary == "Operation audit record.", "audit omits free-form target and summary");
     Assert(log.ReadRecords()[0].ResultState == "Unavailable" && log.ReadRecords()[0].ErrorCode == "NOT_IMPLEMENTED", "audit preserves fixed result metadata");
     const string auditCanary = "AUDIT-CANARY-secret-token-connection-string";
     foreach (var unsafeRecord in new[]
     {
-        new AuditRecord(DateTime.UtcNow, request.RequestId, request.Operation, request.TargetIdentity, "synthetic", false, auditCanary, "NOT_IMPLEMENTED", "unavailable"),
-        new AuditRecord(DateTime.UtcNow, request.RequestId, request.Operation, request.TargetIdentity, "synthetic", false, "Unavailable", auditCanary, "unavailable")
+        new AuditRecord(DateTime.UtcNow, request.RequestId, request.Operation, request.TargetIdentity, permitted, false, auditCanary, "NOT_IMPLEMENTED", "unavailable"),
+        new AuditRecord(DateTime.UtcNow, request.RequestId, request.Operation, request.TargetIdentity, permitted, false, "Unavailable", auditCanary, "unavailable")
     })
     {
         try { log.Log(unsafeRecord); throw new Exception("Expected unsafe audit metadata rejection"); }
@@ -165,9 +183,117 @@ try
     var directoryPath = Path.Combine(root, "audit-is-directory"); Directory.CreateDirectory(directoryPath);
     try { new AdminBrokerAuditLogger(directoryPath).Log(new AuditRecord(DateTime.UtcNow, request.RequestId, request.Operation, request.TargetIdentity, null, false, "Unavailable", null, "x")); throw new Exception("Expected audit persistence error"); }
     catch (UnauthorizedAccessException) { Assert(true, "audit persistence failure propagates"); }
-    var fakePipeServer = new AdminBrokerPipeServer(["S-1-5-21-100"], engine, log);
-    try { await fakePipeServer.ServeOneAsync(new System.IO.Pipes.NamedPipeServerStream("synthetic"), CancellationToken.None); throw new Exception("Expected unavailable transport"); }
-    catch (NotSupportedException) { Assert(true, "named-pipe transport is unavailable"); }
+
+    var auditGuardPath = Path.Combine(root, "audit-guarded-secret.dat");
+    var auditGuardStore = new LocalSecretStore(auditGuardPath, new TestProtector());
+    var auditGuardMutationCalls = 0;
+    try
+    {
+        AuditGuardedMutation.Execute(
+            () => throw new IOException("synthetic audit persistence failure"),
+            () => { auditGuardMutationCalls++; return auditGuardStore.SetSecret(LocalSecretStore.FixedSecretIdCorsairNeon, "new-value"); });
+        throw new Exception("Expected guarded add audit failure");
+    }
+    catch (IOException ex) when (ex.Message == "synthetic audit persistence failure")
+    {
+        Assert(true, "guarded add propagates durable audit failure");
+    }
+    Assert(auditGuardMutationCalls == 0 && !auditGuardStore.GetStatus(LocalSecretStore.FixedSecretIdCorsairNeon).Exists,
+        "guarded add leaves an absent store unchanged when audit persistence fails");
+
+    Assert(auditGuardStore.SetSecret(LocalSecretStore.FixedSecretIdCorsairNeon, "prior-value"), "guarded mutation fixture stores prior value");
+    foreach (var (name, mutation) in new (string Name, Func<bool> Run)[]
+    {
+        ("replace", () => auditGuardStore.SetSecret(LocalSecretStore.FixedSecretIdCorsairNeon, "replacement-value")),
+        ("remove", () => auditGuardStore.RemoveSecret(LocalSecretStore.FixedSecretIdCorsairNeon))
+    })
+    {
+        auditGuardMutationCalls = 0;
+        try
+        {
+            AuditGuardedMutation.Execute(
+                () => throw new IOException("synthetic audit persistence failure"),
+                () => { auditGuardMutationCalls++; return mutation(); });
+            throw new Exception("Expected guarded " + name + " audit failure");
+        }
+        catch (IOException ex) when (ex.Message == "synthetic audit persistence failure")
+        {
+            Assert(true, "guarded " + name + " propagates durable audit failure");
+        }
+        Assert(auditGuardMutationCalls == 0, "guarded " + name + " never invokes the store mutation after audit failure");
+        Assert(auditGuardStore.GetSecretValueInMemory(LocalSecretStore.FixedSecretIdCorsairNeon) == "prior-value",
+            "guarded " + name + " preserves the exact prior secret state after audit failure");
+    }
+    if (OperatingSystem.IsWindows())
+    {
+        var ownerSid = WindowsIdentity.GetCurrent().User!.Value;
+        var currentProcessIsElevated = new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
+        var transportAudit = new AdminBrokerAuditLogger(Path.Combine(root, "transport-audit.jsonl"));
+        var countingEngine = new CountingEngine();
+        if (currentProcessIsElevated)
+        {
+            try
+            {
+                _ = new AdminBrokerPipeServer([ownerSid], countingEngine, transportAudit);
+                throw new Exception("Expected the production transport constructor to reject an elevated process");
+            }
+            catch (InvalidOperationException ex)
+            {
+                Assert(ex.Message == "The Admin Broker transport must run unelevated.", "production transport constructor rejects elevated process");
+            }
+        }
+
+        foreach (var (caseName, resolvedCallerSid) in new (string Name, string? Sid)[]
+        {
+            ("null", null),
+            ("mismatch", "S-1-5-21-1234567890-1234567890-1234567890-4242")
+        })
+        {
+            var preParseEngine = new CountingEngine();
+            var preParseAuditPath = Path.Combine(root, "preparse-" + caseName + "-audit.jsonl");
+            var preParseServer = new AdminBrokerPipeServer([ownerSid], preParseEngine,
+                new AdminBrokerAuditLogger(preParseAuditPath), allowElevatedTestProcess: true);
+            using var preParsePipe = preParseServer.CreateServerPipe();
+            var preParseTask = preParseServer.ServeOneAsync(preParsePipe, CancellationToken.None, _ => resolvedCallerSid);
+            using var preParseClient = new NamedPipeClientStream(".", AdminBrokerContract.PipeName, PipeDirection.InOut,
+                PipeOptions.Asynchronous, TokenImpersonationLevel.Impersonation);
+            await preParseClient.ConnectAsync(5000);
+            await preParseTask.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert(preParseEngine.CallCount == 0, caseName + " caller identity is rejected before engine invocation");
+            Assert(!File.Exists(preParseAuditPath), caseName + " caller identity is rejected before any request parse/audit path without sending request bytes");
+        }
+
+        {
+            var pipeServer = new AdminBrokerPipeServer([ownerSid], countingEngine, transportAudit, allowElevatedTestProcess: true);
+            using var serverPipe = pipeServer.CreateServerPipe();
+            var serveTask = pipeServer.ServeOneAsync(serverPipe, CancellationToken.None);
+            using var client = new NamedPipeClientStream(".", AdminBrokerContract.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous, TokenImpersonationLevel.Impersonation);
+            await client.ConnectAsync(5000);
+            await using var writer = new StreamWriter(client, leaveOpen: true);
+            using var reader = new StreamReader(client, leaveOpen: true);
+            await writer.WriteLineAsync(noParams);
+            await writer.FlushAsync();
+            var responseJson = await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            await serveTask.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert(responseJson is not null && AdminBrokerContract.TryParseResponse(responseJson, out _), "framed local request returns bounded response");
+            Assert(countingEngine.CallCount == 1, "permitted current-user request reaches engine exactly once (response=" + responseJson + ", audit=" + JsonSerializer.Serialize(transportAudit.ReadRecords()) + ")");
+            Assert(transportAudit.ReadRecords().Count == 1, "transport writes sanitized durable audit before response");
+        }
+
+        var deniedEngine = new CountingEngine();
+        var deniedServer = new AdminBrokerPipeServer([ownerSid], deniedEngine, new AdminBrokerAuditLogger(Path.Combine(root, "denied-audit.jsonl")), allowElevatedTestProcess: true);
+        using var deniedPipe = deniedServer.CreateServerPipe();
+        var deniedTask = deniedServer.ServeOneAsync(deniedPipe, CancellationToken.None);
+        using var deniedClient = new NamedPipeClientStream(".", AdminBrokerContract.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous, TokenImpersonationLevel.Impersonation);
+        await deniedClient.ConnectAsync(5000);
+        await using var deniedWriter = new StreamWriter(deniedClient, leaveOpen: true);
+        using var deniedReader = new StreamReader(deniedClient, leaveOpen: true);
+        await deniedWriter.WriteLineAsync(new string('x', AdminBrokerContract.MaximumRequestCharacters + 1));
+        await deniedWriter.FlushAsync();
+        await deniedReader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        await deniedTask.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert(deniedEngine.CallCount == 0, "oversized frame is rejected before handler invocation");
+    }
     Console.WriteLine($"Admin Broker tests passed ({assertions} assertions).");
 }
 finally { Directory.Delete(root, true); }
@@ -181,4 +307,15 @@ sealed class TestProtector : ISecretProtector
 {
     public byte[] Protect(byte[] plaintext, byte[]? optionalEntropy = null) => plaintext.ToArray();
     public byte[] Unprotect(byte[] encryptedData, byte[]? optionalEntropy = null) => encryptedData.ToArray();
+}
+
+sealed class CountingEngine : IAdminBrokerEngine
+{
+    public int CallCount { get; private set; }
+    public Task<AdminBrokerResponse> ProcessRequestAsync(AdminBrokerRequest request, string? callerSid, CancellationToken cancellationToken)
+    {
+        CallCount++;
+        return Task.FromResult(new AdminBrokerResponse(AdminBrokerContract.Version, request.RequestId, request.Operation,
+            false, "redacted", "Unavailable", "No reviewed adapter is available.", "NOT_IMPLEMENTED", DateTime.UtcNow, null));
+    }
 }
