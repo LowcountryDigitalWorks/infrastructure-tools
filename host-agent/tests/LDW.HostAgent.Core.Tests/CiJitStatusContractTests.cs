@@ -51,15 +51,25 @@ internal static class CiJitStatusContractTests
         Assert(runningQueueUnavailable.QueueSummary == "Queue unavailable", "queue unavailability remains visible during RUNNING");
 
         AssertThrows<ArgumentOutOfRangeException>(() => CiJitStatusResolver.Resolve(clean with { EligibleQueuedCount = -1 }), "negative eligible count rejected");
+        AssertThrows<ArgumentOutOfRangeException>(() => CiJitStatusResolver.Resolve(clean with { SelectedRunId = 0 }), "nonpositive run id rejected");
+        AssertThrows<ArgumentOutOfRangeException>(() => CiJitStatusResolver.Resolve(clean with { SelectedJobId = -1 }), "nonpositive job id rejected");
         AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { SourceVersion = "" }), "missing source provenance rejected");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { SourceVersion = new string('a', 40) }), "raw SHA-like source provenance rejected");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { SourceVersion = "ci10/raw/provider" }), "raw path-like source provenance rejected");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { ReasonCode = "CAPACITY\nraw" }), "raw multiline reason rejected");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { ReasonCode = "TOKEN_VALUE" }), "unrecognized reason code rejected");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { SelectedProfile = "https://api.github.com/raw" }), "raw provider reference rejected as profile");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { SelectedProfile = new string('b', 40) }), "SHA-like profile value rejected");
 
         var details = CiJitStatusResolver.Resolve(clean with
         {
             EligibleQueuedCount = 1,
+            ReasonCode = "POLICY_HOLD",
             SelectedProfile = "ci10-bo-secret-scan",
             SelectedRunId = 123,
             SelectedJobId = 456
         });
+        Assert(details.ReasonCode == "POLICY_HOLD", "only allowlisted reason codes survive projection");
         Assert(details.SelectedProfile == "ci10-bo-secret-scan" && details.SelectedRunId == 123 && details.SelectedJobId == 456,
             "bounded profile/run/job details survive without raw provider payload");
     }
