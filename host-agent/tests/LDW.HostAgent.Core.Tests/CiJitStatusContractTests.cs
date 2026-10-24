@@ -36,6 +36,22 @@ internal static class CiJitStatusContractTests
         AssertState(clean with { EligibleQueuedCount = 1, Capacity = CiJitCapacityState.Busy, ReasonCode = "BUSY" }, CiJitOwnerState.Hold, "busy hold");
         AssertState(clean with { EligibleQueuedCount = 1, Capacity = CiJitCapacityState.Ready, ReasonCode = "POLICY_HOLD" }, CiJitOwnerState.Hold, "policy hold overrides otherwise-ready local capacity");
 
+        var heldOnly = CiJitStatusResolver.Resolve(clean with
+        {
+            EligibleQueuedCount = 0,
+            HeldQueuedCount = 1
+        });
+        Assert(heldOnly.State == CiJitOwnerState.Hold, "held-only fresh queue cannot render IDLE");
+        Assert(heldOnly.QueueSummary == "1 held", "held-only queue remains visible in summary");
+
+        var mixedQueue = CiJitStatusResolver.Resolve(clean with
+        {
+            EligibleQueuedCount = 2,
+            HeldQueuedCount = 1
+        });
+        Assert(mixedQueue.State == CiJitOwnerState.Queued, "eligible work remains primary when eligible and held candidates coexist");
+        Assert(mixedQueue.QueueSummary == "2 waiting · 1 held", "mixed queue summary preserves eligible and held counts separately");
+
         AssertState(clean with { QueueState = CiJitQueueState.Unavailable, EligibleQueuedCount = null, HeldQueuedCount = null }, CiJitOwnerState.Unknown, "unavailable queue never fabricates idle");
         AssertState(clean with { LocalStateFresh = false }, CiJitOwnerState.Unknown, "pre-boot/stale local state fails closed");
         AssertState(clean with { ProvenanceValid = false }, CiJitOwnerState.Unknown, "provenance mismatch fails closed");
@@ -55,6 +71,7 @@ internal static class CiJitStatusContractTests
         AssertThrows<ArgumentOutOfRangeException>(() => CiJitStatusResolver.Resolve(clean with { SelectedRunId = 0 }), "nonpositive run id rejected");
         AssertThrows<ArgumentOutOfRangeException>(() => CiJitStatusResolver.Resolve(clean with { SelectedJobId = -1 }), "nonpositive job id rejected");
         AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { QueueState = CiJitQueueState.Fresh, EligibleQueuedCount = null }), "fresh queue without eligible count rejected");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { QueueState = CiJitQueueState.Fresh, HeldQueuedCount = null }), "fresh queue without held count rejected");
         AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { QueueState = CiJitQueueState.Stale, EligibleQueuedCount = 0, HeldQueuedCount = null }), "stale queue cannot retain zero eligible count");
         AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { QueueState = CiJitQueueState.Unavailable, EligibleQueuedCount = null, HeldQueuedCount = 1 }), "unavailable queue cannot retain held count");
         AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { Capacity = CiJitCapacityState.Ready, ReasonCode = "CAPACITY" }), "capacity reason must match capacity state");
@@ -64,8 +81,12 @@ internal static class CiJitStatusContractTests
         AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { SourceVersion = "ci10/raw/provider" }), "raw path-like source provenance rejected");
         AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { ReasonCode = "CAPACITY\nraw" }), "raw multiline reason rejected");
         AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { ReasonCode = "TOKEN_VALUE" }), "unrecognized reason code rejected");
-        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { SelectedProfile = "https://api.github.com/raw" }), "raw provider reference rejected as profile");
-        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { SelectedProfile = new string('b', 40) }), "SHA-like profile value rejected");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { SelectedProfile = "https://api.github.com/raw", SelectedRunId = 123, SelectedJobId = 456 }), "raw provider reference rejected as profile");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { SelectedProfile = new string('b', 40), SelectedRunId = 123, SelectedJobId = 456 }), "SHA-like profile value rejected");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { SelectedProfile = "ci10-bo-secret-scan" }), "profile-only selected identity rejected");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { SelectedRunId = 123, SelectedJobId = 456 }), "run/job selected identity without profile rejected");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { SelectedProfile = "ci10-bo-secret-scan", SelectedRunId = 123 }), "selected identity missing job rejected");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { SelectedProfile = "ci10-bo-secret-scan", SelectedJobId = 456 }), "selected identity missing run rejected");
 
         var details = CiJitStatusResolver.Resolve(clean with
         {
