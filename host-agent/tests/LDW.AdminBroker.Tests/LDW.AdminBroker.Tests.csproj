@@ -8,5 +8,6 @@
   <ItemGroup>
     <ProjectReference Include="../../src/LDW.AdminBroker/LDW.AdminBroker.csproj" />
     <ProjectReference Include="../../src/LDW.LocalSecretStore/LDW.LocalSecretStore.csproj" />
+    <ProjectReference Include="../../src/LDW.LocalSecretProbe/LDW.LocalSecretProbe.csproj" />
   </ItemGroup>
 </Project>
