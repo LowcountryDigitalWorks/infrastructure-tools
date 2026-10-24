@@ -87,7 +87,7 @@ export default {
       if (requestedBridgeId && requestedBridgeId !== boundBridgeId.bridgeId) {
         return jsonResponse({ error: "bridgeId does not match authenticated bridge identity." }, 403);
       }
-      if (!hasExactConnectIdentity(request.headers)) {
+      if (!readValidatedConnectIdentity(request.headers)) {
         return jsonResponse({ error: "Bridge identity metadata missing, invalid, or drifted." }, 400);
       }
 
@@ -212,7 +212,8 @@ export class BridgeRelayDurableObject {
     if (!bridgeId) {
       return jsonResponse({ error: "bridgeId is required." }, 400);
     }
-    if (!hasExactConnectIdentity(request.headers)) {
+    const identity = readValidatedConnectIdentity(request.headers);
+    if (!identity) {
       return jsonResponse({ error: "Bridge identity metadata missing, invalid, or drifted." }, 400);
     }
 
@@ -230,8 +231,8 @@ export class BridgeRelayDurableObject {
     server.serializeAttachment({ bridgeId, connectionId });
     this.repository.saveStatusObservation(bridgeId, {
       last_authenticated_at: new Date().toISOString(),
-      protocol_version: PROTOCOL_VERSION,
-      runtime_version: BRIDGE_RUNTIME_VERSION
+      protocol_version: identity.protocol_version,
+      runtime_version: identity.runtime_version
     });
     this.deliverQueuedDispatches(bridgeId, connectionId, server);
 
@@ -1125,10 +1126,18 @@ async function forwardToBridgeObject(env, bridgeId, path, method, body, sourceRe
   return stub.fetch(request);
 }
 
-function hasExactConnectIdentity(headers) {
-  return headers.get("X-LDW-Protocol-Version") === PROTOCOL_VERSION &&
-    headers.get("X-LDW-Bridge-Runtime") === BRIDGE_RUNTIME &&
-    headers.get("X-LDW-Bridge-Version") === BRIDGE_RUNTIME_VERSION;
+function readValidatedConnectIdentity(headers) {
+  const identity = {
+    protocol_version: headers.get("X-LDW-Protocol-Version"),
+    bridge_runtime: headers.get("X-LDW-Bridge-Runtime"),
+    runtime_version: headers.get("X-LDW-Bridge-Version")
+  };
+  if (identity.protocol_version !== PROTOCOL_VERSION ||
+      identity.bridge_runtime !== BRIDGE_RUNTIME ||
+      identity.runtime_version !== BRIDGE_RUNTIME_VERSION) {
+    return null;
+  }
+  return identity;
 }
 
 function isValidStatusObservation(value) {

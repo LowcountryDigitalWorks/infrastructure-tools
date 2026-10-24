@@ -740,6 +740,11 @@ test("status is Site-only, fixed-identity, bounded, and fails closed across sock
   assert.equal(rehydrated.repository.getStatusObservation("ldw01-bridge").last_authenticated_at, "2026-10-24T12:00:00.000Z");
   const offline = await (await sendWithToken(env, env.SITE_DISPATCH_TOKEN, "/relay/status", "GET")).json();
   assert.equal(offline.state, "OFFLINE");
+  durable.repository.saveStatusObservation("ldw01-bridge", {last_authenticated_at:"2026-10-24T12:00:00.000Z", protocol_version:"1.0", runtime_version:"drifted"});
+  const invalidObservation = await (await sendWithToken(env, env.SITE_DISPATCH_TOKEN, "/relay/status", "GET")).json();
+  assert.equal(invalidObservation.state, "UNKNOWN");
+  assert.equal(invalidObservation.freshness, "UNKNOWN");
+  durable.repository.saveStatusObservation("ldw01-bridge", {last_authenticated_at:"2026-10-24T12:00:00.000Z", protocol_version:"1.0", runtime_version:"1.0.0"});
   assert.equal(offline.freshness, "STALE");
 
   const a = attachSocket(env, "ldw01-bridge");
