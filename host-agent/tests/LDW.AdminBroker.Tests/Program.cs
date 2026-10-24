@@ -201,20 +201,22 @@ try
                 Assert(ex.Message == "The Admin Broker transport must run unelevated.", "production transport constructor rejects elevated process");
             }
         }
-        var pipeServer = new AdminBrokerPipeServer([ownerSid], countingEngine, transportAudit, allowElevatedTestProcess: true);
-        using var serverPipe = pipeServer.CreateServerPipe();
-        var serveTask = pipeServer.ServeOneAsync(serverPipe, CancellationToken.None);
-        using var client = new NamedPipeClientStream(".", AdminBrokerContract.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous, TokenImpersonationLevel.Impersonation);
-        await client.ConnectAsync(5000);
-        await using var writer = new StreamWriter(client, leaveOpen: true);
-        using var reader = new StreamReader(client, leaveOpen: true);
-        await writer.WriteLineAsync(noParams);
-        await writer.FlushAsync();
-        var responseJson = await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5));
-        await serveTask.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert(responseJson is not null && AdminBrokerContract.TryParseResponse(responseJson, out _), "framed local request returns bounded response");
-        Assert(countingEngine.CallCount == 1, "permitted current-user request reaches engine exactly once (response=" + responseJson + ", audit=" + JsonSerializer.Serialize(transportAudit.ReadRecords()) + ")");
-        Assert(transportAudit.ReadRecords().Count == 1, "transport writes sanitized durable audit before response");
+        {
+            var pipeServer = new AdminBrokerPipeServer([ownerSid], countingEngine, transportAudit, allowElevatedTestProcess: true);
+            using var serverPipe = pipeServer.CreateServerPipe();
+            var serveTask = pipeServer.ServeOneAsync(serverPipe, CancellationToken.None);
+            using var client = new NamedPipeClientStream(".", AdminBrokerContract.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous, TokenImpersonationLevel.Impersonation);
+            await client.ConnectAsync(5000);
+            await using var writer = new StreamWriter(client, leaveOpen: true);
+            using var reader = new StreamReader(client, leaveOpen: true);
+            await writer.WriteLineAsync(noParams);
+            await writer.FlushAsync();
+            var responseJson = await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            await serveTask.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert(responseJson is not null && AdminBrokerContract.TryParseResponse(responseJson, out _), "framed local request returns bounded response");
+            Assert(countingEngine.CallCount == 1, "permitted current-user request reaches engine exactly once (response=" + responseJson + ", audit=" + JsonSerializer.Serialize(transportAudit.ReadRecords()) + ")");
+            Assert(transportAudit.ReadRecords().Count == 1, "transport writes sanitized durable audit before response");
+        }
 
         var deniedEngine = new CountingEngine();
         var deniedServer = new AdminBrokerPipeServer([ownerSid], deniedEngine, new AdminBrokerAuditLogger(Path.Combine(root, "denied-audit.jsonl")), allowElevatedTestProcess: true);
