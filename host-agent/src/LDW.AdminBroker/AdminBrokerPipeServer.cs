@@ -54,13 +54,21 @@ public sealed class AdminBrokerPipeServer
         4096,
         4096);
 
-    public async Task ServeOneAsync(NamedPipeServerStream pipe, CancellationToken cancellationToken)
+    public Task ServeOneAsync(NamedPipeServerStream pipe, CancellationToken cancellationToken) =>
+        ServeOneAsync(pipe, cancellationToken, TryGetCallerSid);
+
+    internal async Task ServeOneAsync(NamedPipeServerStream pipe, CancellationToken cancellationToken,
+        Func<NamedPipeServerStream, string?> callerSidResolver)
     {
         ArgumentNullException.ThrowIfNull(pipe);
+        ArgumentNullException.ThrowIfNull(callerSidResolver);
         if (!pipe.IsConnected)
             await pipe.WaitForConnectionAsync(cancellationToken).ConfigureAwait(false);
 
-        var callerSid = TryGetCallerSid(pipe);
+        var callerSid = callerSidResolver(pipe);
+        if (!AdminBrokerAuthorizationPolicy.IsPermittedCaller(callerSid, [_ownerSid]))
+            return;
+
         var framed = await ReadFrameAsync(pipe, AdminBrokerContract.MaximumRequestCharacters, cancellationToken).ConfigureAwait(false);
         if (framed is null || !AdminBrokerContract.TryParseRequest(framed, out var request) || request is null)
         {
@@ -73,17 +81,7 @@ public sealed class AdminBrokerPipeServer
             return;
         }
 
-        if (!AdminBrokerAuthorizationPolicy.IsPermittedCaller(callerSid, [_ownerSid]))
-        {
-            var denied = new AdminBrokerResponse(AdminBrokerContract.Version, request.RequestId, request.Operation,
-                false, "redacted", "Unauthorized", "Caller is not authorized.", "CALLER_SID_MISMATCH", DateTime.UtcNow, null);
-            _auditLogger.Log(new AuditRecord(DateTime.UtcNow, request.RequestId, request.Operation, request.TargetIdentity,
-                callerSid, false, denied.ResultState, denied.ErrorCode, denied.Summary));
-            await WriteResponseAsync(pipe, denied, cancellationToken).ConfigureAwait(false);
-            return;
-        }
-
-        // Policy and schema validation complete before the engine is allowed to see the request.
+        // Caller identity, parsing, policy and schema validation all complete before the engine sees the request.
         if (!AdminBrokerRequestPolicy.IsAllowed(request))
         {
             var rejected = new AdminBrokerResponse(AdminBrokerContract.Version, request.RequestId, request.Operation,
