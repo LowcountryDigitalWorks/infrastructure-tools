@@ -242,6 +242,27 @@ try
                 Assert(ex.Message == "The Admin Broker transport must run unelevated.", "production transport constructor rejects elevated process");
             }
         }
+
+        foreach (var (caseName, resolvedCallerSid) in new (string Name, string? Sid)[]
+        {
+            ("null", null),
+            ("mismatch", "S-1-5-21-1234567890-1234567890-1234567890-4242")
+        })
+        {
+            var preParseEngine = new CountingEngine();
+            var preParseAuditPath = Path.Combine(root, "preparse-" + caseName + "-audit.jsonl");
+            var preParseServer = new AdminBrokerPipeServer([ownerSid], preParseEngine,
+                new AdminBrokerAuditLogger(preParseAuditPath), allowElevatedTestProcess: true);
+            using var preParsePipe = preParseServer.CreateServerPipe();
+            var preParseTask = preParseServer.ServeOneAsync(preParsePipe, CancellationToken.None, _ => resolvedCallerSid);
+            using var preParseClient = new NamedPipeClientStream(".", AdminBrokerContract.PipeName, PipeDirection.InOut,
+                PipeOptions.Asynchronous, TokenImpersonationLevel.Impersonation);
+            await preParseClient.ConnectAsync(5000);
+            await preParseTask.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert(preParseEngine.CallCount == 0, caseName + " caller identity is rejected before engine invocation");
+            Assert(!File.Exists(preParseAuditPath), caseName + " caller identity is rejected before any request parse/audit path without sending request bytes");
+        }
+
         {
             var pipeServer = new AdminBrokerPipeServer([ownerSid], countingEngine, transportAudit, allowElevatedTestProcess: true);
             using var serverPipe = pipeServer.CreateServerPipe();
