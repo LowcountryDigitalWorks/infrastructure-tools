@@ -117,13 +117,6 @@ public static class CiJitStatusResolver
         if (input.ReasonCode is not null && !AllowedReasonCodes.Contains(input.ReasonCode))
             throw new ArgumentException("ReasonCode is not in the sanitized allowlist.", nameof(input.ReasonCode));
 
-        var selectedIdentityParts =
-            (input.SelectedProfile is not null ? 1 : 0)
-            + (input.SelectedRunId is not null ? 1 : 0)
-            + (input.SelectedJobId is not null ? 1 : 0);
-        if (selectedIdentityParts is not 0 and not 3)
-            throw new ArgumentException("Selected queue identity must be either absent or include profile, run ID, and job ID.", nameof(input.SelectedProfile));
-
         if (input.SelectedProfile is not null)
         {
             ValidateSafeIdentifier(input.SelectedProfile, nameof(input.SelectedProfile), 64, allowUppercase: false, allowColon: false);
@@ -134,6 +127,13 @@ public static class CiJitStatusResolver
         if (input.HeldQueuedCount is < 0) throw new ArgumentOutOfRangeException(nameof(input.HeldQueuedCount));
         if (input.SelectedRunId is <= 0) throw new ArgumentOutOfRangeException(nameof(input.SelectedRunId));
         if (input.SelectedJobId is <= 0) throw new ArgumentOutOfRangeException(nameof(input.SelectedJobId));
+
+        var selectedIdentityParts =
+            (input.SelectedProfile is not null ? 1 : 0)
+            + (input.SelectedRunId is not null ? 1 : 0)
+            + (input.SelectedJobId is not null ? 1 : 0);
+        if (selectedIdentityParts is not 0 and not 3)
+            throw new ArgumentException("Selected queue identity must be either absent or include profile, run ID, and job ID.", nameof(input.SelectedProfile));
 
         ValidateQueueSnapshot(input);
 
