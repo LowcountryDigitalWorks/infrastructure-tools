@@ -1,9 +1,14 @@
 const RELAY_PATHS = {
   dispatch: "/relay/dispatch",
-  connect: "/relay/connect"
+  connect: "/relay/connect",
+  status: "/relay/status"
 };
 
 const PROTOCOL_VERSION = "1.0";
+const BRIDGE_RUNTIME = "ldw-operations-bridge";
+const BRIDGE_RUNTIME_VERSION = "1.0.0";
+const SITE_STATUS_BRIDGE_ID = "ldw01-primary";
+const SITE_STATUS_OPERATIONS = Object.freeze(["BROWSER_LIST_TABS", "BROWSER_READ_TAB_METADATA"]);
 const MAX_TTL_MS = 5 * 60 * 1000;
 const MAX_QUEUED_DELIVERIES_PER_CONNECTION = 32;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
@@ -42,6 +47,14 @@ export default {
     }
 
     const url = new URL(request.url);
+    if (url.pathname === RELAY_PATHS.status && request.method === "GET") {
+      if (role !== "site") return jsonResponse({ error: "Site role required for status." }, 403);
+      if ([...url.searchParams.keys()].length !== 0) return jsonResponse({ error: "Status does not accept query parameters." }, 400);
+      const boundBridgeId = requireConfiguredBridgeId(env);
+      if (!boundBridgeId.ok) return jsonResponse({ error: boundBridgeId.error }, 500);
+      return forwardToBridgeObject(env, boundBridgeId.bridgeId, `/status/${encodeURIComponent(boundBridgeId.bridgeId)}`, "GET", null);
+    }
+
     if (url.pathname === RELAY_PATHS.dispatch && request.method === "POST") {
       if (role !== "site") {
         return jsonResponse({ error: "Site role required for dispatch." }, 403);
@@ -73,6 +86,9 @@ export default {
       const requestedBridgeId = url.searchParams.get("bridgeId");
       if (requestedBridgeId && requestedBridgeId !== boundBridgeId.bridgeId) {
         return jsonResponse({ error: "bridgeId does not match authenticated bridge identity." }, 403);
+      }
+      if (!readValidatedConnectIdentity(request.headers)) {
+        return jsonResponse({ error: "Bridge identity metadata missing, invalid, or drifted." }, 400);
       }
 
       const forwardPath = `/connect?bridgeId=${encodeURIComponent(boundBridgeId.bridgeId)}`;
@@ -128,6 +144,11 @@ export class BridgeRelayDurableObject {
 
   async fetch(request) {
     const url = new URL(request.url);
+    if (url.pathname.startsWith("/status/") && request.method === "GET") {
+      const bridgeId = decodeURIComponent(url.pathname.slice("/status/".length));
+      if (!bridgeId) return jsonResponse({ error: "Status identity required." }, 400);
+      return jsonResponse(this.buildBridgeStatus(bridgeId), 200);
+    }
     if (url.pathname === "/dispatch" && request.method === "POST") {
       const body = await readJson(request);
       const nowIso = new Date().toISOString();
@@ -191,6 +212,10 @@ export class BridgeRelayDurableObject {
     if (!bridgeId) {
       return jsonResponse({ error: "bridgeId is required." }, 400);
     }
+    const identity = readValidatedConnectIdentity(request.headers);
+    if (!identity) {
+      return jsonResponse({ error: "Bridge identity metadata missing, invalid, or drifted." }, 400);
+    }
 
     if (typeof this.state?.acceptWebSocket !== "function") {
       return jsonResponse({ error: "Durable Object hibernation acceptWebSocket API unavailable." }, 501);
@@ -204,6 +229,12 @@ export class BridgeRelayDurableObject {
     // Hibernation path: attach via acceptWebSocket + attachment (not the non-hibernating accept API).
     this.state.acceptWebSocket(server, [bridgeId]);
     server.serializeAttachment({ bridgeId, connectionId });
+    this.repository.saveStatusObservation(bridgeId, {
+      last_authenticated_at: new Date().toISOString(),
+      protocol_version: identity.protocol_version,
+      bridge_runtime: identity.bridge_runtime,
+      runtime_version: identity.runtime_version
+    });
     this.deliverQueuedDispatches(bridgeId, connectionId, server);
 
     return new Response(null, { status: 101, webSocket: client });
@@ -277,29 +308,39 @@ export class BridgeRelayDurableObject {
   }
 
   selectBridgeSocket(bridgeId) {
-    if (typeof this.state?.getWebSockets !== "function") {
-      return null;
-    }
-
-    const sockets = this.state.getWebSockets(bridgeId);
-    for (const socket of sockets) {
+    for (const socket of this.getViableBridgeSockets(bridgeId)) {
       const attachment = safeDeserializeAttachment(socket);
-      if (!attachment || attachment.bridgeId !== bridgeId || typeof attachment.connectionId !== "string") {
-        continue;
-      }
-
-      if (typeof socket.readyState === "number" && socket.readyState !== 1) {
-        continue;
-      }
-
-      if (typeof socket.send !== "function") {
-        continue;
-      }
-
       return { socket, connectionId: attachment.connectionId };
     }
-
     return null;
+  }
+
+  getViableBridgeSockets(bridgeId) {
+    if (typeof this.state?.getWebSockets !== "function") return [];
+    return this.state.getWebSockets(bridgeId).filter(socket => {
+      const attachment = safeDeserializeAttachment(socket);
+      return attachment?.bridgeId === bridgeId && typeof attachment.connectionId === "string" && attachment.connectionId.length > 0 &&
+        (typeof socket.readyState !== "number" || socket.readyState === 1) && typeof socket.send === "function";
+    });
+  }
+
+  buildBridgeStatus(bridgeId) {
+    const observation = this.repository.getStatusObservation(bridgeId);
+    const valid = isValidStatusObservation(observation);
+    const count = this.getViableBridgeSockets(bridgeId).length;
+    let state = "UNKNOWN", freshness = "UNKNOWN";
+    if (valid && count === 1) { state = "ONLINE"; freshness = "FRESH"; }
+    else if (valid && count === 0) { state = "OFFLINE"; freshness = "STALE"; }
+    else if (count > 1) state = "DEGRADED";
+    return {
+      bridge_id: SITE_STATUS_BRIDGE_ID,
+      state,
+      protocol_version: valid ? observation.protocol_version : null,
+      runtime_version: valid ? observation.runtime_version : null,
+      last_authenticated_at: valid ? observation.last_authenticated_at : null,
+      supported_operations: [...SITE_STATUS_OPERATIONS],
+      freshness
+    };
   }
 }
 
@@ -319,6 +360,13 @@ export class SqliteRelayRepository {
 
   initialize() {
     this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS bridge_status_observations (
+        bridge_id TEXT PRIMARY KEY,
+        last_authenticated_at TEXT NOT NULL,
+        protocol_version TEXT NOT NULL,
+        bridge_runtime TEXT NOT NULL,
+        runtime_version TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS dispatches (
         dispatch_id TEXT PRIMARY KEY,
         bridge_id TEXT NOT NULL,
@@ -342,6 +390,20 @@ export class SqliteRelayRepository {
         result_class TEXT
       );
     `);
+  }
+
+  saveStatusObservation(bridgeId, observation) {
+    this.sql.exec(
+      `INSERT INTO bridge_status_observations (bridge_id, last_authenticated_at, protocol_version, bridge_runtime, runtime_version)
+       VALUES (?1, ?2, ?3, ?4, ?5)
+       ON CONFLICT(bridge_id) DO UPDATE SET last_authenticated_at = excluded.last_authenticated_at,
+         protocol_version = excluded.protocol_version, bridge_runtime = excluded.bridge_runtime, runtime_version = excluded.runtime_version`,
+      bridgeId, observation.last_authenticated_at, observation.protocol_version, observation.bridge_runtime, observation.runtime_version
+    );
+  }
+
+  getStatusObservation(bridgeId) {
+    return this.first(this.sql.exec("SELECT * FROM bridge_status_observations WHERE bridge_id = ?1", bridgeId));
   }
 
   acceptDispatch(payload, nowIso) {
@@ -518,9 +580,19 @@ export class InMemoryRelayRepository {
   constructor() {
     this.dispatches = new Map();
     this.idempotency = new Map();
+    this.statusObservations = new Map();
   }
 
   initialize() {}
+
+  saveStatusObservation(bridgeId, observation) {
+    this.statusObservations.set(bridgeId, { bridge_id: bridgeId, ...observation });
+  }
+
+  getStatusObservation(bridgeId) {
+    const observation = this.statusObservations.get(bridgeId);
+    return observation ? { ...observation } : null;
+  }
 
   acceptDispatch(payload, nowIso) {
     const normalized = normalizeDispatchPayload(payload, nowIso);
@@ -1054,6 +1126,28 @@ async function forwardToBridgeObject(env, bridgeId, path, method, body, sourceRe
 
   const request = new Request(`https://relay.internal${path}`, init);
   return stub.fetch(request);
+}
+
+function readValidatedConnectIdentity(headers) {
+  const identity = {
+    protocol_version: headers.get("X-LDW-Protocol-Version"),
+    bridge_runtime: headers.get("X-LDW-Bridge-Runtime"),
+    runtime_version: headers.get("X-LDW-Bridge-Version")
+  };
+  if (identity.protocol_version !== PROTOCOL_VERSION ||
+      identity.bridge_runtime !== BRIDGE_RUNTIME ||
+      identity.runtime_version !== BRIDGE_RUNTIME_VERSION) {
+    return null;
+  }
+  return identity;
+}
+
+function isValidStatusObservation(value) {
+  return value && value.protocol_version === PROTOCOL_VERSION &&
+    value.bridge_runtime === BRIDGE_RUNTIME &&
+    value.runtime_version === BRIDGE_RUNTIME_VERSION &&
+    typeof value.last_authenticated_at === "string" &&
+    Number.isFinite(Date.parse(value.last_authenticated_at));
 }
 
 function resolveCallerRole(request, env) {
