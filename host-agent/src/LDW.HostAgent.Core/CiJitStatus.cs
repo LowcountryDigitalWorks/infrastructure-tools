@@ -75,9 +75,15 @@ public sealed record CiJitStatusSnapshot(
 {
     public string QueueSummary => QueueState switch
     {
-        CiJitQueueState.Fresh when EligibleQueuedCount is 0 => "No eligible jobs",
-        CiJitQueueState.Fresh when EligibleQueuedCount is 1 => "1 waiting",
-        CiJitQueueState.Fresh when EligibleQueuedCount is > 1 => $"{EligibleQueuedCount} waiting",
+        CiJitQueueState.Fresh when EligibleQueuedCount is 0 && HeldQueuedCount is 0 => "No eligible jobs",
+        CiJitQueueState.Fresh when EligibleQueuedCount is 0 && HeldQueuedCount is 1 => "1 held",
+        CiJitQueueState.Fresh when EligibleQueuedCount is 0 && HeldQueuedCount is > 1 => $"{HeldQueuedCount} held",
+        CiJitQueueState.Fresh when EligibleQueuedCount is 1 && HeldQueuedCount is 0 => "1 waiting",
+        CiJitQueueState.Fresh when EligibleQueuedCount is > 1 && HeldQueuedCount is 0 => $"{EligibleQueuedCount} waiting",
+        CiJitQueueState.Fresh when EligibleQueuedCount is 1 && HeldQueuedCount is 1 => "1 waiting · 1 held",
+        CiJitQueueState.Fresh when EligibleQueuedCount is 1 && HeldQueuedCount is > 1 => $"1 waiting · {HeldQueuedCount} held",
+        CiJitQueueState.Fresh when EligibleQueuedCount is > 1 && HeldQueuedCount is 1 => $"{EligibleQueuedCount} waiting · 1 held",
+        CiJitQueueState.Fresh when EligibleQueuedCount is > 1 && HeldQueuedCount is > 1 => $"{EligibleQueuedCount} waiting · {HeldQueuedCount} held",
         CiJitQueueState.Stale => "Queue stale",
         _ => "Queue unavailable"
     };
@@ -110,6 +116,14 @@ public static class CiJitStatusResolver
             throw new ArgumentException("SourceVersion must be a sanitized release/provenance identifier, not a raw SHA.", nameof(input.SourceVersion));
         if (input.ReasonCode is not null && !AllowedReasonCodes.Contains(input.ReasonCode))
             throw new ArgumentException("ReasonCode is not in the sanitized allowlist.", nameof(input.ReasonCode));
+
+        var selectedIdentityParts =
+            (input.SelectedProfile is not null ? 1 : 0)
+            + (input.SelectedRunId is not null ? 1 : 0)
+            + (input.SelectedJobId is not null ? 1 : 0);
+        if (selectedIdentityParts is not 0 and not 3)
+            throw new ArgumentException("Selected queue identity must be either absent or include profile, run ID, and job ID.", nameof(input.SelectedProfile));
+
         if (input.SelectedProfile is not null)
         {
             ValidateSafeIdentifier(input.SelectedProfile, nameof(input.SelectedProfile), 64, allowUppercase: false, allowColon: false);
@@ -143,8 +157,9 @@ public static class CiJitStatusResolver
 
     private static void ValidateQueueSnapshot(CiJitStatusInput input)
     {
-        if (input.QueueState == CiJitQueueState.Fresh && input.EligibleQueuedCount is null)
-            throw new ArgumentException("Fresh queue evidence requires an explicit eligible queue count.", nameof(input.EligibleQueuedCount));
+        if (input.QueueState == CiJitQueueState.Fresh
+            && (input.EligibleQueuedCount is null || input.HeldQueuedCount is null))
+            throw new ArgumentException("Fresh queue evidence requires explicit eligible and held queue counts.", nameof(input.QueueState));
 
         if (input.QueueState != CiJitQueueState.Fresh && (input.EligibleQueuedCount is not null || input.HeldQueuedCount is not null))
             throw new ArgumentException("Stale or unavailable queue evidence cannot retain queue counts.", nameof(input.QueueState));
@@ -176,7 +191,7 @@ public static class CiJitStatusResolver
                 return CiJitOwnerState.Dispatching;
         }
 
-        if (input.QueueState != CiJitQueueState.Fresh || input.EligibleQueuedCount is null)
+        if (input.QueueState != CiJitQueueState.Fresh || input.EligibleQueuedCount is null || input.HeldQueuedCount is null)
             return CiJitOwnerState.Unknown;
 
         if (input.EligibleQueuedCount > 0)
@@ -190,6 +205,9 @@ public static class CiJitStatusResolver
                 _ => CiJitOwnerState.Unknown
             };
         }
+
+        if (input.HeldQueuedCount > 0)
+            return CiJitOwnerState.Hold;
 
         return CiJitOwnerState.Idle;
     }
