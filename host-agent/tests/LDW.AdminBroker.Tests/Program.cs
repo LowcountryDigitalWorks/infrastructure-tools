@@ -183,6 +183,47 @@ try
     var directoryPath = Path.Combine(root, "audit-is-directory"); Directory.CreateDirectory(directoryPath);
     try { new AdminBrokerAuditLogger(directoryPath).Log(new AuditRecord(DateTime.UtcNow, request.RequestId, request.Operation, request.TargetIdentity, null, false, "Unavailable", null, "x")); throw new Exception("Expected audit persistence error"); }
     catch (UnauthorizedAccessException) { Assert(true, "audit persistence failure propagates"); }
+
+    var auditGuardPath = Path.Combine(root, "audit-guarded-secret.dat");
+    var auditGuardStore = new LocalSecretStore(auditGuardPath, new TestProtector());
+    var auditGuardMutationCalls = 0;
+    try
+    {
+        AuditGuardedMutation.Execute(
+            () => throw new IOException("synthetic audit persistence failure"),
+            () => { auditGuardMutationCalls++; return auditGuardStore.SetSecret(LocalSecretStore.FixedSecretIdCorsairNeon, "new-value"); });
+        throw new Exception("Expected guarded add audit failure");
+    }
+    catch (IOException ex) when (ex.Message == "synthetic audit persistence failure")
+    {
+        Assert(true, "guarded add propagates durable audit failure");
+    }
+    Assert(auditGuardMutationCalls == 0 && !auditGuardStore.GetStatus(LocalSecretStore.FixedSecretIdCorsairNeon).Exists,
+        "guarded add leaves an absent store unchanged when audit persistence fails");
+
+    Assert(auditGuardStore.SetSecret(LocalSecretStore.FixedSecretIdCorsairNeon, "prior-value"), "guarded mutation fixture stores prior value");
+    foreach (var (name, mutation) in new (string Name, Func<bool> Run)[]
+    {
+        ("replace", () => auditGuardStore.SetSecret(LocalSecretStore.FixedSecretIdCorsairNeon, "replacement-value")),
+        ("remove", () => auditGuardStore.RemoveSecret(LocalSecretStore.FixedSecretIdCorsairNeon))
+    })
+    {
+        auditGuardMutationCalls = 0;
+        try
+        {
+            AuditGuardedMutation.Execute(
+                () => throw new IOException("synthetic audit persistence failure"),
+                () => { auditGuardMutationCalls++; return mutation(); });
+            throw new Exception("Expected guarded " + name + " audit failure");
+        }
+        catch (IOException ex) when (ex.Message == "synthetic audit persistence failure")
+        {
+            Assert(true, "guarded " + name + " propagates durable audit failure");
+        }
+        Assert(auditGuardMutationCalls == 0, "guarded " + name + " never invokes the store mutation after audit failure");
+        Assert(auditGuardStore.GetSecretValueInMemory(LocalSecretStore.FixedSecretIdCorsairNeon) == "prior-value",
+            "guarded " + name + " preserves the exact prior secret state after audit failure");
+    }
     if (OperatingSystem.IsWindows())
     {
         var ownerSid = WindowsIdentity.GetCurrent().User!.Value;

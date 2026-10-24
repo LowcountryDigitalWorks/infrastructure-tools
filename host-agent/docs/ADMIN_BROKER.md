@@ -26,7 +26,7 @@ The local secret store uses Windows DPAPI (`ProtectedData.Protect` / `Unprotect`
 
 - **Unelevated Tray Surface:** Normal-user Host Agent tray remains unelevated.
 - **Transport:** Local current-user-only named pipe with explicit owner SID caller verification. This is source and deterministic local test evidence, not proof of deployment on any machine.
-- **Audit:** The logger persists bounded, fixed metadata records, redacts target and summary text, rotates at 5 MiB, and propagates write failures before a response is sent. There are still no live mutating operations.
+- **Audit:** The logger persists bounded, fixed metadata records, redacts target and summary text, rotates at 5 MiB, and propagates write failures before a response is sent. Interactive fixed-secret add/replace/remove is additionally gated by a durable `SecretSetRequested` / `SecretRemoveRequested` audit-intent record before the DPAPI store mutation; if that write fails, the mutation delegate is never invoked. These intent records are not success records, so a later store failure cannot be misrepresented as a completed change. There are still no live provider/broker mutating operations.
 - **Secrets:** The fixed proof launches only the companion probe. The secret value is supplied through that child's environment and is absent from arguments, response, audit, and retained output.
 
 ### 3. Interactive secret lifecycle and fixed proof child

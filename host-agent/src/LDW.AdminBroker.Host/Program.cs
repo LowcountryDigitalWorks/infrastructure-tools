@@ -91,9 +91,10 @@ void SetSecret()
             return;
         }
         var value = new string(first);
-        var stored = secretStore.SetSecret(LocalSecretStore.FixedSecretIdCorsairNeon, value);
+        var stored = AuditGuardedMutation.Execute(
+            () => audit.Log(Audit("LOCAL_SECRET_STORE", "SecretSetRequested", null)),
+            () => secretStore.SetSecret(LocalSecretStore.FixedSecretIdCorsairNeon, value));
         value = string.Empty;
-        audit.Log(Audit("LOCAL_SECRET_STORE", stored ? "SecretStored" : "SecretStatus", null));
         Console.WriteLine(stored ? "Fixed secret stored with CurrentUser DPAPI." : "No value was stored.");
     }
     finally
@@ -111,8 +112,9 @@ void RemoveSecret()
         Console.WriteLine("No change made.");
         return;
     }
-    var removed = secretStore.RemoveSecret(LocalSecretStore.FixedSecretIdCorsairNeon);
-    audit.Log(Audit("LOCAL_SECRET_STORE", removed ? "SecretRemoved" : "SecretStatus", null));
+    var removed = AuditGuardedMutation.Execute(
+        () => audit.Log(Audit("LOCAL_SECRET_STORE", "SecretRemoveRequested", null)),
+        () => secretStore.RemoveSecret(LocalSecretStore.FixedSecretIdCorsairNeon));
     Console.WriteLine(removed ? "Fixed secret removed." : "Fixed secret was already absent.");
 }
 

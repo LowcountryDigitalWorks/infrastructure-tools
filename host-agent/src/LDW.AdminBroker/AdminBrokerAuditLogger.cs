@@ -27,6 +27,8 @@ public sealed class AdminBrokerAuditLogger
         "DuplicateRequest",
         "Unauthorized",
         "SecretStatus",
+        "SecretSetRequested",
+        "SecretRemoveRequested",
         "SecretStored",
         "SecretRemoved",
         "ProbeSuccess",
@@ -132,5 +134,20 @@ public sealed class AdminBrokerAuditLogger
 
             return list;
         }
+    }
+}
+
+public static class AuditGuardedMutation
+{
+    public static TResult Execute<TResult>(Action persistAuditIntent, Func<TResult> mutation)
+    {
+        ArgumentNullException.ThrowIfNull(persistAuditIntent);
+        ArgumentNullException.ThrowIfNull(mutation);
+
+        // The durable bounded audit intent is the mutation gate. If persistence fails,
+        // the state-changing delegate is never invoked. The intent record is deliberately
+        // not a success record, so a later store failure cannot make the audit lie.
+        persistAuditIntent();
+        return mutation();
     }
 }
