@@ -136,6 +136,8 @@ public static class CiJitStatusResolver
             throw new ArgumentException("Selected queue identity must be either absent or include profile, run ID, and job ID.", nameof(input.SelectedProfile));
 
         ValidateQueueSnapshot(input);
+        ValidateReasonCode(input);
+        ValidateControllerCapacity(input);
 
         var state = ResolveState(input);
         return new CiJitStatusSnapshot(
@@ -157,6 +159,9 @@ public static class CiJitStatusResolver
 
     private static void ValidateQueueSnapshot(CiJitStatusInput input)
     {
+        if (!input.LocalStateAvailable && input.LocalStateFresh)
+            throw new ArgumentException("Unavailable local state cannot be marked fresh.", nameof(input.LocalStateFresh));
+
         if (input.QueueState == CiJitQueueState.Fresh
             && (input.EligibleQueuedCount is null || input.HeldQueuedCount is null))
             throw new ArgumentException("Fresh queue evidence requires explicit eligible and held queue counts.", nameof(input.QueueState));
@@ -164,15 +169,81 @@ public static class CiJitStatusResolver
         if (input.QueueState != CiJitQueueState.Fresh && (input.EligibleQueuedCount is not null || input.HeldQueuedCount is not null))
             throw new ArgumentException("Stale or unavailable queue evidence cannot retain queue counts.", nameof(input.QueueState));
 
-        if (input.ReasonCode == "CAPACITY" && input.Capacity != CiJitCapacityState.Capacity)
-            throw new ArgumentException("CAPACITY reason requires matching capacity state.", nameof(input.ReasonCode));
-        if (input.ReasonCode == "BUSY" && input.Capacity != CiJitCapacityState.Busy)
-            throw new ArgumentException("BUSY reason requires matching capacity state.", nameof(input.ReasonCode));
+        if (input.SelectedProfile is not null
+            && (input.QueueState != CiJitQueueState.Fresh || input.EligibleQueuedCount is not > 0))
+            throw new ArgumentException("Selected queue identity requires fresh evidence with eligible work.", nameof(input.SelectedProfile));
+    }
+
+    private static void ValidateReasonCode(CiJitStatusInput input)
+    {
+        var hasQueuedWork = input.QueueState == CiJitQueueState.Fresh
+            && (input.EligibleQueuedCount > 0 || input.HeldQueuedCount > 0);
+
+        switch (input.ReasonCode)
+        {
+            case null:
+                break;
+            case "BUSY" when input.Capacity != CiJitCapacityState.Busy:
+            case "CAPACITY" when input.Capacity != CiJitCapacityState.Capacity:
+                throw new ArgumentException("ReasonCode must match its capacity state.", nameof(input.ReasonCode));
+            case "CAPACITY" when !hasQueuedWork
+                || !input.LocalStateAvailable
+                || !input.LocalStateFresh
+                || !input.ProvenanceValid:
+            case "POLICY_HOLD" when !hasQueuedWork
+                || !input.LocalStateAvailable
+                || !input.LocalStateFresh
+                || !input.ProvenanceValid:
+                throw new ArgumentException("Hold reasons require trusted local state and current queued work.", nameof(input.ReasonCode));
+            case "QUEUE_STALE" when input.QueueState != CiJitQueueState.Stale:
+                throw new ArgumentException("QUEUE_STALE reason requires stale queue evidence.", nameof(input.ReasonCode));
+            case "QUEUE_UNAVAILABLE" when input.QueueState != CiJitQueueState.Unavailable:
+                throw new ArgumentException("QUEUE_UNAVAILABLE reason requires unavailable queue evidence.", nameof(input.ReasonCode));
+            case "LOCAL_STATE_STALE" when !input.LocalStateAvailable || input.LocalStateFresh:
+                throw new ArgumentException("LOCAL_STATE_STALE reason requires available stale local state.", nameof(input.ReasonCode));
+            case "LOCAL_STATE_UNAVAILABLE" when input.LocalStateAvailable:
+                throw new ArgumentException("LOCAL_STATE_UNAVAILABLE reason requires unavailable local state.", nameof(input.ReasonCode));
+            case "PROVENANCE_MISMATCH" when input.ProvenanceValid:
+                throw new ArgumentException("PROVENANCE_MISMATCH reason requires invalid provenance.", nameof(input.ReasonCode));
+            case "SOURCE_UNAVAILABLE" when input.LocalStateAvailable && input.QueueState != CiJitQueueState.Unavailable:
+                throw new ArgumentException("SOURCE_UNAVAILABLE reason requires an unavailable source.", nameof(input.ReasonCode));
+            case "MULTIPLE_ACTIVE_RUNS":
+            case "OWNED_RESOURCE_CONTRADICTION":
+            case "STALE_RESIDUE":
+                if (!input.ProvenFailure)
+                    throw new ArgumentException("Failure reasons require confirmed failure evidence.", nameof(input.ReasonCode));
+                break;
+        }
+
+        if (input.ProvenFailure
+            && input.ReasonCode is not null
+            and not "MULTIPLE_ACTIVE_RUNS"
+            and not "OWNED_RESOURCE_CONTRADICTION"
+            and not "STALE_RESIDUE")
+            throw new ArgumentException("Confirmed failure evidence cannot use a non-failure reason.", nameof(input.ReasonCode));
+    }
+
+    private static void ValidateControllerCapacity(CiJitStatusInput input)
+    {
+        var activePhase = input.ControllerPhase is
+            CiJitControllerPhase.Planned
+            or CiJitControllerPhase.Registered
+            or CiJitControllerPhase.Provisioned
+            or CiJitControllerPhase.Running
+            or CiJitControllerPhase.JobCompleted
+            or CiJitControllerPhase.RunnerAbsent
+            or CiJitControllerPhase.GuestRemoved
+            or CiJitControllerPhase.ArtifactsRemoved;
+
+        if ((input.Capacity == CiJitCapacityState.Busy) != activePhase)
+            throw new ArgumentException("BUSY capacity must match an active controller phase.", nameof(input.Capacity));
     }
 
     private static CiJitOwnerState ResolveState(CiJitStatusInput input)
     {
         if (input.ProvenFailure) return CiJitOwnerState.Failed;
+        if (input.ReasonCode is "UNKNOWN" or "MALFORMED_STATE" or "SOURCE_UNAVAILABLE")
+            return CiJitOwnerState.Unknown;
         if (!input.LocalStateAvailable || !input.LocalStateFresh || !input.ProvenanceValid)
             return CiJitOwnerState.Unknown;
 

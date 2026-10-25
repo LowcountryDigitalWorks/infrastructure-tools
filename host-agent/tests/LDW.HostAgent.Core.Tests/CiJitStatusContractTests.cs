@@ -14,18 +14,19 @@ internal static class CiJitStatusContractTests
         Assert(CiJitStatusResolver.Resolve(clean).State == CiJitOwnerState.Idle, "fresh clean zero queue maps to IDLE");
         Assert(CiJitStatusResolver.Resolve(clean).Color == StatusColor.Green, "IDLE is green");
 
-        AssertState(clean with { ControllerPhase = CiJitControllerPhase.Planned }, CiJitOwnerState.Dispatching, "Planned");
-        AssertState(clean with { ControllerPhase = CiJitControllerPhase.Registered }, CiJitOwnerState.Dispatching, "Registered");
-        AssertState(clean with { ControllerPhase = CiJitControllerPhase.Provisioned }, CiJitOwnerState.Dispatching, "Provisioned");
-        AssertState(clean with { ControllerPhase = CiJitControllerPhase.Running }, CiJitOwnerState.Running, "Running");
-        AssertState(clean with { ControllerPhase = CiJitControllerPhase.JobCompleted }, CiJitOwnerState.Cleaning, "JobCompleted");
-        AssertState(clean with { ControllerPhase = CiJitControllerPhase.RunnerAbsent }, CiJitOwnerState.Cleaning, "RunnerAbsent");
-        AssertState(clean with { ControllerPhase = CiJitControllerPhase.GuestRemoved }, CiJitOwnerState.Cleaning, "GuestRemoved");
-        AssertState(clean with { ControllerPhase = CiJitControllerPhase.ArtifactsRemoved }, CiJitOwnerState.Cleaning, "ArtifactsRemoved");
+        AssertState(clean with { ControllerPhase = CiJitControllerPhase.Planned, Capacity = CiJitCapacityState.Busy }, CiJitOwnerState.Dispatching, "Planned");
+        AssertState(clean with { ControllerPhase = CiJitControllerPhase.Registered, Capacity = CiJitCapacityState.Busy }, CiJitOwnerState.Dispatching, "Registered");
+        AssertState(clean with { ControllerPhase = CiJitControllerPhase.Provisioned, Capacity = CiJitCapacityState.Busy }, CiJitOwnerState.Dispatching, "Provisioned");
+        AssertState(clean with { ControllerPhase = CiJitControllerPhase.Running, Capacity = CiJitCapacityState.Busy }, CiJitOwnerState.Running, "Running");
+        AssertState(clean with { ControllerPhase = CiJitControllerPhase.JobCompleted, Capacity = CiJitCapacityState.Busy }, CiJitOwnerState.Cleaning, "JobCompleted");
+        AssertState(clean with { ControllerPhase = CiJitControllerPhase.RunnerAbsent, Capacity = CiJitCapacityState.Busy }, CiJitOwnerState.Cleaning, "RunnerAbsent");
+        AssertState(clean with { ControllerPhase = CiJitControllerPhase.GuestRemoved, Capacity = CiJitCapacityState.Busy }, CiJitOwnerState.Cleaning, "GuestRemoved");
+        AssertState(clean with { ControllerPhase = CiJitControllerPhase.ArtifactsRemoved, Capacity = CiJitCapacityState.Busy }, CiJitOwnerState.Cleaning, "ArtifactsRemoved");
 
         var runningWithBacklog = CiJitStatusResolver.Resolve(clean with
         {
             ControllerPhase = CiJitControllerPhase.Running,
+            Capacity = CiJitCapacityState.Busy,
             EligibleQueuedCount = 2
         });
         Assert(runningWithBacklog.State == CiJitOwnerState.Running, "active local RUNNING wins over queue backlog");
@@ -33,7 +34,14 @@ internal static class CiJitStatusContractTests
 
         AssertState(clean with { EligibleQueuedCount = 1, Capacity = CiJitCapacityState.Ready }, CiJitOwnerState.Queued, "ready queue");
         AssertState(clean with { EligibleQueuedCount = 1, Capacity = CiJitCapacityState.Capacity, ReasonCode = "CAPACITY" }, CiJitOwnerState.Hold, "capacity hold");
-        AssertState(clean with { EligibleQueuedCount = 1, Capacity = CiJitCapacityState.Busy, ReasonCode = "BUSY" }, CiJitOwnerState.Hold, "busy hold");
+        var busyWithBacklog = CiJitStatusResolver.Resolve(clean with
+        {
+            ControllerPhase = CiJitControllerPhase.Running,
+            Capacity = CiJitCapacityState.Busy,
+            EligibleQueuedCount = 1,
+            ReasonCode = "BUSY"
+        });
+        Assert(busyWithBacklog.State == CiJitOwnerState.Running, "active owned work remains primary while BUSY and queued backlog are visible");
         AssertState(clean with { EligibleQueuedCount = 1, Capacity = CiJitCapacityState.Ready, ReasonCode = "POLICY_HOLD" }, CiJitOwnerState.Hold, "policy hold overrides otherwise-ready local capacity");
 
         var heldOnly = CiJitStatusResolver.Resolve(clean with
@@ -60,6 +68,7 @@ internal static class CiJitStatusContractTests
         var runningQueueUnavailable = CiJitStatusResolver.Resolve(clean with
         {
             ControllerPhase = CiJitControllerPhase.Running,
+            Capacity = CiJitCapacityState.Busy,
             QueueState = CiJitQueueState.Unavailable,
             EligibleQueuedCount = null,
             HeldQueuedCount = null
@@ -87,11 +96,116 @@ internal static class CiJitStatusContractTests
         AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { SelectedRunId = 123, SelectedJobId = 456 }), "run/job selected identity without profile rejected");
         AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { SelectedProfile = "ci10-bo-secret-scan", SelectedRunId = 123 }), "selected identity missing job rejected");
         AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { SelectedProfile = "ci10-bo-secret-scan", SelectedJobId = 456 }), "selected identity missing run rejected");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with
+        {
+            SelectedProfile = "ci10-bo-secret-scan",
+            SelectedRunId = 123,
+            SelectedJobId = 456
+        }), "selected identity rejected when fresh eligible queue is empty");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with
+        {
+            QueueState = CiJitQueueState.Unavailable,
+            EligibleQueuedCount = null,
+            HeldQueuedCount = null,
+            SelectedProfile = "ci10-bo-secret-scan",
+            SelectedRunId = 123,
+            SelectedJobId = 456
+        }), "selected identity rejected when queue is unavailable");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with
+        {
+            QueueState = CiJitQueueState.Stale,
+            EligibleQueuedCount = null,
+            HeldQueuedCount = null,
+            SelectedProfile = "ci10-bo-secret-scan",
+            SelectedRunId = 123,
+            SelectedJobId = 456
+        }), "selected identity rejected when queue is stale");
+
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { ReasonCode = "QUEUE_UNAVAILABLE" }), "unavailable queue reason rejected for fresh evidence");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { QueueState = CiJitQueueState.Stale, EligibleQueuedCount = null, HeldQueuedCount = null, ReasonCode = "QUEUE_UNAVAILABLE" }), "unavailable queue reason rejected for stale evidence");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { ReasonCode = "QUEUE_STALE" }), "stale queue reason rejected for fresh evidence");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { ReasonCode = "LOCAL_STATE_STALE" }), "stale local reason rejected for fresh local evidence");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { ReasonCode = "LOCAL_STATE_UNAVAILABLE" }), "unavailable local reason rejected for available local evidence");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with
+        {
+            LocalStateAvailable = false,
+            LocalStateFresh = true
+        }), "unavailable local state cannot be marked fresh");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { ReasonCode = "PROVENANCE_MISMATCH" }), "provenance reason rejected for valid provenance");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { ReasonCode = "POLICY_HOLD" }), "policy hold reason rejected without queued work");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { Capacity = CiJitCapacityState.Capacity, ReasonCode = "CAPACITY" }), "capacity reason rejected without queued work");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { ReasonCode = "STALE_RESIDUE" }), "residue reason requires confirmed failure evidence");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { ProvenFailure = true, ReasonCode = "POLICY_HOLD" }), "confirmed failure cannot be paired with a hold reason");
+        AssertState(clean with { ReasonCode = "UNKNOWN" }, CiJitOwnerState.Unknown, "UNKNOWN reason cannot project clean IDLE");
+        AssertState(clean with { ReasonCode = "MALFORMED_STATE" }, CiJitOwnerState.Unknown, "malformed-state reason cannot project clean IDLE");
+        AssertState(clean with
+        {
+            QueueState = CiJitQueueState.Stale,
+            EligibleQueuedCount = null,
+            HeldQueuedCount = null,
+            ReasonCode = "QUEUE_STALE"
+        }, CiJitOwnerState.Unknown, "matching stale queue reason remains UNKNOWN");
+        AssertState(clean with
+        {
+            QueueState = CiJitQueueState.Unavailable,
+            EligibleQueuedCount = null,
+            HeldQueuedCount = null,
+            ReasonCode = "QUEUE_UNAVAILABLE"
+        }, CiJitOwnerState.Unknown, "matching unavailable queue reason remains UNKNOWN");
+        AssertState(clean with
+        {
+            QueueState = CiJitQueueState.Unavailable,
+            EligibleQueuedCount = null,
+            HeldQueuedCount = null,
+            ReasonCode = "SOURCE_UNAVAILABLE"
+        }, CiJitOwnerState.Unknown, "matching unavailable-source reason remains UNKNOWN");
+        AssertState(clean with
+        {
+            LocalStateAvailable = false,
+            LocalStateFresh = false,
+            ReasonCode = "LOCAL_STATE_UNAVAILABLE"
+        }, CiJitOwnerState.Unknown, "matching unavailable local-state reason remains UNKNOWN");
+        AssertState(clean with
+        {
+            LocalStateFresh = false,
+            ReasonCode = "LOCAL_STATE_STALE"
+        }, CiJitOwnerState.Unknown, "matching stale local-state reason remains UNKNOWN");
+        AssertState(clean with
+        {
+            ProvenanceValid = false,
+            ReasonCode = "PROVENANCE_MISMATCH"
+        }, CiJitOwnerState.Unknown, "matching provenance reason remains UNKNOWN");
+        AssertState(clean with
+        {
+            ProvenFailure = true,
+            ReasonCode = "STALE_RESIDUE"
+        }, CiJitOwnerState.Failed, "matching residue reason remains FAILED");
+
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with
+        {
+            ControllerPhase = CiJitControllerPhase.Running,
+            Capacity = CiJitCapacityState.Ready
+        }), "active RUNNING phase cannot coexist with READY capacity");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with
+        {
+            ControllerPhase = CiJitControllerPhase.Running,
+            Capacity = CiJitCapacityState.Capacity
+        }), "active RUNNING phase requires BUSY capacity");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with
+        {
+            ControllerPhase = CiJitControllerPhase.Complete,
+            Capacity = CiJitCapacityState.Busy
+        }), "completed phase cannot retain BUSY capacity");
+        AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with
+        {
+            Capacity = CiJitCapacityState.Busy
+        }), "BUSY capacity requires an active controller phase");
 
         var details = CiJitStatusResolver.Resolve(clean with
         {
             EligibleQueuedCount = 1,
             ReasonCode = "POLICY_HOLD",
+            Capacity = CiJitCapacityState.Ready,
             SelectedProfile = "ci10-bo-secret-scan",
             SelectedRunId = 123,
             SelectedJobId = 456
