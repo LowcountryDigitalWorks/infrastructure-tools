@@ -399,7 +399,7 @@ $bad.event='push'
         Check 'dispatcher file hash drift refused' {
             $file=Join-Path $bundle 'ci-dispatch/Dispatch.psm1';$original=[IO.File]::ReadAllBytes($file)
             [IO.File]::AppendAllText($file,'# drift')
-            try {Refuses {Assert-Ci10Bundle $bundle $manifestSha ('a'*40) ('b'*40)} 'BUNDLE_FILE_HASH_DRIFT'} finally {[IO.File]::WriteAllBytes($file,$original)}
+            try {Refuses {Assert-Ci10Bundle $bundle $manifestSha ('a'*40) ('b'*40)} 'BUNDLE_VERIFIER_HASH_DRIFT'} finally {[IO.File]::WriteAllBytes($file,$original)}
         }
         Check 'controller file hash drift refused' {
             $file=Join-Path $bundle 'ci-runner/Native.cs';$original=[IO.File]::ReadAllBytes($file)
