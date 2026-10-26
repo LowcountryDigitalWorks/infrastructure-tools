@@ -199,15 +199,90 @@ $bad.event='push'
     & $module {
         param($r,$j)
         $script:RunFixture=$r;$script:JobFixture=$j;$script:Calls=[Collections.Generic.List[string]]::new()
+        $script:QueueRuns=@();$script:QueueJobs=@{};$script:QueueTotalCount=$null
         function script:Invoke-Ci10Read([string]$Path){
             $script:Calls.Add($Path)
             if($Path.Contains('business-operations') -or $Path.Contains('royal-cruise-tracker')){return [pscustomobject]@{total_count=0;workflow_runs=@()}}
-            if($Path.Contains('/workflows/')){return [pscustomobject]@{total_count=1;workflow_runs=@($script:RunFixture)}}
-            if($Path.Contains('/jobs?')){return $script:JobFixture}
+            if($Path.Contains('/workflows/')){
+                $runs=if($script:QueueRuns.Count){@($script:QueueRuns)}else{@($script:RunFixture)}
+                $count=if($null -ne $script:QueueTotalCount){$script:QueueTotalCount}else{$runs.Count}
+                return [pscustomobject]@{total_count=$count;workflow_runs=$runs}
+            }
+            if($Path.Contains('/jobs?')){
+                $runId=[long]([regex]::Match($Path,'/runs/(\d+)/jobs').Groups[1].Value)
+                if($script:QueueJobs.ContainsKey($runId)){return $script:QueueJobs[$runId]}
+                return $script:JobFixture
+            }
             return $script:RunFixture
         }
     } $run $jobs
     Check 'scoped queue discovers without input run ID' {Assert ((Find-Ci10QueuedJob $profiles).RunId -eq 12345)}
+    Check 'fresh queue snapshot returns bounded selected identity and counts' {
+        $snapshot=Get-Ci10QueueSnapshot @($profile)
+        Assert ($snapshot.QueueState -ceq 'FRESH' -and $snapshot.EligibleQueuedCount -eq 1 -and $snapshot.HeldQueuedCount -eq 0)
+        Assert ($snapshot.Selected.ProfileId -ceq $profile.id -and $snapshot.Selected.RunId -eq 12345 -and $snapshot.Selected.JobId -eq 56789)
+        Assert (@($snapshot.PSObject.Properties.Name | Sort-Object) -join ',' -ceq 'EligibleQueuedCount,HeldQueuedCount,HeldReasonCounts,QueueState,Schema,Selected')
+        $json=$snapshot|ConvertTo-Json -Depth 6 -Compress
+        Assert ($json -notmatch 'head_sha|head_branch|labels|workflowPath|private|token|credential|created_at')
+    }
+    Check 'snapshot and dispatcher share the same selected eligible candidate' {
+        $snapshot=Get-Ci10QueueSnapshot @($profile)
+        $dispatch=Find-Ci10QueuedJob @($profile)
+        Assert ($snapshot.EligibleQueuedCount -eq 1 -and $snapshot.Selected.RunId -eq $dispatch.RunId -and $snapshot.Selected.JobId -eq $dispatch.JobId)
+    }
+    Check 'held candidate excluded from eligible count with bounded reason class' {
+        & $module {$script:RunFixture.head_branch='wrong-branch'}
+        $snapshot=Get-Ci10QueueSnapshot @($profile)
+        Assert ($snapshot.QueueState -ceq 'FRESH' -and $snapshot.EligibleQueuedCount -eq 0 -and $snapshot.HeldQueuedCount -eq 1)
+        Assert ($snapshot.HeldReasonCounts.Count -eq 1 -and $snapshot.HeldReasonCounts[0].ReasonCode -ceq 'IDENTITY_MISMATCH')
+        & $module {$script:RunFixture.head_branch='feat/ci-runner-ephemeral-001'}
+    }
+    Check 'unavailable provider never becomes fresh zero' {
+        & $module {function script:Invoke-Ci10Read {throw 'API_READ_FAILED'}}
+        $snapshot=Get-Ci10QueueSnapshot @($profile)
+        Assert ($snapshot.QueueState -ceq 'UNAVAILABLE' -and $null -eq $snapshot.EligibleQueuedCount -and $null -eq $snapshot.HeldQueuedCount)
+        Refuses {Find-Ci10QueuedJob @($profile)} 'API_READ_FAILED'
+    }
+    # Restore the synthetic GET fixture after the unavailable-provider proof.
+    & $module {
+        function script:Invoke-Ci10Read([string]$Path){
+            $script:Calls.Add($Path)
+            if($Path.Contains('business-operations') -or $Path.Contains('royal-cruise-tracker')){return [pscustomobject]@{total_count=0;workflow_runs=@()}}
+            if($Path.Contains('/workflows/')){
+                $runs=if($script:QueueRuns.Count){@($script:QueueRuns)}else{@($script:RunFixture)}
+                $count=if($null -ne $script:QueueTotalCount){$script:QueueTotalCount}else{$runs.Count}
+                return [pscustomobject]@{total_count=$count;workflow_runs=$runs}
+            }
+            if($Path.Contains('/jobs?')){
+                $runId=[long]([regex]::Match($Path,'/runs/(\d+)/jobs').Groups[1].Value)
+                if($script:QueueJobs.ContainsKey($runId)){return $script:QueueJobs[$runId]}
+                return $script:JobFixture
+            }
+            return $script:RunFixture
+        }
+    }
+    Check 'accepted profile scope is enforced before any provider read' {
+        $bad=Clone $profile;$bad.repository='LowcountryDigitalWorks/unapproved'
+        & $module {$script:Calls.Clear()}
+        Refuses {Get-Ci10QueueSnapshot @($bad)} 'PROFILE_SCOPE_REFUSED'
+        & $module {Assert ($script:Calls.Count -eq 0)}
+    }
+    Check 'advertised queue beyond 300 runs fails closed' {
+        & $module {$script:QueueTotalCount=301}
+        Refuses {Get-Ci10QueueSnapshot @($profile)} 'QUEUE_BOUND_EXCEEDED'
+        & $module {$script:QueueTotalCount=$null}
+    }
+    Check 'duplicate run across queue pages is refused' {
+        & $module {$script:QueueRuns=@($script:RunFixture,$script:RunFixture)}
+        Refuses {Get-Ci10QueueSnapshot @($profile)} 'QUEUE_PAGE_RACE_REFUSED'
+        & $module {$script:QueueRuns=@()}
+    }
+    Check 'projection source remains GET-only and cannot enter controller paths' {
+        $source=Get-Content -LiteralPath (Join-Path $PSScriptRoot '../Dispatch.psm1') -Raw
+        $core=$source.Substring($source.IndexOf('function Get-QueueSnapshotCore {'),$source.IndexOf('function Get-Ci10QueueSnapshot {')-$source.IndexOf('function Get-QueueSnapshotCore {'))
+        Assert ($core -notmatch 'Confirm-Ci10Candidate|Start-Ci10Controller|Invoke-IsolatedRunner|Get-VM|Remove-VM|/cancel|--method\s+POST|Recover|Cleanup')
+        Assert ($core -match 'Invoke-Ci10Read')
+    }
     Check 'fresh selected run and job reread' {Assert ((Confirm-Ci10Candidate $candidate).JobId -eq 56789)}
     Check 'latest-attempt race refused' {
         & $module {$script:RunFixture.run_attempt=3}

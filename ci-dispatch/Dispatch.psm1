@@ -308,9 +308,27 @@ function Select-Ci10Oldest {
     @($Candidates | Sort-Object CreatedUtc, RunId, JobId | Select-Object -First 1)
 }
 
-function Find-Ci10QueuedJob {
+function Get-QueueSnapshotCore {
     param([object[]]$Profiles, [string]$RoyalExpectedSha, [string]$RoyalWorkflowBlobSha)
+    $acceptedProfiles = @(Read-Ci10Profiles (Join-Path $PSScriptRoot 'profiles.json'))
+    if (@($Profiles).Count -lt 1 -or @($Profiles).Count -gt $acceptedProfiles.Count -or
+        @($Profiles | Group-Object id | Where-Object Count -ne 1).Count) { throw 'PROFILE_SCOPE_REFUSED' }
+    foreach ($profile in $Profiles) {
+        $accepted = @($acceptedProfiles | Where-Object id -CEQ $profile.id)
+        if ($accepted.Count -ne 1 -or
+            ($accepted[0] | ConvertTo-Json -Depth 10 -Compress) -cne ($profile | ConvertTo-Json -Depth 10 -Compress)) {
+            throw 'PROFILE_SCOPE_REFUSED'
+        }
+    }
     $candidates = [Collections.Generic.List[object]]::new()
+    $heldReasons = [Collections.Generic.SortedDictionary[string,int]]::new([StringComparer]::Ordinal)
+    $heldClass = @{
+        WRONG_REPOSITORY='IDENTITY_MISMATCH'; WRONG_WORKFLOW='IDENTITY_MISMATCH'; WRONG_EVENT_REF_SOURCE='IDENTITY_MISMATCH'
+        RUN_NOT_QUEUED='STATE_MISMATCH'; JOB_NOT_UNASSIGNED_QUEUED='STATE_MISMATCH'; JOB_IDENTITY_MISMATCH='STATE_MISMATCH'
+        EXACTLY_ONE_JOB_REQUIRED='JOB_SHAPE'; WRONG_LABELS='CAPABILITY_MISMATCH'; RUN_TIME_INVALID='INVALID_METADATA'
+        FROZEN_ROYAL_HEAD_REQUIRED='FROZEN_POLICY'; FROZEN_ROYAL_WORKFLOW_BLOB_REQUIRED='FROZEN_POLICY'
+        PRE_ROUTING_ROYAL_PAIR_REFUSED='FROZEN_POLICY'
+    }
     foreach ($profile in $Profiles) {
         $workflow = [Uri]::EscapeDataString([IO.Path]::GetFileName($profile.workflowPath))
         $seen = [Collections.Generic.HashSet[long]]::new()
@@ -326,8 +344,11 @@ function Find-Ci10QueuedJob {
                 $jobs = Invoke-Ci10Read ('repos/' + $profile.repository + '/actions/runs/' + $run.id + '/jobs?filter=latest&per_page=100')
                 try { $candidate = Get-Ci10Candidate $profile $run $jobs $RoyalExpectedSha $RoyalWorkflowBlobSha; $candidates.Add($candidate) }
                 catch {
-                    if ($_.Exception.Message -cnotin @('WRONG_REPOSITORY','WRONG_WORKFLOW','WRONG_EVENT_REF_SOURCE','RUN_NOT_QUEUED',
-                        'EXACTLY_ONE_JOB_REQUIRED','JOB_IDENTITY_MISMATCH','JOB_NOT_UNASSIGNED_QUEUED','WRONG_LABELS','RUN_TIME_INVALID','FROZEN_ROYAL_HEAD_REQUIRED','FROZEN_ROYAL_WORKFLOW_BLOB_REQUIRED')) { throw }
+                    $reason = $_.Exception.Message
+                    if (-not $heldClass.ContainsKey($reason)) { throw }
+                    $class = $heldClass[$reason]
+                    if (-not $heldReasons.ContainsKey($class)) { $heldReasons[$class] = 0 }
+                    $heldReasons[$class]++
                 }
             }
             if (@($response.workflow_runs).Count -lt 100) { break }
@@ -335,7 +356,46 @@ function Find-Ci10QueuedJob {
             }
         }
     }
-    Select-Ci10Oldest @($candidates)
+    $selected = @(Select-Ci10Oldest @($candidates))
+    [pscustomobject]@{
+        Candidates = @($candidates)
+        Selected = if ($selected.Count) { $selected[0] } else { $null }
+        EligibleQueuedCount = $candidates.Count
+        HeldQueuedCount = [int](($heldReasons.Values | Measure-Object -Sum).Sum)
+        HeldReasonCounts = $heldReasons
+    }
+}
+
+function Get-Ci10QueueSnapshot {
+    param([object[]]$Profiles, [string]$RoyalExpectedSha, [string]$RoyalWorkflowBlobSha)
+    try { $core = Get-QueueSnapshotCore $Profiles $RoyalExpectedSha $RoyalWorkflowBlobSha }
+    catch {
+        if ($_.Exception.Message -notin @('API_READ_FAILED','API_RESPONSE_INVALID')) { throw }
+        return [pscustomobject]@{
+            Schema='ci10-queue-v1'; QueueState='UNAVAILABLE'; EligibleQueuedCount=$null; HeldQueuedCount=$null
+            HeldReasonCounts=@(); Selected=$null
+        }
+    }
+    $selected = $core.Selected
+    [pscustomobject]@{
+        Schema='ci10-queue-v1'; QueueState='FRESH'; EligibleQueuedCount=[int]$core.EligibleQueuedCount
+        HeldQueuedCount=[int]$core.HeldQueuedCount
+        HeldReasonCounts=@($core.HeldReasonCounts.GetEnumerator() | ForEach-Object {
+            [pscustomobject]@{ReasonCode=[string]$_.Key; Count=[int]$_.Value}
+        })
+        Selected=if ($null -eq $selected) { $null } else {
+            [pscustomobject]@{ProfileId=[string]$selected.Profile.id; RunId=[long]$selected.RunId; JobId=[long]$selected.JobId}
+        }
+    }
+}
+
+function Find-Ci10QueuedJob {
+    param([object[]]$Profiles, [string]$RoyalExpectedSha, [string]$RoyalWorkflowBlobSha)
+    # Compatibility surface for the dispatcher: it consumes the same validated
+    # queue snapshot core while retaining the rich trusted candidate internally.
+    $snapshot = Get-QueueSnapshotCore $Profiles $RoyalExpectedSha $RoyalWorkflowBlobSha
+    if ($null -eq $snapshot.Selected) { return }
+    $snapshot.Selected
 }
 
 function Confirm-Ci10Candidate {
