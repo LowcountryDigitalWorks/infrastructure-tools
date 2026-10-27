@@ -47,29 +47,6 @@ jobs:
         shell: pwsh
         run: pwsh ./ci-dispatch/tests/Test-Dispatch.ps1
 
-      - name: Diagnose historical controller snapshot hashes
-        shell: pwsh
-        run: |
-          $commit='68a535fd3df17bae59fdb86386fac85e024b1650'
-          $paths=@(
-            'ci-runner/CiRunner.psm1',
-            'ci-runner/Invoke-IsolatedRunner.ps1',
-            'ci-runner/Native.cs',
-            'ci-runner/guest/bootstrap.sh',
-            'ci-runner/guest/ci7-runner.service',
-            'ci-runner/guest/run-one.sh'
-          )
-          $root=Join-Path $env:RUNNER_TEMP ('controller-snapshot-'+[guid]::NewGuid().ToString('N'))
-          $zip=$root+'.zip'
-          New-Item -ItemType Directory -Path $root | Out-Null
-          git archive --format=zip ("--output=$zip") $commit -- @paths
-          if($LASTEXITCODE -ne 0){throw 'CONTROLLER_SNAPSHOT_DIAGNOSTIC_ARCHIVE_FAILED'}
-          Expand-Archive -LiteralPath $zip -DestinationPath $root
-          foreach($path in $paths){
-            $sha=(Get-FileHash -LiteralPath (Join-Path $root $path) -Algorithm SHA256).Hash.ToLowerInvariant()
-            Write-Host ("CONTROLLER_SNAPSHOT_SHA256 path=$path sha256=$sha")
-          }
-
       - name: Run protected controller snapshot tests
         shell: pwsh
         run: pwsh ./ci-dispatch/tests/Test-ControllerSnapshots.ps1
