@@ -365,11 +365,11 @@ $bad.event='push'
     $releaseRoot=Join-Path $secure 'dispatcher';Protect $releaseRoot
     $releases=Join-Path $releaseRoot 'releases';Protect $releases
     $bundle=Join-Path $releases ('a'*40);Protect $bundle
-    foreach($path in @(Get-Ci10RuntimeFiles)){
-        $target=Join-Path $bundle $path
-        $null=New-Item -ItemType Directory -Path (Split-Path $target -Parent) -Force
-        Copy-Item -LiteralPath (Join-Path $repo $path) -Destination $target
-    }
+    $runtimeArchive=Join-Path $fixture 'manifest-runtime.zip'
+    & git -C $repo archive --format=zip ('--output='+$runtimeArchive) HEAD -- @(Get-Ci10RuntimeFiles) 2>$null
+    if($LASTEXITCODE -ne 0){throw 'TEST_RUNTIME_ARCHIVE_FAILED'}
+    [IO.Compression.ZipFile]::ExtractToDirectory($runtimeArchive,$bundle)
+    Remove-Item -LiteralPath $runtimeArchive -Force
     $royalController=Join-Path $fixture 'manifest-royal-controller'
     New-Item -ItemType Directory -Path $royalController -Force|Out-Null
     New-ControllerFixture '54b9343af44c70db1d1403cf7f45cfc11e8bf167' $royalController
