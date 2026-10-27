@@ -47,28 +47,9 @@ jobs:
         shell: pwsh
         run: pwsh ./ci-dispatch/tests/Test-Dispatch.ps1
 
-      - name: Measure Stage A Windows controller archive hashes
+      - name: Run dispatcher observability isolation tests
         shell: pwsh
-        run: |
-          $paths=@(
-            'ci-runner/CiRunner.psm1',
-            'ci-runner/Invoke-IsolatedRunner.ps1',
-            'ci-runner/Native.cs',
-            'ci-runner/guest/bootstrap.sh',
-            'ci-runner/guest/ci7-runner.service',
-            'ci-runner/guest/run-one.sh'
-          )
-          $root=Join-Path $env:RUNNER_TEMP 'slice3-controller-hash'
-          New-Item -ItemType Directory -Path $root -Force | Out-Null
-          $zip=Join-Path $root 'controller.zip'
-          git archive --format=zip --output=$zip 68a535fd3df17bae59fdb86386fac85e024b1650 -- $paths
-          if($LASTEXITCODE -ne 0){throw 'ARCHIVE_FAILED'}
-          $out=Join-Path $root 'out'
-          [IO.Compression.ZipFile]::ExtractToDirectory($zip,$out)
-          foreach($path in $paths){
-            $hash=(Get-FileHash -LiteralPath (Join-Path $out $path) -Algorithm SHA256).Hash.ToLowerInvariant()
-            Write-Output ($path+'='+$hash)
-          }
+        run: pwsh ./ci-dispatch/tests/Test-ObservabilityIsolation.ps1
 
       - name: Run protected controller snapshot tests
         shell: pwsh
