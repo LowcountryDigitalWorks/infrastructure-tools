@@ -6,6 +6,9 @@ internal static class BridgeRunnerContractTests
 {
     public static void Run()
     {
+        DragonflyBridgeContractTests.RunAsync().GetAwaiter().GetResult();
+        DragonflyBridgeRunnerConfigurationTests.Run();
+
         var config = BridgeRunnerConfiguration.Parse(
             "{\"bridgeId\":\"ldw01-bridge\",\"relayConnectUri\":\"wss://ldw-operations-bridge-relay.locodw.workers.dev/relay/connect?bridgeId=ldw01-bridge\"}");
         Assert(config.BridgeId == "ldw01-bridge", "runner accepts exact bridge identity");
