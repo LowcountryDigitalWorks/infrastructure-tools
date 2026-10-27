@@ -57,7 +57,7 @@ public sealed class DispatchValidator
             return DispatchValidationError.UnknownOperation;
         }
 
-        if (!CodyncOperationSchema.IsValid(request.Operation, request.Args))
+        if (!BridgeOperationSchema.IsValid(request.Operation, request.Args))
         {
             return DispatchValidationError.InvalidOperationArgs;
         }
