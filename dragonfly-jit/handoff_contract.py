@@ -108,7 +108,7 @@ def validate_capsule(payload: object, *, now: dt.datetime | None = None) -> dict
         raise HandoffError("CAPSULE_INVALID")
     if set(payload) != _REQUIRED_FIELDS:
         raise HandoffError("CAPSULE_FIELDS_INVALID")
-    if payload["marker"] != MARKER or payload["schema"] != SCHEMA:
+    if payload["marker"] != MARKER or type(payload["schema"]) is not int or payload["schema"] != SCHEMA:
         raise HandoffError("CAPSULE_IDENTITY_INVALID")
     dispatch_id = _canonical_uuid4(payload["dispatch_id"])
     if payload["target_host"] != TARGET_HOST:
@@ -203,7 +203,8 @@ def claim_dispatch(summary: dict, *, state_root: Path, now: dt.datetime | None =
     _assert_no_symlink(claims)
     os.chmod(claims, 0o700)
 
-    claim_path = claims / f"{summary['dispatch_id']}.json"
+    dispatch_id = _canonical_uuid4(summary.get("dispatch_id"))
+    claim_path = claims / f"{dispatch_id}.json"
     _assert_no_symlink(claim_path, allow_missing_leaf=True)
     record = {
         "marker": MARKER,

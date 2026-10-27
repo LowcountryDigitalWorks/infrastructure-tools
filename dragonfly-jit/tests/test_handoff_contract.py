@@ -57,6 +57,7 @@ class HandoffContractTests(unittest.TestCase):
         for field, replacement, reason in [
             ("marker", "other", "CAPSULE_IDENTITY_INVALID"),
             ("schema", 2, "CAPSULE_IDENTITY_INVALID"),
+            ("schema", True, "CAPSULE_IDENTITY_INVALID"),
             ("target_host", "other", "TARGET_HOST_INVALID"),
             ("profile_id", "other", "PROFILE_INVALID"),
             ("repository", "other/repo", "REPOSITORY_INVALID"),
@@ -119,6 +120,16 @@ class HandoffContractTests(unittest.TestCase):
             with self.assertRaisesRegex(hc.HandoffError, "HANDOFF_REPLAY"):
                 hc.claim_dispatch(summary, state_root=state, now=NOW)
             self.assertEqual(0o700, stat.S_IMODE((state / hc.CLAIM_SUBDIR).stat().st_mode))
+
+    def test_claim_revalidates_dispatch_id_before_path_use(self):
+        summary = hc.validate_capsule(capsule(), now=NOW)
+        forged = dict(summary)
+        forged["dispatch_id"] = "../escape"
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp) / "state"
+            with self.assertRaisesRegex(hc.HandoffError, "DISPATCH_ID_INVALID"):
+                hc.claim_dispatch(forged, state_root=state, now=NOW)
+            self.assertFalse((Path(temp) / "escape.json").exists())
 
     def test_claim_path_symlink_is_refused(self):
         summary = hc.validate_capsule(capsule(), now=NOW)
