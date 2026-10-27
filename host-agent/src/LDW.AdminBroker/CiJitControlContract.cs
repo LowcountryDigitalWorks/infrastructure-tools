@@ -117,6 +117,7 @@ public static class CiJitControlContract
             return null;
 
         var details = new Dictionary<string, string>(StringComparer.Ordinal);
+        Add(details, "reasonCode", result.ReasonCode);
         Add(details, "operationId", result.OperationId);
         Add(details, "profileId", result.ProfileId);
         Add(details, "runId", result.RunId?.ToString(CultureInfo.InvariantCulture));
