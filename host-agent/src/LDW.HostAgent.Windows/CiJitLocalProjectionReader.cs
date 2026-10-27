@@ -1,3 +1,4 @@
+using System.Text.Json;
 using LDW.HostAgent.Core;
 
 namespace LDW.HostAgent.Windows;
