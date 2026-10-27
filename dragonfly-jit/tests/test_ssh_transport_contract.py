@@ -69,7 +69,8 @@ class SshTransportContractTests(unittest.TestCase):
 
         self.assertEqual(plan["executable"], r"C:\Windows\System32\OpenSSH\ssh.exe")
         self.assertEqual(args[-2], "eddie@redrix.example-alias")
-        self.assertEqual(args[-1], "ldw-dragonfly-jit-handoff-v1")
+        self.assertEqual(args[-1], "/nonexistent/ldw-dragonfly-jit-handoff-v1")
+        self.assertEqual(contract.REMOTE_SENTINEL, receiver.REMOTE_SENTINEL)
         self.assertTrue(plan["stdin_capsule_only"])
         self.assertFalse(plan["opens_network"])
 
