@@ -39,6 +39,7 @@ ARCHIVE="$ARCHIVE" WORK="$WORK" EXPECTED_COMMIT="$EXPECTED_COMMIT" python3 - <<'
 import hashlib
 import json
 import os
+import re
 import stat
 import tarfile
 from pathlib import Path, PurePosixPath
@@ -76,12 +77,18 @@ expected_exact = {
     "runtimeIdentifier": "linux-x64",
     "targetFramework": "net10.0",
     "selfContained": True,
+    "requiresSystemDotnet": False,
     "installRoot": "~/.local/lib/ldw/operations-bridge/dragonfly",
     "entrypoint": "payload/LDW.OperationsBridge.Runner",
     "configurationPath": "~/.config/ldw/operations-bridge/dragonfly/config.json",
     "statePath": "~/.local/state/ldw/operations-bridge/dragonfly/health.json",
     "containsConfiguration": False,
     "containsCredential": False,
+    "requiredHostBinaries": ["/usr/bin/python3", "/usr/bin/secret-tool"],
+    "requiredExternalAdapter": {
+        "path": "~/.local/lib/ldw-dragonfly-jit/bridge_adapter.py",
+        "gitBlob": "9ffbfd1dd2ea63fd7eece24e1f3eb791c92da0bf",
+    },
 }
 for key, expected in expected_exact.items():
     if manifest.get(key) != expected:
@@ -90,6 +97,10 @@ for key, expected in expected_exact.items():
 source_epoch = manifest.get("sourceDateEpoch")
 if not isinstance(source_epoch, int) or source_epoch < 0:
     raise SystemExit("manifest sourceDateEpoch is invalid")
+
+sdk_version = manifest.get("dotnetSdkVersion")
+if not isinstance(sdk_version, str) or not re.fullmatch(r"[0-9][0-9A-Za-z.+-]{2,31}", sdk_version):
+    raise SystemExit("manifest dotnetSdkVersion is invalid")
 
 records = manifest.get("files")
 if not isinstance(records, list) or not records:
@@ -128,5 +139,5 @@ for forbidden in (root / "config.json", payload / "config.json"):
     if forbidden.exists():
         raise SystemExit("package unexpectedly contains runtime configuration")
 
-print(f"PACKAGE_VERIFY=PASS source={expected_commit} files={len(actual_files)}")
+print(f"PACKAGE_VERIFY=PASS source={expected_commit} sdk={sdk_version} files={len(actual_files)}")
 PY
