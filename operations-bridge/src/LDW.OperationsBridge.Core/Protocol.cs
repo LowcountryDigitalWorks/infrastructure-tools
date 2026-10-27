@@ -28,6 +28,14 @@ public static class BridgeProtocol
             BridgeOperation.CodyncWaitReadExact
         };
 
+    public static readonly IReadOnlySet<BridgeOperation> AllowedDragonflyOwnerControlOperations =
+        new HashSet<BridgeOperation>
+        {
+            BridgeOperation.DragonflyRunnerStatus,
+            BridgeOperation.DragonflyRunnerStart,
+            BridgeOperation.DragonflyRunnerDrain
+        };
+
     public static readonly IReadOnlySet<DispatchTerminalStatus> AllowedTerminalStatuses =
         new HashSet<DispatchTerminalStatus>
         {
@@ -48,6 +56,9 @@ public static class BridgeProtocol
             BridgeOperation.CodyncListApprovedBotsGroups => "codync.list_approved_bots_groups",
             BridgeOperation.CodyncSendExact => "codync.send_exact",
             BridgeOperation.CodyncWaitReadExact => "codync.wait_read_exact",
+            BridgeOperation.DragonflyRunnerStatus => "dragonfly.runner.status",
+            BridgeOperation.DragonflyRunnerStart => "dragonfly.runner.start",
+            BridgeOperation.DragonflyRunnerDrain => "dragonfly.runner.drain",
             _ => "unknown"
         };
 
@@ -75,6 +86,15 @@ public static class BridgeProtocol
                 return true;
             case "codync.wait_read_exact":
                 operation = BridgeOperation.CodyncWaitReadExact;
+                return true;
+            case "dragonfly.runner.status":
+                operation = BridgeOperation.DragonflyRunnerStatus;
+                return true;
+            case "dragonfly.runner.start":
+                operation = BridgeOperation.DragonflyRunnerStart;
+                return true;
+            case "dragonfly.runner.drain":
+                operation = BridgeOperation.DragonflyRunnerDrain;
                 return true;
             default:
                 operation = BridgeOperation.Unknown;
@@ -213,7 +233,10 @@ public enum BridgeOperation
     CodyncHealth = 4,
     CodyncListApprovedBotsGroups = 5,
     CodyncSendExact = 6,
-    CodyncWaitReadExact = 7
+    CodyncWaitReadExact = 7,
+    DragonflyRunnerStatus = 8,
+    DragonflyRunnerStart = 9,
+    DragonflyRunnerDrain = 10
 }
 
 public enum DispatchLifecycle
