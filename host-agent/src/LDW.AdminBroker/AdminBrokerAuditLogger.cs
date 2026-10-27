@@ -78,8 +78,10 @@ public sealed class AdminBrokerAuditLogger
                         && record.Operation is not ("INVALID_REQUEST" or "LOCAL_SECRET_STORE" or "FIXED_SECRET_PROBE"))
                     || (record.CallerSid?.Length ?? 0) > 184
                     || (record.CallerSid is not null && !AdminBrokerAuthorizationPolicy.IsSafeExplicitUserSid(record.CallerSid))
-                    || !SafeResultStates.Contains(record.ResultState) ||
-                    (record.ErrorCode is not null && !SafeErrorCodes.Contains(record.ErrorCode)))
+                    || (!SafeResultStates.Contains(record.ResultState) && !CiJitControlContract.IsResultState(record.ResultState))
+                    || (record.ErrorCode is not null
+                        && !SafeErrorCodes.Contains(record.ErrorCode)
+                        && !CiJitControlContract.IsReasonCode(record.ErrorCode)))
                     throw new InvalidOperationException("Audit record contains unsupported fields.");
                 var directory = Path.GetDirectoryName(_auditLogPath);
                 if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
