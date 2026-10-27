@@ -83,6 +83,18 @@ def _verify_controller(path: Path) -> None:
         raise AdapterError("CONTROLLER_IDENTITY_MISMATCH")
 
 
+def _validate_request(payload: object) -> dict:
+    if not isinstance(payload, dict) or set(payload) != {"operation", "arguments"}:
+        raise AdapterError("REQUEST_FIELDS_INVALID")
+    operation = payload["operation"]
+    arguments = payload["arguments"]
+    if operation not in OPERATIONS:
+        raise AdapterError("OPERATION_INVALID")
+    if not isinstance(arguments, dict) or arguments:
+        raise AdapterError("ARGUMENTS_INVALID")
+    return {"operation": operation, "arguments": {}}
+
+
 def read_request(stream) -> dict:
     raw = stream.read(MAX_REQUEST_BYTES + 1)
     if len(raw) > MAX_REQUEST_BYTES:
@@ -93,15 +105,7 @@ def read_request(stream) -> dict:
         raise AdapterError("REQUEST_UTF8_INVALID") from exc
     except json.JSONDecodeError as exc:
         raise AdapterError("REQUEST_JSON_INVALID") from exc
-    if not isinstance(payload, dict) or set(payload) != {"operation", "arguments"}:
-        raise AdapterError("REQUEST_FIELDS_INVALID")
-    operation = payload["operation"]
-    arguments = payload["arguments"]
-    if operation not in OPERATIONS:
-        raise AdapterError("OPERATION_INVALID")
-    if not isinstance(arguments, dict) or arguments:
-        raise AdapterError("ARGUMENTS_INVALID")
-    return {"operation": operation, "arguments": {}}
+    return _validate_request(payload)
 
 
 def _bounded_reason(value: object) -> str | None:
@@ -178,18 +182,19 @@ def _controller_error(stderr: str) -> str:
     return "CONTROLLER_FAILED"
 
 
-def invoke(
+def _invoke_with_dependencies(
     request: dict,
     *,
-    controller_path: Path | None = None,
-    python_path: Path = PYTHON_PATH,
-    home: Path | None = None,
-    runner: Callable = subprocess.run,
+    controller_path: Path,
+    python_path: Path,
+    home: Path,
+    runner: Callable,
 ) -> dict:
+    request = _validate_request(request)
     operation = request["operation"]
     command = OPERATIONS[operation]
-    controller = (controller_path or _controller_path()).absolute()
-    owner_home = (home or _owner_home()).absolute()
+    controller = controller_path.absolute()
+    owner_home = home.absolute()
     _verify_controller(controller)
     env = {
         "HOME": str(owner_home),
@@ -216,6 +221,17 @@ def invoke(
     if completed.returncode != 0:
         raise AdapterError(_controller_error(completed.stderr))
     return _project(operation, _parse_controller_json(completed.stdout))
+
+
+def invoke(request: dict) -> dict:
+    """Invoke one production adapter operation with no caller-overridable path/runtime."""
+    return _invoke_with_dependencies(
+        request,
+        controller_path=_controller_path(),
+        python_path=PYTHON_PATH,
+        home=_owner_home(),
+        runner=subprocess.run,
+    )
 
 
 def _emit(payload: dict) -> None:
