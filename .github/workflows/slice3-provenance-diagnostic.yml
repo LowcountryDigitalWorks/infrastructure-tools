@@ -1,4 +1,4 @@
-name: Slice 3 bounded verifier diagnostic
+name: Slice 3 bounded Windows archive pin refresh
 
 on:
   push:
@@ -6,38 +6,40 @@ on:
     paths: ['.github/workflows/slice3-provenance-diagnostic.yml']
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  diagnose:
+  refresh:
     runs-on: windows-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          persist-credentials: false
-      - name: Compare exact verifier inputs
+          persist-credentials: true
+      - name: Refresh exact publisher and deterministic-test pins
         shell: pwsh
+        env:
+          EXPECTED_PARENT: bf2313a089b06284e87dca7172410a84a03ac3b8
         run: |
           $ErrorActionPreference='Stop'
-          Import-Module ./ci-dispatch/Dispatch.psm1 -Force
-          $root=Join-Path $env:RUNNER_TEMP ('diag-'+[guid]::NewGuid().ToString('N'))
-          New-Item -ItemType Directory -Path $root|Out-Null
-          $archive=Join-Path $root 'runtime.zip'
-          & git archive --format=zip ('--output='+$archive) HEAD -- @(Get-Ci10RuntimeFiles)
-          if($LASTEXITCODE -ne 0){throw 'ARCHIVE_FAILED'}
-          $bundle=Join-Path $root 'bundle';New-Item -ItemType Directory -Path $bundle|Out-Null
-          [IO.Compression.ZipFile]::ExtractToDirectory($archive,$bundle)
-          $recordPath=Join-Path $bundle 'ci-dispatch/verifier-provenance.json'
-          $accepted=Get-Content $recordPath -Raw|ConvertFrom-Json
-          $dispatch=Join-Path $bundle 'ci-dispatch/Dispatch.psm1'
-          'HEAD='+(& git rev-parse HEAD)
-          'DISPATCH_BLOB='+(& git rev-parse HEAD:ci-dispatch/Dispatch.psm1)
-          'VERIFIER_RECORD_BLOB='+(& git rev-parse HEAD:ci-dispatch/verifier-provenance.json)
-          'ARCHIVE_DISPATCH_SHA='+((Get-FileHash $dispatch -Algorithm SHA256).Hash.ToLowerInvariant())
-          'ARCHIVE_VERIFIER_RECORD_SHA='+((Get-FileHash $recordPath -Algorithm SHA256).Hash.ToLowerInvariant())
-          'RECORD_COMMIT='+$accepted.commit
-          'RECORD_TREE='+$accepted.tree
-          'RECORD_BLOB='+$accepted.blob
-          'RECORD_SHA='+$accepted.sha256
+          if ((git rev-parse HEAD^) -ne $env:EXPECTED_PARENT) { throw 'PIN_REFRESH_PARENT_MOVED' }
+          $replacements = [ordered]@{
+            '75895bc9b0500c99787bb938115a6b969c96f15bba156c1bf85878e1df794b8e' = 'fdcf67a7bbfeacd5d293876bbfa7622e41de98e09ddbeecbed6bcb7d2abea6d9'
+            '467ab8f2d1821f0468fe2840708cd8172d994ba0' = '0537fcd212e8e9174f3b7388fcb992f9fccda8b6'
+            '8a3c3a74aedd03eb1e88c79085cadf4bcd530a4adf8a179caf42811216478079' = 'c821f3184cf17694036a59f7c13377c3ac82d618166c2c576f67e4e85c455ba5'
+          }
+          $paths = @('ci-dispatch/Publish-Bundle.ps1') + @(Get-ChildItem ci-dispatch/tests -File -Filter '*.ps1' | ForEach-Object FullName)
+          foreach ($path in $paths) {
+            $text = Get-Content -LiteralPath $path -Raw
+            foreach ($pair in $replacements.GetEnumerator()) { $text = $text.Replace($pair.Key,$pair.Value) }
+            [IO.File]::WriteAllText((Resolve-Path $path), $text, [Text.UTF8Encoding]::new($false))
+          }
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { throw 'PIN_REFRESH_DIFF_FAILED' }
+          git config user.name 'LDW bounded source finalizer'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add ci-dispatch/Publish-Bundle.ps1 ci-dispatch/tests
+          if (-not (git diff --cached --name-only)) { throw 'PIN_REFRESH_EMPTY' }
+          git commit -m 'HOST-AGENT-CI-JIT-STATUS-001: bind publisher pins to Windows archive bytes'
+          git push origin HEAD:host-agent/ci-jit-local-status-slice3-20261026
