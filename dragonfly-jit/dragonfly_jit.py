@@ -167,8 +167,11 @@ def _atomic_json(path: Path, payload: dict) -> None:
 
 def _read_json(path: Path) -> dict:
     _assert_no_symlink(path)
-    with path.open("r", encoding="utf-8") as handle:
-        value = json.load(handle)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise DragonflyError("JSON_READ_INVALID") from exc
     if not isinstance(value, dict):
         raise DragonflyError("JSON_OBJECT_REQUIRED")
     return value
@@ -363,7 +366,16 @@ class Controller:
             current = self.read_state()
             if current["state"] in {"FAILED", "HOLD"}:
                 return current
-            if current["state"] in {"RUNNING", "DRAINING"}:
+            if current["state"] == "RUNNING":
+                return self.write_state(
+                    "DRAINING",
+                    run_id=current.get("run_id"),
+                    qemu_pid=current.get("qemu_pid"),
+                    reason="DRAIN_REQUESTED",
+                )
+            if current["state"] == "DRAINING":
+                if current.get("run_id") is None and self._guest_lock_available():
+                    return self.write_state("STOPPED")
                 return self.write_state(
                     "DRAINING",
                     run_id=current.get("run_id"),
@@ -379,7 +391,7 @@ class Controller:
         current = self.read_state()
         try:
             residue_count = len(self._run_dirs())
-        except DragonflyError:
+        except (DragonflyError, OSError):
             residue_count = -1
             current = dict(current)
             current["state"] = "HOLD"
@@ -590,10 +602,12 @@ power_state:
                 if manifest_path.exists():
                     try:
                         self._cleanup_owned_run(run_dir)
-                    except DragonflyError:
+                    except Exception as exc:
                         with _file_lock(self.state_lock_path):
                             self.write_state("HOLD", run_id=run_id, reason="CLEANUP_UNCERTAIN")
-                        raise
+                        if isinstance(exc, DragonflyError):
+                            raise
+                        raise DragonflyError("CLEANUP_IO_FAILED") from exc
 
             if result is None:
                 raise DragonflyError("SMOKE_RESULT_MISSING")
@@ -626,16 +640,14 @@ power_state:
                     raise DragonflyError("MULTIPLE_RUN_DIRS")
                 if run_dirs:
                     self._cleanup_owned_run(run_dirs[0])
-            except DragonflyError:
+            except Exception as exc:
                 with _file_lock(self.state_lock_path):
                     self.write_state("HOLD", reason="RECOVERY_UNCERTAIN")
-                raise
+                if isinstance(exc, DragonflyError):
+                    raise
+                raise DragonflyError("RECOVERY_IO_FAILED") from exc
             with _file_lock(self.state_lock_path):
-                current = self.read_state()
-                if current["state"] in {"RUNNING", "DRAINING", "FAILED", "HOLD"}:
-                    state = self.write_state("STOPPED", reason="RECOVERED")
-                else:
-                    state = current
+                state = self.write_state("STOPPED", reason="RECOVERED")
             return {"result": "CLEAN", "state": state["state"]}
 
 
