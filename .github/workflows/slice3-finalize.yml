@@ -1,0 +1,603 @@
+name: Slice 3 bounded source finalizer
+
+on:
+  push:
+    branches: [host-agent/ci-jit-local-status-slice3-20261026]
+    paths: ['.github/workflows/slice3-finalize.yml']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: slice3-finalize
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact branch with history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Build staged source candidate and provenance
+        shell: bash
+        env:
+          EXPECTED_PARENT: eadee65c28ebd7d56f8a47cce849a002b551f146
+        run: |
+          set -euo pipefail
+          cat > /tmp/finalize_slice3.py <<'PY'
+          from pathlib import Path
+          import subprocess, hashlib, json, re, os
+
+          REPO = Path.cwd()
+          TEMP_WORKFLOW = Path('.github/workflows/slice3-finalize.yml')
+          HISTORICAL_STATUS_COMMIT = 'e542ece16084925631bed6be40af8328a3dc052d'
+          OLD_DISPATCH_BLOB = 'c862dd503b98060ec984206e63ef9efa5f957e8f'
+          OLD_DISPATCH_SHA = '0a41b338ca6b8b05ff31a26f30486381c7c836e484985a813b6fce6d07232c72'
+          OLD_RECORD_BLOB = '6ed6339eed313bfc6a2710ead2d6c56df1551500'
+          OLD_RECORD_SHA = 'b7ab4e288b5476e29b2effbd1dca95da67e08bcc26c7ed864d350584f22ac0cd'
+          OLD_RECORD_COMMIT = 'ce2bf253556a69dfb43de7bb8e8a4927c41c9e15'
+          OLD_RECORD_TREE = '57ceb47f2a0a40d3b176cde0818a0ad8c5891dca'
+
+          CONTROLLER_PATHS = [
+              'ci-runner/CiRunner.psm1',
+              'ci-runner/Invoke-IsolatedRunner.ps1',
+              'ci-runner/Native.cs',
+              'ci-runner/guest/bootstrap.sh',
+              'ci-runner/guest/ci7-runner.service',
+              'ci-runner/guest/run-one.sh',
+          ]
+
+          def run(*args, text=True):
+              return subprocess.check_output(args, cwd=REPO, text=text).strip() if text else subprocess.check_output(args, cwd=REPO)
+
+          def must_replace(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f'{label}: expected exactly one replacement target, found {count}')
+              return text.replace(old, new, 1)
+
+          def write(path, content):
+              p = REPO / path
+              p.parent.mkdir(parents=True, exist_ok=True)
+              p.write_text(content, encoding='utf-8', newline='\n')
+
+          def commit(message):
+              subprocess.run(['git','add','-A'], cwd=REPO, check=True)
+              if not run('git','diff','--cached','--name-only'):
+                  raise RuntimeError('staged commit unexpectedly empty: ' + message)
+              subprocess.run(['git','commit','-m',message], cwd=REPO, check=True)
+              return run('git','rev-parse','HEAD'), run('git','rev-parse','HEAD^{tree}')
+
+          def sha256_at(ref, path):
+              raw = subprocess.check_output(['git','show',f'{ref}:{path}'], cwd=REPO)
+              return hashlib.sha256(raw).hexdigest()
+
+          def blob_at(ref, path):
+              return run('git','rev-parse',f'{ref}:{path}')
+
+          expected_parent = os.environ['EXPECTED_PARENT']
+          parent = run('git','rev-parse','HEAD^')
+          if parent != expected_parent:
+              raise RuntimeError(f'branch moved before finalizer start: expected parent {expected_parent}, got {parent}')
+          changed = run('git','diff','--name-only','HEAD^','HEAD').splitlines()
+          if changed != [str(TEMP_WORKFLOW)]:
+              raise RuntimeError('finalizer bootstrap commit contains unexpected paths: ' + repr(changed))
+
+          # Restore the previously drafted shared status module, then tighten its parent-boundary
+          # and queue/controller consistency behavior before it becomes part of the protected bundle.
+          status = subprocess.check_output(
+              ['git','show',f'{HISTORICAL_STATUS_COMMIT}:ci-dispatch/StatusProjection.psm1'], cwd=REPO, text=True)
+
+          protect_start = status.index('function Protect-Ci10StatusRoot {')
+          protect_end = status.index('\nfunction Set-Ci10StatusReaderAcl {', protect_start)
+          parent_and_protect = r'''function Assert-Ci10StatusParentBoundary {
+              param([Parameter(Mandatory)][string]$Path)
+              if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return }
+              if (-not (Test-Path -LiteralPath $Path -PathType Container)) { throw 'STATUS_PARENT_REQUIRED' }
+              $acl = Get-Acl -LiteralPath $Path
+              if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @('S-1-5-18','S-1-5-32-544')) {
+                  throw 'STATUS_PARENT_OWNER_UNTRUSTED'
+              }
+              $replace = [Security.AccessControl.FileSystemRights]::Delete -bor
+                  [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+                  [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+                  [Security.AccessControl.FileSystemRights]::TakeOwnership
+              foreach ($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
+                  if ($rule.AccessControlType -eq 'Allow' -and
+                      -not ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -and
+                      ($rule.FileSystemRights -band $replace) -and
+                      $rule.IdentityReference.Value -notin @('S-1-5-18','S-1-5-32-544')) {
+                      throw 'STATUS_PARENT_REPLACEMENT_UNTRUSTED'
+                  }
+              }
+          }
+
+          function Protect-Ci10StatusRoot {
+              if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+                  $null = New-Item -ItemType Directory -Path $script:StatusRoot -Force
+                  return
+              }
+              $parent = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($script:StatusRoot))
+              Assert-Ci10StatusParentBoundary $parent
+              if (-not (Test-Path -LiteralPath $script:StatusRoot)) {
+                  $null = New-Item -ItemType Directory -Path $script:StatusRoot -Force
+                  $acl = [Security.AccessControl.DirectorySecurity]::new()
+                  $acl.SetAccessRuleProtection($true,$false)
+                  $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+                  foreach ($sid in @('S-1-5-18','S-1-5-32-544')) {
+                      $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                          [Security.Principal.SecurityIdentifier]::new($sid),
+                          'FullControl','ContainerInherit,ObjectInherit','None','Allow'))
+                  }
+                  Set-Acl -LiteralPath $script:StatusRoot -AclObject $acl
+              }
+              Assert-Ci10StatusProjectionPath $script:StatusRoot
+              $acl = Get-Acl -LiteralPath $script:StatusRoot
+              if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @('S-1-5-18','S-1-5-32-544')) {
+                  throw 'STATUS_ROOT_OWNER_UNTRUSTED'
+              }
+              $write = [Security.AccessControl.FileSystemRights]::Write -bor
+                  [Security.AccessControl.FileSystemRights]::Delete -bor
+                  [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+                  [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+                  [Security.AccessControl.FileSystemRights]::TakeOwnership
+              foreach ($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
+                  if ($rule.AccessControlType -eq 'Allow' -and ($rule.FileSystemRights -band $write) -and
+                      $rule.IdentityReference.Value -notin @('S-1-5-18','S-1-5-32-544')) {
+                      throw 'STATUS_ROOT_UNTRUSTED_WRITE'
+                  }
+              }
+              Assert-Ci10StatusParentBoundary $parent
+          }
+          '''
+          status = status[:protect_start] + parent_and_protect + status[protect_end+1:]
+
+          queue_start = status.index('function Set-Ci10StatusQueueProjection {')
+          queue_end = status.index('\nfunction Set-Ci10StatusControllerPhase {', queue_start)
+          queue_function = r'''function Set-Ci10StatusQueueProjection {
+              param(
+                  [Parameter(Mandatory)][object]$QueueSnapshot,
+                  [ValidateSet('READY','BUSY','CAPACITY','UNKNOWN')][string]$Capacity,
+                  [ValidateSet('BUSY','CAPACITY','POLICY_HOLD','QUEUE_UNAVAILABLE','UNKNOWN')][string]$ReasonCode,
+                  [switch]$ProvenanceValid
+              )
+              if (-not $QueueSnapshot -or $QueueSnapshot.Schema -cne 'ci10-queue-v1' -or
+                  $QueueSnapshot.QueueState -cnotin @('FRESH','UNAVAILABLE')) { throw 'STATUS_QUEUE_SNAPSHOT_REFUSED' }
+              $lock = Enter-Ci10StatusProjectionLock
+              try {
+                  $prior = Read-Ci10StatusProjectionUnsafe
+                  $queueState = [string]$QueueSnapshot.QueueState
+                  $eligible = if ($queueState -ceq 'FRESH') { [int]$QueueSnapshot.EligibleQueuedCount } else { $null }
+                  $held = if ($queueState -ceq 'FRESH') { [int]$QueueSnapshot.HeldQueuedCount } else { $null }
+                  $selectedProfile = if ($queueState -ceq 'FRESH' -and $QueueSnapshot.Selected) { [string]$QueueSnapshot.Selected.ProfileId } else { $null }
+                  $selectedRunId = if ($queueState -ceq 'FRESH' -and $QueueSnapshot.Selected) { [long]$QueueSnapshot.Selected.RunId } else { $null }
+                  $selectedJobId = if ($queueState -ceq 'FRESH' -and $QueueSnapshot.Selected) { [long]$QueueSnapshot.Selected.JobId } else { $null }
+                  $activePhase = [string]$prior.controller_phase -in $script:ActivePhases
+                  $effectiveCapacity = if ($activePhase) { 'BUSY' } elseif ($Capacity -ceq 'BUSY') { 'UNKNOWN' } else { $Capacity }
+                  $hasQueuedWork = $queueState -ceq 'FRESH' -and (($eligible -gt 0) -or ($held -gt 0))
+                  if ($ReasonCode -eq 'POLICY_HOLD' -and -not $hasQueuedWork) { throw 'STATUS_REASON_REFUSED' }
+                  $effectiveReason = if ([bool]$prior.proven_failure) { [string]$prior.reason_code }
+                      elseif ($activePhase) { 'BUSY' }
+                      elseif ($queueState -ceq 'UNAVAILABLE') { 'QUEUE_UNAVAILABLE' }
+                      elseif ($effectiveCapacity -ceq 'CAPACITY' -and $hasQueuedWork) { 'CAPACITY' }
+                      elseif ($Capacity -ceq 'BUSY') { 'UNKNOWN' }
+                      elseif ($ReasonCode -eq 'POLICY_HOLD') { 'POLICY_HOLD' }
+                      elseif ($ReasonCode -eq 'UNKNOWN') { 'UNKNOWN' }
+                      else { $null }
+                  $status = [ordered]@{
+                      schema = $script:StatusSchema
+                      source_version = $script:StatusSourceVersion
+                      boot_started_utc = (Get-Ci10StatusBootStartedUtc).ToString('O')
+                      local_observed_at_utc = [DateTimeOffset]::UtcNow.ToUniversalTime().ToString('O')
+                      provenance_valid = [bool]$ProvenanceValid
+                      proven_failure = [bool]$prior.proven_failure
+                      controller_phase = $prior.controller_phase
+                      capacity = $effectiveCapacity
+                      reason_code = $effectiveReason
+                      queue_observed_at_utc = if ($queueState -ceq 'FRESH') { [DateTimeOffset]::UtcNow.ToUniversalTime().ToString('O') } else { $null }
+                      queue_state = $queueState
+                      eligible_queued_count = $eligible
+                      held_queued_count = $held
+                      selected_profile = $selectedProfile
+                      selected_run_id = $selectedRunId
+                      selected_job_id = $selectedJobId
+                  }
+                  Write-Ci10StatusProjectionUnsafe $status
+              } finally { $lock.Dispose() }
+          }
+          '''
+          status = status[:queue_start] + queue_function + status[queue_end+1:]
+          write('ci-dispatch/StatusProjection.psm1', status)
+
+          # Replace the temporary controller-local writer with a thin wrapper over the shared protected module.
+          controller_path = Path('ci-runner/Invoke-IsolatedRunner.ps1')
+          controller = controller_path.read_text(encoding='utf-8')
+          start = controller.index("$statusRoot = Join-Path $env:ProgramData 'LDW/CiJitStatus'")
+          end = controller.index('$state = $null', start)
+          controller_boundary = r'''$statusActivePhases = @('Planned','Registered','Provisioned','Running','JobCompleted','RunnerAbsent','GuestRemoved','ArtifactsRemoved')
+
+          function Test-Ci7PublishedBundle {
+              try {
+                  $bundle = Split-Path $PSScriptRoot -Parent
+                  $manifestPath = Join-Path $bundle 'manifest.json'
+                  $dispatchPath = Join-Path $bundle 'ci-dispatch/Dispatch.psm1'
+                  $statusModulePath = Join-Path $bundle 'ci-dispatch/StatusProjection.psm1'
+                  if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf) -or
+                      -not (Test-Path -LiteralPath $dispatchPath -PathType Leaf) -or
+                      -not (Test-Path -LiteralPath $statusModulePath -PathType Leaf)) { return $false }
+                  Import-Module $dispatchPath -Force -Global
+                  $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+                  $manifestSha = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                  $null = Assert-Ci10Bundle $bundle $manifestSha ([string]$manifest.commit) ([string]$manifest.tree)
+                  Import-Module $statusModulePath -Force -Global
+                  return $true
+              } catch { return $false }
+          }
+
+          function Set-Ci7StatusPhase {
+              param(
+                  [ValidateSet('Planned','Registered','Provisioned','Running','JobCompleted','RunnerAbsent','GuestRemoved','ArtifactsRemoved','Complete')][string]$Phase,
+                  [switch]$ProvenanceValid,
+                  [switch]$ProvenFailure,
+                  [ValidateSet('STALE_RESIDUE')][string]$FailureReason
+              )
+              $arguments = @{ Phase = $Phase }
+              if ($ProvenanceValid) { $arguments.ProvenanceValid = $true }
+              if ($ProvenFailure) { $arguments.ProvenFailure = $true }
+              if ($FailureReason) { $arguments.FailureReason = $FailureReason }
+              try { Set-Ci10StatusControllerPhase @arguments } catch { return }
+          }
+
+          '''
+          controller = controller[:start] + controller_boundary + controller[end:]
+          heartbeat_old = "if ([DateTime]::UtcNow - $lastProgress -ge [TimeSpan]::FromSeconds(45)) { 'LIFECYCLE_WAIT=BOUNDED'; $lastProgress = [DateTime]::UtcNow }"
+          heartbeat_new = "if ([DateTime]::UtcNow - $lastProgress -ge [TimeSpan]::FromSeconds(45)) { 'LIFECYCLE_WAIT=BOUNDED'; if ($statusProvenanceValid) { Set-Ci7StatusPhase Running -ProvenanceValid }; $lastProgress = [DateTime]::UtcNow }"
+          controller = must_replace(controller, heartbeat_old, heartbeat_new, 'controller heartbeat')
+          write(controller_path, controller)
+
+          # Dispatcher reads the accepted shared queue projection even when capacity is BUSY/CAPACITY,
+          # publishes it best-effort, and never makes observability a launch/cleanup dependency.
+          dispatcher_entry_path = Path('ci-dispatch/Invoke-Dispatcher.ps1')
+          entry = dispatcher_entry_path.read_text(encoding='utf-8')
+          import_old = "    Import-Module (Join-Path $bundle 'ci-runner/CiRunner.psm1') -Force\n    Assert-Ci7Elevated"
+          import_new = "    Import-Module (Join-Path $bundle 'ci-runner/CiRunner.psm1') -Force\n    Import-Module (Join-Path $bundle 'ci-dispatch/StatusProjection.psm1') -Force\n    Assert-Ci7Elevated"
+          entry = must_replace(entry, import_old, import_new, 'dispatcher status module import')
+          recover_marker = "        if ($Mode -eq 'Recover') {"
+          projection = r'''        $queueProjection = Get-Ci10QueueSnapshot $profiles
+                  $projectionCapacity = if ($gate -in @('READY','BUSY','CAPACITY')) { $gate } else { 'UNKNOWN' }
+                  try { Set-Ci10StatusQueueProjection -QueueSnapshot $queueProjection -Capacity $projectionCapacity -ProvenanceValid } catch { }
+          '''
+          entry = must_replace(entry, recover_marker, projection + recover_marker, 'dispatcher queue projection')
+          write(dispatcher_entry_path, entry)
+
+          # Active local controller state requires a heartbeat; clean same-boot state may remain valid while idle.
+          core_path = Path('host-agent/src/LDW.HostAgent.Core/CiJitLocalProjection.cs')
+          core = core_path.read_text(encoding='utf-8')
+          core = must_replace(core,
+              '    public static readonly TimeSpan QueueFreshnessWindow = TimeSpan.FromMinutes(2);\n    public static readonly TimeSpan BootComparisonTolerance = TimeSpan.FromMinutes(2);',
+              '    public static readonly TimeSpan QueueFreshnessWindow = TimeSpan.FromMinutes(2);\n    public static readonly TimeSpan ActiveLocalFreshnessWindow = TimeSpan.FromMinutes(2);\n    public static readonly TimeSpan BootComparisonTolerance = TimeSpan.FromMinutes(2);',
+              'active local freshness constant')
+          core = must_replace(core,
+              '        var sameBoot = (bootStartedUtc - estimatedBootStartedUtc).Duration() <= BootComparisonTolerance;\n        var localStateFresh = sameBoot;',
+              '''        var sameBoot = (bootStartedUtc - estimatedBootStartedUtc).Duration() <= BootComparisonTolerance;
+                  var activePhase = controllerPhase is
+                      CiJitControllerPhase.Planned
+                      or CiJitControllerPhase.Registered
+                      or CiJitControllerPhase.Provisioned
+                      or CiJitControllerPhase.Running
+                      or CiJitControllerPhase.JobCompleted
+                      or CiJitControllerPhase.RunnerAbsent
+                      or CiJitControllerPhase.GuestRemoved
+                      or CiJitControllerPhase.ArtifactsRemoved;
+                  var localStateFresh = sameBoot
+                      && (!activePhase || nowUtc - localObservedAtUtc <= ActiveLocalFreshnessWindow);''',
+              'active local freshness derivation')
+          core = must_replace(core, '        else if (!sameBoot)\n        {\n            reason = "LOCAL_STATE_STALE";\n        }',
+              '        else if (!localStateFresh)\n        {\n            reason = "LOCAL_STATE_STALE";\n        }',
+              'local stale reason')
+          write(core_path, core)
+
+          core_tests_path = Path('host-agent/tests/LDW.HostAgent.Core.Tests/CiJitLocalProjectionTests.cs')
+          core_tests = core_tests_path.read_text(encoding='utf-8')
+          stale_anchor = '''        var oldBoot = CiJitLocalProjection.Parse(Projection(projectedBoot: boot.AddHours(-1)), now, boot);
+                  Assert(!oldBoot.LocalStateFresh && oldBoot.State == CiJitOwnerState.Unknown && oldBoot.ReasonCode == "LOCAL_STATE_STALE",
+                      "prior-boot projection fails closed");
+          '''
+          stale_insert = stale_anchor + '''
+                  var staleRunning = CiJitLocalProjection.Parse(Projection(
+                      controllerPhase: "\\\"Running\\\"",
+                      capacity: "BUSY",
+                      reasonCode: "\\\"BUSY\\\"",
+                      localObserved: now.AddMinutes(-3)), now, boot);
+                  Assert(!staleRunning.LocalStateFresh && staleRunning.State == CiJitOwnerState.Unknown && staleRunning.ReasonCode == "LOCAL_STATE_STALE",
+                      "stale active controller projection fails closed until heartbeat refresh");
+          '''
+          core_tests = must_replace(core_tests, stale_anchor, stale_insert, 'stale active controller test')
+          write(core_tests_path, core_tests)
+
+          # Keep the primary owner surface compact; phase/capacity/IDs remain in Details/diagnostics.
+          status_form_path = Path('host-agent/src/LDW.HostAgent.Windows/StatusForm.cs')
+          form = status_form_path.read_text(encoding='utf-8')
+          form = form.replace('        _groups.Controls.Add(CreateCiJitCard(live.CiJitStatus));\n', '', 1)
+          form = must_replace(form,
+              '            _groups.Controls.Add(card);\n        }',
+              '            _groups.Controls.Add(card);\n            if (environment.Id == "development-automation")\n                _groups.Controls.Add(CreateCiJitCard(live.CiJitStatus));\n        }',
+              'CI JIT card placement')
+          detail_old = '''        var phase = status.ControllerPhase?.ToString() ?? "None";
+                  var detail = $"{status.State} · {status.QueueSummary} · capacity {status.Capacity} · phase {phase}";
+                  if (!string.IsNullOrWhiteSpace(status.ReasonCode)) detail += $" · {status.ReasonCode}";
+          '''
+          detail_new = '''        var reason = string.IsNullOrWhiteSpace(status.ReasonCode)
+                      ? null
+                      : status.ReasonCode.Replace('_', ' ').ToLowerInvariant();
+                  var detail = reason is null ? status.QueueSummary : $"{status.QueueSummary} · {reason}";
+          '''
+          form = must_replace(form, detail_old, detail_new, 'compact CI JIT detail')
+          write(status_form_path, form)
+
+          # Source-only install/config entrypoint: exact user SID receives read-only access to the fixed projection root.
+          access_script = r'''[CmdletBinding(SupportsShouldProcess=$true)]
+          param(
+              [Parameter(Mandatory)][ValidatePattern('^S-1-5-21-(\d+-){3}\d+$')][string]$PermittedReaderSid
+          )
+          $ErrorActionPreference = 'Stop'
+          if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { throw 'CI_JIT_STATUS_ACCESS_WINDOWS_ONLY' }
+          $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+          if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'CI_JIT_STATUS_ACCESS_ELEVATION_REQUIRED' }
+          $repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+          $module = Join-Path $repo 'ci-dispatch/StatusProjection.psm1'
+          if (-not (Test-Path -LiteralPath $module -PathType Leaf)) { throw 'CI_JIT_STATUS_MODULE_REQUIRED' }
+          if ($PSCmdlet.ShouldProcess('fixed LDW CI/JIT status projection', 'grant read-only Host Agent SID access')) {
+              Import-Module $module -Force
+              Set-Ci10StatusReaderAcl -ReaderSid $PermittedReaderSid
+              'CI_JIT_STATUS_READER_ACL=PASS'
+          }
+          '''
+          write('host-agent/deploy/Configure-CiJitStatusAccess.ps1', access_script)
+
+          status_test = r'''[CmdletBinding()]
+          param()
+          $ErrorActionPreference='Stop'
+          $repo=Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+          $sandbox=Join-Path ([IO.Path]::GetTempPath()) ('ldw-ci-jit-status-'+[guid]::NewGuid().ToString('N'))
+          $oldProgramData=$env:ProgramData
+          $total=0
+          function Check([string]$Name,[scriptblock]$Body){$script:case=$Name;& $Body;$script:total++;'PASS '+$Name}
+          function Assert([bool]$Condition){if(-not $Condition){throw ('TEST_ASSERTION_FAILED:'+ $script:case)}}
+          try {
+              $env:ProgramData=$sandbox
+              $parent=Join-Path $sandbox 'LDW'
+              $null=New-Item -ItemType Directory -Path $parent -Force
+              if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+                  $acl=[Security.AccessControl.DirectorySecurity]::new()
+                  $acl.SetAccessRuleProtection($true,$false)
+                  $admin=[Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+                  $system=[Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+                  $acl.SetOwner($admin)
+                  foreach($sid in @($admin,$system)){
+                      $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                          $sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow'))
+                  }
+                  Set-Acl -LiteralPath $parent -AclObject $acl
+              }
+              Import-Module (Join-Path $repo 'ci-dispatch/StatusProjection.psm1') -Force
+              $fresh=[pscustomobject]@{Schema='ci10-queue-v1';QueueState='FRESH';EligibleQueuedCount=1;HeldQueuedCount=0;HeldReasonCounts=@();Selected=[pscustomobject]@{ProfileId='ci10-bo-secret-scan';RunId=101;JobId=202}}
+              Check 'fresh queue projection is bounded and sanitized' {
+                  Set-Ci10StatusQueueProjection -QueueSnapshot $fresh -Capacity READY -ProvenanceValid
+                  $status=Get-Content -LiteralPath (Get-Ci10StatusProjectionPath) -Raw|ConvertFrom-Json
+                  Assert ($status.schema -eq 1 -and $status.source_version -ceq 'ci-jit-v1')
+                  Assert ($status.queue_state -ceq 'FRESH' -and $status.eligible_queued_count -eq 1 -and $status.selected_run_id -eq 101)
+                  Assert ($status.capacity -ceq 'READY' -and $null -eq $status.reason_code)
+              }
+              Check 'active controller phase wins over concurrent READY queue refresh' {
+                  Set-Ci10StatusControllerPhase -Phase Running -ProvenanceValid
+                  Set-Ci10StatusQueueProjection -QueueSnapshot $fresh -Capacity READY -ProvenanceValid
+                  $status=Get-Content -LiteralPath (Get-Ci10StatusProjectionPath) -Raw|ConvertFrom-Json
+                  Assert ($status.controller_phase -ceq 'Running' -and $status.capacity -ceq 'BUSY' -and $status.reason_code -ceq 'BUSY')
+              }
+              Check 'lock-only BUSY without controller phase fails closed to UNKNOWN' {
+                  Set-Ci10StatusControllerPhase -Phase Complete -ProvenanceValid
+                  Set-Ci10StatusQueueProjection -QueueSnapshot $fresh -Capacity BUSY -ProvenanceValid
+                  $status=Get-Content -LiteralPath (Get-Ci10StatusProjectionPath) -Raw|ConvertFrom-Json
+                  Assert ($status.capacity -ceq 'UNKNOWN' -and $status.reason_code -ceq 'UNKNOWN')
+              }
+              Check 'unavailable queue drops all prior queue identity' {
+                  $unavailable=[pscustomobject]@{Schema='ci10-queue-v1';QueueState='UNAVAILABLE';EligibleQueuedCount=$null;HeldQueuedCount=$null;HeldReasonCounts=@();Selected=$null}
+                  Set-Ci10StatusQueueProjection -QueueSnapshot $unavailable -Capacity READY -ProvenanceValid
+                  $status=Get-Content -LiteralPath (Get-Ci10StatusProjectionPath) -Raw|ConvertFrom-Json
+                  Assert ($status.queue_state -ceq 'UNAVAILABLE' -and $null -eq $status.eligible_queued_count -and $null -eq $status.selected_run_id)
+                  Assert ($status.reason_code -ceq 'QUEUE_UNAVAILABLE')
+              }
+              if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+                  Check 'reader SID receives read-only rights and no mutation rights' {
+                      $sid='S-1-5-21-1000000000-1000000001-1000000002-1001'
+                      Set-Ci10StatusReaderAcl -ReaderSid $sid
+                      $acl=Get-Acl -LiteralPath (Split-Path (Get-Ci10StatusProjectionPath) -Parent)
+                      $rules=@($acl.GetAccessRules($true,$false,[Security.Principal.SecurityIdentifier])|Where-Object{$_.IdentityReference.Value -eq $sid -and $_.AccessControlType -eq 'Allow'})
+                      Assert ($rules.Count -eq 1)
+                      $rights=$rules[0].FileSystemRights
+                      $write=[Security.AccessControl.FileSystemRights]::Write -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
+                      Assert (($rights -band [Security.AccessControl.FileSystemRights]::ReadAndExecute) -eq [Security.AccessControl.FileSystemRights]::ReadAndExecute)
+                      Assert (($rights -band $write) -eq 0)
+                  }
+              }
+              'STATUS_PROJECTION_TESTS='+$total
+          } finally {
+              Remove-Module StatusProjection -ErrorAction SilentlyContinue
+              $env:ProgramData=$oldProgramData
+              if(Test-Path -LiteralPath $sandbox){Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue}
+          }
+          '''
+          write('ci-dispatch/tests/Test-StatusProjection.ps1', status_test)
+
+          control_workflow = r'''name: CI control-plane deterministic validation
+
+          on:
+            pull_request:
+              paths:
+                - 'ci-dispatch/**'
+                - 'ci-runner/**'
+                - 'host-agent/**'
+                - '.github/workflows/ci-control-plane-validation.yml'
+
+          permissions:
+            contents: read
+
+          jobs:
+            validate:
+              runs-on: windows-latest
+              timeout-minutes: 15
+              steps:
+                - name: Checkout exact candidate
+                  uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+                  with:
+                    fetch-depth: 0
+                    persist-credentials: false
+
+                - name: Parse CI and deployment PowerShell
+                  shell: pwsh
+                  run: |
+                    $allErrors=@()
+                    Get-ChildItem ci-dispatch,ci-runner,host-agent/deploy -Recurse -File | Where-Object { $_.Extension -in @('.ps1','.psm1') } | ForEach-Object {
+                      $tokens=$null; $parseErrors=$null
+                      [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName,[ref]$tokens,[ref]$parseErrors)
+                      $allErrors += @($parseErrors)
+                    }
+                    if($allErrors.Count){$allErrors|Format-List|Out-String|Write-Error;throw "PowerShell parser reported $($allErrors.Count) error(s)."}
+
+                - name: Run dispatcher contract tests
+                  shell: pwsh
+                  run: pwsh ./ci-dispatch/tests/Test-Dispatch.ps1
+
+                - name: Run protected controller snapshot tests
+                  shell: pwsh
+                  run: pwsh ./ci-dispatch/tests/Test-ControllerSnapshots.ps1
+
+                - name: Run sanitized status projection tests
+                  shell: pwsh
+                  run: pwsh ./ci-dispatch/tests/Test-StatusProjection.ps1
+
+                - name: Diff whitespace validation
+                  shell: pwsh
+                  run: |
+                    $base=(git merge-base origin/main HEAD).Trim()
+                    git diff --check "$base...HEAD"
+                    if($LASTEXITCODE -ne 0){throw 'git diff --check failed.'}
+          '''
+          # Strip the indentation used only to keep this Python here-doc readable.
+          control_workflow = '\n'.join(line[10:] if line.startswith('          ') else line for line in control_workflow.splitlines()) + '\n'
+          write('.github/workflows/ci-control-plane-validation.yml', control_workflow)
+
+          # The one-shot finalizer must not remain in the candidate tree.
+          TEMP_WORKFLOW.unlink()
+
+          subprocess.run(['git','config','user.name','LDW bounded source finalizer'], cwd=REPO, check=True)
+          subprocess.run(['git','config','user.email','41898282+github-actions[bot]@users.noreply.github.com'], cwd=REPO, check=True)
+          stage_a, tree_a = commit('HOST-AGENT-CI-JIT-STATUS-001: freeze shared status producer and readers')
+
+          controller_hashes = {path: sha256_at(stage_a, path) for path in CONTROLLER_PATHS}
+
+          # Stage B: accept the exact new controller source snapshot and add the shared status module to the protected runtime file set.
+          dispatch_path = Path('ci-dispatch/Dispatch.psm1')
+          dispatch = dispatch_path.read_text(encoding='utf-8')
+          second_snapshot = r'''    [pscustomobject]@{ commit='54b9343af44c70db1d1403cf7f45cfc11e8bf167'; tree='beb9b9096b2f4bfa41ad877ad4f6a41150fbcfec'; files=@{
+                  'ci-runner/CiRunner.psm1'='b8860e7576f52cb756769bad9208d63ff42d45ae32073869f8406ef870810044'
+                  'ci-runner/Invoke-IsolatedRunner.ps1'='04e3b69fbe24dda001963ed1aff6210e7488bb3287a9dbd0ab0969951c99baa2'
+                  'ci-runner/Native.cs'='48fa6136b2bea13f939119917de616f4da19f971243cce2d4563ca434bbf6425'
+                  'ci-runner/guest/bootstrap.sh'='705b6581a1fecd1b22413b5709b0d90df9f80e277d5d0c94c9abbc27e7eadd80'
+                  'ci-runner/guest/ci7-runner.service'='68f8a767e0cb6412b28b7e4751dd6dbe0cd586e74365099adbb20eadcdd8b368'
+                  'ci-runner/guest/run-one.sh'='75f1ba052f024276d6870d84d1d02aa78effacdece41552ad000422e3d1c6db8'
+              } }
+          '''
+          if second_snapshot not in dispatch:
+              raise RuntimeError('accepted second controller snapshot anchor not found')
+          new_snapshot_lines = [f"    [pscustomobject]@{{ commit='{stage_a}'; tree='{tree_a}'; files=@{{"]
+          for path in CONTROLLER_PATHS:
+              new_snapshot_lines.append(f"        '{path}'='{controller_hashes[path]}'")
+          new_snapshot_lines.append('    } }')
+          new_snapshot = '\n'.join(new_snapshot_lines) + '\n'
+          dispatch = dispatch.replace(second_snapshot, second_snapshot.rstrip() + ',\n' + new_snapshot, 1)
+          dispatch = must_replace(dispatch,
+              "    'ci-dispatch/verifier-provenance.json',\n",
+              "    'ci-dispatch/verifier-provenance.json', 'ci-dispatch/StatusProjection.psm1',\n",
+              'protected runtime status module')
+          write(dispatch_path, dispatch)
+          stage_b, tree_b = commit('HOST-AGENT-CI-JIT-STATUS-001: accept exact status-aware controller snapshot')
+          dispatch_blob = blob_at(stage_b, 'ci-dispatch/Dispatch.psm1')
+          dispatch_sha = sha256_at(stage_b, 'ci-dispatch/Dispatch.psm1')
+
+          # Stage C: bind the verifier record to the exact Dispatch source from Stage B.
+          record = {
+              'schema': 1,
+              'commit': stage_b,
+              'tree': tree_b,
+              'blob': dispatch_blob,
+              'sha256': dispatch_sha,
+          }
+          write('ci-dispatch/verifier-provenance.json', json.dumps(record, separators=(',',':')) + '\n')
+          stage_c, tree_c = commit('HOST-AGENT-CI-JIT-STATUS-001: bind dispatcher verifier provenance')
+          record_blob = blob_at(stage_c, 'ci-dispatch/verifier-provenance.json')
+          record_sha = sha256_at(stage_c, 'ci-dispatch/verifier-provenance.json')
+
+          # Stage D: refresh publisher/test pins without changing the already-frozen verifier or controller sources.
+          replacements = {
+              OLD_DISPATCH_BLOB: dispatch_blob,
+              OLD_DISPATCH_SHA: dispatch_sha,
+              OLD_RECORD_BLOB: record_blob,
+              OLD_RECORD_SHA: record_sha,
+              OLD_RECORD_COMMIT: stage_b,
+              OLD_RECORD_TREE: tree_b,
+          }
+          pin_paths = [Path('ci-dispatch/Publish-Bundle.ps1')] + sorted(Path('ci-dispatch/tests').glob('*.ps1'))
+          for p in pin_paths:
+              text = p.read_text(encoding='utf-8')
+              for old,new in replacements.items():
+                  text = text.replace(old,new)
+              if p.name == 'Test-ControllerSnapshots.ps1':
+                  text = text.replace("registry is limited to the two independently accepted controller snapshots",
+                                      "registry contains the three independently bounded controller snapshots", 1)
+                  text = must_replace(text, 'Assert ($snapshots.Count -eq 2)', 'Assert ($snapshots.Count -eq 3)', 'controller snapshot count')
+                  anchor = "        Assert ($snapshots[1].tree -ceq 'beb9b9096b2f4bfa41ad877ad4f6a41150fbcfec')"
+                  addition = anchor + f"\n        Assert ($snapshots[2].commit -ceq '{stage_a}')\n        Assert ($snapshots[2].tree -ceq '{tree_a}')"
+                  text = must_replace(text, anchor, addition, 'third controller snapshot assertions')
+              p.write_text(text, encoding='utf-8', newline='\n')
+
+          final_head, final_tree = commit('HOST-AGENT-CI-JIT-STATUS-001: refresh protected provenance pins and validation')
+
+          # Final source invariants before any push.
+          if blob_at(final_head, 'ci-dispatch/Dispatch.psm1') != dispatch_blob:
+              raise RuntimeError('final head moved frozen dispatcher verifier source')
+          if blob_at(final_head, 'ci-dispatch/verifier-provenance.json') != record_blob:
+              raise RuntimeError('final head moved frozen verifier record')
+          for path in CONTROLLER_PATHS:
+              if sha256_at(final_head, path) != controller_hashes[path]:
+                  raise RuntimeError('final head moved accepted controller file: ' + path)
+          if TEMP_WORKFLOW.exists():
+              raise RuntimeError('temporary finalizer workflow remains in final tree')
+
+          subprocess.run(['git','diff','--check',expected_parent+'...HEAD'], cwd=REPO, check=True)
+          print('STAGE_A='+stage_a)
+          print('STAGE_A_TREE='+tree_a)
+          print('STAGE_B='+stage_b)
+          print('STAGE_B_TREE='+tree_b)
+          print('DISPATCH_BLOB='+dispatch_blob)
+          print('DISPATCH_SHA256='+dispatch_sha)
+          print('STAGE_C='+stage_c)
+          print('VERIFIER_RECORD_BLOB='+record_blob)
+          print('VERIFIER_RECORD_SHA256='+record_sha)
+          print('FINAL_HEAD='+final_head)
+          print('FINAL_TREE='+final_tree)
+          PY
+
+          python /tmp/finalize_slice3.py
+
+          # Static parse on the exact final working tree before publishing it.
+          pwsh -NoLogo -NoProfile -NonInteractive -Command '
+            $errors=@(); Get-ChildItem ci-dispatch,ci-runner,host-agent/deploy -Recurse -File | Where-Object { $_.Extension -in @(".ps1",".psm1") } | ForEach-Object { $t=$null;$e=$null;[void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName,[ref]$t,[ref]$e);$errors+=@($e) }; if($errors.Count){$errors|Format-List|Out-String|Write-Error;exit 1}'
+
+          git push origin HEAD:host-agent/ci-jit-local-status-slice3-20261026
