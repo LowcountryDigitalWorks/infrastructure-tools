@@ -100,7 +100,53 @@ def sha512_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _valid_reason(reason: object) -> bool:
+    return (
+        isinstance(reason, str)
+        and reason.isupper()
+        and len(reason) <= 64
+        and reason.replace("_", "").isalnum()
+    )
+
+
+def _validate_state_payload(value: dict) -> None:
+    if value.get("schema") != STATE_SCHEMA or value.get("marker") != MARKER:
+        raise DragonflyError("STATE_CONTRACT_INVALID")
+    state = value.get("state")
+    if state not in ALLOWED_STATES:
+        raise DragonflyError("STATE_VALUE_INVALID")
+    allowed = {"schema", "marker", "state", "updated_at", "run_id", "qemu_pid", "reason"}
+    if set(value) - allowed:
+        raise DragonflyError("STATE_FIELDS_INVALID")
+    updated_at = value.get("updated_at")
+    if updated_at is not None and not isinstance(updated_at, str):
+        raise DragonflyError("STATE_TIMESTAMP_INVALID")
+    run_id = value.get("run_id")
+    if run_id is not None:
+        if not isinstance(run_id, str):
+            raise DragonflyError("STATE_RUN_ID_INVALID")
+        try:
+            uuid.UUID(run_id)
+        except ValueError as exc:
+            raise DragonflyError("STATE_RUN_ID_INVALID") from exc
+    qemu_pid = value.get("qemu_pid")
+    if qemu_pid is not None and (not isinstance(qemu_pid, int) or isinstance(qemu_pid, bool) or qemu_pid <= 0):
+        raise DragonflyError("STATE_PID_INVALID")
+    if qemu_pid is not None and run_id is None:
+        raise DragonflyError("STATE_IDENTITY_INVALID")
+    reason = value.get("reason")
+    if reason is not None and not _valid_reason(reason):
+        raise DragonflyError("STATE_REASON_INVALID")
+    if state in {"STOPPED", "AVAILABLE"} and (run_id is not None or qemu_pid is not None):
+        raise DragonflyError("STATE_IDENTITY_INVALID")
+    if state == "RUNNING" and (run_id is None or qemu_pid is None):
+        raise DragonflyError("STATE_IDENTITY_INVALID")
+    if state == "DRAINING" and ((run_id is None) != (qemu_pid is None)):
+        raise DragonflyError("STATE_IDENTITY_INVALID")
+
+
 def _atomic_json(path: Path, payload: dict) -> None:
+    _assert_no_symlink(path.parent, allow_missing_leaf=True)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     _assert_no_symlink(path.parent)
     _assert_no_symlink(path, allow_missing_leaf=True)
@@ -129,7 +175,7 @@ def _read_json(path: Path) -> dict:
 
 
 def _pid_alive(pid: int | None) -> bool:
-    if not isinstance(pid, int) or pid <= 0:
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
     try:
         os.kill(pid, 0)
@@ -164,6 +210,7 @@ def _set_parent_death_signal() -> None:
 
 @contextlib.contextmanager
 def _file_lock(path: Path, *, blocking: bool = False):
+    _assert_no_symlink(path.parent, allow_missing_leaf=True)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     _assert_no_symlink(path.parent)
     _assert_no_symlink(path, allow_missing_leaf=True)
@@ -231,12 +278,14 @@ class Controller:
         self.guest_lock_path = self.state_root / "guest.lock"
 
     def ensure_roots(self) -> None:
+        _assert_no_symlink(self.state_root, allow_missing_leaf=True)
         self.state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _assert_no_symlink(self.state_root)
+        _assert_no_symlink(self.runs_root, allow_missing_leaf=True)
         self.runs_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _assert_no_symlink(self.runs_root)
         os.chmod(self.state_root, 0o700)
         os.chmod(self.runs_root, 0o700)
-        _assert_no_symlink(self.state_root)
-        _assert_no_symlink(self.runs_root)
 
     def _run_dirs(self) -> list[Path]:
         entries = list(self.runs_root.iterdir())
@@ -266,28 +315,11 @@ class Controller:
                 "reason": None,
             }
         value = _read_json(self.state_path)
-        if value.get("schema") != STATE_SCHEMA or value.get("marker") != MARKER:
-            raise DragonflyError("STATE_CONTRACT_INVALID")
-        if value.get("state") not in ALLOWED_STATES:
-            raise DragonflyError("STATE_VALUE_INVALID")
-        allowed = {"schema", "marker", "state", "updated_at", "run_id", "qemu_pid", "reason"}
-        if set(value) - allowed:
-            raise DragonflyError("STATE_FIELDS_INVALID")
+        _validate_state_payload(value)
         return value
 
     def write_state(self, state: str, *, run_id: str | None = None,
                     qemu_pid: int | None = None, reason: str | None = None) -> dict:
-        if state not in ALLOWED_STATES:
-            raise DragonflyError("STATE_VALUE_INVALID")
-        if run_id is not None:
-            try:
-                uuid.UUID(run_id)
-            except ValueError as exc:
-                raise DragonflyError("RUN_ID_INVALID") from exc
-        if qemu_pid is not None and (not isinstance(qemu_pid, int) or qemu_pid <= 0):
-            raise DragonflyError("PID_INVALID")
-        if reason is not None and (not reason.isupper() or len(reason) > 64 or not reason.replace("_", "").isalnum()):
-            raise DragonflyError("REASON_INVALID")
         payload = {
             "schema": STATE_SCHEMA,
             "marker": MARKER,
@@ -297,6 +329,7 @@ class Controller:
             "qemu_pid": qemu_pid,
             "reason": reason,
         }
+        _validate_state_payload(payload)
         _atomic_json(self.state_path, payload)
         return payload
 
@@ -330,13 +363,15 @@ class Controller:
             current = self.read_state()
             if current["state"] in {"FAILED", "HOLD"}:
                 return current
-            if current["state"] in {"RUNNING", "DRAINING"} or not self._guest_lock_available():
+            if current["state"] in {"RUNNING", "DRAINING"}:
                 return self.write_state(
                     "DRAINING",
                     run_id=current.get("run_id"),
                     qemu_pid=current.get("qemu_pid"),
                     reason="DRAIN_REQUESTED",
                 )
+            if current["state"] == "AVAILABLE" and not self._guest_lock_available():
+                return self.write_state("DRAINING", reason="DRAIN_REQUESTED")
             return self.write_state("STOPPED")
 
     def status(self) -> dict:
@@ -447,7 +482,7 @@ power_state:
                 raise DragonflyError("OWNERSHIP_FILE_MISMATCH")
             _assert_owned_child(run_dir, candidate)
         pid = value["qemu_pid"]
-        if pid is not None and (not isinstance(pid, int) or pid <= 0):
+        if pid is not None and (not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0):
             raise DragonflyError("OWNERSHIP_PID_INVALID")
         return value
 
@@ -488,6 +523,7 @@ power_state:
                     raise DragonflyError("STALE_RUN_STATE_REFUSED")
 
             run_id, run_dir, overlay, seed, user_data, pidfile, _manifest_path = self._new_run()
+            result: dict | None = None
             try:
                 user_data.write_text(self._smoke_user_data(), encoding="utf-8")
                 os.chmod(user_data, 0o600)
@@ -503,45 +539,51 @@ power_state:
                     check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
 
-                command = [
-                    "qemu-system-x86_64", "-accel", "kvm", "-machine", "q35",
-                    "-cpu", "host", "-smp", str(GUEST_CPUS), "-m", f"{GUEST_MEMORY_MIB}M",
-                    "-drive", f"if=virtio,format=qcow2,file={overlay}",
-                    "-drive", f"if=virtio,format=raw,readonly=on,file={seed}",
-                    "-netdev", "user,id=net0", "-device", "virtio-net-pci,netdev=net0",
-                    "-display", "none", "-serial", "none", "-monitor", "none",
-                    "-pidfile", str(pidfile), "-no-reboot",
-                ]
-                process = subprocess.Popen(
-                    command,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    preexec_fn=_set_parent_death_signal,
-                )
-                self._write_manifest(run_id, run_dir, overlay, seed, pidfile, qemu_pid=process.pid)
-                with _file_lock(self.state_lock_path):
-                    self.write_state("RUNNING", run_id=run_id, qemu_pid=process.pid)
-
-                try:
-                    rc = process.wait(timeout=SMOKE_TIMEOUT_SECONDS)
-                except subprocess.TimeoutExpired:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait(timeout=5)
-                    raise DragonflyError("SMOKE_TIMEOUT")
-
-                self._write_manifest(run_id, run_dir, overlay, seed, pidfile, qemu_pid=None)
-                if rc != 0:
-                    raise DragonflyError("QEMU_NONZERO_EXIT")
-                result = {"run_id": run_id, "result": "PASS"}
-            except Exception:
+                process: subprocess.Popen | None = None
                 with _file_lock(self.state_lock_path):
                     current = self.read_state()
-                    target = "STOPPED" if current["state"] == "DRAINING" else "FAILED"
-                    self.write_state(target, reason="SMOKE_FAILED")
+                    if current["state"] == "DRAINING":
+                        result = {"run_id": run_id, "result": "DRAINED"}
+                    elif current["state"] != "AVAILABLE":
+                        raise DragonflyError("HOST_STATE_CHANGED")
+                    else:
+                        command = [
+                            "qemu-system-x86_64", "-accel", "kvm", "-machine", "q35",
+                            "-cpu", "host", "-smp", str(GUEST_CPUS), "-m", f"{GUEST_MEMORY_MIB}M",
+                            "-drive", f"if=virtio,format=qcow2,file={overlay}",
+                            "-drive", f"if=virtio,format=raw,readonly=on,file={seed}",
+                            "-netdev", "user,id=net0", "-device", "virtio-net-pci,netdev=net0",
+                            "-display", "none", "-serial", "none", "-monitor", "none",
+                            "-pidfile", str(pidfile), "-no-reboot",
+                        ]
+                        process = subprocess.Popen(
+                            command,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            preexec_fn=_set_parent_death_signal,
+                        )
+                        self._write_manifest(run_id, run_dir, overlay, seed, pidfile, qemu_pid=process.pid)
+                        self.write_state("RUNNING", run_id=run_id, qemu_pid=process.pid)
+
+                if process is not None:
+                    try:
+                        rc = process.wait(timeout=SMOKE_TIMEOUT_SECONDS)
+                    except subprocess.TimeoutExpired:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait(timeout=5)
+                        raise DragonflyError("SMOKE_TIMEOUT")
+
+                    self._write_manifest(run_id, run_dir, overlay, seed, pidfile, qemu_pid=None)
+                    if rc != 0:
+                        raise DragonflyError("QEMU_NONZERO_EXIT")
+                    result = {"run_id": run_id, "result": "PASS"}
+            except Exception:
+                with _file_lock(self.state_lock_path):
+                    self.write_state("FAILED", reason="SMOKE_FAILED")
                 raise
             finally:
                 manifest_path = run_dir / "ownership.json"
@@ -553,12 +595,16 @@ power_state:
                             self.write_state("HOLD", run_id=run_id, reason="CLEANUP_UNCERTAIN")
                         raise
 
+            if result is None:
+                raise DragonflyError("SMOKE_RESULT_MISSING")
             with _file_lock(self.state_lock_path):
                 current = self.read_state()
-                if current["state"] == "DRAINING":
+                if result["result"] == "DRAINED" or current["state"] == "DRAINING":
                     self.write_state("STOPPED")
-                else:
+                elif current["state"] == "RUNNING":
                     self.write_state("AVAILABLE")
+                else:
+                    raise DragonflyError("POST_SMOKE_STATE_INVALID")
             return result
 
     def recover(self) -> dict:
