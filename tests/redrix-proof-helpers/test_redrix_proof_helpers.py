@@ -62,6 +62,11 @@ def test_readback_contract() -> None:
     assert 'TailscaleIPs' not in value
     assert 'MagicDNSSuffix' not in value
     assert "d.get('Self')" in value
+    assert 'JIT_STATE_ROOT=' in value
+    assert "print('JIT_QEMU_PID='+('null' if qemu is None else 'present'))" in value
+    assert "print('JIT_RESIDUE_COUNT='+str(residue))" in value
+    assert '"$CONTROLLER" status' not in value
+    assert 'ensure_roots' in value  # explanatory comment only: why command execution is forbidden
 
 
 def test_credential_free_proof_contract() -> None:
