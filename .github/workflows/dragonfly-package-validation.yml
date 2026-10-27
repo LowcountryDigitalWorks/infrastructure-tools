@@ -1,0 +1,102 @@
+name: Dragonfly Package Validation
+
+on:
+  pull_request:
+    paths:
+      - 'operations-bridge/**'
+      - '.github/workflows/dragonfly-package-validation.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'operations-bridge/**'
+      - '.github/workflows/dragonfly-package-validation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package-linux-x64:
+    name: Package linux-x64
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build and run Operations Bridge deterministic tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet build operations-bridge/LDW.OperationsBridge.sln -c Release
+          dotnet run --no-build --project operations-bridge/tests/LDW.OperationsBridge.Tests/LDW.OperationsBridge.Tests.csproj -c Release
+          node --test operations-bridge/relay-cloudflare/tests/*.test.mjs
+
+      - name: Build package twice and prove reproducibility
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE_COMMIT="$(git rev-parse HEAD)"
+          PACKAGE_NAME='ldw-operations-bridge-dragonfly-linux-x64.tar.gz'
+
+          bash operations-bridge/scripts/build-dragonfly-linux-package.sh "$SOURCE_COMMIT" "$RUNNER_TEMP/package-a"
+          bash operations-bridge/scripts/build-dragonfly-linux-package.sh "$SOURCE_COMMIT" "$RUNNER_TEMP/package-b"
+
+          bash operations-bridge/scripts/verify-dragonfly-linux-package.sh \
+            "$RUNNER_TEMP/package-a/$PACKAGE_NAME" \
+            "$RUNNER_TEMP/package-a/$PACKAGE_NAME.sha256" \
+            "$SOURCE_COMMIT"
+          bash operations-bridge/scripts/verify-dragonfly-linux-package.sh \
+            "$RUNNER_TEMP/package-b/$PACKAGE_NAME" \
+            "$RUNNER_TEMP/package-b/$PACKAGE_NAME.sha256" \
+            "$SOURCE_COMMIT"
+
+          cmp "$RUNNER_TEMP/package-a/$PACKAGE_NAME" "$RUNNER_TEMP/package-b/$PACKAGE_NAME"
+          cmp "$RUNNER_TEMP/package-a/$PACKAGE_NAME.sha256" "$RUNNER_TEMP/package-b/$PACKAGE_NAME.sha256"
+
+          mkdir -p "$RUNNER_TEMP/runtime-proof" "$RUNNER_TEMP/runtime-home"
+          tar -xzf "$RUNNER_TEMP/package-a/$PACKAGE_NAME" -C "$RUNNER_TEMP/runtime-proof"
+          ENTRYPOINT="$RUNNER_TEMP/runtime-proof/ldw-operations-bridge-dragonfly-linux-x64/payload/LDW.OperationsBridge.Runner"
+          STATUS_OUTPUT="$(env -i HOME="$RUNNER_TEMP/runtime-home" PATH=/nonexistent "$ENTRYPOINT" --dragonfly-status)"
+          test "$STATUS_OUTPUT" = '{"state":"unknown"}'
+
+          mkdir -p artifacts
+          cp "$RUNNER_TEMP/package-a/$PACKAGE_NAME" artifacts/
+          cp "$RUNNER_TEMP/package-a/$PACKAGE_NAME.sha256" artifacts/
+          cp "$RUNNER_TEMP/package-a/ldw-operations-bridge-dragonfly-linux-x64/manifest.json" artifacts/
+
+          echo "source_commit=$SOURCE_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "archive_sha256=$(cut -d ' ' -f1 "$RUNNER_TEMP/package-a/$PACKAGE_NAME.sha256")" >> "$GITHUB_OUTPUT"
+
+      - name: Reject package configuration/credential files
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          manifest = json.loads(Path('artifacts/manifest.json').read_text(encoding='utf-8'))
+          assert manifest['containsConfiguration'] is False
+          assert manifest['containsCredential'] is False
+          names = {entry['path'] for entry in manifest['files']}
+          forbidden = {'config.json', 'bridge-token', 'token.txt', 'credentials.json'}
+          assert not (names & forbidden), names & forbidden
+          print('PACKAGE_BOUNDARY=PASS')
+          PY
+
+      - name: Upload exact package artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dragonfly-redrix-linux-x64
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14
