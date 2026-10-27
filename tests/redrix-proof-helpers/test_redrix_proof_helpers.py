@@ -52,6 +52,9 @@ def test_readback_contract() -> None:
     assert_no_mutating_capability_commands(value)
     for expected in EXPECTED.values():
         assert expected in value
+    assert "command -v realpath >/dev/null" in value
+    assert 'for cmd in sha256sum sha512sum unzip tar python3 mktemp stat awk id head grep basename rm; do' in value
+    assert "AUTHORIZED_KEYS_RESTRICT_DOC=probe_tool_missing" in value
     assert 'tailscale status --json' in value
     assert '/usr/sbin/sshd -V' in value
     assert 'ssh-keygen -lf "$HOST_PUB" -E sha256' in value
