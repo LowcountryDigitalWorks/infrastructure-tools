@@ -131,6 +131,18 @@ class DragonflyContractTests(unittest.TestCase):
         self.assertEqual("STALE_RUN_STATE", status["reason"])
         self.assertTrue(residue.exists())
 
+    def test_status_projects_run_root_contamination_as_hold(self):
+        self.controller.ensure_roots()
+        self.controller.write_state("AVAILABLE")
+        contaminant = self.controller.runs_root / "unexpected-file"
+        contaminant.write_text("x")
+        with mock.patch.object(mod, "resource_snapshot", return_value=self.admitted_snapshot()):
+            status = self.controller.status()
+        self.assertEqual("HOLD", status["state"])
+        self.assertEqual("RUN_ROOT_CONTAMINATED", status["reason"])
+        self.assertEqual(-1, status["residue_count"])
+        self.assertTrue(contaminant.exists())
+
     def test_smoke_qemu_contract_has_kvm_no_inbound_forward_or_host_mount(self):
         self.controller.ensure_roots()
         self.controller.write_state("AVAILABLE")
@@ -234,6 +246,19 @@ class DragonflyContractTests(unittest.TestCase):
             with self.assertRaisesRegex(mod.DragonflyError, "LIVE_GUEST_CLEANUP_REFUSED"):
                 self.controller.recover()
         self.assertEqual("HOLD", self.controller.read_state()["state"])
+
+    def test_recover_refuses_live_state_pid_without_run_directory(self):
+        self.controller.ensure_roots()
+        run_id = "11111111-1111-4111-8111-111111111111"
+        self.controller.write_state("RUNNING", run_id=run_id, qemu_pid=5678)
+        with mock.patch.object(mod, "_pid_alive", side_effect=lambda pid: pid == 5678):
+            with self.assertRaisesRegex(mod.DragonflyError, "LIVE_STATE_PID_REFUSED"):
+                self.controller.recover()
+        state = self.controller.read_state()
+        self.assertEqual("HOLD", state["state"])
+        self.assertEqual("RECOVERY_LIVE_STATE", state["reason"])
+        self.assertEqual(run_id, state["run_id"])
+        self.assertEqual(5678, state["qemu_pid"])
 
     def test_successful_recovery_converges_to_stopped_not_available(self):
         self.controller.ensure_roots()
