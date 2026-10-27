@@ -71,17 +71,19 @@ bash operations-bridge/scripts/verify-dragonfly-linux-package.sh \
   "$SOURCE_COMMIT"
 ```
 
-The builder fails closed unless the requested source commit equals the current clean checkout HEAD and the output directory does not already exist. It publishes `LDW.OperationsBridge.Runner` as `linux-x64`, `--self-contained true`, normalizes archive timestamps to the exact source commit timestamp, records SHA-256 + size for every payload file, and emits:
+The builder fails closed unless the requested source commit equals the current clean checkout HEAD and the output directory does not already exist. It publishes `LDW.OperationsBridge.Runner` as `linux-x64`, `--self-contained true`, normalizes archive timestamps to the exact source commit timestamp, records the exact build .NET SDK version plus SHA-256 + size for every payload file, and emits:
 
 - `ldw-operations-bridge-dragonfly-linux-x64.tar.gz`;
 - `ldw-operations-bridge-dragonfly-linux-x64.tar.gz.sha256`;
-- an internal `manifest.json` with exact source provenance and fixed runtime/install/config/state identities.
+- an internal `manifest.json` with exact source/toolchain provenance and fixed runtime/install/config/state identities.
 
 The fixed owner-local install root is:
 
 `~/.local/lib/ldw/operations-bridge/dragonfly`
 
-The archive root contains only `manifest.json` plus the self-contained `payload/`. It deliberately contains **no runtime `config.json` and no credential/keyring material**. Configuration remains a separately installed non-secret file at the accepted config path; the Bridge bearer remains a separately provisioned Secret Service item.
+The archive root contains only `manifest.json` plus the self-contained .NET `payload/`. It deliberately contains **no runtime `config.json` and no credential/keyring material**. Configuration remains a separately installed non-secret file at the accepted config path; the Bridge bearer remains a separately provisioned Secret Service item.
+
+“Self-contained” here means **no system .NET runtime is required on REDRIX**. The already accepted Dragonfly process boundary still deliberately requires the proven host binaries `/usr/bin/python3` and `/usr/bin/secret-tool`, plus the separately accepted local adapter at `~/.local/lib/ldw-dragonfly-jit/bridge_adapter.py`. The package manifest records those fixed dependencies and the required adapter Git blob `9ffbfd1dd2ea63fd7eece24e1f3eb791c92da0bf`; the runtime independently re-verifies the adapter path, symlink/mode boundary, and exact blob before invoking it. The package does not duplicate or silently replace that accepted JIT/controller component.
 
 Hosted `Dragonfly Package Validation` builds the package twice from the same exact candidate, verifies both archives and manifests, requires byte-identical archives/checksums, executes the packaged `--dragonfly-status` with `PATH=/nonexistent` to avoid reliance on a `dotnet` command, rejects configuration/credential files, and uploads the exact archive/checksum/manifest as a short-lived GitHub Actions artifact. The workflow has no schedule, no secrets, and `contents: read` only.
 
@@ -90,12 +92,13 @@ Hosted `Dragonfly Package Validation` builds the package twice from the same exa
 After #109 source is independently accepted, the first device proof remains intentionally credential-free:
 
 1. verify the accepted archive checksum and manifest/source commit;
-2. install archive contents only into the fixed owner-local install root;
-3. separately create the exact non-secret config for `dragonfly-redrix-01` and the reviewed WSS route;
-4. run `payload/LDW.OperationsBridge.Runner --dragonfly-status`;
-5. run `payload/LDW.OperationsBridge.Runner --dragonfly-run` with **no real Dragonfly Bridge credential present**;
-6. require bounded `blocked` behavior and clean exit, with no plaintext/env/argv fallback or indefinite prompt;
-7. independently verify the Dragonfly JIT controller remains STOPPED, QEMU is absent, residue is zero, and existing owner launchers/base are unchanged.
+2. verify the manifest's fixed host binaries and exact already-installed adapter identity;
+3. install archive contents only into the fixed owner-local install root;
+4. separately create the exact non-secret config for `dragonfly-redrix-01` and the reviewed WSS route;
+5. run `payload/LDW.OperationsBridge.Runner --dragonfly-status`;
+6. run `payload/LDW.OperationsBridge.Runner --dragonfly-run` with **no real Dragonfly Bridge credential present**;
+7. require bounded `blocked` behavior and clean exit, with no plaintext/env/argv fallback or indefinite prompt;
+8. independently verify the Dragonfly JIT controller remains STOPPED, QEMU is absent, residue is zero, and existing owner launchers/base are unchanged.
 
 No real scoped Bridge credential or relay identity is provisioned until that proof passes and the separate owner/security gate is reached.
 
