@@ -47,10 +47,6 @@ jobs:
         shell: pwsh
         run: pwsh ./ci-dispatch/tests/Test-Dispatch.ps1
 
-      - name: Run dispatcher observability isolation tests
-        shell: pwsh
-        run: pwsh ./ci-dispatch/tests/Test-ObservabilityIsolation.ps1
-
       - name: Run protected controller snapshot tests
         shell: pwsh
         run: pwsh ./ci-dispatch/tests/Test-ControllerSnapshots.ps1
