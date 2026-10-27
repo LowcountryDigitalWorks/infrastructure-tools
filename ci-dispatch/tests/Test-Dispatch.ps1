@@ -24,7 +24,7 @@ function New-ControllerFixture([string]$Commit,[string]$Destination){
     Remove-Item -LiteralPath $zip -Force
 }
 function Copy-AcceptedDispatcherFixture([string]$Destination){
-    $commit='4faab579250ad7aaeeb13ae91708973b49bf9d10'
+    $commit='ce2bf253556a69dfb43de7bb8e8a4927c41c9e15'
     $stage=Join-Path $fixture ('accepted-dispatcher-'+[guid]::NewGuid().ToString('N'))
     $zip=$stage+'.zip'
     $null=New-Item -ItemType Directory -Path $stage
