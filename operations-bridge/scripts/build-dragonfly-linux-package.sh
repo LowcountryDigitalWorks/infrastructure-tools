@@ -1,21 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -lt 2 || $# -gt 3 ]]; then
-  echo "usage: $0 <source-commit> <source-date-epoch> [output-directory]" >&2
+if [[ $# -lt 1 || $# -gt 2 ]]; then
+  echo "usage: $0 <source-commit> [new-output-directory]" >&2
   exit 2
 fi
 
 SOURCE_COMMIT="$1"
-SOURCE_DATE_EPOCH="$2"
-OUTPUT_ROOT="${3:-${TMPDIR:-/tmp}/ldw-dragonfly-package}"
+OUTPUT_ROOT="${2:-${TMPDIR:-/tmp}/ldw-dragonfly-package}"
 
 if [[ ! "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
   echo "source commit must be an exact lowercase 40-character Git SHA" >&2
-  exit 2
-fi
-if [[ ! "$SOURCE_DATE_EPOCH" =~ ^[0-9]+$ ]]; then
-  echo "source date epoch must be a non-negative integer" >&2
   exit 2
 fi
 
@@ -28,7 +23,25 @@ PAYLOAD_DIR="$PACKAGE_ROOT/payload"
 ARCHIVE="$OUTPUT_ROOT/$PACKAGE_NAME.tar.gz"
 ARCHIVE_SHA="$ARCHIVE.sha256"
 
-rm -rf -- "$OUTPUT_ROOT"
+ACTUAL_HEAD="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+if [[ "$ACTUAL_HEAD" != "$SOURCE_COMMIT" ]]; then
+  echo "source commit does not match the checked-out repository HEAD" >&2
+  exit 1
+fi
+if [[ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=normal)" ]]; then
+  echo "repository must be clean before packaging exact source provenance" >&2
+  exit 1
+fi
+SOURCE_DATE_EPOCH="$(git -C "$REPO_ROOT" show -s --format=%ct "$SOURCE_COMMIT")"
+if [[ ! "$SOURCE_DATE_EPOCH" =~ ^[0-9]+$ ]]; then
+  echo "source commit timestamp could not be resolved" >&2
+  exit 1
+fi
+
+if [[ -e "$OUTPUT_ROOT" ]]; then
+  echo "output directory must not already exist" >&2
+  exit 2
+fi
 mkdir -p -- "$PAYLOAD_DIR"
 
 dotnet publish "$PROJECT" \
