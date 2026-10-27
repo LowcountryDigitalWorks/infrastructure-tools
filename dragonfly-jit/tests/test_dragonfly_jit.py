@@ -1,0 +1,164 @@
+import importlib.util
+import json
+from pathlib import Path
+import tempfile
+import unittest
+from unittest import mock
+
+MODULE_PATH = Path(__file__).resolve().parents[1] / "dragonfly_jit.py"
+SPEC = importlib.util.spec_from_file_location("dragonfly_jit", MODULE_PATH)
+mod = importlib.util.module_from_spec(SPEC)
+assert SPEC.loader is not None
+SPEC.loader.exec_module(mod)
+
+
+class DragonflyContractTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.data = self.root / "data"
+        self.state = self.root / "state"
+        self.controller = mod.Controller(data_root=self.data, state_root=self.state)
+        self.base = self.data / "base" / mod.BASE_FILENAME
+        self.base.parent.mkdir(parents=True)
+        self.base.write_bytes(b"fixture")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def admitted_snapshot(self):
+        return {
+            "mem_available_mib": mod.GUEST_MEMORY_MIB + mod.MIN_RESERVE_MIB + 1,
+            "load_fraction": 0.1,
+            "free_disk_gib": mod.MIN_FREE_DISK_GIB + 1,
+            "visible_cpus": 12,
+        }
+
+    def test_pin_is_full_sha512(self):
+        self.assertEqual(128, len(mod.BASE_SHA512))
+        int(mod.BASE_SHA512, 16)
+
+    def test_base_digest_mismatch_fails_closed(self):
+        with self.assertRaisesRegex(mod.DragonflyError, "BASE_SHA512_MISMATCH"):
+            self.controller.verify_base()
+
+    def test_base_symlink_is_refused(self):
+        self.base.unlink()
+        target = self.root / "target.qcow2"
+        target.write_bytes(b"fixture")
+        self.base.symlink_to(target)
+        with self.assertRaisesRegex(mod.DragonflyError, "VERIFIED_BASE_REQUIRED|SYMLINK"):
+            self.controller.verify_base()
+
+    def test_admission_memory_disk_and_cpu_are_independent_failures(self):
+        good = self.admitted_snapshot()
+        for key, value, reason in (
+            ("mem_available_mib", mod.GUEST_MEMORY_MIB + mod.MIN_RESERVE_MIB - 1, "CAPACITY_MEMORY"),
+            ("free_disk_gib", mod.MIN_FREE_DISK_GIB - 1, "CAPACITY_DISK"),
+            ("load_fraction", mod.MAX_LOAD_FRACTION + 0.01, "CAPACITY_CPU"),
+        ):
+            candidate = dict(good)
+            candidate[key] = value
+            with self.assertRaisesRegex(mod.DragonflyError, reason):
+                mod.assert_admission(candidate)
+
+    def test_start_only_marks_available_and_does_not_launch(self):
+        with mock.patch.object(self.controller, "verify_base", return_value={}), \
+             mock.patch.object(mod, "resource_snapshot", return_value=self.admitted_snapshot()), \
+             mock.patch.object(mod.subprocess, "Popen") as popen:
+            state = self.controller.start()
+        self.assertEqual("AVAILABLE", state["state"])
+        popen.assert_not_called()
+
+    def test_drain_available_goes_stopped(self):
+        self.controller.ensure_roots()
+        self.controller.write_state("AVAILABLE")
+        state = self.controller.drain()
+        self.assertEqual("STOPPED", state["state"])
+
+    def test_drain_running_never_kills_process(self):
+        self.controller.ensure_roots()
+        run_id = "11111111-1111-4111-8111-111111111111"
+        self.controller.write_state("RUNNING", run_id=run_id, qemu_pid=999999)
+        with mock.patch.object(self.controller, "_guest_lock_available", return_value=False), \
+             mock.patch.object(mod.os, "kill") as kill:
+            state = self.controller.drain()
+        self.assertEqual("DRAINING", state["state"])
+        self.assertEqual("DRAIN_REQUESTED", state["reason"])
+        kill.assert_not_called()
+
+    def test_state_rejects_unknown_fields(self):
+        self.controller.ensure_roots()
+        self.controller.write_state("STOPPED")
+        payload = json.loads(self.controller.state_path.read_text())
+        payload["secret"] = "nope"
+        self.controller.state_path.write_text(json.dumps(payload))
+        with self.assertRaisesRegex(mod.DragonflyError, "STATE_FIELDS_INVALID"):
+            self.controller.read_state()
+
+    def test_smoke_qemu_contract_has_kvm_no_inbound_forward_or_host_mount(self):
+        self.controller.ensure_roots()
+        self.controller.write_state("AVAILABLE")
+        popen = mock.Mock()
+        popen.pid = 4242
+        popen.wait.return_value = 0
+        calls = []
+
+        def capture(command, **kwargs):
+            calls.append(command)
+            return popen
+
+        with mock.patch.object(self.controller, "verify_base", return_value={}), \
+             mock.patch.object(mod, "resource_snapshot", return_value=self.admitted_snapshot()), \
+             mock.patch.object(mod.shutil, "which", return_value="/usr/bin/tool"), \
+             mock.patch.object(mod.subprocess, "run") as run, \
+             mock.patch.object(mod.subprocess, "Popen", side_effect=capture), \
+             mock.patch.object(mod, "_pid_alive", return_value=False):
+            result = self.controller.smoke()
+
+        self.assertEqual("PASS", result["result"])
+        self.assertEqual(1, len(calls))
+        command = calls[0]
+        joined = " ".join(str(part) for part in command)
+        self.assertIn("-accel kvm", joined)
+        self.assertIn("-netdev user,id=net0", joined)
+        self.assertNotIn("hostfwd", joined)
+        self.assertNotIn("virtiofs", joined)
+        self.assertNotIn("9p", joined)
+        self.assertEqual(2, run.call_count)
+        self.assertEqual("AVAILABLE", self.controller.read_state()["state"])
+        self.assertEqual([], list(self.controller.runs_root.iterdir()))
+
+    def test_cleanup_refuses_unknown_artifact(self):
+        self.controller.ensure_roots()
+        run_id, run_dir, overlay, seed, user_data, _manifest = self.controller._new_run()
+        overlay.write_bytes(b"")
+        seed.write_bytes(b"")
+        user_data.write_text("#cloud-config\n")
+        self.controller._write_manifest(run_id, run_dir, overlay, seed)
+        (run_dir / "unexpected").write_text("x")
+        with self.assertRaisesRegex(mod.DragonflyError, "UNKNOWN_RUN_ARTIFACT_REFUSED"):
+            self.controller._cleanup_owned_run(run_dir)
+
+    def test_cleanup_refuses_live_owned_pid(self):
+        self.controller.ensure_roots()
+        run_id, run_dir, overlay, seed, user_data, _manifest = self.controller._new_run()
+        overlay.write_bytes(b"")
+        seed.write_bytes(b"")
+        user_data.write_text("#cloud-config\n")
+        self.controller._write_manifest(run_id, run_dir, overlay, seed, qemu_pid=1234)
+        with mock.patch.object(mod, "_pid_alive", return_value=True):
+            with self.assertRaisesRegex(mod.DragonflyError, "LIVE_GUEST_CLEANUP_REFUSED"):
+                self.controller._cleanup_owned_run(run_dir)
+
+    def test_recover_refuses_multiple_run_directories(self):
+        self.controller.ensure_roots()
+        (self.controller.runs_root / "11111111-1111-4111-8111-111111111111").mkdir()
+        (self.controller.runs_root / "22222222-2222-4222-8222-222222222222").mkdir()
+        with self.assertRaisesRegex(mod.DragonflyError, "MULTIPLE_RUN_DIRS"):
+            self.controller.recover()
+        self.assertEqual("HOLD", self.controller.read_state()["state"])
+
+
+if __name__ == "__main__":
+    unittest.main()
