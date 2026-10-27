@@ -305,7 +305,7 @@ try {
         & git -C $untrusted config user.email 'ci10-test@example.invalid'
         $marker=Join-Path $root 'untrusted-module-executed.txt'
         $dispatcherMarker=Join-Path $root 'hidden-dispatcher-entrypoint-executed.txt'
-        Copy-Item -LiteralPath (Join-Path $repo 'ci-dispatch/Dispatch.psm1') -Destination (Join-Path $untrusted 'ci-dispatch/Dispatch.psm1')
+        Copy-AcceptedVerifierFixture $untrusted
         Copy-Item -LiteralPath (Join-Path $repo 'ci-dispatch/Publish-Bundle.ps1') -Destination (Join-Path $untrusted 'ci-dispatch/Publish-Bundle.ps1')
         $acceptedController=Join-Path $root ('candidate-'+$snapshots[1].commit)
         Get-ChildItem -LiteralPath $acceptedController -Recurse -File|ForEach-Object{
