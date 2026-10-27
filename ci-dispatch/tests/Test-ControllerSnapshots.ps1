@@ -159,8 +159,8 @@ try {
         Invoke-Expression $function[0].Extent.Text
         Invoke-Expression $guard[0].Extent.Text
         Invoke-Expression $materializer[0].Extent.Text
-        $script:AcceptedDispatcherSource=[pscustomobject]@{path='ci-dispatch/Dispatch.psm1';blob='2bd5cf864bb45ae1cb710f7dc8614060d8447143';sha256='75895bc9b0500c99787bb938115a6b969c96f15bba156c1bf85878e1df794b8e'}
-        $script:AcceptedVerifierRecordSource=[pscustomobject]@{path='ci-dispatch/verifier-provenance.json';blob='467ab8f2d1821f0468fe2840708cd8172d994ba0';sha256='8a3c3a74aedd03eb1e88c79085cadf4bcd530a4adf8a179caf42811216478079'}
+        $script:AcceptedDispatcherSource=[pscustomobject]@{path='ci-dispatch/Dispatch.psm1';blob='2bd5cf864bb45ae1cb710f7dc8614060d8447143';sha256='fdcf67a7bbfeacd5d293876bbfa7622e41de98e09ddbeecbed6bcb7d2abea6d9'}
+        $script:AcceptedVerifierRecordSource=[pscustomobject]@{path='ci-dispatch/verifier-provenance.json';blob='0537fcd212e8e9174f3b7388fcb992f9fccda8b6';sha256='c821f3184cf17694036a59f7c13377c3ac82d618166c2c576f67e4e85c455ba5'}
         $mainOnly=Join-Path $root 'squash-equivalent-main-only'
         $null=New-Item -ItemType Directory -Path (Join-Path $mainOnly 'ci-dispatch') -Force
         & git init $mainOnly 2>$null
@@ -237,8 +237,8 @@ try {
         Assert ($function.Count -eq 1 -and $guard.Count -eq 1)
         Invoke-Expression $function[0].Extent.Text
         Invoke-Expression $guard[0].Extent.Text
-        $script:AcceptedDispatcherSource=[pscustomobject]@{path='ci-dispatch/Dispatch.psm1';blob='2bd5cf864bb45ae1cb710f7dc8614060d8447143';sha256='75895bc9b0500c99787bb938115a6b969c96f15bba156c1bf85878e1df794b8e'}
-        $script:AcceptedVerifierRecordSource=[pscustomobject]@{path='ci-dispatch/verifier-provenance.json';blob='467ab8f2d1821f0468fe2840708cd8172d994ba0';sha256='8a3c3a74aedd03eb1e88c79085cadf4bcd530a4adf8a179caf42811216478079'}
+        $script:AcceptedDispatcherSource=[pscustomobject]@{path='ci-dispatch/Dispatch.psm1';blob='2bd5cf864bb45ae1cb710f7dc8614060d8447143';sha256='fdcf67a7bbfeacd5d293876bbfa7622e41de98e09ddbeecbed6bcb7d2abea6d9'}
+        $script:AcceptedVerifierRecordSource=[pscustomobject]@{path='ci-dispatch/verifier-provenance.json';blob='0537fcd212e8e9174f3b7388fcb992f9fccda8b6';sha256='c821f3184cf17694036a59f7c13377c3ac82d618166c2c576f67e4e85c455ba5'}
         $unaccepted=Join-Path $root 'unaccepted-repository'
         $null=New-Item -ItemType Directory -Path (Join-Path $unaccepted 'ci-dispatch') -Force
         & git init $unaccepted 2>$null
@@ -330,7 +330,7 @@ try {
         Assert (-not ($parameters -match 'AcceptedController|ControllerCommit|ControllerTree|Snapshot'))
         Assert ($source.Contains('Get-Ci10MatchedControllerSnapshot'))
         Assert ($source.Contains('2bd5cf864bb45ae1cb710f7dc8614060d8447143'))
-        Assert ($source.Contains('467ab8f2d1821f0468fe2840708cd8172d994ba0'))
+        Assert ($source.Contains('0537fcd212e8e9174f3b7388fcb992f9fccda8b6'))
         Assert ($source.Contains("path='ci-dispatch/Dispatch.psm1'"))
         Assert ($source.Contains("path='ci-dispatch/verifier-provenance.json'"))
         Assert (-not ($source.Contains('805b71f36232412e072b0c860c1f4d665511d347')))

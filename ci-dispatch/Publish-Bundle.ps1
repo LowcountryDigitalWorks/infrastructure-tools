@@ -7,11 +7,11 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $script:AcceptedDispatcherSource = [pscustomobject]@{
     path='ci-dispatch/Dispatch.psm1'
-    blob='2bd5cf864bb45ae1cb710f7dc8614060d8447143'; sha256='75895bc9b0500c99787bb938115a6b969c96f15bba156c1bf85878e1df794b8e'
+    blob='2bd5cf864bb45ae1cb710f7dc8614060d8447143'; sha256='fdcf67a7bbfeacd5d293876bbfa7622e41de98e09ddbeecbed6bcb7d2abea6d9'
 }
 $script:AcceptedVerifierRecordSource = [pscustomobject]@{
     path='ci-dispatch/verifier-provenance.json'
-    blob='467ab8f2d1821f0468fe2840708cd8172d994ba0'; sha256='8a3c3a74aedd03eb1e88c79085cadf4bcd530a4adf8a179caf42811216478079'
+    blob='0537fcd212e8e9174f3b7388fcb992f9fccda8b6'; sha256='c821f3184cf17694036a59f7c13377c3ac82d618166c2c576f67e4e85c455ba5'
 }
 $root = Join-Path $env:ProgramData 'LDW/CiRunnerDispatch'
 $staging = $null
