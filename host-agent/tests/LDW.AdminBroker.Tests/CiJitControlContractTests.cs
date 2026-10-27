@@ -89,11 +89,15 @@ internal static class CiJitControlContractTests
         var duplicate = engine.ProcessRequestAsync(runRequest, null, CancellationToken.None).GetAwaiter().GetResult();
         Assert(first.Success && first.ResultState == "STARTED" && first.ErrorCode is null,
             "typed adapter may return a bounded started result");
+        Assert(first.Details is not null && first.Details["reasonCode"] == "NONE",
+            "successful typed result preserves bounded reason code");
         Assert(adapter.RunOnceCalls == 1, "duplicate request ID never invokes run-once twice");
         Assert(duplicate.ErrorCode == "DUPLICATE_REQUEST", "duplicate request returns deterministic replay response");
 
         var retireResponse = engine.ProcessRequestAsync(retire! with { RequestId = "66666666-6666-6666-6666-666666666666" }, null, CancellationToken.None).GetAwaiter().GetResult();
         Assert(retireResponse.Success && adapter.LastRetireRunId == 123, "only validated stale runId reaches adapter");
+        Assert(retireResponse.Details is not null && retireResponse.Details["reasonCode"] == "PR_HEAD_MOVED",
+            "successful stale retirement preserves deterministic stale reason");
 
         var statusRequest = discoverRequest with
         {
@@ -104,7 +108,7 @@ internal static class CiJitControlContractTests
         Assert(statusResponse.Success && statusResponse.Details is not null, "status returns bounded details");
         Assert(statusResponse.Details!.Keys.All(k => new[]
         {
-            "operationId", "profileId", "runId", "jobId", "observedAtUtc", "sourceVersion", "ownerState",
+            "reasonCode", "operationId", "profileId", "runId", "jobId", "observedAtUtc", "sourceVersion", "ownerState",
             "statusReasonCode", "localStateFresh", "queueState", "eligibleQueuedCount", "heldQueuedCount",
             "selectedProfile", "selectedRunId", "selectedJobId", "controllerPhase", "capacity"
         }.Contains(k, StringComparer.Ordinal)), "status detail keys stay on fixed allowlist");
