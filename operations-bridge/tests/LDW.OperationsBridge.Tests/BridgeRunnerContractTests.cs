@@ -8,6 +8,7 @@ internal static class BridgeRunnerContractTests
     {
         DragonflyBridgeContractTests.RunAsync().GetAwaiter().GetResult();
         DragonflyBridgeRunnerConfigurationTests.Run();
+        DragonflySecretServiceReaderTests.Run();
 
         var config = BridgeRunnerConfiguration.Parse(
             "{\"bridgeId\":\"ldw01-bridge\",\"relayConnectUri\":\"wss://ldw-operations-bridge-relay.locodw.workers.dev/relay/connect?bridgeId=ldw01-bridge\"}");
