@@ -1,6 +1,12 @@
 name: CI control-plane deterministic validation
 
 on:
+  push:
+    paths:
+      - 'ci-dispatch/**'
+      - 'ci-runner/**'
+      - 'host-agent/**'
+      - '.github/workflows/ci-control-plane-validation.yml'
   pull_request:
     paths:
       - 'ci-dispatch/**'
@@ -19,19 +25,23 @@ jobs:
       - name: Checkout exact candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-fetch-depth: 0
-persist-credentials: false
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Parse CI and deployment PowerShell
         shell: pwsh
         run: |
-$allErrors=@()
-Get-ChildItem ci-dispatch,ci-runner,host-agent/deploy -Recurse -File | Where-Object { $_.Extension -in @('.ps1','.psm1') } | ForEach-Object {
-  $tokens=$null; $parseErrors=$null
-  [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName,[ref]$tokens,[ref]$parseErrors)
-  $allErrors += @($parseErrors)
-}
-if($allErrors.Count){$allErrors|Format-List|Out-String|Write-Error;throw "PowerShell parser reported $($allErrors.Count) error(s)."}
+          $allErrors=@()
+          Get-ChildItem ci-dispatch,ci-runner,host-agent/deploy -Recurse -File | Where-Object { $_.Extension -in @('.ps1','.psm1') } | ForEach-Object {
+            $tokens=$null
+            $parseErrors=$null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName,[ref]$tokens,[ref]$parseErrors)
+            $allErrors += @($parseErrors)
+          }
+          if($allErrors.Count){
+            $allErrors | Format-List | Out-String | Write-Error
+            throw "PowerShell parser reported $($allErrors.Count) error(s)."
+          }
 
       - name: Run dispatcher contract tests
         shell: pwsh
@@ -48,6 +58,6 @@ if($allErrors.Count){$allErrors|Format-List|Out-String|Write-Error;throw "PowerS
       - name: Diff whitespace validation
         shell: pwsh
         run: |
-$base=(git merge-base origin/main HEAD).Trim()
-git diff --check "$base...HEAD"
-if($LASTEXITCODE -ne 0){throw 'git diff --check failed.'}
+          $base=(git merge-base origin/main HEAD).Trim()
+          git diff --check "$base...HEAD"
+          if($LASTEXITCODE -ne 0){throw 'git diff --check failed.'}
