@@ -1,0 +1,199 @@
+name: Slice 3 temporary Windows provenance finalizer
+
+on:
+  push:
+    branches:
+      - host-agent/ci-jit-local-status-slice3-20261026
+    paths:
+      - .github/workflows/slice3-finalizer-temp.yml
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Allow helper workflow removal before clean checkout
+        shell: pwsh
+        run: Start-Sleep -Seconds 30
+
+      - name: Checkout latest clean target branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: host-agent/ci-jit-local-status-slice3-20261026
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Stage source, verifier record, and exact Windows archive pins
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $branch='host-agent/ci-jit-local-status-slice3-20261026'
+          if (Test-Path -LiteralPath '.github/workflows/slice3-finalizer-temp.yml') { throw 'TEMP_HELPER_STILL_PRESENT' }
+          $base=(git rev-parse HEAD).Trim()
+          git fetch origin $branch
+          if ((git rev-parse ('origin/'+$branch)).Trim() -ne $base) { throw 'TARGET_MOVED_BEFORE_FINALIZER' }
+
+          function Write-Utf8NoBom([string]$Path,[string]$Text) {
+            [IO.File]::WriteAllText((Resolve-Path $Path),$Text,[Text.UTF8Encoding]::new($false))
+          }
+          function Replace-ExactlyOnce([string]$Text,[string]$Old,[string]$New,[string]$Label) {
+            $first=$Text.IndexOf($Old,[StringComparison]::Ordinal)
+            if($first -lt 0){throw ($Label+'_TARGET_MISSING')}
+            if($Text.IndexOf($Old,$first+$Old.Length,[StringComparison]::Ordinal) -ge 0){throw ($Label+'_TARGET_AMBIGUOUS')}
+            return $Text.Substring(0,$first)+$New+$Text.Substring($first+$Old.Length)
+          }
+
+          # 1) Observational queue projection must never alter the accepted dispatcher control result.
+          $entryPath='ci-dispatch/Invoke-Dispatcher.ps1'
+          $entry=Get-Content -LiteralPath $entryPath -Raw
+          $old=@'
+        $queueProjection = Get-Ci10QueueSnapshot $profiles
+        $projectionCapacity = if ($gate -in @('READY','BUSY','CAPACITY')) { $gate } else { 'UNKNOWN' }
+        try { Set-Ci10StatusQueueProjection -QueueSnapshot $queueProjection -Capacity $projectionCapacity -ProvenanceValid } catch { }
+'@
+          $new=@'
+        # Status projection is observational only. Queue/status read failures must not alter BUSY,
+        # CAPACITY, or Recover behavior; READY still performs its authoritative queue read below.
+        try {
+            $queueProjection = Get-Ci10QueueSnapshot $profiles
+            $projectionCapacity = if ($gate -in @('READY','BUSY','CAPACITY')) { $gate } else { 'UNKNOWN' }
+            Set-Ci10StatusQueueProjection -QueueSnapshot $queueProjection -Capacity $projectionCapacity -ProvenanceValid
+        } catch {
+            try {
+                $unavailableProjection = [pscustomobject]@{
+                    Schema = 'ci10-queue-v1'; QueueState = 'UNAVAILABLE'; EligibleQueuedCount = $null
+                    HeldQueuedCount = $null; HeldReasonCounts = @(); Selected = $null
+                }
+                $projectionCapacity = if ($gate -in @('READY','BUSY','CAPACITY')) { $gate } else { 'UNKNOWN' }
+                Set-Ci10StatusQueueProjection -QueueSnapshot $unavailableProjection -Capacity $projectionCapacity -ProvenanceValid
+            } catch { }
+        }
+'@
+          $entry=Replace-ExactlyOnce $entry $old $new 'OBSERVABILITY_ISOLATION'
+          Write-Utf8NoBom $entryPath $entry
+
+          # 2) Pin the exact Windows git-archive bytes of the accepted Stage-A controller snapshot.
+          $dispatchPath='ci-dispatch/Dispatch.psm1'
+          $dispatch=Get-Content -LiteralPath $dispatchPath -Raw
+          $controllerPins=[ordered]@{
+            '6935ad2082022d08af41e5d675926f6f30b0c3661f89619d33e3850d7a7f8606'='d4298c06056196e75e644b05108c478b48bfc23d7e3c4c363d89d25a96d5ca3a'
+            '23987391705c4dcb7247a2bdafcc585f1a9b58a411a31c0601a25942623a9025'='ae5b0bd8cfe39bb32367663cdfffb2f6fd31723854f40d706d10a67ce766c0f8'
+            'f5af15fdcd477574114885635870049b199f992a997f061057c547a98b407261'='48fa6136b2bea13f939119917de616f4da19f971243cce2d4563ca434bbf6425'
+            '9eba5d80e12336fcb45841cb495260121197a69c0819508b46599b720bc58f55'='705b6581a1fecd1b22413b5709b0d90df9f80e277d5d0c94c9abbc27e7eadd80'
+            '3f87a4de95d07bcf75719b728240ffbb9471f64b4b5fab938184bfe46e653104'='68f8a767e0cb6412b28b7e4751dd6dbe0cd586e74365099adbb20eadcdd8b368'
+            'a6f69f5605aa2a78f42fb32234ff91a097bf1683b7a7ef6e5ec910625ec864b1'='75f1ba052f024276d6870d84d1d02aa78effacdece41552ad000422e3d1c6db8'
+          }
+          foreach($pair in $controllerPins.GetEnumerator()){
+            $dispatch=Replace-ExactlyOnce $dispatch $pair.Key $pair.Value 'CONTROLLER_ARCHIVE_PIN'
+          }
+          Write-Utf8NoBom $dispatchPath $dispatch
+
+          # 3) Add a focused regression proving the observational read remains outside the control failure domain.
+          $obsTest=@'
+[CmdletBinding()]
+param()
+$ErrorActionPreference='Stop'
+$repo=Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+$entry=Get-Content -LiteralPath (Join-Path $repo 'ci-dispatch/Invoke-Dispatcher.ps1') -Raw
+$total=0
+function Check([string]$Name,[scriptblock]$Body){$script:case=$Name;& $Body;$script:total++;'PASS '+$Name}
+function Assert([bool]$Condition){if(-not $Condition){throw ('TEST_ASSERTION_FAILED:'+ $script:case)}}
+Check 'status queue read is best-effort and authoritative READY read remains later' {
+    $projectionRead=$entry.IndexOf('$queueProjection = Get-Ci10QueueSnapshot $profiles',[StringComparison]::Ordinal)
+    $tryStart=$entry.LastIndexOf('try {',$projectionRead,[StringComparison]::Ordinal)
+    $readyRead=$entry.IndexOf('$selected = @(Find-Ci10QueuedJob $profiles)',[StringComparison]::Ordinal)
+    Assert ($projectionRead -ge 0 -and $tryStart -ge 0 -and $tryStart -lt $projectionRead)
+    Assert ($readyRead -gt $projectionRead)
+}
+Check 'status read failure publishes only bounded unavailable evidence' {
+    Assert ($entry.Contains("Schema = 'ci10-queue-v1'; QueueState = 'UNAVAILABLE'"))
+    Assert ($entry.Contains('EligibleQueuedCount = $null'))
+    Assert ($entry.Contains('HeldQueuedCount = $null; HeldReasonCounts = @(); Selected = $null'))
+}
+Check 'observability fallback cannot launch or cancel work' {
+    $fallbackStart=$entry.IndexOf('$unavailableProjection = [pscustomobject]@{',[StringComparison]::Ordinal)
+    $fallbackEnd=$entry.IndexOf("if (`$Mode -eq 'Recover')",$fallbackStart,[StringComparison]::Ordinal)
+    Assert ($fallbackStart -ge 0 -and $fallbackEnd -gt $fallbackStart)
+    $fallback=$entry.Substring($fallbackStart,$fallbackEnd-$fallbackStart)
+    Assert (-not $fallback.Contains('Start-Ci10Controller'))
+    Assert (-not $fallback.Contains('/cancel'))
+    Assert (-not $fallback.Contains('Confirm-Ci10Candidate'))
+}
+'OBSERVABILITY_ISOLATION_TESTS=PASS'
+'OBSERVABILITY_ISOLATION_TEST_COUNT='+$total
+'@
+          [IO.File]::WriteAllText((Join-Path (Get-Location) 'ci-dispatch/tests/Test-ObservabilityIsolation.ps1'),$obsTest,[Text.UTF8Encoding]::new($false))
+
+          git diff --check
+          if($LASTEXITCODE -ne 0){throw 'SOURCE_DIFF_CHECK_FAILED'}
+          git config user.name 'LDW bounded source finalizer'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add $entryPath $dispatchPath ci-dispatch/tests/Test-ObservabilityIsolation.ps1
+          git commit -m 'HOST-AGENT-CI-JIT-STATUS-001: isolate status reads and correct controller archive pins'
+          $sourceCommit=(git rev-parse HEAD).Trim()
+          $sourceTree=(git rev-parse 'HEAD^{tree}').Trim()
+          $dispatchBlob=(git rev-parse 'HEAD:ci-dispatch/Dispatch.psm1').Trim()
+
+          $measure=Join-Path $env:RUNNER_TEMP 'slice3-provenance-measure'
+          New-Item -ItemType Directory -Path $measure -Force | Out-Null
+          $dispatchZip=Join-Path $measure 'dispatch.zip'
+          git archive --format=zip --output=$dispatchZip HEAD -- ci-dispatch/Dispatch.psm1
+          $dispatchOut=Join-Path $measure 'dispatch'
+          [IO.Compression.ZipFile]::ExtractToDirectory($dispatchZip,$dispatchOut)
+          $dispatchHash=(Get-FileHash -LiteralPath (Join-Path $dispatchOut 'ci-dispatch/Dispatch.psm1') -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          # 4) Bind verifier record to the exact corrected dispatcher source commit/tree/blob/hash.
+          $record=[ordered]@{schema=1;commit=$sourceCommit;tree=$sourceTree;blob=$dispatchBlob;sha256=$dispatchHash}
+          $recordJson=($record|ConvertTo-Json -Compress)+'`n'
+          [IO.File]::WriteAllText((Join-Path (Get-Location) 'ci-dispatch/verifier-provenance.json'),$recordJson,[Text.UTF8Encoding]::new($false))
+          git add ci-dispatch/verifier-provenance.json
+          git commit -m 'HOST-AGENT-CI-JIT-STATUS-001: bind corrected dispatcher verifier provenance'
+          $recordCommit=(git rev-parse HEAD).Trim()
+          $recordBlob=(git rev-parse 'HEAD:ci-dispatch/verifier-provenance.json').Trim()
+          $recordZip=Join-Path $measure 'record.zip'
+          git archive --format=zip --output=$recordZip HEAD -- ci-dispatch/verifier-provenance.json
+          $recordOut=Join-Path $measure 'record'
+          [IO.Compression.ZipFile]::ExtractToDirectory($recordZip,$recordOut)
+          $recordHash=(Get-FileHash -LiteralPath (Join-Path $recordOut 'ci-dispatch/verifier-provenance.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          # 5) Refresh all publisher/test provenance pins from the last accepted Slice-3 verifier tuple.
+          $old=[ordered]@{
+            '4faab579250ad7aaeeb13ae91708973b49bf9d10'=$sourceCommit
+            'd69c7f5aca13b2e4caa8d0e077790b66a83f835e'=$sourceTree
+            '2bd5cf864bb45ae1cb710f7dc8614060d8447143'=$dispatchBlob
+            'fdcf67a7bbfeacd5d293876bbfa7622e41de98e09ddbeecbed6bcb7d2abea6d9'=$dispatchHash
+            '0537fcd212e8e9174f3b7388fcb992f9fccda8b6'=$recordBlob
+            'c821f3184cf17694036a59f7c13377c3ac82d618166c2c576f67e4e85c455ba5'=$recordHash
+          }
+          $pinPaths=@('ci-dispatch/Publish-Bundle.ps1')+@(Get-ChildItem ci-dispatch/tests -File -Filter '*.ps1'|ForEach-Object FullName)
+          foreach($path in $pinPaths){
+            $text=Get-Content -LiteralPath $path -Raw
+            foreach($pair in $old.GetEnumerator()){$text=$text.Replace($pair.Key,$pair.Value)}
+            [IO.File]::WriteAllText((Resolve-Path $path),$text,[Text.UTF8Encoding]::new($false))
+          }
+          git diff --check
+          if($LASTEXITCODE -ne 0){throw 'PIN_DIFF_CHECK_FAILED'}
+          git add ci-dispatch/Publish-Bundle.ps1 ci-dispatch/tests
+          git commit -m 'HOST-AGENT-CI-JIT-STATUS-001: refresh corrected Windows provenance pins'
+          $final=(git rev-parse HEAD).Trim()
+          $finalTree=(git rev-parse 'HEAD^{tree}').Trim()
+
+          # Freeze/race checks before publication.
+          if((git rev-parse 'HEAD:ci-dispatch/Dispatch.psm1').Trim() -ne $dispatchBlob){throw 'DISPATCH_SOURCE_MOVED_AFTER_BIND'}
+          if((git rev-parse 'HEAD:ci-dispatch/verifier-provenance.json').Trim() -ne $recordBlob){throw 'VERIFIER_RECORD_MOVED_AFTER_BIND'}
+          git fetch origin $branch
+          if((git rev-parse ('origin/'+$branch)).Trim() -ne $base){throw 'TARGET_MOVED_DURING_FINALIZER'}
+          git push origin ('HEAD:'+ $branch)
+
+          Write-Output ('SOURCE_COMMIT='+$sourceCommit)
+          Write-Output ('SOURCE_TREE='+$sourceTree)
+          Write-Output ('DISPATCH_BLOB='+$dispatchBlob)
+          Write-Output ('DISPATCH_WINDOWS_SHA256='+$dispatchHash)
+          Write-Output ('RECORD_COMMIT='+$recordCommit)
+          Write-Output ('RECORD_BLOB='+$recordBlob)
+          Write-Output ('RECORD_WINDOWS_SHA256='+$recordHash)
+          Write-Output ('FINAL_HEAD='+$final)
+          Write-Output ('FINAL_TREE='+$finalTree)
