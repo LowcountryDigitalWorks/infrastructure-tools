@@ -11,6 +11,20 @@ internal static class Program
 
     public static async Task<int> Main(string[] args)
     {
+        if (args.Length == 1 && args[0] == "--dragonfly-status")
+        {
+            if (!OperatingSystem.IsLinux())
+            {
+                Console.Error.WriteLine("Dragonfly Bridge status requires Linux.");
+                return 3;
+            }
+            Console.WriteLine("{\"state\":\"" + DragonflyBridgeHealthStore.ReadState() + "\"}");
+            return 0;
+        }
+
+        if (args.Length == 1 && args[0] == "--dragonfly-run")
+            return await RunDragonflyAsync().ConfigureAwait(false);
+
         if (args.Length == 1 && args[0] == "--status")
         {
             Console.WriteLine("{\"state\":\"" + BridgeRunnerHealthStore.ReadState() + "\"}");
@@ -18,7 +32,7 @@ internal static class Program
         }
         if (args.Length != 1 || args[0] != "--run")
         {
-            Console.Error.WriteLine("Usage: LDW.OperationsBridge.Runner --run | --status");
+            Console.Error.WriteLine("Usage: LDW.OperationsBridge.Runner --run | --status | --dragonfly-run | --dragonfly-status");
             return 2;
         }
         if (!OperatingSystem.IsWindows())
@@ -63,6 +77,44 @@ internal static class Program
         {
             if (ownsMutex)
                 singleInstance.ReleaseMutex();
+        }
+    }
+
+    private static async Task<int> RunDragonflyAsync()
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            Console.Error.WriteLine("Dragonfly Bridge requires Linux.");
+            return 3;
+        }
+
+        using var cancellation = new CancellationTokenSource();
+        ConsoleCancelEventHandler cancel = (_, eventArgs) =>
+        {
+            eventArgs.Cancel = true;
+            cancellation.Cancel();
+        };
+        Console.CancelKeyPress += cancel;
+        try
+        {
+            return await DragonflyBridgeRuntime.RunAsync(cancellation.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                DragonflyBridgeHealthStore.Write("blocked", DragonflyBridgeRunnerConfiguration.FixedBridgeId);
+            }
+            catch
+            {
+                // Health persistence is secondary to preserving fail-closed runtime behavior.
+            }
+            Console.Error.WriteLine("Dragonfly Bridge failed closed: " + ex.GetType().Name);
+            return 5;
+        }
+        finally
+        {
+            Console.CancelKeyPress -= cancel;
         }
     }
 

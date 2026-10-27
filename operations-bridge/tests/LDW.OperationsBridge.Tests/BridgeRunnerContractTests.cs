@@ -11,6 +11,7 @@ internal static class BridgeRunnerContractTests
         DragonflySecretServiceReaderTests.Run();
         DragonflyPythonProcessAdapterTests.Run();
         TerminalWireNoStartTests.Run();
+        DragonflyLinuxRuntimeTests.Run();
 
         var config = BridgeRunnerConfiguration.Parse(
             "{\"bridgeId\":\"ldw01-bridge\",\"relayConnectUri\":\"wss://ldw-operations-bridge-relay.locodw.workers.dev/relay/connect?bridgeId=ldw01-bridge\"}");
