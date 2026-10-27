@@ -83,13 +83,15 @@ internal sealed class HostAgentContext : ApplicationContext
         builder.AppendLine($"Overall: {_lastSnapshot.Snapshot.Color} / {_lastSnapshot.Snapshot.Health} — {_lastSnapshot.Snapshot.Summary}");
         builder.AppendLine($"Owner session: {_lastSnapshot.RuntimeContext.OwnerSession}");
         builder.AppendLine($"Configuration: {_lastSnapshot.Configuration.Summary}");
+        var ci = _lastSnapshot.CiJitStatus;
+        builder.AppendLine($"ci-jit: state={ci.State}; queue={ci.QueueState}; eligible={(ci.EligibleQueuedCount?.ToString() ?? "unknown")}; held={(ci.HeldQueuedCount?.ToString() ?? "unknown")}; capacity={ci.Capacity}; phase={(ci.ControllerPhase?.ToString() ?? "none")}; profile={(ci.SelectedProfile ?? "none")}; run={(ci.SelectedRunId?.ToString() ?? "none")}; job={(ci.SelectedJobId?.ToString() ?? "none")}; reason={(ci.ReasonCode ?? "none")}");
         foreach (var observation in _lastSnapshot.Snapshot.Components)
             builder.AppendLine($"{observation.ComponentId}: {observation.Color} / {observation.State} / {observation.Health} — {observation.Summary}");
         if (_lastSnapshot.LinuxTelemetry is { } linux)
             builder.AppendLine($"linux: kernel={linux.Kernel}; uptimeHours={linux.Uptime.TotalHours:F1}; load1={linux.Load1:F2}; memoryAvailableBytes={linux.MemoryAvailableBytes}; swapUsedBytes={linux.SwapUsedBytes}; cpuPsiKnown={linux.CpuPsiSomeAverage10.HasValue}; memoryPsiKnown={linux.MemoryPsiSomeAverage10.HasValue}; updates={(linux.UpdatesAvailable.HasValue ? linux.UpdatesAvailable.Value.ToString() : "unknown")}; rebootRequired={linux.RebootRequired}");
         if (_lastSnapshot.GitHubRunnerTelemetry is { } runner)
             builder.AppendLine($"github-runner: idPresent={runner.Id > 0}; online={runner.Online}; busy={runner.Busy}; labelCount={runner.Labels.Count}");
-        builder.AppendLine("Machine-local addresses, SSH targets/paths, credentials, GitHub auth, and raw adapter output are intentionally omitted.");
+        builder.AppendLine("Machine-local addresses, SSH targets/paths, credentials, GitHub auth, raw controller state, and raw adapter output are intentionally omitted.");
         Clipboard.SetText(builder.ToString());
     }
 

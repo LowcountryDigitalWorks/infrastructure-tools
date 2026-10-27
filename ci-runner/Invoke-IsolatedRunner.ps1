@@ -16,11 +16,134 @@ Import-Module (Join-Path $PSScriptRoot 'CiRunner.psm1') -Force
 $approvedList = @($ApprovedRepositories | ForEach-Object { $_ -split ',' })
 $staticLabelsList = if ($StaticLabels) { @($StaticLabels | ForEach-Object { $_ -split ',' }) } else { $null }
 
+$statusActivePhases = @('Planned','Registered','Provisioned','Running','JobCompleted','RunnerAbsent','GuestRemoved','ArtifactsRemoved')
+
+function Test-Ci7PublishedBundle {
+    try {
+        $bundle = [IO.Path]::GetFullPath((Split-Path $PSScriptRoot -Parent))
+        $dispatchRoot = Join-Path $env:ProgramData 'LDW/CiRunnerDispatch'
+        $releases = Join-Path $dispatchRoot 'releases'
+        $releaseRoot = [IO.Path]::GetDirectoryName($dispatchRoot)
+        $parent = [IO.Path]::GetDirectoryName($releaseRoot)
+        $grandparent = [IO.Path]::GetDirectoryName($parent)
+        $manifestPath = Join-Path $bundle 'manifest.json'
+        $dispatchPath = Join-Path $bundle 'ci-dispatch/Dispatch.psm1'
+        $statusModulePath = Join-Path $bundle 'ci-dispatch/StatusProjection.psm1'
+        $entryPath = [IO.Path]::GetFullPath($PSCommandPath)
+        $expectedEntry = [IO.Path]::GetFullPath((Join-Path $bundle 'ci-runner/Invoke-IsolatedRunner.ps1'))
+        if (-not [string]::Equals($entryPath,$expectedEntry,[StringComparison]::OrdinalIgnoreCase)) {
+            throw 'PREFLIGHT_ENTRY_PATH_MISMATCH'
+        }
+        foreach ($path in @($releaseRoot,$releases,$bundle,$PSScriptRoot,$manifestPath,$entryPath,$dispatchPath,$statusModulePath)) {
+            Assert-Ci7PreImportProtectedPath $path
+        }
+        Assert-Ci7PreImportParentBoundary $parent
+        Assert-Ci7PreImportParentBoundary $grandparent
+
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        if ($manifest.schema -ne 1 -or $manifest.commit -cnotmatch '^[a-f0-9]{40}$' -or
+            $manifest.tree -cnotmatch '^[a-f0-9]{40}$' -or
+            -not [string]::Equals($bundle,[IO.Path]::GetFullPath((Join-Path $releases ([string]$manifest.commit))),[StringComparison]::OrdinalIgnoreCase)) {
+            throw 'PREFLIGHT_PROVENANCE_MISMATCH'
+        }
+        $manifestSha = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        foreach ($path in @(
+            'ci-runner/Invoke-IsolatedRunner.ps1',
+            'ci-dispatch/Dispatch.psm1',
+            'ci-dispatch/StatusProjection.psm1'
+        )) {
+            $file = Join-Path $bundle $path
+            $entry = @($manifest.files | Where-Object path -CEQ $path)
+            if ($entry.Count -ne 1 -or $entry[0].sha256 -cnotmatch '^[a-f0-9]{64}$' -or
+                (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -cne $entry[0].sha256) {
+                throw 'BUNDLE_PREFLIGHT_HASH_DRIFT'
+            }
+        }
+        Import-Module $dispatchPath -Force -Global
+        $null = Assert-Ci10Bundle $bundle $manifestSha ([string]$manifest.commit) ([string]$manifest.tree)
+        Import-Module $statusModulePath -Force -Global
+        return $true
+    } catch { return $false }
+}
+
+function Assert-Ci7PreImportParentBoundary {
+    param([Parameter(Mandatory)][string]$Path)
+    $item = Get-Item -LiteralPath ([IO.Path]::GetFullPath($Path)) -Force -ErrorAction Stop
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'PREFLIGHT_REPARSE_PATH_REFUSED' }
+    $acl = Get-Acl -LiteralPath $item.FullName
+    if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @('S-1-5-18','S-1-5-32-544')) {
+        throw 'PREFLIGHT_PARENT_OWNER_UNTRUSTED'
+    }
+    $replace = [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership
+    foreach ($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -eq 'Allow' -and
+            -not ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -and
+            ($rule.FileSystemRights -band $replace) -and
+            $rule.IdentityReference.Value -notin @('S-1-5-18','S-1-5-32-544')) {
+            throw 'PREFLIGHT_PARENT_REPLACEMENT_UNTRUSTED'
+        }
+    }
+}
+
+function Assert-Ci7PreImportProtectedPath {
+    param([Parameter(Mandatory)][string]$Path)
+    $full = [IO.Path]::GetFullPath($Path)
+    $cursor = $full
+    while ($cursor) {
+        $item = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'PREFLIGHT_REPARSE_PATH_REFUSED' }
+        $cursor = [IO.Path]::GetDirectoryName($cursor)
+    }
+    $acl = Get-Acl -LiteralPath $full
+    if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @('S-1-5-18','S-1-5-32-544')) {
+        throw 'PREFLIGHT_OWNER_UNTRUSTED'
+    }
+    $write = [Security.AccessControl.FileSystemRights]::Write -bor
+        [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership
+    $rules = @($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+    foreach ($rule in $rules) {
+        if ($rule.AccessControlType -eq 'Allow' -and ($rule.FileSystemRights -band $write) -and
+            $rule.IdentityReference.Value -notin @('S-1-5-18','S-1-5-32-544')) {
+            throw 'PREFLIGHT_ACL_UNTRUSTED_WRITE'
+        }
+    }
+    foreach ($sid in @('S-1-5-18','S-1-5-32-544')) {
+        if (-not @($rules | Where-Object {
+            $_.IdentityReference.Value -eq $sid -and $_.AccessControlType -eq 'Allow' -and
+            ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -eq
+                [Security.AccessControl.FileSystemRights]::FullControl
+        }).Count) {
+            throw 'PREFLIGHT_ACL_REQUIRED_PRINCIPAL_MISSING'
+        }
+    }
+}
+
+function Set-Ci7StatusPhase {
+    param(
+        [ValidateSet('Planned','Registered','Provisioned','Running','JobCompleted','RunnerAbsent','GuestRemoved','ArtifactsRemoved','Complete')][string]$Phase,
+        [switch]$ProvenanceValid,
+        [switch]$ProvenFailure,
+        [ValidateSet('STALE_RESIDUE')][string]$FailureReason
+    )
+    $arguments = @{ Phase = $Phase }
+    if ($ProvenanceValid) { $arguments.ProvenanceValid = $true }
+    if ($ProvenFailure) { $arguments.ProvenFailure = $true }
+    if ($FailureReason) { $arguments.FailureReason = $FailureReason }
+    try { Set-Ci10StatusControllerPhase @arguments } catch { return }
+}
+
 $state = $null
 $lock = $null
 $rootLock = $null
 $diagnostics = $null
 $cleanupComplete = $false
+$statusProvenanceValid = Test-Ci7PublishedBundle
 try {
     Assert-Ci7Elevated
     if ($Mode -in @('Cleanup','Reap')) {
@@ -28,6 +151,7 @@ try {
         if ($Mode -eq 'Cleanup' -and $LocalRunId -cnotmatch '^[0-9a-f]{32}$') { throw 'LOCAL_RUN_ID_REQUIRED' }
         if ($Mode -eq 'Cleanup' -and -not (Test-Path -LiteralPath (Join-Path $Root ('runs/' + $LocalRunId)))) {
             Assert-Ci7AlreadyClean $Root $LocalRunId $approvedList
+            if ($statusProvenanceValid) { Set-Ci7StatusPhase Complete -ProvenanceValid }
             'CLEANUP_IDEMPOTENT=PASS'
             exit 0
         }
@@ -41,7 +165,6 @@ try {
             if (-not (Test-Path -LiteralPath $file)) { throw 'STALE_STATE_MISSING' }
             $state = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
             Assert-Ci7State $state $Root
-            # A live controller owns an exclusive lock. Reap never races it.
             try { $lock = [IO.File]::Open((Join-Path $directory 'controller.lock'), 'OpenOrCreate', 'ReadWrite', 'None') }
             catch { throw 'ACTIVE_CONTROLLER_OR_LOCK_UNCERTAIN' }
             try {
@@ -54,9 +177,9 @@ try {
                 'INTERRUPTED_CLEANUP=PASS'
             } finally { if ($lock) { $lock.Dispose(); $lock = $null } }
         }
-        # Prefix alone is never enough authority to destroy an orphan VM.
         $orphans = @(Get-VM | Where-Object { $_.Name -cmatch '^ci7-' })
         if ($orphans.Count) { throw 'ORPHAN_VM_REQUIRES_CONCLUSIVE_STATE' }
+        if ($statusProvenanceValid) { Set-Ci7StatusPhase Complete -ProvenanceValid }
         exit 0
     }
 
@@ -77,6 +200,7 @@ try {
     $lock = [IO.File]::Open((Join-Path $state.Directory 'controller.lock'), 'CreateNew', 'ReadWrite', 'None')
     Save-Ci7State $state
     Write-Ci7Evidence $state 'planned'
+    if ($statusProvenanceValid) { Set-Ci7StatusPhase Planned -ProvenanceValid }
     try {
         $jit = Invoke-Ci7Api ('repos/' + $Repository + '/actions/runners/generate-jitconfig') POST @{
             name = $state.Name; runner_group_id = 1; labels = @(Get-Ci7Labels $WorkflowRunId $configuration); work_folder = '_work'
@@ -87,16 +211,19 @@ try {
         Move-Ci7Phase $state Registered
         Save-Ci7State $state
         Write-Ci7Evidence $state 'registered'
+        if ($statusProvenanceValid) { Set-Ci7StatusPhase Registered -ProvenanceValid }
         Assert-Ci7JitContract $state $jit
         New-Ci7Seed $state $jit.encoded_jit_config
         $jit.encoded_jit_config = $null; $jit = $null
         New-Ci7Guest $state
         Move-Ci7Phase $state Provisioned; Save-Ci7State $state
         Write-Ci7Evidence $state 'provisioned'
+        if ($statusProvenanceValid) { Set-Ci7StatusPhase Provisioned -ProvenanceValid }
         Start-VM -VM (Get-VM -Id $state.VMId -ErrorAction Stop) -ErrorAction Stop
         $diagnostics = [LDW.CiRunner.GuestDiagnostics]::new($state.Name)
         Move-Ci7Phase $state Running; Save-Ci7State $state
         Write-Ci7Evidence $state 'running'
+        if ($statusProvenanceValid) { Set-Ci7StatusPhase Running -ProvenanceValid }
         'SYNTHETIC_CONTROLLER_STARTED=YES'
         $deadline = [DateTime]::UtcNow.AddMinutes($TimeoutMinutes)
         $lastProgress = [DateTime]::UtcNow
@@ -108,7 +235,7 @@ try {
             }
             $job = Get-Ci7MonitoredJob $state
             if ($job.id -ne $state.JobId -or ($job.runner_id -and $job.runner_id -ne $state.RunnerId)) { throw 'UNEXPECTED_JOB_ASSIGNMENT' }
-            if ([DateTime]::UtcNow - $lastProgress -ge [TimeSpan]::FromSeconds(45)) { 'LIFECYCLE_WAIT=BOUNDED'; $lastProgress = [DateTime]::UtcNow }
+            if ([DateTime]::UtcNow - $lastProgress -ge [TimeSpan]::FromSeconds(45)) { 'LIFECYCLE_WAIT=BOUNDED'; if ($statusProvenanceValid) { Set-Ci7StatusPhase Running -ProvenanceValid }; $lastProgress = [DateTime]::UtcNow }
             if ($job.status -ne 'completed') {
                 $vm = Get-VM -Id $state.VMId -ErrorAction Stop
                 Assert-Ci7OwnedVm $state $vm
@@ -122,15 +249,20 @@ try {
         if ($job.runner_id -ne $state.RunnerId -or $job.runner_name -cne $state.Name) { throw 'JOB_RUNNER_EVIDENCE_MISMATCH' }
         Move-Ci7Phase $state JobCompleted; Save-Ci7State $state
         Write-Ci7Evidence $state $(if ($job.conclusion -ceq 'success') { 'job-success' } else { 'job-failure' })
+        if ($statusProvenanceValid) { Set-Ci7StatusPhase JobCompleted -ProvenanceValid }
         Remove-Ci7Runner $state
         Move-Ci7Phase $state RunnerAbsent; Save-Ci7State $state
+        if ($statusProvenanceValid) { Set-Ci7StatusPhase RunnerAbsent -ProvenanceValid }
         Remove-Ci7LocalResources $state
         Move-Ci7Phase $state GuestRemoved
+        if ($statusProvenanceValid) { Set-Ci7StatusPhase GuestRemoved -ProvenanceValid }
         Move-Ci7Phase $state ArtifactsRemoved; Save-Ci7State $state
+        if ($statusProvenanceValid) { Set-Ci7StatusPhase ArtifactsRemoved -ProvenanceValid }
         $lock.Dispose(); $lock = $null
         Clear-Ci7TransientState $state
         Move-Ci7Phase $state Complete
         $cleanupComplete = $true
+        if ($statusProvenanceValid) { Set-Ci7StatusPhase Complete -ProvenanceValid }
         if ($job.conclusion -cne 'success') { throw 'INTENDED_JOB_FAILED' }
         'SYNTHETIC_EXACTLY_ONE_JOB=PASS'
         'SYNTHETIC_EXPECTED_LABELS=PASS'
@@ -150,12 +282,18 @@ try {
                 if ($lock) { $lock.Dispose(); $lock = $null }
                 Clear-Ci7TransientState $state
                 $cleanupComplete = $true
-            } catch { Write-Ci7Evidence $state 'cleanup-failed'; throw 'CLEANUP_UNCERTAIN_MANIFEST_RETAINED' }
+                if ($statusProvenanceValid) { Set-Ci7StatusPhase Complete -ProvenanceValid }
+            } catch {
+                if ($statusProvenanceValid -and $state) {
+                    $failurePhase = if ([string]$state.Phase -in $statusActivePhases) { [string]$state.Phase } else { 'ArtifactsRemoved' }
+                    Set-Ci7StatusPhase $failurePhase -ProvenanceValid -ProvenFailure -FailureReason STALE_RESIDUE
+                }
+                Write-Ci7Evidence $state 'cleanup-failed'; throw 'CLEANUP_UNCERTAIN_MANIFEST_RETAINED'
+            }
         }
         throw
     }
 } catch {
-    # No native exception text: it may include private paths or API response data.
     $code = [string]$_.Exception.Message
     if ($code -cnotmatch '^[A-Z][A-Z0-9_]+$') { $code = 'CONTROLLER_OPERATION_FAILED' }
     'CONTROLLER_RESULT=FAIL'

@@ -20,7 +20,7 @@ $script:AcceptedControllerSnapshots = @(
 )
 $script:RuntimeFiles = @(
     'ci-dispatch/Dispatch.psm1', 'ci-dispatch/Invoke-Dispatcher.ps1', 'ci-dispatch/profiles.json',
-    'ci-dispatch/verifier-provenance.json',
+    'ci-dispatch/verifier-provenance.json', 'ci-dispatch/StatusProjection.psm1',
     'ci-runner/CiRunner.psm1', 'ci-runner/Invoke-IsolatedRunner.ps1', 'ci-runner/Native.cs',
     'ci-runner/guest/bootstrap.sh', 'ci-runner/guest/ci7-runner.service', 'ci-runner/guest/run-one.sh'
 )

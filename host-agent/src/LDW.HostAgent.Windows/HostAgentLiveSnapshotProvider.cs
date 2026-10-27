@@ -10,13 +10,15 @@ internal sealed record HostAgentLiveSnapshot(
     RuntimeContext RuntimeContext,
     HostAgentSettingsLoadResult Configuration,
     LinuxNodeTelemetry? LinuxTelemetry,
-    GitHubRunnerTelemetry? GitHubRunnerTelemetry);
+    GitHubRunnerTelemetry? GitHubRunnerTelemetry,
+    CiJitStatusSnapshot CiJitStatus);
 
 internal sealed class HostAgentLiveSnapshotProvider
 {
     private readonly WindowsSystemProbe _systemProbe = new();
     private readonly WindowsRuntimeContextProbe _runtimeProbe = new();
     private readonly ReadOnlyCommandRunner _commands = new();
+    private readonly CiJitLocalProjectionReader _ciJit = new();
     private readonly HostAgentSettingsLoadResult _configuration;
     private readonly WindowsLiveAdapters _adapters;
     private readonly DeviceDefinition _definition;
@@ -62,7 +64,15 @@ internal sealed class HostAgentLiveSnapshotProvider
             aggregate.Health,
             aggregate.Color,
             aggregate.Summary);
-        return new HostAgentLiveSnapshot(_definition, snapshot, system, runtime, _configuration, linux.Telemetry, runner.Telemetry);
+        return new HostAgentLiveSnapshot(
+            _definition,
+            snapshot,
+            system,
+            runtime,
+            _configuration,
+            linux.Telemetry,
+            runner.Telemetry,
+            _ciJit.Read());
     }
 
     private static DeviceDefinition CreateDefinition(HostAgentSettings settings)

@@ -23,6 +23,20 @@ function New-ControllerFixture([string]$Commit,[string]$Destination){
     [IO.Compression.ZipFile]::ExtractToDirectory($zip,$Destination)
     Remove-Item -LiteralPath $zip -Force
 }
+function Copy-AcceptedDispatcherFixture([string]$Destination){
+    $commit='ce2bf253556a69dfb43de7bb8e8a4927c41c9e15'
+    $stage=Join-Path $fixture ('accepted-dispatcher-'+[guid]::NewGuid().ToString('N'))
+    $zip=$stage+'.zip'
+    $null=New-Item -ItemType Directory -Path $stage
+    & git -C $repo archive --format=zip ('--output='+$zip) $commit -- 'ci-dispatch/Dispatch.psm1' 2>$null
+    if($LASTEXITCODE -ne 0){throw 'TEST_DISPATCHER_ARCHIVE_FAILED'}
+    [IO.Compression.ZipFile]::ExtractToDirectory($zip,$stage)
+    $acceptedPath=Join-Path $stage 'ci-dispatch/Dispatch.psm1'
+    $source=[IO.File]::ReadAllText($acceptedPath)
+    [IO.File]::WriteAllText($Destination,$source.Replace("`r`n","`n").Replace("`n","`r`n"),[Text.UTF8Encoding]::new($false))
+    Remove-Item -LiteralPath $stage -Recurse -Force
+    Remove-Item -LiteralPath $zip -Force
+}
 function Protect([string]$Path){
     $null=New-Item -ItemType Directory -Path $Path -Force
     if ($env:OS -eq 'Windows_NT') {
@@ -365,17 +379,18 @@ $bad.event='push'
     $releaseRoot=Join-Path $secure 'dispatcher';Protect $releaseRoot
     $releases=Join-Path $releaseRoot 'releases';Protect $releases
     $bundle=Join-Path $releases ('a'*40);Protect $bundle
-    foreach($path in @(Get-Ci10RuntimeFiles)){
-        $target=Join-Path $bundle $path
-        $null=New-Item -ItemType Directory -Path (Split-Path $target -Parent) -Force
-        Copy-Item -LiteralPath (Join-Path $repo $path) -Destination $target
-    }
+    $runtimeArchive=Join-Path $fixture 'manifest-runtime.zip'
+    & git -C $repo archive --format=zip ('--output='+$runtimeArchive) HEAD -- @(Get-Ci10RuntimeFiles) 2>$null
+    if($LASTEXITCODE -ne 0){throw 'TEST_RUNTIME_ARCHIVE_FAILED'}
+    [IO.Compression.ZipFile]::ExtractToDirectory($runtimeArchive,$bundle)
+    Remove-Item -LiteralPath $runtimeArchive -Force
     $royalController=Join-Path $fixture 'manifest-royal-controller'
     New-Item -ItemType Directory -Path $royalController -Force|Out-Null
     New-ControllerFixture '54b9343af44c70db1d1403cf7f45cfc11e8bf167' $royalController
     foreach($path in @(Get-Ci10RuntimeFiles|Where-Object{$_.StartsWith('ci-runner/')})){
         Copy-Item -LiteralPath (Join-Path $royalController $path) -Destination (Join-Path $bundle $path) -Force
     }
+    Copy-AcceptedDispatcherFixture (Join-Path $bundle 'ci-dispatch/Dispatch.psm1')
     $dispatcherProvenance=Get-Content -LiteralPath (Join-Path $bundle 'ci-dispatch/verifier-provenance.json') -Raw|ConvertFrom-Json
     $manifest=[ordered]@{schema=1;commit=('a'*40);tree=('b'*40);dispatcher=$dispatcherProvenance;controllerCommit='54b9343af44c70db1d1403cf7f45cfc11e8bf167';
         controllerTree='beb9b9096b2f4bfa41ad877ad4f6a41150fbcfec';files=@(Get-Ci10RuntimeFiles|ForEach-Object{

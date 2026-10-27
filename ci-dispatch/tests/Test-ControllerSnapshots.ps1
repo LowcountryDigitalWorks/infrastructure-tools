@@ -21,14 +21,32 @@ function New-ControllerFixture([string]$Commit,[string]$Destination){
     [IO.Compression.ZipFile]::ExtractToDirectory($zip,$Destination)
     Remove-Item -LiteralPath $zip -Force
 }
+function Copy-AcceptedVerifierFixture([string]$DestinationRoot){
+    $commit='6a1edeabc3b021e6c5f436be121432d3dfb55393'
+    $stage=Join-Path $root ('accepted-verifier-'+[guid]::NewGuid().ToString('N'))
+    $zip=$stage+'.zip'
+    $null=New-Item -ItemType Directory -Path $stage
+    & git -C $repo archive --format=zip ('--output='+$zip) $commit -- `
+        'ci-dispatch/Dispatch.psm1' 'ci-dispatch/verifier-provenance.json' 2>$null
+    if($LASTEXITCODE -ne 0){throw 'TEST_VERIFIER_ARCHIVE_FAILED'}
+    [IO.Compression.ZipFile]::ExtractToDirectory($zip,$stage)
+    foreach($path in @('ci-dispatch/Dispatch.psm1','ci-dispatch/verifier-provenance.json')){
+        $destination=Join-Path $DestinationRoot $path
+        $null=New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force
+        Copy-Item -LiteralPath (Join-Path $stage $path) -Destination $destination -Force
+    }
+    Remove-Item -LiteralPath $stage -Recurse -Force
+    Remove-Item -LiteralPath $zip -Force
+}
 try {
     $snapshots=@(Get-Ci10AcceptedControllerSnapshots)
-    Check 'registry is limited to the two independently accepted controller snapshots' {
+    Check 'registry contains only the two accepted protected-main controller snapshots' {
         Assert ($snapshots.Count -eq 2)
         Assert ($snapshots[0].commit -ceq '49f39f5d3a66251ed18c2e776d843feb25f65fe1')
         Assert ($snapshots[0].tree -ceq '4d241fe9bc0fbf190daf2e36be0e9c52966c5a7b')
         Assert ($snapshots[1].commit -ceq '54b9343af44c70db1d1403cf7f45cfc11e8bf167')
         Assert ($snapshots[1].tree -ceq 'beb9b9096b2f4bfa41ad877ad4f6a41150fbcfec')
+        Assert (@($snapshots | Where-Object commit -CEQ '68a535fd3df17bae59fdb86386fac85e024b1650').Count -eq 0)
     }
     foreach($snapshot in $snapshots){
         Check ('all runtime controller files match '+$snapshot.commit.Substring(0,7)) {
@@ -77,16 +95,14 @@ try {
         Refuses {Get-Ci10ManifestControllerSnapshot $mixedManifest} 'BUNDLE_CONTROLLER_SNAPSHOT_MISMATCH'
     }
     Check 'accepted verifier provenance pairs with exact Royal controller target' {
-        $dispatcherPath=Join-Path $root 'verifier-bundle/ci-dispatch/Dispatch.psm1'
-        $recordPath=Join-Path $root 'verifier-bundle/ci-dispatch/verifier-provenance.json'
-        $null=New-Item -ItemType Directory -Path (Split-Path $dispatcherPath -Parent) -Force
-        Copy-Item -LiteralPath (Join-Path $repo 'ci-dispatch/Dispatch.psm1') -Destination $dispatcherPath
-        Copy-Item -LiteralPath (Join-Path $repo 'ci-dispatch/verifier-provenance.json') -Destination $recordPath
+        $verifierBundle=Join-Path $root 'verifier-bundle'
+        Copy-AcceptedVerifierFixture $verifierBundle
+        $recordPath=Join-Path $verifierBundle 'ci-dispatch/verifier-provenance.json'
         $accepted=Get-Content -LiteralPath $recordPath -Raw|ConvertFrom-Json
         $verifierManifest=[pscustomobject]@{dispatcher=$accepted;files=@(
             [pscustomobject]@{path='ci-dispatch/Dispatch.psm1';sha256=$accepted.sha256}
         )}
-        $provenance=Get-Ci10ManifestDispatcherProvenance -BundleRoot (Join-Path $root 'verifier-bundle') -Manifest $verifierManifest
+        $provenance=Get-Ci10ManifestDispatcherProvenance -BundleRoot $verifierBundle -Manifest $verifierManifest
         Assert ($provenance.blob -ceq 'c862dd503b98060ec984206e63ef9efa5f957e8f')
         $royal=Join-Path $root ('candidate-'+$snapshots[1].commit)
         $stage=Join-Path $root 'stage-verifier-royal'
@@ -166,14 +182,14 @@ try {
         & git -C $mainOnly config user.name 'CI-10 deterministic test'
         & git -C $mainOnly config user.email 'ci10-test@example.invalid'
         & git -C $mainOnly config core.autocrlf true
-        Copy-Item -LiteralPath (Join-Path $repo $script:AcceptedDispatcherSource.path) -Destination (Join-Path $mainOnly $script:AcceptedDispatcherSource.path)
-        Copy-Item -LiteralPath (Join-Path $repo $script:AcceptedVerifierRecordSource.path) -Destination (Join-Path $mainOnly $script:AcceptedVerifierRecordSource.path)
+        Copy-AcceptedVerifierFixture $mainOnly
         & git -C $mainOnly add -- ci-dispatch/Dispatch.psm1 ci-dispatch/verifier-provenance.json
         & git -C $mainOnly commit -m 'Create squash-equivalent accepted verifier tree' 2>$null
         if($LASTEXITCODE -ne 0 -or (& git -C $mainOnly status --porcelain)){throw 'TEST_MAIN_ONLY_COMMIT_FAILED'}
         Assert ((git -C $mainOnly rev-parse 'HEAD:ci-dispatch/Dispatch.psm1').Trim() -ceq $script:AcceptedDispatcherSource.blob)
         Assert ((git -C $mainOnly rev-parse 'HEAD:ci-dispatch/verifier-provenance.json').Trim() -ceq $script:AcceptedVerifierRecordSource.blob)
         Assert ((git -C $mainOnly rev-list --count HEAD).Trim() -ceq '1')
+        Assert ((git -C $mainOnly rev-list --parents -n 1 HEAD).Trim().Split(' ').Count -eq 1)
         Assert-Ci10AcceptedHeadDispatcherSource $mainOnly
         foreach($transient in @('805b71f36232412e072b0c860c1f4d665511d347','7c856daf5a8e4dc4d101ab088259008a78fc68f2')){
             & git -C $mainOnly cat-file -e ($transient+'^{commit}') 2>$null
@@ -289,7 +305,7 @@ try {
         & git -C $untrusted config user.email 'ci10-test@example.invalid'
         $marker=Join-Path $root 'untrusted-module-executed.txt'
         $dispatcherMarker=Join-Path $root 'hidden-dispatcher-entrypoint-executed.txt'
-        Copy-Item -LiteralPath (Join-Path $repo 'ci-dispatch/Dispatch.psm1') -Destination (Join-Path $untrusted 'ci-dispatch/Dispatch.psm1')
+        Copy-AcceptedVerifierFixture $untrusted
         Copy-Item -LiteralPath (Join-Path $repo 'ci-dispatch/Publish-Bundle.ps1') -Destination (Join-Path $untrusted 'ci-dispatch/Publish-Bundle.ps1')
         $acceptedController=Join-Path $root ('candidate-'+$snapshots[1].commit)
         Get-ChildItem -LiteralPath $acceptedController -Recurse -File|ForEach-Object{
