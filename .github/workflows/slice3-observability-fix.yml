@@ -1,0 +1,80 @@
+name: Slice 3 bounded observability fail-isolation correction
+
+on:
+  push:
+    branches: [host-agent/ci-jit-local-status-slice3-20261026]
+    paths: ['.github/workflows/slice3-observability-fix.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  correct:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Keep read-only status refresh outside dispatcher failure domain
+        shell: bash
+        env:
+          EXPECTED_PARENT: 08fdd352fb14d475763b7c0efe052e52858670ba
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "$EXPECTED_PARENT"
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('ci-dispatch/Invoke-Dispatcher.ps1')
+          s=p.read_text(encoding='utf-8')
+          old="""        $queueProjection = Get-Ci10QueueSnapshot $profiles
+        $projectionCapacity = if ($gate -in @('READY','BUSY','CAPACITY')) { $gate } else { 'UNKNOWN' }
+        try { Set-Ci10StatusQueueProjection -QueueSnapshot $queueProjection -Capacity $projectionCapacity -ProvenanceValid } catch { }
+"""
+          new="""        # Status projection is observational only. A queue/read or local status-write failure must not
+        # alter BUSY/CAPACITY/Recover behavior; READY still performs its authoritative queue read below.
+        try {
+            $queueProjection = Get-Ci10QueueSnapshot $profiles
+            $projectionCapacity = if ($gate -in @('READY','BUSY','CAPACITY')) { $gate } else { 'UNKNOWN' }
+            Set-Ci10StatusQueueProjection -QueueSnapshot $queueProjection -Capacity $projectionCapacity -ProvenanceValid
+        } catch {
+            try {
+                $unavailableProjection = [pscustomobject]@{
+                    Schema = 'ci10-queue-v1'; QueueState = 'UNAVAILABLE'; EligibleQueuedCount = $null;
+                    HeldQueuedCount = $null; HeldReasonCounts = @(); Selected = $null
+                }
+                $projectionCapacity = if ($gate -in @('READY','BUSY','CAPACITY')) { $gate } else { 'UNKNOWN' }
+                Set-Ci10StatusQueueProjection -QueueSnapshot $unavailableProjection -Capacity $projectionCapacity -ProvenanceValid
+            } catch { }
+        }
+"""
+          if s.count(old)!=1:
+              raise SystemExit('expected exact status projection block once')
+          p.write_text(s.replace(old,new,1),encoding='utf-8',newline='\n')
+
+          t=Path('ci-dispatch/tests/Test-Dispatch.ps1')
+          x=t.read_text(encoding='utf-8')
+          anchor="""    Check 'accepted Royal deployment profile is exact and pinned' {
+"""
+          test="""    Check 'status projection read is isolated from dispatcher control failure domain' {
+        $entry = Get-Content -LiteralPath (Join-Path $repo 'ci-dispatch/Invoke-Dispatcher.ps1') -Raw
+        $projectionRead = $entry.IndexOf('$queueProjection = Get-Ci10QueueSnapshot $profiles',[StringComparison]::Ordinal)
+        $bestEffortTry = $entry.LastIndexOf('try {',$projectionRead,[StringComparison]::Ordinal)
+        $authoritativeReadyRead = $entry.IndexOf('$selected = @(Find-Ci10QueuedJob $profiles)',[StringComparison]::Ordinal)
+        Assert ($projectionRead -ge 0 -and $bestEffortTry -ge 0 -and $bestEffortTry -lt $projectionRead)
+        Assert ($authoritativeReadyRead -gt $projectionRead)
+        Assert ($entry.Contains("QueueState = 'UNAVAILABLE'"))
+    }
+
+"""
+          if x.count(anchor)!=1:
+              raise SystemExit('test insertion anchor not unique')
+          t.write_text(x.replace(anchor,test+anchor,1),encoding='utf-8',newline='\n')
+          PY
+          git diff --check
+          git config user.name 'LDW bounded source finalizer'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add ci-dispatch/Invoke-Dispatcher.ps1 ci-dispatch/tests/Test-Dispatch.ps1
+          git commit -m 'HOST-AGENT-CI-JIT-STATUS-001: isolate status reads from dispatcher control flow'
+          git push origin HEAD:host-agent/ci-jit-local-status-slice3-20261026
