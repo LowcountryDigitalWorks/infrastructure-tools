@@ -66,6 +66,7 @@ internal sealed class StatusForm : Form
         _name.Text = $"{live.Definition.Name}  ·  LDW Host Agent";
         SetOverall(live.Snapshot.Color, live.Snapshot.Summary);
         _refreshed.Text = $"Last refreshed {live.Snapshot.ObservedAt.ToLocalTime():g}";
+        _groups.Controls.Add(CreateCiJitCard(live.CiJitStatus));
         var observations = live.Snapshot.Components.ToDictionary(x => x.ComponentId, StringComparer.OrdinalIgnoreCase);
         foreach (var environment in live.Definition.Environments)
         {
@@ -100,6 +101,22 @@ internal sealed class StatusForm : Form
         _refreshed.Text = "Last refreshed: unavailable";
     }
 
+    private static Panel CreateCiJitCard(CiJitStatusSnapshot status)
+    {
+        var state = StatusPresentation.For(status.Color);
+        var phase = status.ControllerPhase?.ToString() ?? "None";
+        var detail = $"{status.State} · {status.QueueSummary} · capacity {status.Capacity} · phase {phase}";
+        if (!string.IsNullOrWhiteSpace(status.ReasonCode)) detail += $" · {status.ReasonCode}";
+
+        var card = new Panel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, BackColor = Color.White, Padding = new Padding(15), Margin = new Padding(0, 0, 0, 12), MinimumSize = new Size(700, 0), MaximumSize = new Size(760, 0), Width = 700 };
+        var rows = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, FlowDirection = FlowDirection.TopDown, WrapContents = false, Dock = DockStyle.Fill, MaximumSize = new Size(720, 0) };
+        rows.Controls.Add(new Label { AutoSize = true, Font = new Font("Segoe UI", 11, FontStyle.Bold), ForeColor = Color.FromArgb(22, 44, 68), Text = "CI / JIT", Padding = new Padding(0, 0, 0, 7) });
+        rows.Controls.Add(new Label { AutoSize = true, Text = $"{state.Glyph}  {status.State}", ForeColor = ColorFor(status.Color), Font = new Font("Segoe UI", 9.5f, FontStyle.Bold), AccessibleName = $"CI JIT state: {status.State}" });
+        rows.Controls.Add(new Label { AutoSize = true, Text = detail, ForeColor = Color.FromArgb(70, 86, 101), MaximumSize = new Size(650, 0), Margin = new Padding(0, 2, 0, 0) });
+        card.Controls.Add(rows);
+        return card;
+    }
+
     private void SetOverall(StatusColor color, string summary)
     {
         var state = StatusPresentation.For(color);
@@ -117,6 +134,8 @@ internal sealed class StatusForm : Form
             text.AppendLine($"Observed (UTC): {_live.Snapshot.ObservedAt:O}");
             text.AppendLine($"Configuration: {_live.Configuration.Summary}");
             text.AppendLine($"Owner session: {_live.RuntimeContext.OwnerSession}");
+            var ci = _live.CiJitStatus;
+            text.AppendLine($"CI/JIT: state {ci.State}; queue {ci.QueueState}; eligible {(ci.EligibleQueuedCount?.ToString() ?? "unknown")}; held {(ci.HeldQueuedCount?.ToString() ?? "unknown")}; capacity {ci.Capacity}; phase {(ci.ControllerPhase?.ToString() ?? "none")}; profile {(ci.SelectedProfile ?? "none")}; run {(ci.SelectedRunId?.ToString() ?? "none")}; job {(ci.SelectedJobId?.ToString() ?? "none")}; reason {(ci.ReasonCode ?? "none")}.");
             if (_live.LinuxTelemetry is { } linux)
             {
                 var root = linux.Disks.FirstOrDefault();
