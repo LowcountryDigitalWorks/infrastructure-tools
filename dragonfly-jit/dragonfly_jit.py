@@ -346,12 +346,15 @@ class Controller:
             residue_count = len(self._run_dirs())
         except DragonflyError:
             residue_count = -1
+            current = dict(current)
+            current["state"] = "HOLD"
+            current["reason"] = "RUN_ROOT_CONTAMINATED"
         if current.get("qemu_pid") and not _pid_alive(current["qemu_pid"]):
             current = dict(current)
             current["reason"] = "PID_NOT_RUNNING"
             if current["state"] in {"RUNNING", "DRAINING"}:
                 current["state"] = "HOLD"
-        if residue_count != 0 and current["state"] in {"STOPPED", "AVAILABLE"}:
+        if residue_count > 0 and current["state"] in {"STOPPED", "AVAILABLE"}:
             current = dict(current)
             current["state"] = "HOLD"
             current["reason"] = "STALE_RUN_STATE"
@@ -561,6 +564,16 @@ power_state:
     def recover(self) -> dict:
         self.ensure_roots()
         with _file_lock(self.guest_lock_path):
+            with _file_lock(self.state_lock_path):
+                current = self.read_state()
+                if _pid_alive(current.get("qemu_pid")):
+                    self.write_state(
+                        "HOLD",
+                        run_id=current.get("run_id"),
+                        qemu_pid=current.get("qemu_pid"),
+                        reason="RECOVERY_LIVE_STATE",
+                    )
+                    raise DragonflyError("LIVE_STATE_PID_REFUSED")
             try:
                 run_dirs = self._run_dirs()
                 if len(run_dirs) > 1:
