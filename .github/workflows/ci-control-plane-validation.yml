@@ -51,6 +51,10 @@ jobs:
         shell: pwsh
         run: pwsh ./ci-dispatch/tests/Test-ControllerSnapshots.ps1
 
+      - name: Run isolated controller contract tests
+        shell: pwsh
+        run: pwsh ./ci-runner/tests/Test-Controller.ps1
+
       - name: Run sanitized status projection tests
         shell: pwsh
         run: pwsh ./ci-dispatch/tests/Test-StatusProjection.ps1

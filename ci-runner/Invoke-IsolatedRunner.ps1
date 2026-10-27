@@ -20,20 +20,108 @@ $statusActivePhases = @('Planned','Registered','Provisioned','Running','JobCompl
 
 function Test-Ci7PublishedBundle {
     try {
-        $bundle = Split-Path $PSScriptRoot -Parent
+        $bundle = [IO.Path]::GetFullPath((Split-Path $PSScriptRoot -Parent))
+        $dispatchRoot = Join-Path $env:ProgramData 'LDW/CiRunnerDispatch'
+        $releases = Join-Path $dispatchRoot 'releases'
+        $releaseRoot = [IO.Path]::GetDirectoryName($dispatchRoot)
+        $parent = [IO.Path]::GetDirectoryName($releaseRoot)
+        $grandparent = [IO.Path]::GetDirectoryName($parent)
         $manifestPath = Join-Path $bundle 'manifest.json'
         $dispatchPath = Join-Path $bundle 'ci-dispatch/Dispatch.psm1'
         $statusModulePath = Join-Path $bundle 'ci-dispatch/StatusProjection.psm1'
-        if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf) -or
-            -not (Test-Path -LiteralPath $dispatchPath -PathType Leaf) -or
-            -not (Test-Path -LiteralPath $statusModulePath -PathType Leaf)) { return $false }
-        Import-Module $dispatchPath -Force -Global
+        $entryPath = [IO.Path]::GetFullPath($PSCommandPath)
+        $expectedEntry = [IO.Path]::GetFullPath((Join-Path $bundle 'ci-runner/Invoke-IsolatedRunner.ps1'))
+        if (-not [string]::Equals($entryPath,$expectedEntry,[StringComparison]::OrdinalIgnoreCase)) {
+            throw 'PREFLIGHT_ENTRY_PATH_MISMATCH'
+        }
+        foreach ($path in @($releaseRoot,$releases,$bundle,$PSScriptRoot,$manifestPath,$entryPath,$dispatchPath,$statusModulePath)) {
+            Assert-Ci7PreImportProtectedPath $path
+        }
+        Assert-Ci7PreImportParentBoundary $parent
+        Assert-Ci7PreImportParentBoundary $grandparent
+
         $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        if ($manifest.schema -ne 1 -or $manifest.commit -cnotmatch '^[a-f0-9]{40}$' -or
+            $manifest.tree -cnotmatch '^[a-f0-9]{40}$' -or
+            -not [string]::Equals($bundle,[IO.Path]::GetFullPath((Join-Path $releases ([string]$manifest.commit))),[StringComparison]::OrdinalIgnoreCase)) {
+            throw 'PREFLIGHT_PROVENANCE_MISMATCH'
+        }
         $manifestSha = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        foreach ($path in @(
+            'ci-runner/Invoke-IsolatedRunner.ps1',
+            'ci-dispatch/Dispatch.psm1',
+            'ci-dispatch/StatusProjection.psm1'
+        )) {
+            $file = Join-Path $bundle $path
+            $entry = @($manifest.files | Where-Object path -CEQ $path)
+            if ($entry.Count -ne 1 -or $entry[0].sha256 -cnotmatch '^[a-f0-9]{64}$' -or
+                (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -cne $entry[0].sha256) {
+                throw 'BUNDLE_PREFLIGHT_HASH_DRIFT'
+            }
+        }
+        Import-Module $dispatchPath -Force -Global
         $null = Assert-Ci10Bundle $bundle $manifestSha ([string]$manifest.commit) ([string]$manifest.tree)
         Import-Module $statusModulePath -Force -Global
         return $true
     } catch { return $false }
+}
+
+function Assert-Ci7PreImportParentBoundary {
+    param([Parameter(Mandatory)][string]$Path)
+    $item = Get-Item -LiteralPath ([IO.Path]::GetFullPath($Path)) -Force -ErrorAction Stop
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'PREFLIGHT_REPARSE_PATH_REFUSED' }
+    $acl = Get-Acl -LiteralPath $item.FullName
+    if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @('S-1-5-18','S-1-5-32-544')) {
+        throw 'PREFLIGHT_PARENT_OWNER_UNTRUSTED'
+    }
+    $replace = [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership
+    foreach ($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -eq 'Allow' -and
+            -not ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -and
+            ($rule.FileSystemRights -band $replace) -and
+            $rule.IdentityReference.Value -notin @('S-1-5-18','S-1-5-32-544')) {
+            throw 'PREFLIGHT_PARENT_REPLACEMENT_UNTRUSTED'
+        }
+    }
+}
+
+function Assert-Ci7PreImportProtectedPath {
+    param([Parameter(Mandatory)][string]$Path)
+    $full = [IO.Path]::GetFullPath($Path)
+    $cursor = $full
+    while ($cursor) {
+        $item = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'PREFLIGHT_REPARSE_PATH_REFUSED' }
+        $cursor = [IO.Path]::GetDirectoryName($cursor)
+    }
+    $acl = Get-Acl -LiteralPath $full
+    if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @('S-1-5-18','S-1-5-32-544')) {
+        throw 'PREFLIGHT_OWNER_UNTRUSTED'
+    }
+    $write = [Security.AccessControl.FileSystemRights]::Write -bor
+        [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership
+    $rules = @($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+    foreach ($rule in $rules) {
+        if ($rule.AccessControlType -eq 'Allow' -and ($rule.FileSystemRights -band $write) -and
+            $rule.IdentityReference.Value -notin @('S-1-5-18','S-1-5-32-544')) {
+            throw 'PREFLIGHT_ACL_UNTRUSTED_WRITE'
+        }
+    }
+    foreach ($sid in @('S-1-5-18','S-1-5-32-544')) {
+        if (-not @($rules | Where-Object {
+            $_.IdentityReference.Value -eq $sid -and $_.AccessControlType -eq 'Allow' -and
+            ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -eq
+                [Security.AccessControl.FileSystemRights]::FullControl
+        }).Count) {
+            throw 'PREFLIGHT_ACL_REQUIRED_PRINCIPAL_MISSING'
+        }
+    }
 }
 
 function Set-Ci7StatusPhase {

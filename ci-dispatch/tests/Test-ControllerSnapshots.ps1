@@ -21,16 +21,29 @@ function New-ControllerFixture([string]$Commit,[string]$Destination){
     [IO.Compression.ZipFile]::ExtractToDirectory($zip,$Destination)
     Remove-Item -LiteralPath $zip -Force
 }
+function Copy-AcceptedDispatcherFixture([string]$Destination){
+    $commit='4faab579250ad7aaeeb13ae91708973b49bf9d10'
+    $stage=Join-Path $root ('accepted-dispatcher-'+[guid]::NewGuid().ToString('N'))
+    $zip=$stage+'.zip'
+    $null=New-Item -ItemType Directory -Path $stage
+    & git -C $repo archive --format=zip ('--output='+$zip) $commit -- 'ci-dispatch/Dispatch.psm1' 2>$null
+    if($LASTEXITCODE -ne 0){throw 'TEST_DISPATCHER_ARCHIVE_FAILED'}
+    [IO.Compression.ZipFile]::ExtractToDirectory($zip,$stage)
+    $acceptedPath=Join-Path $stage 'ci-dispatch/Dispatch.psm1'
+    $source=[IO.File]::ReadAllText($acceptedPath)
+    [IO.File]::WriteAllText($Destination,$source.Replace("`r`n","`n").Replace("`n","`r`n"),[Text.UTF8Encoding]::new($false))
+    Remove-Item -LiteralPath $stage -Recurse -Force
+    Remove-Item -LiteralPath $zip -Force
+}
 try {
     $snapshots=@(Get-Ci10AcceptedControllerSnapshots)
-    Check 'registry contains the three independently bounded controller snapshots' {
-        Assert ($snapshots.Count -eq 3)
+    Check 'registry contains only the two accepted protected-main controller snapshots' {
+        Assert ($snapshots.Count -eq 2)
         Assert ($snapshots[0].commit -ceq '49f39f5d3a66251ed18c2e776d843feb25f65fe1')
         Assert ($snapshots[0].tree -ceq '4d241fe9bc0fbf190daf2e36be0e9c52966c5a7b')
         Assert ($snapshots[1].commit -ceq '54b9343af44c70db1d1403cf7f45cfc11e8bf167')
         Assert ($snapshots[1].tree -ceq 'beb9b9096b2f4bfa41ad877ad4f6a41150fbcfec')
-        Assert ($snapshots[2].commit -ceq '68a535fd3df17bae59fdb86386fac85e024b1650')
-        Assert ($snapshots[2].tree -ceq '46f9601340762c0c6a552028ec3cd5a5c234d340')
+        Assert (@($snapshots | Where-Object commit -CEQ '68a535fd3df17bae59fdb86386fac85e024b1650').Count -eq 0)
     }
     foreach($snapshot in $snapshots){
         Check ('all runtime controller files match '+$snapshot.commit.Substring(0,7)) {
@@ -82,7 +95,7 @@ try {
         $dispatcherPath=Join-Path $root 'verifier-bundle/ci-dispatch/Dispatch.psm1'
         $recordPath=Join-Path $root 'verifier-bundle/ci-dispatch/verifier-provenance.json'
         $null=New-Item -ItemType Directory -Path (Split-Path $dispatcherPath -Parent) -Force
-        Copy-Item -LiteralPath (Join-Path $repo 'ci-dispatch/Dispatch.psm1') -Destination $dispatcherPath
+        Copy-AcceptedDispatcherFixture $dispatcherPath
         Copy-Item -LiteralPath (Join-Path $repo 'ci-dispatch/verifier-provenance.json') -Destination $recordPath
         $accepted=Get-Content -LiteralPath $recordPath -Raw|ConvertFrom-Json
         $verifierManifest=[pscustomobject]@{dispatcher=$accepted;files=@(

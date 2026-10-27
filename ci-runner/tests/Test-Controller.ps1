@@ -89,6 +89,29 @@ try {
             }
         }
     }
+    Check 'published bundle provenance is checked before dispatcher and status imports' {
+        $runnerPath=Join-Path $PSScriptRoot '../Invoke-IsolatedRunner.ps1'
+        $source=Get-Content -LiteralPath $runnerPath -Raw
+        $tokens=$null;$parseErrors=$null
+        $ast=[System.Management.Automation.Language.Parser]::ParseFile($runnerPath,[ref]$tokens,[ref]$parseErrors)
+        Assert ($parseErrors.Count -eq 0)
+        foreach($functionName in @('Assert-Ci7PreImportParentBoundary','Assert-Ci7PreImportProtectedPath')){
+            $function=$ast.FindAll({param($node)$node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq $functionName},$false)
+            Assert ($function.Count -eq 1)
+        }
+        $preflight=$source.IndexOf('Assert-Ci7PreImportProtectedPath $path',[StringComparison]::Ordinal)
+        $parentBoundary=$source.IndexOf('Assert-Ci7PreImportParentBoundary $parent',[StringComparison]::Ordinal)
+        $manifestRead=$source.IndexOf('$manifest = Get-Content -LiteralPath $manifestPath -Raw',[StringComparison]::Ordinal)
+        $fileHash=$source.IndexOf('Get-FileHash -LiteralPath $file',[StringComparison]::Ordinal)
+        $dispatchImport=$source.IndexOf('Import-Module $dispatchPath',[StringComparison]::Ordinal)
+        $fullBundleCheck=$source.IndexOf('Assert-Ci10Bundle $bundle $manifestSha',[StringComparison]::Ordinal)
+        $statusImport=$source.IndexOf('Import-Module $statusModulePath',[StringComparison]::Ordinal)
+        Assert ($preflight -ge 0 -and $parentBoundary -gt $preflight -and
+            $manifestRead -gt $parentBoundary -and $fileHash -gt $manifestRead -and
+            $dispatchImport -gt $fileHash -and $fullBundleCheck -gt $dispatchImport -and
+            $statusImport -gt $fullBundleCheck)
+    }
     Check 'JIT is ephemeral with auto-update disabled and correct repository' {
         $state.RunnerId = 42
         $runner = @{ agentName = $state.Name; agentId = 42; gitHubUrl = 'https://github.com/' + $config.Repository; ephemeral = $true; disableUpdate = $true }
