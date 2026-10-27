@@ -21,7 +21,6 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $repo=(Get-Location).Path
           Import-Module ./ci-dispatch/Dispatch.psm1 -Force
           $root=Join-Path $env:RUNNER_TEMP ('diag-'+[guid]::NewGuid().ToString('N'))
           New-Item -ItemType Directory -Path $root|Out-Null
@@ -30,28 +29,15 @@ jobs:
           if($LASTEXITCODE -ne 0){throw 'ARCHIVE_FAILED'}
           $bundle=Join-Path $root 'bundle';New-Item -ItemType Directory -Path $bundle|Out-Null
           [IO.Compression.ZipFile]::ExtractToDirectory($archive,$bundle)
-          $accepted=Get-Content (Join-Path $bundle 'ci-dispatch/verifier-provenance.json') -Raw|ConvertFrom-Json
+          $recordPath=Join-Path $bundle 'ci-dispatch/verifier-provenance.json'
+          $accepted=Get-Content $recordPath -Raw|ConvertFrom-Json
           $dispatch=Join-Path $bundle 'ci-dispatch/Dispatch.psm1'
-          $dispatchHash=(Get-FileHash $dispatch -Algorithm SHA256).Hash.ToLowerInvariant()
-          $files=@(Get-Ci10RuntimeFiles|ForEach-Object{[pscustomobject]@{path=$_;sha256=(Get-FileHash (Join-Path $bundle $_) -Algorithm SHA256).Hash.ToLowerInvariant()}})
-          $manifest=[ordered]@{schema=1;commit=('a'*40);tree=('b'*40);dispatcher=$accepted;controllerCommit='54b9343af44c70db1d1403cf7f45cfc11e8bf167';controllerTree='beb9b9096b2f4bfa41ad877ad4f6a41150fbcfec';files=$files}
-          $property=$manifest.PSObject.Properties['dispatcher']
-          $entry=@($manifest.files|Where-Object path -CEQ 'ci-dispatch/Dispatch.psm1')
           'HEAD='+(& git rev-parse HEAD)
           'DISPATCH_BLOB='+(& git rev-parse HEAD:ci-dispatch/Dispatch.psm1)
+          'VERIFIER_RECORD_BLOB='+(& git rev-parse HEAD:ci-dispatch/verifier-provenance.json)
+          'ARCHIVE_DISPATCH_SHA='+((Get-FileHash $dispatch -Algorithm SHA256).Hash.ToLowerInvariant())
+          'ARCHIVE_VERIFIER_RECORD_SHA='+((Get-FileHash $recordPath -Algorithm SHA256).Hash.ToLowerInvariant())
           'RECORD_COMMIT='+$accepted.commit
           'RECORD_TREE='+$accepted.tree
           'RECORD_BLOB='+$accepted.blob
           'RECORD_SHA='+$accepted.sha256
-          'ARCHIVE_DISPATCH_SHA='+$dispatchHash
-          'MANIFEST_ENTRY_COUNT='+$entry.Count
-          if($entry.Count){'MANIFEST_DISPATCH_SHA='+$entry[0].sha256}
-          'DISPATCHER_PROPERTY_PRESENT='+[bool]$property
-          if($property){
-            'ACTUAL_TYPE='+$property.Value.GetType().FullName
-            'ACTUAL_COMMIT='+$property.Value.commit
-            'ACTUAL_TREE='+$property.Value.tree
-            'ACTUAL_BLOB='+$property.Value.blob
-            'ACTUAL_SHA='+$property.Value.sha256
-          }
-          try{$null=Get-Ci10ManifestDispatcherProvenance -BundleRoot $bundle -Manifest $manifest;'VERIFIER_DIRECT=PASS'}catch{'VERIFIER_DIRECT='+$_.Exception.Message}
