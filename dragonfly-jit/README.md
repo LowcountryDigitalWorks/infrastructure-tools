@@ -130,24 +130,26 @@ The source in this slice is intentionally **non-operational**:
   only the exact owner-local non-secret config shape and returns the fixed
   Windows OpenSSH argv plan for later use.
 - The plan fixes `C:\Windows\System32\OpenSSH\ssh.exe`, remote user `eddie`,
-  port 22, one fixed sentinel command, batch mode, strict host-key checking,
-  dedicated known-hosts/private-key paths, identities-only, no agent forwarding,
-  clear-all-forwardings, no local command and no TTY. Capsule/bootstrap bytes are
-  never represented in argv.
+  port 22, one fixed absolute fail-closed sentinel, batch mode, strict host-key
+  checking, dedicated known-hosts/private-key paths, identities-only, no agent
+  forwarding, clear-all-forwardings, no local command and no TTY.
+  Capsule/bootstrap bytes are never represented in argv.
 - The private endpoint and trusted ED25519 host-key fingerprint belong only in a
   future owner-local config under `%LOCALAPPDATA%\LDW\CI-JIT\DragonflyTransport`.
   This public repository contains neither value and does not infer that an
   arbitrary endpoint is private/Tailscale-reachable.
 - `ssh_forced_receiver.py` opens no listener. It accepts only
-  `SSH_ORIGINAL_COMMAND=ldw-dragonfly-jit-handoff-v1`, refuses a CLI surface,
-  requires the normal `eddie` Linux identity when used without test injection,
-  pins the accepted `handoff_contract.py` Git blob
+  `SSH_ORIGINAL_COMMAND=/nonexistent/ldw-dragonfly-jit-handoff-v1`, refuses a
+  CLI surface, requires the normal `eddie` Linux identity when used without test
+  injection, refuses symlinked/group-writable or wrong-owner source paths, pins
+  the accepted `handoff_contract.py` Git blob
   `2f7892275bacd9f56abaa0cdf204f46f79c046c0`, then reuses that contract's
   bounded stdin validation and durable claim path. Raw bootstrap is never emitted.
 
 The fixed client sentinel is defense in depth: if a future dedicated key were
-accidentally installed without its server-side forced command, the client still
-does not request an interactive shell. The future REDRIX key restriction must
+accidentally installed without its server-side forced command, the absolute
+`/nonexistent/...` request fails instead of resolving a remote PATH command or
+requesting an interactive shell. The future REDRIX key restriction must
 independently force the reviewed receiver and disable PTY, agent/X11 forwarding,
 TCP/streamlocal forwarding, SFTP/subsystem and arbitrary commands. Exact
 `restrict`/authorized-key syntax is **not** accepted by this source alone; #115
