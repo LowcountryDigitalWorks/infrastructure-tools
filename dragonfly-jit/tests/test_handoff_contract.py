@@ -121,15 +121,30 @@ class HandoffContractTests(unittest.TestCase):
                 hc.claim_dispatch(summary, state_root=state, now=NOW)
             self.assertEqual(0o700, stat.S_IMODE((state / hc.CLAIM_SUBDIR).stat().st_mode))
 
-    def test_claim_revalidates_dispatch_id_before_path_use(self):
+    def test_claim_revalidates_summary_before_any_path_use(self):
         summary = hc.validate_capsule(capsule(), now=NOW)
-        forged = dict(summary)
-        forged["dispatch_id"] = "../escape"
+        cases = [
+            ("dispatch_id", "../escape", "DISPATCH_ID_INVALID"),
+            ("target_host", "other-host", "TARGET_HOST_INVALID"),
+            ("bootstrap_present", False, "BOOTSTRAP_FLAG_INVALID"),
+        ]
+        for field, replacement, reason in cases:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temp:
+                forged = dict(summary)
+                forged[field] = replacement
+                state = Path(temp) / "state"
+                with self.assertRaisesRegex(hc.HandoffError, reason):
+                    hc.claim_dispatch(forged, state_root=state, now=NOW)
+                self.assertFalse(state.exists())
+
+    def test_claim_rechecks_expiry_at_claim_time(self):
+        summary = hc.validate_capsule(capsule(), now=NOW)
+        later = dt.datetime(2026, 10, 27, 4, 3, 0, tzinfo=dt.timezone.utc)
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp) / "state"
-            with self.assertRaisesRegex(hc.HandoffError, "DISPATCH_ID_INVALID"):
-                hc.claim_dispatch(forged, state_root=state, now=NOW)
-            self.assertFalse((Path(temp) / "escape.json").exists())
+            with self.assertRaisesRegex(hc.HandoffError, "EXPIRED"):
+                hc.claim_dispatch(summary, state_root=state, now=later)
+            self.assertFalse(state.exists())
 
     def test_claim_path_symlink_is_refused(self):
         summary = hc.validate_capsule(capsule(), now=NOW)

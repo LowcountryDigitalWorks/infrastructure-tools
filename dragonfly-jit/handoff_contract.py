@@ -57,6 +57,7 @@ _REQUIRED_FIELDS = {
     "labels",
     "opaque_bootstrap",
 }
+_SUMMARY_FIELDS = (_REQUIRED_FIELDS - {"opaque_bootstrap"}) | {"bootstrap_present"}
 
 
 class HandoffError(RuntimeError):
@@ -103,11 +104,7 @@ def _opaque_bootstrap(value: object) -> str:
     return value
 
 
-def validate_capsule(payload: object, *, now: dt.datetime | None = None) -> dict:
-    if not isinstance(payload, dict):
-        raise HandoffError("CAPSULE_INVALID")
-    if set(payload) != _REQUIRED_FIELDS:
-        raise HandoffError("CAPSULE_FIELDS_INVALID")
+def _validate_identity_fields(payload: dict) -> tuple[str, int, int, int, str, dt.datetime, dt.datetime]:
     if payload["marker"] != MARKER or type(payload["schema"]) is not int or payload["schema"] != SCHEMA:
         raise HandoffError("CAPSULE_IDENTITY_INVALID")
     dispatch_id = _canonical_uuid4(payload["dispatch_id"])
@@ -136,11 +133,24 @@ def validate_capsule(payload: object, *, now: dt.datetime | None = None) -> dict
     ttl = int((expires_at - issued_at).total_seconds())
     if ttl > MAX_TTL_SECONDS:
         raise HandoffError("TTL_INVALID")
+    return dispatch_id, run_id, run_attempt, job_id, head_sha, issued_at, expires_at
+
+
+def _validate_time_window(issued_at: dt.datetime, expires_at: dt.datetime, *, now: dt.datetime | None) -> None:
     current = (now or _utc_now()).astimezone(dt.timezone.utc).replace(microsecond=0)
     if issued_at > current + dt.timedelta(seconds=CLOCK_SKEW_SECONDS):
         raise HandoffError("NOT_YET_VALID")
     if current >= expires_at:
         raise HandoffError("EXPIRED")
+
+
+def validate_capsule(payload: object, *, now: dt.datetime | None = None) -> dict:
+    if not isinstance(payload, dict):
+        raise HandoffError("CAPSULE_INVALID")
+    if set(payload) != _REQUIRED_FIELDS:
+        raise HandoffError("CAPSULE_FIELDS_INVALID")
+    dispatch_id, run_id, run_attempt, job_id, head_sha, issued_at, expires_at = _validate_identity_fields(payload)
+    _validate_time_window(issued_at, expires_at, now=now)
     _opaque_bootstrap(payload["opaque_bootstrap"])
     return {
         "marker": MARKER,
@@ -158,6 +168,33 @@ def validate_capsule(payload: object, *, now: dt.datetime | None = None) -> dict
         "labels": list(LABELS),
         "issued_at": payload["issued_at"],
         "expires_at": payload["expires_at"],
+        "bootstrap_present": True,
+    }
+
+
+def _validate_claim_summary(summary: object, *, now: dt.datetime | None = None) -> dict:
+    if not isinstance(summary, dict) or set(summary) != _SUMMARY_FIELDS:
+        raise HandoffError("SUMMARY_FIELDS_INVALID")
+    dispatch_id, run_id, run_attempt, job_id, head_sha, issued_at, expires_at = _validate_identity_fields(summary)
+    _validate_time_window(issued_at, expires_at, now=now)
+    if summary["bootstrap_present"] is not True:
+        raise HandoffError("BOOTSTRAP_FLAG_INVALID")
+    return {
+        "marker": MARKER,
+        "schema": SCHEMA,
+        "dispatch_id": dispatch_id,
+        "target_host": TARGET_HOST,
+        "profile_id": PROFILE_ID,
+        "repository": REPOSITORY,
+        "workflow": WORKFLOW,
+        "run_id": run_id,
+        "run_attempt": run_attempt,
+        "job_id": job_id,
+        "head_sha": head_sha,
+        "job_name": JOB_NAME,
+        "labels": list(LABELS),
+        "issued_at": summary["issued_at"],
+        "expires_at": summary["expires_at"],
         "bootstrap_present": True,
     }
 
@@ -193,6 +230,7 @@ def _assert_no_symlink(path: Path, *, allow_missing_leaf: bool = False) -> None:
 
 
 def claim_dispatch(summary: dict, *, state_root: Path, now: dt.datetime | None = None) -> Path:
+    summary = _validate_claim_summary(summary, now=now)
     state_root = state_root.expanduser().absolute()
     _assert_no_symlink(state_root, allow_missing_leaf=True)
     state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -203,8 +241,7 @@ def claim_dispatch(summary: dict, *, state_root: Path, now: dt.datetime | None =
     _assert_no_symlink(claims)
     os.chmod(claims, 0o700)
 
-    dispatch_id = _canonical_uuid4(summary.get("dispatch_id"))
-    claim_path = claims / f"{dispatch_id}.json"
+    claim_path = claims / f"{summary['dispatch_id']}.json"
     _assert_no_symlink(claim_path, allow_missing_leaf=True)
     record = {
         "marker": MARKER,
