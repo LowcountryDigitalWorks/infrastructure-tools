@@ -1,0 +1,45 @@
+name: Slice 3 controller archive hash diagnostic
+
+on:
+  push:
+    branches:
+      - host-agent/ci-jit-local-status-slice3-20261026
+    paths:
+      - .github/workflows/slice3-controller-hash.yml
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Measure accepted Stage A archive bytes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $paths=@(
+            'ci-runner/CiRunner.psm1',
+            'ci-runner/Invoke-IsolatedRunner.ps1',
+            'ci-runner/Native.cs',
+            'ci-runner/guest/bootstrap.sh',
+            'ci-runner/guest/ci7-runner.service',
+            'ci-runner/guest/run-one.sh'
+          )
+          $root=Join-Path $env:RUNNER_TEMP 'slice3-controller-hash'
+          New-Item -ItemType Directory -Path $root -Force | Out-Null
+          $zip=Join-Path $root 'controller.zip'
+          git archive --format=zip --output=$zip 68a535fd3df17bae59fdb86386fac85e024b1650 -- $paths
+          if($LASTEXITCODE -ne 0){throw 'ARCHIVE_FAILED'}
+          $out=Join-Path $root 'out'
+          [IO.Compression.ZipFile]::ExtractToDirectory($zip,$out)
+          foreach($path in $paths){
+            $hash=(Get-FileHash -LiteralPath (Join-Path $out $path) -Algorithm SHA256).Hash.ToLowerInvariant()
+            Write-Output ($path+'='+$hash)
+          }
