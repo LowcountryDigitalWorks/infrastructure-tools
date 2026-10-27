@@ -44,7 +44,7 @@ actual_tar_sha="$(sha256sum "$TAR" | awk '{print $1}')"
 )
 
 ZIP_PATH="$ZIP_PATH" MANIFEST="$MANIFEST" TAR="$TAR" EXPECTED_SOURCE_COMMIT="$EXPECTED_SOURCE_COMMIT" EXPECTED_ADAPTER_BLOB="$EXPECTED_ADAPTER_BLOB" PACKAGE_NAME="$PACKAGE_NAME" python3 - <<'PY'
-import hashlib, json, os, tarfile
+import json, os, tarfile
 from pathlib import PurePosixPath
 m=json.load(open(os.environ['MANIFEST'], encoding='utf-8'))
 exact={
@@ -93,7 +93,7 @@ echo "PACKAGE_SHA256=$actual_tar_sha"
 [[ "$MODE" == '--artifact-only' ]] && exit 0
 
 # Everything below is read-only local capability/state discovery. It makes no
-# package, keyring, SSH, Tailscale, service, firewall, runner, or VM changes.
+# package, keyring, SSH, Tailscale, service, firewall, runner, VM, or JIT state changes.
 echo "USER_NAME=$(id -un)"
 echo "USER_UID=$(id -u)"
 if [[ "$(id -u)" == '0' ]]; then echo 'ERROR:ROOT_USER_REFUSED' >&2; exit 1; fi
@@ -127,14 +127,56 @@ fi
 CONTROLLER="$HOME/.local/lib/ldw-dragonfly-jit/dragonfly_jit.py"
 if [[ -f "$CONTROLLER" && ! -L "$CONTROLLER" ]]; then
   echo "CONTROLLER_SHA256=$(sha256sum "$CONTROLLER" | awk '{print $1}')"
-  set +e
-  controller_status="$(/usr/bin/python3 "$CONTROLLER" status 2>&1)"; controller_rc=$?
-  set -e
-  echo "CONTROLLER_STATUS_RC=$controller_rc"
-  printf 'CONTROLLER_STATUS=%s\n' "$controller_status"
 else
   echo 'CONTROLLER=missing_or_symlink'
 fi
+
+# Do not invoke the accepted controller's `status` command here: that command is
+# semantically read-only but calls ensure_roots(), which can create/chmod state
+# directories. Read and validate the state/run tree directly instead.
+JIT_STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/ldw-dragonfly-jit"
+JIT_STATE_ROOT="$JIT_STATE_ROOT" python3 - <<'PY'
+import json, os, stat, uuid
+from pathlib import Path
+root=Path(os.environ['JIT_STATE_ROOT']).absolute()
+status_path=root/'status.json'
+runs_root=root/'runs'
+if root.is_symlink(): raise SystemExit('ERROR:JIT_STATE_ROOT_SYMLINK')
+value={
+ 'schema':1,'marker':'CI-RUNNER-DRAGONFLY-JIT-001','state':'STOPPED',
+ 'updated_at':None,'run_id':None,'qemu_pid':None,'reason':None,
+}
+if status_path.exists() or status_path.is_symlink():
+    if status_path.is_symlink() or not status_path.is_file(): raise SystemExit('ERROR:JIT_STATUS_PATH_INVALID')
+    try: value=json.loads(status_path.read_text(encoding='utf-8'))
+    except Exception as exc: raise SystemExit('ERROR:JIT_STATUS_JSON_INVALID') from exc
+    if not isinstance(value,dict): raise SystemExit('ERROR:JIT_STATUS_OBJECT_REQUIRED')
+allowed={'schema','marker','state','updated_at','run_id','qemu_pid','reason'}
+if set(value)-allowed: raise SystemExit('ERROR:JIT_STATUS_FIELDS_INVALID')
+if value.get('schema')!=1 or value.get('marker')!='CI-RUNNER-DRAGONFLY-JIT-001': raise SystemExit('ERROR:JIT_STATUS_CONTRACT_INVALID')
+if value.get('state') not in {'STOPPED','AVAILABLE','RUNNING','DRAINING','HOLD','FAILED'}: raise SystemExit('ERROR:JIT_STATUS_STATE_INVALID')
+run_id=value.get('run_id')
+if run_id is not None:
+    try: uuid.UUID(run_id)
+    except Exception as exc: raise SystemExit('ERROR:JIT_STATUS_RUN_ID_INVALID') from exc
+qemu=value.get('qemu_pid')
+if qemu is not None and (not isinstance(qemu,int) or isinstance(qemu,bool) or qemu<=0): raise SystemExit('ERROR:JIT_STATUS_PID_INVALID')
+if runs_root.is_symlink(): raise SystemExit('ERROR:JIT_RUNS_ROOT_SYMLINK')
+residue=0
+contaminated=False
+if runs_root.exists():
+    if not runs_root.is_dir(): raise SystemExit('ERROR:JIT_RUNS_ROOT_INVALID')
+    for entry in runs_root.iterdir():
+        if entry.is_symlink() or not entry.is_dir():
+            contaminated=True
+            continue
+        residue += 1
+print('JIT_STATE='+value['state'])
+print('JIT_RUN_ID='+('null' if run_id is None else 'present'))
+print('JIT_QEMU_PID='+('null' if qemu is None else 'present'))
+print('JIT_RESIDUE_COUNT='+str(residue))
+print('JIT_RUN_ROOT='+('contaminated' if contaminated else 'clean'))
+PY
 
 for f in ldw-runner-start.desktop ldw-runner-drain-stop.desktop ldw-runner-status.desktop; do
   p="$HOME/.local/share/applications/$f"
