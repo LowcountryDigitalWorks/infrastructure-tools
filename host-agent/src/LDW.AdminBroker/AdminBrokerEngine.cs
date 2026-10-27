@@ -21,7 +21,7 @@ public sealed class AdminBrokerEngine : IAdminBrokerEngine
         if (request is null) throw new ArgumentNullException(nameof(request));
         if (!Guid.TryParseExact(request.RequestId, "D", out _))
             return Task.FromResult(Failure(request, "InvalidRequest", "Request ID must be a UUID.", "INVALID_REQUEST_ID"));
-        if (!AdminBrokerRequestPolicy.IsAllowed(request))
+        if (CiJitControlContract.IsOperation(request.Operation) && !AdminBrokerRequestPolicy.IsAllowed(request))
             return Task.FromResult(Failure(request, "InvalidRequest", "Request rejected.", "POLICY_REJECTED"));
 
         lock (_requestLock)
