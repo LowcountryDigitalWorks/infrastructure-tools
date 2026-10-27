@@ -43,6 +43,7 @@ public static class CiJitControlContract
         "TARGET_REFUSED",
         "QUEUE_UNAVAILABLE",
         "QUEUE_STALE",
+        "NO_ELIGIBLE_JOB",
         "BUSY",
         "CAPACITY",
         "POLICY_HOLD",
