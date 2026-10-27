@@ -195,16 +195,19 @@ function Write-Ci10StatusProjectionUnsafe {
         [long]$Status.selected_run_id -le 0 -or [long]$Status.selected_job_id -le 0)) { throw 'STATUS_SELECTED_IDENTITY_REFUSED' }
 
     $temp = Join-Path $script:StatusRoot ('status.' + [guid]::NewGuid().ToString('N') + '.pending')
+    $backup = Join-Path $script:StatusRoot ('status.' + [guid]::NewGuid().ToString('N') + '.backup')
     Assert-Ci10StatusProjectionPath $temp
+    Assert-Ci10StatusProjectionPath $backup
     try {
         $Status | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $temp -Encoding utf8NoBOM
         if (Test-Path -LiteralPath $script:StatusPath) {
-            [IO.File]::Replace($temp,$script:StatusPath,$null,$true)
+            [IO.File]::Replace($temp,$script:StatusPath,$backup,$true)
         } else {
             Move-Item -LiteralPath $temp -Destination $script:StatusPath
         }
     } finally {
         if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force }
+        if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Force }
     }
 }
 
