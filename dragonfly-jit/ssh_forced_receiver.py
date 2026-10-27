@@ -25,6 +25,7 @@ HANDOFF_MODULE_NAME = "ldw_dragonfly_handoff_contract"
 HANDOFF_FILENAME = "handoff_contract.py"
 EXPECTED_HANDOFF_GIT_BLOB = "2f7892275bacd9f56abaa0cdf204f46f79c046c0"
 MAX_HANDOFF_BYTES = 256 * 1024
+MAX_RECEIVER_BYTES = 64 * 1024
 
 
 class ReceiverError(RuntimeError):
@@ -36,32 +37,45 @@ def _git_blob_sha1(data: bytes) -> str:
     return hashlib.sha1(header + data).hexdigest()
 
 
-def _assert_regular_private_source(path: Path) -> bytes:
+def _assert_path_not_symlinked(path: Path) -> Path:
     path = path.absolute()
     cursor = Path(path.anchor)
     for part in path.parts[1:]:
         cursor = cursor / part
         if cursor.is_symlink():
             raise ReceiverError("HANDOFF_SOURCE_UNTRUSTED")
+    return path
+
+
+def _assert_owned_regular_source(path: Path, *, max_bytes: int) -> bytes:
+    path = _assert_path_not_symlinked(path)
     try:
         st = path.stat()
     except OSError as exc:
         raise ReceiverError("HANDOFF_SOURCE_UNTRUSTED") from exc
-    if not stat.S_ISREG(st.st_mode) or st.st_size <= 0 or st.st_size > MAX_HANDOFF_BYTES:
+    if not stat.S_ISREG(st.st_mode) or st.st_size <= 0 or st.st_size > max_bytes:
+        raise ReceiverError("HANDOFF_SOURCE_UNTRUSTED")
+    if hasattr(os, "geteuid") and st.st_uid != os.geteuid():
         raise ReceiverError("HANDOFF_SOURCE_UNTRUSTED")
     if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         raise ReceiverError("HANDOFF_SOURCE_UNTRUSTED")
     try:
-        data = path.read_bytes()
+        return path.read_bytes()
     except OSError as exc:
         raise ReceiverError("HANDOFF_SOURCE_UNTRUSTED") from exc
+
+
+def _assert_regular_private_source(path: Path) -> bytes:
+    data = _assert_owned_regular_source(path, max_bytes=MAX_HANDOFF_BYTES)
     if _git_blob_sha1(data) != EXPECTED_HANDOFF_GIT_BLOB:
         raise ReceiverError("HANDOFF_SOURCE_UNTRUSTED")
     return data
 
 
 def _load_handoff_contract():
-    source_path = Path(__file__).resolve().parent / HANDOFF_FILENAME
+    receiver_path = Path(__file__).absolute()
+    _assert_owned_regular_source(receiver_path, max_bytes=MAX_RECEIVER_BYTES)
+    source_path = receiver_path.parent / HANDOFF_FILENAME
     _assert_regular_private_source(source_path)
     spec = importlib.util.spec_from_file_location(HANDOFF_MODULE_NAME, source_path)
     if spec is None or spec.loader is None:
