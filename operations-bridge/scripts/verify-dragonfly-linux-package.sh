@@ -27,6 +27,21 @@ if [[ "$CHECKSUM_NAME" != "$ARCHIVE_NAME.sha256" ]]; then
   exit 1
 fi
 
+CHECKSUM="$CHECKSUM" ARCHIVE_NAME="$ARCHIVE_NAME" python3 - <<'PY'
+import os
+import re
+from pathlib import Path
+
+checksum = Path(os.environ["CHECKSUM"])
+archive_name = os.environ["ARCHIVE_NAME"]
+lines = checksum.read_text(encoding="ascii").splitlines()
+if len(lines) != 1:
+    raise SystemExit("checksum file must contain exactly one record")
+match = re.fullmatch(r"([0-9a-f]{64})  (.+)", lines[0])
+if match is None or match.group(2) != archive_name:
+    raise SystemExit("checksum record is not bound to the exact archive filename")
+PY
+
 (
   cd -- "$ARCHIVE_DIR"
   sha256sum --check --strict -- "$CHECKSUM_NAME"
@@ -68,6 +83,8 @@ manifest_path = root / "manifest.json"
 payload = root / "payload"
 if not manifest_path.is_file() or not payload.is_dir():
     raise SystemExit("package manifest/payload layout is invalid")
+if sorted(path.name for path in root.iterdir()) != ["manifest.json", "payload"]:
+    raise SystemExit("package root contains material outside manifest.json and payload")
 
 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 expected_exact = {
@@ -90,12 +107,15 @@ expected_exact = {
         "gitBlob": "9ffbfd1dd2ea63fd7eece24e1f3eb791c92da0bf",
     },
 }
+expected_keys = set(expected_exact) | {"sourceDateEpoch", "dotnetSdkVersion", "files"}
+if set(manifest) != expected_keys:
+    raise SystemExit("manifest schema contains missing or unexpected fields")
 for key, expected in expected_exact.items():
     if manifest.get(key) != expected:
         raise SystemExit(f"manifest field {key!r} is invalid")
 
 source_epoch = manifest.get("sourceDateEpoch")
-if not isinstance(source_epoch, int) or source_epoch < 0:
+if not isinstance(source_epoch, int) or isinstance(source_epoch, bool) or source_epoch < 0:
     raise SystemExit("manifest sourceDateEpoch is invalid")
 
 sdk_version = manifest.get("dotnetSdkVersion")
@@ -124,7 +144,8 @@ for record in records:
     data = path.read_bytes()
     if hashlib.sha256(data).hexdigest() != record["sha256"]:
         raise SystemExit(f"manifest digest mismatch: {relative}")
-    if len(data) != record["size"]:
+    size = record["size"]
+    if not isinstance(size, int) or isinstance(size, bool) or size < 0 or len(data) != size:
         raise SystemExit(f"manifest size mismatch: {relative}")
     record_names.append(relative)
 
@@ -134,10 +155,6 @@ if sorted(record_names) != actual_names or len(set(record_names)) != len(record_
 entrypoint = root / manifest["entrypoint"]
 if not entrypoint.is_file() or not (entrypoint.stat().st_mode & stat.S_IXUSR):
     raise SystemExit("self-contained entrypoint is missing or not owner-executable")
-
-for forbidden in (root / "config.json", payload / "config.json"):
-    if forbidden.exists():
-        raise SystemExit("package unexpectedly contains runtime configuration")
 
 print(f"PACKAGE_VERIFY=PASS source={expected_commit} sdk={sdk_version} files={len(actual_files)}")
 PY
