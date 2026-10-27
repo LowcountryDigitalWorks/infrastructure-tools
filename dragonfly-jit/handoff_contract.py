@@ -229,17 +229,41 @@ def _assert_no_symlink(path: Path, *, allow_missing_leaf: bool = False) -> None:
             raise HandoffError("CLAIM_PATH_SYMLINK")
 
 
+def _fsync_directory(path: Path) -> None:
+    """Persist one directory inode/entry boundary without following symlinks."""
+    path = path.expanduser().absolute()
+    _assert_no_symlink(path)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise HandoffError("CLAIM_DURABILITY_FAILED") from exc
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        raise HandoffError("CLAIM_DURABILITY_FAILED") from exc
+    finally:
+        os.close(fd)
+
+
 def claim_dispatch(summary: dict, *, state_root: Path, now: dt.datetime | None = None) -> Path:
     summary = _validate_claim_summary(summary, now=now)
     state_root = state_root.expanduser().absolute()
     _assert_no_symlink(state_root, allow_missing_leaf=True)
     state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     _assert_no_symlink(state_root)
+    _fsync_directory(state_root.parent)
+
     claims = state_root / CLAIM_SUBDIR
     _assert_no_symlink(claims, allow_missing_leaf=True)
     claims.mkdir(mode=0o700, exist_ok=True)
     _assert_no_symlink(claims)
     os.chmod(claims, 0o700)
+    _fsync_directory(state_root)
 
     claim_path = claims / f"{summary['dispatch_id']}.json"
     _assert_no_symlink(claim_path, allow_missing_leaf=True)
@@ -277,9 +301,15 @@ def claim_dispatch(summary: dict, *, state_root: Path, now: dt.datetime | None =
     except Exception as exc:
         try:
             claim_path.unlink()
-        except OSError:
+            _fsync_directory(claims)
+        except (OSError, HandoffError):
             pass
         raise HandoffError("CLAIM_WRITE_FAILED") from exc
+
+    # The file contents are durable at this point; persist the directory entry too.
+    # If that final sync fails, leave the exclusive claim marker in place so this
+    # dispatch cannot be retried in-process as though no claim had occurred.
+    _fsync_directory(claims)
     return claim_path
 
 
