@@ -36,6 +36,14 @@ public static class AdminBrokerContract
         public const string HostAgentStatus = "HOST_AGENT_STATUS";
         public const string HostAgentRestartReviewedComponent = "HOST_AGENT_RESTART_REVIEWED_COMPONENT";
         public const string HostAgentRepairReviewedInstall = "HOST_AGENT_REPAIR_REVIEWED_INSTALL";
+        public const string CiJitStatus = "CI_JIT_STATUS";
+        public const string CiJitDiscover = "CI_JIT_DISCOVER";
+        public const string CiJitRunOnce = "CI_JIT_RUN_ONCE";
+        public const string CiJitRecover = "CI_JIT_RECOVER";
+        public const string CiJitAbortActive = "CI_JIT_ABORT_ACTIVE";
+        public const string CiJitListStale = "CI_JIT_LIST_STALE";
+        public const string CiJitRetireStale = "CI_JIT_RETIRE_STALE";
+        public const string CiJitGetOperationResult = "CI_JIT_GET_OPERATION_RESULT";
 
         public static readonly HashSet<string> All = new(StringComparer.Ordinal)
         {
@@ -44,7 +52,15 @@ public static class AdminBrokerContract
             CodyncBotDelete,
             HostAgentStatus,
             HostAgentRestartReviewedComponent,
-            HostAgentRepairReviewedInstall
+            HostAgentRepairReviewedInstall,
+            CiJitStatus,
+            CiJitDiscover,
+            CiJitRunOnce,
+            CiJitRecover,
+            CiJitAbortActive,
+            CiJitListStale,
+            CiJitRetireStale,
+            CiJitGetOperationResult
         };
 
         public static bool IsValid(string? operation) =>
@@ -123,15 +139,40 @@ public static class AdminBrokerContract
                 targetProp.GetString()!,
                 parameters);
 
-            var expected = opProp.GetString() switch
+            var operation = opProp.GetString();
+            var expected = operation switch
             {
                 Operations.CodyncBotCreate or Operations.CodyncBotUpdate => new[] { "name", "description", "endpointUrl", "capabilities" },
-                Operations.CodyncBotDelete or Operations.HostAgentStatus or Operations.HostAgentRestartReviewedComponent or Operations.HostAgentRepairReviewedInstall => Array.Empty<string>(),
+                Operations.CiJitRetireStale => new[] { "runId" },
+                Operations.CiJitGetOperationResult => new[] { "operationId" },
+                Operations.CodyncBotDelete
+                    or Operations.HostAgentStatus
+                    or Operations.HostAgentRestartReviewedComponent
+                    or Operations.HostAgentRepairReviewedInstall
+                    or Operations.CiJitStatus
+                    or Operations.CiJitDiscover
+                    or Operations.CiJitRunOnce
+                    or Operations.CiJitRecover
+                    or Operations.CiJitAbortActive
+                    or Operations.CiJitListStale => Array.Empty<string>(),
                 _ => Array.Empty<string>()
             };
             var supplied = parameters?.Keys.ToHashSet(StringComparer.Ordinal) ?? new HashSet<string>(StringComparer.Ordinal);
             if (!supplied.SetEquals(expected)) return false;
-            if (expected.Length > 0 && (parameters!["name"].ValueKind != JsonValueKind.String || parameters["description"].ValueKind != JsonValueKind.String || parameters["endpointUrl"].ValueKind != JsonValueKind.String || parameters["capabilities"].ValueKind != JsonValueKind.Array)) return false;
+
+            if (operation is Operations.CodyncBotCreate or Operations.CodyncBotUpdate
+                && (parameters!["name"].ValueKind != JsonValueKind.String
+                    || parameters["description"].ValueKind != JsonValueKind.String
+                    || parameters["endpointUrl"].ValueKind != JsonValueKind.String
+                    || parameters["capabilities"].ValueKind != JsonValueKind.Array))
+                return false;
+            if (operation == Operations.CiJitRetireStale
+                && (parameters!["runId"].ValueKind != JsonValueKind.Number || !parameters["runId"].TryGetInt64(out _)))
+                return false;
+            if (operation == Operations.CiJitGetOperationResult
+                && (parameters!["operationId"].ValueKind != JsonValueKind.String
+                    || !Guid.TryParseExact(parameters["operationId"].GetString(), "D", out _)))
+                return false;
 
             return true;
         }

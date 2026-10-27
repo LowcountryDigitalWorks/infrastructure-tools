@@ -24,6 +24,35 @@ public static class AdminBrokerRequestPolicy
                 || !TryCapabilities(parameters))
                 return false;
         }
+        else if (CiJitControlContract.IsOperation(request.Operation))
+        {
+            if (!string.Equals(request.TargetIdentity, CiJitControlContract.TargetIdentity, StringComparison.Ordinal))
+                return false;
+
+            if (request.Operation == AdminBrokerContract.Operations.CiJitRetireStale)
+            {
+                if (parameters is null
+                    || parameters.Count != 1
+                    || !parameters.TryGetValue("runId", out var runId)
+                    || runId.ValueKind != JsonValueKind.Number
+                    || !runId.TryGetInt64(out var value)
+                    || value <= 0)
+                    return false;
+            }
+            else if (request.Operation == AdminBrokerContract.Operations.CiJitGetOperationResult)
+            {
+                if (parameters is null
+                    || parameters.Count != 1
+                    || !parameters.TryGetValue("operationId", out var operationId)
+                    || operationId.ValueKind != JsonValueKind.String
+                    || !Guid.TryParseExact(operationId.GetString(), "D", out _))
+                    return false;
+            }
+            else if (parameters is { Count: > 0 })
+            {
+                return false;
+            }
+        }
         else if (parameters is { Count: > 0 })
         {
             return false;
