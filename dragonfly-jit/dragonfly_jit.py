@@ -375,6 +375,12 @@ class Controller:
                 )
             if current["state"] == "DRAINING":
                 if current.get("run_id") is None and self._guest_lock_available():
+                    try:
+                        run_dirs = self._run_dirs()
+                    except (DragonflyError, OSError):
+                        return self.write_state("HOLD", reason="DRAIN_RESIDUE_UNCERTAIN")
+                    if run_dirs:
+                        return self.write_state("HOLD", reason="DRAIN_RESIDUE")
                     return self.write_state("STOPPED")
                 return self.write_state(
                     "DRAINING",
