@@ -70,6 +70,23 @@ class DragonflyContractTests(unittest.TestCase):
         self.assertEqual("AVAILABLE", state["state"])
         popen.assert_not_called()
 
+    def test_start_refuses_stale_run_directory(self):
+        self.controller.ensure_roots()
+        (self.controller.runs_root / "11111111-1111-4111-8111-111111111111").mkdir()
+        with mock.patch.object(self.controller, "verify_base", return_value={}), \
+             mock.patch.object(mod, "resource_snapshot", return_value=self.admitted_snapshot()):
+            with self.assertRaisesRegex(mod.DragonflyError, "STALE_RUN_STATE_REFUSED"):
+                self.controller.start()
+
+    def test_start_refuses_failed_or_hold_until_recovery(self):
+        self.controller.ensure_roots()
+        for state in ("FAILED", "HOLD"):
+            self.controller.write_state(state, reason="SMOKE_FAILED")
+            with mock.patch.object(self.controller, "verify_base", return_value={}), \
+                 mock.patch.object(mod, "resource_snapshot", return_value=self.admitted_snapshot()):
+                with self.assertRaisesRegex(mod.DragonflyError, "RECOVERY_REQUIRED"):
+                    self.controller.start()
+
     def test_drain_available_goes_stopped(self):
         self.controller.ensure_roots()
         self.controller.write_state("AVAILABLE")
@@ -87,6 +104,13 @@ class DragonflyContractTests(unittest.TestCase):
         self.assertEqual("DRAIN_REQUESTED", state["reason"])
         kill.assert_not_called()
 
+    def test_drain_does_not_clear_hold(self):
+        self.controller.ensure_roots()
+        self.controller.write_state("HOLD", reason="RECOVERY_UNCERTAIN")
+        state = self.controller.drain()
+        self.assertEqual("HOLD", state["state"])
+        self.assertEqual("RECOVERY_UNCERTAIN", state["reason"])
+
     def test_state_rejects_unknown_fields(self):
         self.controller.ensure_roots()
         self.controller.write_state("STOPPED")
@@ -95,6 +119,17 @@ class DragonflyContractTests(unittest.TestCase):
         self.controller.state_path.write_text(json.dumps(payload))
         with self.assertRaisesRegex(mod.DragonflyError, "STATE_FIELDS_INVALID"):
             self.controller.read_state()
+
+    def test_status_projects_stale_residue_as_hold_without_deleting(self):
+        self.controller.ensure_roots()
+        self.controller.write_state("STOPPED")
+        residue = self.controller.runs_root / "11111111-1111-4111-8111-111111111111"
+        residue.mkdir()
+        with mock.patch.object(mod, "resource_snapshot", return_value=self.admitted_snapshot()):
+            status = self.controller.status()
+        self.assertEqual("HOLD", status["state"])
+        self.assertEqual("STALE_RUN_STATE", status["reason"])
+        self.assertTrue(residue.exists())
 
     def test_smoke_qemu_contract_has_kvm_no_inbound_forward_or_host_mount(self):
         self.controller.ensure_roots()
@@ -129,6 +164,16 @@ class DragonflyContractTests(unittest.TestCase):
         self.assertEqual("AVAILABLE", self.controller.read_state()["state"])
         self.assertEqual([], list(self.controller.runs_root.iterdir()))
 
+    def test_smoke_refuses_preexisting_residue(self):
+        self.controller.ensure_roots()
+        self.controller.write_state("AVAILABLE")
+        (self.controller.runs_root / "11111111-1111-4111-8111-111111111111").mkdir()
+        with mock.patch.object(self.controller, "verify_base", return_value={}), \
+             mock.patch.object(mod, "resource_snapshot", return_value=self.admitted_snapshot()), \
+             mock.patch.object(mod.shutil, "which", return_value="/usr/bin/tool"):
+            with self.assertRaisesRegex(mod.DragonflyError, "STALE_RUN_STATE_REFUSED"):
+                self.controller.smoke()
+
     def test_cleanup_refuses_unknown_artifact(self):
         self.controller.ensure_roots()
         run_id, run_dir, overlay, seed, user_data, _manifest = self.controller._new_run()
@@ -151,13 +196,42 @@ class DragonflyContractTests(unittest.TestCase):
             with self.assertRaisesRegex(mod.DragonflyError, "LIVE_GUEST_CLEANUP_REFUSED"):
                 self.controller._cleanup_owned_run(run_dir)
 
-    def test_recover_refuses_multiple_run_directories(self):
+    def test_recover_refuses_multiple_run_directories_and_holds(self):
         self.controller.ensure_roots()
         (self.controller.runs_root / "11111111-1111-4111-8111-111111111111").mkdir()
         (self.controller.runs_root / "22222222-2222-4222-8222-222222222222").mkdir()
         with self.assertRaisesRegex(mod.DragonflyError, "MULTIPLE_RUN_DIRS"):
             self.controller.recover()
         self.assertEqual("HOLD", self.controller.read_state()["state"])
+        self.assertEqual("RECOVERY_UNCERTAIN", self.controller.read_state()["reason"])
+
+    def test_recover_refuses_missing_manifest_and_holds(self):
+        self.controller.ensure_roots()
+        (self.controller.runs_root / "11111111-1111-4111-8111-111111111111").mkdir()
+        with self.assertRaisesRegex(mod.DragonflyError, "OWNERSHIP_MANIFEST_REQUIRED"):
+            self.controller.recover()
+        self.assertEqual("HOLD", self.controller.read_state()["state"])
+
+    def test_recover_refuses_live_owned_pid_and_holds(self):
+        self.controller.ensure_roots()
+        run_id, run_dir, overlay, seed, user_data, _manifest = self.controller._new_run()
+        overlay.write_bytes(b"")
+        seed.write_bytes(b"")
+        user_data.write_text("#cloud-config\n")
+        self.controller._write_manifest(run_id, run_dir, overlay, seed, qemu_pid=1234)
+        with mock.patch.object(mod, "_pid_alive", return_value=True):
+            with self.assertRaisesRegex(mod.DragonflyError, "LIVE_GUEST_CLEANUP_REFUSED"):
+                self.controller.recover()
+        self.assertEqual("HOLD", self.controller.read_state()["state"])
+
+    def test_successful_recovery_converges_to_stopped_not_available(self):
+        self.controller.ensure_roots()
+        self.controller.write_state("FAILED", reason="SMOKE_FAILED")
+        result = self.controller.recover()
+        self.assertEqual("STOPPED", result["state"])
+        state = self.controller.read_state()
+        self.assertEqual("STOPPED", state["state"])
+        self.assertEqual("RECOVERED", state["reason"])
 
 
 if __name__ == "__main__":
