@@ -147,30 +147,73 @@ def install(*, source_dir: Path, home: Path, python_path: Path) -> dict:
         )
         _atomic_write(desktop_dir / filename, content, 0o644)
 
+    verification = check(
+        source_dir=source_dir,
+        home=home,
+        python_path=python_path,
+    )
+    if verification["result"] != "PASS":
+        raise InstallError("POST_INSTALL_VERIFY_FAILED")
+
     return {
         "marker": MARKER,
         "result": "INSTALLED",
         "launchers": [spec[1] for spec in DESKTOP_SPECS],
         "desktop_files": [spec[0] for spec in DESKTOP_SPECS],
         "install_root": str(install_root),
+        "verified": True,
     }
 
 
-def check(*, home: Path) -> dict:
+def check(*, source_dir: Path, home: Path, python_path: Path) -> dict:
+    source_dir = source_dir.expanduser().absolute()
     home = home.expanduser().absolute()
     desktop_dir = home / DESKTOP_SUBDIR
     expected_names = {spec[0] for spec in DESKTOP_SPECS}
     actual_names = _owned_desktop_names(desktop_dir)
     install_root = home / INSTALL_SUBDIR
-    installed_scripts = all(
-        (install_root / name).is_file() and not (install_root / name).is_symlink()
-        for name in ("dragonfly_jit.py", "owner_controls.py")
-    )
+
+    scripts_exact = True
+    for name in ("dragonfly_jit.py", "owner_controls.py"):
+        source = source_dir / name
+        installed = install_root / name
+        if (
+            not source.is_file()
+            or source.is_symlink()
+            or not installed.is_file()
+            or installed.is_symlink()
+            or source.read_bytes() != installed.read_bytes()
+        ):
+            scripts_exact = False
+            break
+
+    desktops_exact = actual_names == expected_names
+    if desktops_exact:
+        control_path = install_root / "owner_controls.py"
+        for filename, name, control, linger, comment in DESKTOP_SPECS:
+            path = desktop_dir / filename
+            if not path.is_file() or path.is_symlink():
+                desktops_exact = False
+                break
+            expected = desktop_text(
+                filename=filename,
+                name=name,
+                control=control,
+                linger=linger,
+                comment=comment,
+                python_path=python_path,
+                control_path=control_path,
+            )
+            if path.read_text(encoding="utf-8") != expected:
+                desktops_exact = False
+                break
+
     return {
         "marker": MARKER,
-        "result": "PASS" if actual_names == expected_names and installed_scripts else "FAIL",
+        "result": "PASS" if scripts_exact and desktops_exact else "FAIL",
         "desktop_files": sorted(actual_names),
-        "scripts_present": installed_scripts,
+        "scripts_exact": scripts_exact,
+        "desktops_exact": desktops_exact,
     }
 
 
@@ -179,7 +222,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("command", choices=("install", "check"))
     parser.add_argument("--home", type=Path, default=Path.home())
     parser.add_argument("--source-dir", type=Path, default=Path(__file__).resolve().parent)
-    parser.add_argument("--python", type=Path, default=Path(os.environ.get("PYTHON", "/usr/bin/python3")))
+    parser.add_argument("--python", type=Path, default=Path("/usr/bin/python3"))
     return parser
 
 
@@ -189,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "install":
             payload = install(source_dir=args.source_dir, home=args.home, python_path=args.python)
         else:
-            payload = check(home=args.home)
+            payload = check(source_dir=args.source_dir, home=args.home, python_path=args.python)
         print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
         return 0 if payload.get("result") in {"INSTALLED", "PASS"} else 2
     except InstallError as exc:

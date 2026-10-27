@@ -35,9 +35,10 @@ def _bounded_error(stderr: str) -> str:
 def run_controller(command: str, *, controller: Path | None = None) -> tuple[int, dict | None, str | None]:
     if command not in COMMANDS:
         return 2, None, "ERROR:CONTROL_INVALID"
-    target = (controller or _controller_path()).resolve()
-    if not target.is_file() or target.is_symlink():
+    candidate = (controller or _controller_path()).expanduser().absolute()
+    if candidate.is_symlink() or not candidate.is_file():
         return 2, None, "ERROR:CONTROLLER_MISSING"
+    target = candidate.resolve()
 
     completed = subprocess.run(
         [sys.executable, str(target), command],

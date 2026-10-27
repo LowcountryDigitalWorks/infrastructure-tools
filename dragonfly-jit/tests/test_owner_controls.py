@@ -47,6 +47,7 @@ class OwnerControlTests(unittest.TestCase):
             files = sorted(path.name for path in desktop_dir.glob("ldw-runner-*.desktop"))
             self.assertEqual(sorted(spec[0] for spec in installer.DESKTOP_SPECS), files)
             self.assertEqual("INSTALLED", result["result"])
+            self.assertTrue(result["verified"])
             for filename, name, control, linger, _comment in installer.DESKTOP_SPECS:
                 text = (desktop_dir / filename).read_text()
                 self.assertIn(f"Name={name}\n", text)
@@ -56,8 +57,15 @@ class OwnerControlTests(unittest.TestCase):
                 self.assertNotIn(" smoke ", text)
                 self.assertNotIn(" recover ", text)
 
-            check = installer.check(home=home)
+            check = installer.check(source_dir=ROOT, home=home, python_path=Path("/usr/bin/python3"))
             self.assertEqual("PASS", check["result"])
+            self.assertTrue(check["scripts_exact"])
+            self.assertTrue(check["desktops_exact"])
+
+            (desktop_dir / "ldw-runner-status.desktop").write_text("[Desktop Entry]\nName=tampered\n")
+            tampered = installer.check(source_dir=ROOT, home=home, python_path=Path("/usr/bin/python3"))
+            self.assertEqual("FAIL", tampered["result"])
+            self.assertFalse(tampered["desktops_exact"])
 
     def test_installer_refuses_unknown_ldw_launcher(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -104,6 +112,18 @@ class OwnerControlTests(unittest.TestCase):
         self.assertEqual(2, rc)
         self.assertIsNone(payload)
         self.assertEqual("ERROR:CAPACITY_MEMORY", error)
+
+    def test_controller_symlink_is_refused_before_resolution(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "real.py"
+            target.write_text("print('x')\n")
+            link = root / "controller.py"
+            link.symlink_to(target)
+            rc, payload, error = controls.run_controller("status", controller=link)
+        self.assertEqual(2, rc)
+        self.assertIsNone(payload)
+        self.assertEqual("ERROR:CONTROLLER_MISSING", error)
 
     def test_linger_is_bounded(self):
         self.assertEqual(2, controls.main(["status", "--linger-seconds", "31"]))
