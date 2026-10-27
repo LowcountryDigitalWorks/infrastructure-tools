@@ -19,7 +19,7 @@ import pwd
 import stat
 import sys
 
-REMOTE_SENTINEL = "ldw-dragonfly-jit-handoff-v1"
+REMOTE_SENTINEL = "/nonexistent/ldw-dragonfly-jit-handoff-v1"
 OWNER_USER = "eddie"
 HANDOFF_MODULE_NAME = "ldw_dragonfly_handoff_contract"
 HANDOFF_FILENAME = "handoff_contract.py"
