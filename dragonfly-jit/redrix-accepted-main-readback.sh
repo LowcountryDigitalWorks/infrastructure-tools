@@ -15,12 +15,13 @@ usage() {
 }
 
 [[ $# -ge 1 && $# -le 2 ]] || usage
+command -v realpath >/dev/null || { echo 'ERROR:REQUIRED_TOOL_MISSING:realpath' >&2; exit 2; }
 ZIP_PATH="$(realpath -- "$1")"
 MODE="${2:-}"
 [[ -f "$ZIP_PATH" ]] || { echo 'ERROR:ARTIFACT_ZIP_MISSING' >&2; exit 2; }
 [[ -z "$MODE" || "$MODE" == '--artifact-only' ]] || usage
 
-for cmd in sha256sum unzip tar python3; do
+for cmd in sha256sum sha512sum unzip tar python3 mktemp stat awk id head grep basename rm; do
   command -v "$cmd" >/dev/null || { echo "ERROR:REQUIRED_TOOL_MISSING:$cmd" >&2; exit 2; }
 done
 
@@ -162,10 +163,14 @@ else
 fi
 
 if [[ -f /usr/share/man/man5/authorized_keys.5.gz ]]; then
-  if zgrep -Eq '(^|[^[:alnum:]_])restrict([^[:alnum:]_]|$)' /usr/share/man/man5/authorized_keys.5.gz; then
-    echo 'AUTHORIZED_KEYS_RESTRICT_DOC=present'
+  if command -v zgrep >/dev/null; then
+    if zgrep -Eq '(^|[^[:alnum:]_])restrict([^[:alnum:]_]|$)' /usr/share/man/man5/authorized_keys.5.gz; then
+      echo 'AUTHORIZED_KEYS_RESTRICT_DOC=present'
+    else
+      echo 'AUTHORIZED_KEYS_RESTRICT_DOC=not_found'
+    fi
   else
-    echo 'AUTHORIZED_KEYS_RESTRICT_DOC=not_found'
+    echo 'AUTHORIZED_KEYS_RESTRICT_DOC=probe_tool_missing'
   fi
 else
   echo 'AUTHORIZED_KEYS_RESTRICT_DOC=manpage_missing'
