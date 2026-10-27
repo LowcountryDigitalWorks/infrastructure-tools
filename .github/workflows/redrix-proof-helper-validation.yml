@@ -1,0 +1,43 @@
+name: REDRIX proof helper validation
+
+on:
+  pull_request:
+    paths:
+      - 'dragonfly-jit/redrix-accepted-main-readback.sh'
+      - 'operations-bridge/scripts/redrix-credential-free-proof.sh'
+      - 'tests/redrix-proof-helpers/test_redrix_proof_helpers.py'
+      - '.github/workflows/redrix-proof-helper-validation.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'dragonfly-jit/redrix-accepted-main-readback.sh'
+      - 'operations-bridge/scripts/redrix-credential-free-proof.sh'
+      - 'tests/redrix-proof-helpers/test_redrix_proof_helpers.py'
+      - '.github/workflows/redrix-proof-helper-validation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Bash syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n dragonfly-jit/redrix-accepted-main-readback.sh
+          bash -n operations-bridge/scripts/redrix-credential-free-proof.sh
+
+      - name: Contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/redrix-proof-helpers/test_redrix_proof_helpers.py
