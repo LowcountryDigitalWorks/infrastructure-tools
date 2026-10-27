@@ -299,16 +299,19 @@ class BridgeAdapterTests(unittest.TestCase):
 
     def test_source_contains_no_network_provider_or_forbidden_controller_commands(self):
         source = MODULE_PATH.read_text()
+        provider_tokens = (
+            "GITHUB" + "_TOKEN",
+            "gh " + "api",
+            "registration" + "-token",
+            "jit" + "config",
+        )
         for token in (
             "socket",
             "requests",
             "urllib",
             "httpx",
             "websocket",
-            "GITHUB_TOKEN",
-            "gh api",
-            "registration-token",
-            "jitconfig",
+            *provider_tokens,
         ):
             self.assertNotIn(token, source)
         self.assertNotIn('"smoke"', source)
