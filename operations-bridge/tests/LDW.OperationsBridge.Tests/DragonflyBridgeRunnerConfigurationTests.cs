@@ -28,6 +28,7 @@ internal static class DragonflyBridgeRunnerConfigurationTests
             "{\"bridgeId\":\"dragonfly-redrix-01\",\"relayConnectUri\":\"wss://evil.example/relay/connect?bridgeId=dragonfly-redrix-01\"}",
             "{\"bridgeId\":\"dragonfly-redrix-01\",\"relayConnectUri\":\"wss://ldw-operations-bridge-relay.locodw.workers.dev/relay/dispatch?bridgeId=dragonfly-redrix-01\"}",
             "{\"bridgeId\":\"dragonfly-redrix-01\",\"relayConnectUri\":\"wss://ldw-operations-bridge-relay.locodw.workers.dev/relay/connect?bridgeId=other\"}",
+            "{\"bridgeId\":\"dragonfly-redrix-01\",\"relayConnectUri\":\"wss://ldw-operations-bridge-relay.locodw.workers.dev/relay/connect?bridgeId=dragonfly-redrix-01#fragment\"}",
             "{\"bridgeId\":\"dragonfly-redrix-01\",\"relayConnectUri\":\"wss://user:pass@ldw-operations-bridge-relay.locodw.workers.dev/relay/connect?bridgeId=dragonfly-redrix-01\"}",
             "{\"bridgeId\":\"dragonfly-redrix-01\",\"relayConnectUri\":\"wss://ldw-operations-bridge-relay.locodw.workers.dev/relay/connect?bridgeId=dragonfly-redrix-01\",\"token\":\"plaintext\"}",
             "{\"bridgeId\":\"dragonfly-redrix-01\",\"relayConnectUri\":\"wss://ldw-operations-bridge-relay.locodw.workers.dev/relay/connect?bridgeId=dragonfly-redrix-01\",\"secretPath\":\"/tmp/token\"}",
