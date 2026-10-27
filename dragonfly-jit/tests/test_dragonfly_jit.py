@@ -138,9 +138,11 @@ class DragonflyContractTests(unittest.TestCase):
         popen.pid = 4242
         popen.wait.return_value = 0
         calls = []
+        kwargs_seen = []
 
         def capture(command, **kwargs):
             calls.append(command)
+            kwargs_seen.append(kwargs)
             return popen
 
         with mock.patch.object(self.controller, "verify_base", return_value={}), \
@@ -157,9 +159,11 @@ class DragonflyContractTests(unittest.TestCase):
         joined = " ".join(str(part) for part in command)
         self.assertIn("-accel kvm", joined)
         self.assertIn("-netdev user,id=net0", joined)
+        self.assertIn("-pidfile", command)
         self.assertNotIn("hostfwd", joined)
         self.assertNotIn("virtiofs", joined)
         self.assertNotIn("9p", joined)
+        self.assertIs(kwargs_seen[0]["preexec_fn"], mod._set_parent_death_signal)
         self.assertEqual(2, run.call_count)
         self.assertEqual("AVAILABLE", self.controller.read_state()["state"])
         self.assertEqual([], list(self.controller.runs_root.iterdir()))
@@ -174,27 +178,39 @@ class DragonflyContractTests(unittest.TestCase):
             with self.assertRaisesRegex(mod.DragonflyError, "STALE_RUN_STATE_REFUSED"):
                 self.controller.smoke()
 
-    def test_cleanup_refuses_unknown_artifact(self):
+    def _make_owned_run(self, *, qemu_pid=None):
         self.controller.ensure_roots()
-        run_id, run_dir, overlay, seed, user_data, _manifest = self.controller._new_run()
+        run_id, run_dir, overlay, seed, user_data, pidfile, _manifest = self.controller._new_run()
         overlay.write_bytes(b"")
         seed.write_bytes(b"")
         user_data.write_text("#cloud-config\n")
-        self.controller._write_manifest(run_id, run_dir, overlay, seed)
+        self.controller._write_manifest(run_id, run_dir, overlay, seed, pidfile, qemu_pid=qemu_pid)
+        return run_id, run_dir, overlay, seed, user_data, pidfile
+
+    def test_cleanup_refuses_unknown_artifact(self):
+        _run_id, run_dir, _overlay, _seed, _user_data, _pidfile = self._make_owned_run()
         (run_dir / "unexpected").write_text("x")
         with self.assertRaisesRegex(mod.DragonflyError, "UNKNOWN_RUN_ARTIFACT_REFUSED"):
             self.controller._cleanup_owned_run(run_dir)
 
     def test_cleanup_refuses_live_owned_pid(self):
-        self.controller.ensure_roots()
-        run_id, run_dir, overlay, seed, user_data, _manifest = self.controller._new_run()
-        overlay.write_bytes(b"")
-        seed.write_bytes(b"")
-        user_data.write_text("#cloud-config\n")
-        self.controller._write_manifest(run_id, run_dir, overlay, seed, qemu_pid=1234)
-        with mock.patch.object(mod, "_pid_alive", return_value=True):
+        _run_id, run_dir, _overlay, _seed, _user_data, _pidfile = self._make_owned_run(qemu_pid=1234)
+        with mock.patch.object(mod, "_pid_alive", side_effect=lambda pid: pid == 1234):
             with self.assertRaisesRegex(mod.DragonflyError, "LIVE_GUEST_CLEANUP_REFUSED"):
                 self.controller._cleanup_owned_run(run_dir)
+
+    def test_cleanup_refuses_live_pidfile_even_before_manifest_pid_update(self):
+        _run_id, run_dir, _overlay, _seed, _user_data, pidfile = self._make_owned_run()
+        pidfile.write_text("4321\n")
+        with mock.patch.object(mod, "_pid_alive", side_effect=lambda pid: pid == 4321):
+            with self.assertRaisesRegex(mod.DragonflyError, "LIVE_GUEST_CLEANUP_REFUSED"):
+                self.controller._cleanup_owned_run(run_dir)
+
+    def test_invalid_pidfile_fails_closed(self):
+        _run_id, run_dir, _overlay, _seed, _user_data, pidfile = self._make_owned_run()
+        pidfile.write_text("not-a-pid\n")
+        with self.assertRaisesRegex(mod.DragonflyError, "PIDFILE_INVALID"):
+            self.controller._cleanup_owned_run(run_dir)
 
     def test_recover_refuses_multiple_run_directories_and_holds(self):
         self.controller.ensure_roots()
@@ -213,13 +229,8 @@ class DragonflyContractTests(unittest.TestCase):
         self.assertEqual("HOLD", self.controller.read_state()["state"])
 
     def test_recover_refuses_live_owned_pid_and_holds(self):
-        self.controller.ensure_roots()
-        run_id, run_dir, overlay, seed, user_data, _manifest = self.controller._new_run()
-        overlay.write_bytes(b"")
-        seed.write_bytes(b"")
-        user_data.write_text("#cloud-config\n")
-        self.controller._write_manifest(run_id, run_dir, overlay, seed, qemu_pid=1234)
-        with mock.patch.object(mod, "_pid_alive", return_value=True):
+        _run_id, _run_dir, _overlay, _seed, _user_data, _pidfile = self._make_owned_run(qemu_pid=1234)
+        with mock.patch.object(mod, "_pid_alive", side_effect=lambda pid: pid == 1234):
             with self.assertRaisesRegex(mod.DragonflyError, "LIVE_GUEST_CLEANUP_REFUSED"):
                 self.controller.recover()
         self.assertEqual("HOLD", self.controller.read_state()["state"])
