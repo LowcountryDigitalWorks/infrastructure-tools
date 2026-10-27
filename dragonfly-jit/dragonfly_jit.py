@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
 import datetime as dt
 import fcntl
 import hashlib
@@ -16,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -36,6 +38,7 @@ MIN_RESERVE_MIB = 8192
 MIN_FREE_DISK_GIB = 16
 MAX_LOAD_FRACTION = 0.70
 SMOKE_TIMEOUT_SECONDS = 180
+PR_SET_PDEATHSIG = 1
 
 
 class DragonflyError(RuntimeError):
@@ -135,6 +138,28 @@ def _pid_alive(pid: int | None) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def _read_pidfile(path: Path) -> int | None:
+    if not path.exists() and not path.is_symlink():
+        return None
+    _assert_no_symlink(path)
+    text = path.read_text(encoding="ascii").strip()
+    if not text.isdigit():
+        raise DragonflyError("PIDFILE_INVALID")
+    pid = int(text)
+    if pid <= 0:
+        raise DragonflyError("PIDFILE_INVALID")
+    return pid
+
+
+def _set_parent_death_signal() -> None:
+    """Linux/Crostini child hook: QEMU must not outlive an abruptly dead controller."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0) != 0:
+        os._exit(126)
+    if os.getppid() == 1:
+        os.kill(os.getpid(), signal.SIGTERM)
 
 
 @contextlib.contextmanager
@@ -343,7 +368,7 @@ class Controller:
             **snapshot,
         }
 
-    def _new_run(self) -> tuple[str, Path, Path, Path, Path, Path]:
+    def _new_run(self) -> tuple[str, Path, Path, Path, Path, Path, Path]:
         run_id = str(uuid.uuid4())
         run_dir = self.runs_root / run_id
         _assert_owned_child(self.runs_root, run_dir)
@@ -351,8 +376,9 @@ class Controller:
         overlay = run_dir / "guest.qcow2"
         seed = run_dir / "seed.img"
         user_data = run_dir / "user-data"
+        pidfile = run_dir / "qemu.pid"
         manifest = run_dir / "ownership.json"
-        return run_id, run_dir, overlay, seed, user_data, manifest
+        return run_id, run_dir, overlay, seed, user_data, pidfile, manifest
 
     @staticmethod
     def _smoke_user_data() -> str:
@@ -373,7 +399,7 @@ power_state:
 """
 
     def _write_manifest(self, run_id: str, run_dir: Path, overlay: Path, seed: Path,
-                        qemu_pid: int | None = None) -> None:
+                        pidfile: Path, qemu_pid: int | None = None) -> None:
         payload = {
             "schema": MANIFEST_SCHEMA,
             "marker": MARKER,
@@ -381,6 +407,7 @@ power_state:
             "run_dir": str(run_dir),
             "overlay": str(overlay),
             "seed": str(seed),
+            "pidfile": str(pidfile),
             "base_filename": BASE_FILENAME,
             "base_sha512": BASE_SHA512,
             "qemu_pid": qemu_pid,
@@ -394,7 +421,7 @@ power_state:
             raise DragonflyError("OWNERSHIP_MANIFEST_REQUIRED")
         value = _read_json(manifest_path)
         required = {
-            "schema", "marker", "run_id", "run_dir", "overlay", "seed",
+            "schema", "marker", "run_id", "run_dir", "overlay", "seed", "pidfile",
             "base_filename", "base_sha512", "qemu_pid"
         }
         if set(value) != required:
@@ -407,9 +434,11 @@ power_state:
             uuid.UUID(value["run_id"])
         except (ValueError, TypeError) as exc:
             raise DragonflyError("OWNERSHIP_RUN_ID_INVALID") from exc
-        if Path(value["run_dir"]).absolute() != run_dir.absolute():
+        if Path(value["run_dir"]).resolve(strict=True) != run_dir.resolve(strict=True):
             raise DragonflyError("OWNERSHIP_RUN_DIR_MISMATCH")
-        for key, expected_name in (("overlay", "guest.qcow2"), ("seed", "seed.img")):
+        for key, expected_name in (
+            ("overlay", "guest.qcow2"), ("seed", "seed.img"), ("pidfile", "qemu.pid")
+        ):
             candidate = Path(value[key])
             if candidate.name != expected_name:
                 raise DragonflyError("OWNERSHIP_FILE_MISMATCH")
@@ -421,14 +450,16 @@ power_state:
 
     def _cleanup_owned_run(self, run_dir: Path) -> None:
         manifest = self._validate_manifest(run_dir)
-        if _pid_alive(manifest.get("qemu_pid")):
+        manifest_pid = manifest.get("qemu_pid")
+        pidfile_pid = _read_pidfile(Path(manifest["pidfile"]))
+        if _pid_alive(manifest_pid) or _pid_alive(pidfile_pid):
             raise DragonflyError("LIVE_GUEST_CLEANUP_REFUSED")
-        allowed_names = {"ownership.json", "guest.qcow2", "seed.img", "user-data"}
+        allowed_names = {"ownership.json", "guest.qcow2", "seed.img", "user-data", "qemu.pid"}
         existing = {entry.name for entry in run_dir.iterdir()}
         unknown = existing - allowed_names
         if unknown:
             raise DragonflyError("UNKNOWN_RUN_ARTIFACT_REFUSED")
-        for name in ("guest.qcow2", "seed.img", "user-data", "ownership.json"):
+        for name in ("guest.qcow2", "seed.img", "user-data", "qemu.pid", "ownership.json"):
             path = run_dir / name
             if path.exists() or path.is_symlink():
                 _assert_owned_child(run_dir, path)
@@ -453,11 +484,11 @@ power_state:
                 if self._run_dirs():
                     raise DragonflyError("STALE_RUN_STATE_REFUSED")
 
-            run_id, run_dir, overlay, seed, user_data, _manifest_path = self._new_run()
+            run_id, run_dir, overlay, seed, user_data, pidfile, _manifest_path = self._new_run()
             try:
                 user_data.write_text(self._smoke_user_data(), encoding="utf-8")
                 os.chmod(user_data, 0o600)
-                self._write_manifest(run_id, run_dir, overlay, seed)
+                self._write_manifest(run_id, run_dir, overlay, seed, pidfile)
 
                 subprocess.run(
                     ["qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b",
@@ -475,10 +506,16 @@ power_state:
                     "-drive", f"if=virtio,format=qcow2,file={overlay}",
                     "-drive", f"if=virtio,format=raw,readonly=on,file={seed}",
                     "-netdev", "user,id=net0", "-device", "virtio-net-pci,netdev=net0",
-                    "-display", "none", "-serial", "none", "-monitor", "none", "-no-reboot",
+                    "-display", "none", "-serial", "none", "-monitor", "none",
+                    "-pidfile", str(pidfile), "-no-reboot",
                 ]
-                process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                self._write_manifest(run_id, run_dir, overlay, seed, qemu_pid=process.pid)
+                process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    preexec_fn=_set_parent_death_signal,
+                )
+                self._write_manifest(run_id, run_dir, overlay, seed, pidfile, qemu_pid=process.pid)
                 with _file_lock(self.state_lock_path):
                     self.write_state("RUNNING", run_id=run_id, qemu_pid=process.pid)
 
@@ -493,7 +530,7 @@ power_state:
                         process.wait(timeout=5)
                     raise DragonflyError("SMOKE_TIMEOUT")
 
-                self._write_manifest(run_id, run_dir, overlay, seed, qemu_pid=None)
+                self._write_manifest(run_id, run_dir, overlay, seed, pidfile, qemu_pid=None)
                 if rc != 0:
                     raise DragonflyError("QEMU_NONZERO_EXIT")
                 result = {"run_id": run_id, "result": "PASS"}
@@ -506,14 +543,12 @@ power_state:
             finally:
                 manifest_path = run_dir / "ownership.json"
                 if manifest_path.exists():
-                    manifest = _read_json(manifest_path)
-                    if not _pid_alive(manifest.get("qemu_pid")):
-                        try:
-                            self._cleanup_owned_run(run_dir)
-                        except DragonflyError:
-                            with _file_lock(self.state_lock_path):
-                                self.write_state("HOLD", run_id=run_id, reason="CLEANUP_UNCERTAIN")
-                            raise
+                    try:
+                        self._cleanup_owned_run(run_dir)
+                    except DragonflyError:
+                        with _file_lock(self.state_lock_path):
+                            self.write_state("HOLD", run_id=run_id, reason="CLEANUP_UNCERTAIN")
+                        raise
 
             with _file_lock(self.state_lock_path):
                 current = self.read_state()
