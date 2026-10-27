@@ -796,12 +796,29 @@ export function normalizeDispatchPayload(payload, nowIso) {
 }
 
 export function finalizeTerminal(row, connectionId, payload, nowIso) {
-  const startedAt = normalizeIsoTimestamp(payload?.startedAt);
-  if (!startedAt) {
+  let terminalStatus = typeof payload?.status === "string" ? payload.status : "FAILED";
+  let evidence = typeof payload?.evidence === "string" ? payload.evidence : "Client terminal message.";
+  let resultPayload = normalizeTerminalPayload(payload?.payload, row.operation);
+
+  if (!ALLOWED_TERMINAL_STATUSES.has(terminalStatus)) {
+    terminalStatus = "FAILED";
+    evidence = "Unsupported terminal status.";
+    resultPayload = {};
+  }
+
+  const rawStartedAt = payload?.startedAt;
+  const startedAt = rawStartedAt === null || rawStartedAt === undefined
+    ? null
+    : normalizeIsoTimestamp(rawStartedAt);
+  if (rawStartedAt !== null && rawStartedAt !== undefined && !startedAt) {
+    return { ok: false, error: "invalid-started-at" };
+  }
+
+  if (!startedAt && terminalStatus !== "BLOCKED" && terminalStatus !== "STALE") {
     return { ok: false, error: "missing-started-at" };
   }
 
-  if (Date.parse(startedAt) > Date.parse(nowIso)) {
+  if (startedAt && Date.parse(startedAt) > Date.parse(nowIso)) {
     return { ok: false, error: "invalid-started-at-order" };
   }
 
@@ -813,16 +830,6 @@ export function finalizeTerminal(row, connectionId, payload, nowIso) {
   const bridgeVersion = observeBridgeVersion(payload?.bridgeVersion);
   if (!bridgeVersion) {
     return { ok: false, error: "missing-bridge-version" };
-  }
-
-  let terminalStatus = typeof payload?.status === "string" ? payload.status : "FAILED";
-  let evidence = typeof payload?.evidence === "string" ? payload.evidence : "Client terminal message.";
-  let resultPayload = normalizeTerminalPayload(payload?.payload, row.operation);
-
-  if (!ALLOWED_TERMINAL_STATUSES.has(terminalStatus)) {
-    terminalStatus = "FAILED";
-    evidence = "Unsupported terminal status.";
-    resultPayload = {};
   }
 
   if (row.delivery_connection_id !== connectionId || row.correlation_id !== payload?.correlationId) {
@@ -843,6 +850,12 @@ export function finalizeTerminal(row, connectionId, payload, nowIso) {
     terminalStatus = "BLOCKED";
     evidence = "Codync accepted-send evidence cannot establish provider completion.";
     resultPayload = {};
+  }
+
+  // Re-check after relay-side status transformations. A no-start client result may
+  // remain no-start only when the final terminal class is BLOCKED or STALE.
+  if (!startedAt && terminalStatus !== "BLOCKED" && terminalStatus !== "STALE") {
+    return { ok: false, error: "missing-started-at" };
   }
 
   return {

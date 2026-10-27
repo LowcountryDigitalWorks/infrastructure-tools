@@ -165,11 +165,12 @@ public sealed class ClientWebSocketBridgeTransport : IBridgeTransport, IAsyncDis
 
     public static object ToTerminalWireMessage(BridgeDispatchResult result)
     {
-        if (!result.StartedAt.HasValue ||
+        var allowsNoExecutionStart = result.TerminalStatus is DispatchTerminalStatus.Blocked or DispatchTerminalStatus.Stale;
+        if ((!result.StartedAt.HasValue && !allowsNoExecutionStart) ||
             !BridgeProtocol.TryObserveBridgeRuntime(result.BridgeRuntime, out var runtime) ||
             !BridgeProtocol.TryObserveBridgeVersion(result.BridgeVersion, out var version))
         {
-            throw new InvalidOperationException("Client terminal wire requires observed startedAt/runtime/version.");
+            throw new InvalidOperationException("Client terminal wire requires valid runtime/version and observed start unless the result is pre-execution BLOCKED/STALE.");
         }
 
         return new
@@ -183,7 +184,7 @@ public sealed class ClientWebSocketBridgeTransport : IBridgeTransport, IAsyncDis
             operation = result.OperationClass,
             resultClass = result.ResultClass,
             status = BridgeProtocol.ToWireTerminalStatus(result.TerminalStatus),
-            startedAt = result.StartedAt.Value.ToString("O"),
+            startedAt = result.StartedAt?.ToString("O"),
             completedAt = result.CompletedAt.ToString("O"),
             evidence = BridgeProtocol.BoundEvidence(result.Evidence),
             payload = BridgeProtocol.BoundPayload(result.Payload, result.Operation)
