@@ -37,6 +37,11 @@ if [[ ! "$SOURCE_DATE_EPOCH" =~ ^[0-9]+$ ]]; then
   echo "source commit timestamp could not be resolved" >&2
   exit 1
 fi
+DOTNET_SDK_VERSION="$(dotnet --version)"
+if [[ ! "$DOTNET_SDK_VERSION" =~ ^[0-9][0-9A-Za-z.+-]{2,31}$ ]]; then
+  echo "dotnet SDK version could not be resolved safely" >&2
+  exit 1
+fi
 
 if [[ -e "$OUTPUT_ROOT" ]]; then
   echo "output directory must not already exist" >&2
@@ -69,6 +74,7 @@ find "$PAYLOAD_DIR" -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} +
 
 SOURCE_COMMIT="$SOURCE_COMMIT" \
 SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
+DOTNET_SDK_VERSION="$DOTNET_SDK_VERSION" \
 PAYLOAD_DIR="$PAYLOAD_DIR" \
 PACKAGE_ROOT="$PACKAGE_ROOT" \
 python3 - <<'PY'
@@ -90,15 +96,22 @@ manifest = {
     "artifact": "ldw-operations-bridge-dragonfly-linux-x64",
     "sourceCommit": os.environ["SOURCE_COMMIT"],
     "sourceDateEpoch": int(os.environ["SOURCE_DATE_EPOCH"]),
+    "dotnetSdkVersion": os.environ["DOTNET_SDK_VERSION"],
     "runtimeIdentifier": "linux-x64",
     "targetFramework": "net10.0",
     "selfContained": True,
+    "requiresSystemDotnet": False,
     "installRoot": "~/.local/lib/ldw/operations-bridge/dragonfly",
     "entrypoint": "payload/LDW.OperationsBridge.Runner",
     "configurationPath": "~/.config/ldw/operations-bridge/dragonfly/config.json",
     "statePath": "~/.local/state/ldw/operations-bridge/dragonfly/health.json",
     "containsConfiguration": False,
     "containsCredential": False,
+    "requiredHostBinaries": ["/usr/bin/python3", "/usr/bin/secret-tool"],
+    "requiredExternalAdapter": {
+        "path": "~/.local/lib/ldw-dragonfly-jit/bridge_adapter.py",
+        "gitBlob": "9ffbfd1dd2ea63fd7eece24e1f3eb791c92da0bf",
+    },
     "files": records,
 }
 (package_root / "manifest.json").write_text(
