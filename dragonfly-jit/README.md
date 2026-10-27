@@ -4,12 +4,12 @@ Work item: `LowcountryDigitalWorks/infrastructure-tools#96`.
 Cross-LDW acceptance/evidence: `LowcountryDigitalWorks/business-operations#552`.
 Existing queue/discovery/auth control plane: `ci-dispatch` / issue #10.
 
-This directory is the source-only host foundation for the HP Elite Dragonfly
+This directory is the source-controlled host foundation for the HP Elite Dragonfly
 Chromebook REDRIX Crostini execution host. It does **not** register a GitHub
 runner, poll GitHub, store a GitHub credential, install a standing task, or alter
 workflow routing. LDW01 remains the trusted dispatcher/control owner.
 
-## Current slice
+## Local lifecycle
 
 `dragonfly_jit.py` provides a closed local lifecycle surface:
 
@@ -25,12 +25,12 @@ workflow routing. LDW01 remains the trusted dispatcher/control owner.
 - `recover` — reconcile only conclusively owned transient state; ambiguous or
   live state fails closed rather than deleting by prefix.
 
-The smoke command exists to exercise the same host primitive already proven live.
-It is not a GitHub Actions runner and is not workload authorization.
+The smoke command exists to exercise the host primitive. It is not a GitHub
+Actions runner and is not workload authorization.
 
 ## Pinned base
 
-The accepted local base filename is:
+Accepted local base filename:
 
 `debian-13-genericcloud-amd64.qcow2`
 
@@ -40,9 +40,8 @@ Pinned SHA-512:
 
 The image was acquired from Debian's `trixie/latest` genericcloud location and
 verified against Debian's published SHA512SUMS during the live feasibility proof.
-The mutable `latest` locator is recorded only as acquisition evidence; runtime
-trust is the exact pinned digest above. This slice does not auto-refresh or
-silently accept a newer image.
+The mutable `latest` locator is provenance only; runtime trust is the exact digest.
+This source does not auto-refresh or silently accept a newer image.
 
 Default local paths use XDG locations and contain no machine address or secret:
 
@@ -55,7 +54,7 @@ The base is never booted directly. Every smoke run uses a fresh qcow2 overlay.
 
 - one active local controller/guest maximum via an exclusive file lock;
 - exact base digest verification before launch;
-- symlink/reparse-style path substitution is refused for owned runtime files;
+- symlink substitution is refused for owned runtime files;
 - owned run directories use a fixed marker and manifest schema;
 - cleanup may delete only manifest-declared files inside the exact owned run
   directory;
@@ -66,50 +65,72 @@ The base is never booted directly. Every smoke run uses a fresh qcow2 overlay.
 - no raw guest console is persisted by the controller;
 - no GitHub token, JIT configuration, customer data, private repository payload,
   or provider response is accepted by this slice;
-- ambiguous state enters HOLD/FAILED and requires reconciliation; it is never
-  treated as cleanup authority.
+- ambiguous state enters HOLD/FAILED and requires explicit reconciliation.
 
 The initial conservative smoke envelope is 2 vCPU / 2 GiB RAM, with at least
 8 GiB additional Crostini `MemAvailable`, at least 16 GiB free storage, and a
 1-minute load average no greater than 70% of visible CPUs. These are admission
-bounds for the source candidate, not final production tuning.
+bounds, not final production tuning or a stronger workload/security certification.
 
 ## Owner controls
 
-The eventual ChromeOS-visible controls remain exactly:
+`owner_controls.py` is a presentation-only wrapper over the co-installed local
+controller. `install_owner_controls.py` installs a user-level copy under
+`~/.local/lib/ldw-dragonfly-jit/` and creates **exactly three** Linux application
+launchers under `~/.local/share/applications/`:
 
 1. **Start LDW Runner** -> local `start` semantics;
 2. **Drain & Stop LDW Runner** -> local `drain` semantics;
 3. **LDW Runner Status** -> local `status` semantics.
 
-This slice intentionally does not install `.desktop` launchers yet. Launcher
-installation follows after the lifecycle source and tests are accepted so the UI
-cannot outrun the underlying fail-closed state machine.
+The launchers use `Terminal=true` and a bounded short linger so the owner can see
+the result before the terminal closes. Status renders only the controller's
+bounded state/resource fields. Unrecognized fields are not displayed.
+
+The installer is user-level only. It creates no service, daemon, task, schedule,
+queue poller, listener, provider integration, credential, auto-recovery path, or
+emergency force-stop launcher. If an unexpected `ldw-runner-*.desktop` entry is
+already present, installation fails closed instead of deleting it.
+
+Source-tree install/check commands:
+
+```bash
+python3 dragonfly-jit/install_owner_controls.py install
+python3 dragonfly-jit/install_owner_controls.py check
+```
+
+Installation copies the reviewed controller and owner wrapper into the user-level
+application directory; the launchers invoke that local copy rather than a mutable
+working-tree path.
 
 ## Validation
 
-Source-only validation:
+Source validation:
 
 ```bash
+python3 -m py_compile \
+  dragonfly-jit/dragonfly_jit.py \
+  dragonfly-jit/owner_controls.py \
+  dragonfly-jit/install_owner_controls.py
+
 python3 -m unittest discover -s dragonfly-jit/tests -p 'test_*.py' -v
-python3 -m py_compile dragonfly-jit/dragonfly_jit.py
 ```
 
-A GitHub-hosted validation workflow runs only those source tests. It does not use
-KVM or any self-hosted runner and does not route work to Dragonfly.
+The hosted workflow performs these source checks only. It does not use KVM or any
+self-hosted runner and does not route work to Dragonfly.
 
-## Next gate
+## Next gates
 
-After this source foundation is reviewed:
+After the owner-control source and local installation behavior are independently
+reviewed and proven on REDRIX:
 
-1. prove the controller on the exact Dragonfly with the already-pinned base;
-2. add the three local launchers;
-3. define the authenticated **LDW01 -> Dragonfly** exact host-target handoff
+1. define the authenticated **LDW01 -> Dragonfly** exact host-target handoff
    without copying broad GitHub auth to Dragonfly;
-4. add a secretless one-job GitHub synthetic profile;
-5. prove interruption/duplicate-launch/drain/cleanup behavior;
-6. obtain fresh independent exact-head review before assigning any stronger
-   isolation/security workload class.
+2. add a harmless secretless one-job GitHub synthetic profile;
+3. prove provider-positive one-job assignment/start/success plus interruption,
+   duplicate-launch refusal, drain and destructive cleanup;
+4. obtain fresh independent exact-head review before assigning any stronger
+   isolation/security label or routing real private security work.
 
 No production routing, customer/regulated workload, standing poller, security
 weakening, paid capacity, or claim of Hyper-V-equivalent isolation is authorized
