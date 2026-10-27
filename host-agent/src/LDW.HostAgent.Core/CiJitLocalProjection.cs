@@ -11,6 +11,7 @@ public static class CiJitLocalProjection
     public const int Schema = 1;
     public const string SourceVersion = "ci-jit-v1";
     public static readonly TimeSpan QueueFreshnessWindow = TimeSpan.FromMinutes(2);
+    public static readonly TimeSpan ActiveLocalFreshnessWindow = TimeSpan.FromMinutes(2);
     public static readonly TimeSpan BootComparisonTolerance = TimeSpan.FromMinutes(2);
 
     private static readonly HashSet<string> Fields = new(StringComparer.Ordinal)
@@ -105,7 +106,17 @@ public static class CiJitLocalProjection
             throw new InvalidDataException("Selected CI/JIT queue identity must be complete or absent.");
 
         var sameBoot = (bootStartedUtc - estimatedBootStartedUtc).Duration() <= BootComparisonTolerance;
-        var localStateFresh = sameBoot;
+        var activePhase = controllerPhase is
+            CiJitControllerPhase.Planned
+            or CiJitControllerPhase.Registered
+            or CiJitControllerPhase.Provisioned
+            or CiJitControllerPhase.Running
+            or CiJitControllerPhase.JobCompleted
+            or CiJitControllerPhase.RunnerAbsent
+            or CiJitControllerPhase.GuestRemoved
+            or CiJitControllerPhase.ArtifactsRemoved;
+        var localStateFresh = sameBoot
+            && (!activePhase || nowUtc - localObservedAtUtc <= ActiveLocalFreshnessWindow);
         var effectiveQueueState = queueState;
         if (queueState == CiJitQueueState.Fresh
             && nowUtc - queueObservedAtUtc!.Value > QueueFreshnessWindow)
@@ -123,7 +134,7 @@ public static class CiJitLocalProjection
         {
             // The resolver validates that a proven failure uses only a failure-class reason.
         }
-        else if (!sameBoot)
+        else if (!localStateFresh)
         {
             reason = "LOCAL_STATE_STALE";
         }

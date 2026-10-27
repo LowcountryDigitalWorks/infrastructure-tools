@@ -16,110 +16,22 @@ Import-Module (Join-Path $PSScriptRoot 'CiRunner.psm1') -Force
 $approvedList = @($ApprovedRepositories | ForEach-Object { $_ -split ',' })
 $staticLabelsList = if ($StaticLabels) { @($StaticLabels | ForEach-Object { $_ -split ',' }) } else { $null }
 
-$statusRoot = Join-Path $env:ProgramData 'LDW/CiJitStatus'
-$statusPath = Join-Path $statusRoot 'status.json'
-$statusLockPath = Join-Path $statusRoot 'status.lock'
 $statusActivePhases = @('Planned','Registered','Provisioned','Running','JobCompleted','RunnerAbsent','GuestRemoved','ArtifactsRemoved')
-
-function Get-Ci7StatusBootStartedUtc {
-    [DateTimeOffset]::UtcNow.AddMilliseconds(-[Environment]::TickCount64).ToUniversalTime()
-}
-
-function Assert-Ci7StatusPath([string]$Path) {
-    $root = [IO.Path]::GetFullPath($statusRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
-    $full = [IO.Path]::GetFullPath($Path)
-    if ($full -cne $root -and -not $full.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'STATUS_PATH_OUTSIDE_OWNED_ROOT'
-    }
-    $cursor = $full
-    while ($cursor) {
-        if ((Test-Path -LiteralPath $cursor) -and ((Get-Item -LiteralPath $cursor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-            throw 'STATUS_REPARSE_PATH_REFUSED'
-        }
-        if ($cursor -ceq $root) { break }
-        $cursor = [IO.Path]::GetDirectoryName($cursor)
-    }
-}
-
-function Protect-Ci7StatusRoot {
-    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
-        [void](New-Item -ItemType Directory -Path $statusRoot -Force)
-        return
-    }
-    if (-not (Test-Path -LiteralPath $statusRoot)) {
-        [void](New-Item -ItemType Directory -Path $statusRoot -Force)
-        $acl = [Security.AccessControl.DirectorySecurity]::new()
-        $acl.SetAccessRuleProtection($true,$false)
-        $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
-        foreach ($sid in @('S-1-5-18','S-1-5-32-544')) {
-            $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
-                [Security.Principal.SecurityIdentifier]::new($sid),
-                'FullControl','ContainerInherit,ObjectInherit','None','Allow'))
-        }
-        Set-Acl -LiteralPath $statusRoot -AclObject $acl
-    }
-    Assert-Ci7StatusPath $statusRoot
-    $acl = Get-Acl -LiteralPath $statusRoot
-    if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @('S-1-5-18','S-1-5-32-544')) {
-        throw 'STATUS_ROOT_OWNER_UNTRUSTED'
-    }
-    $write = [Security.AccessControl.FileSystemRights]::Write -bor
-        [Security.AccessControl.FileSystemRights]::Delete -bor
-        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
-        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-        [Security.AccessControl.FileSystemRights]::TakeOwnership
-    foreach ($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
-        if ($rule.AccessControlType -eq 'Allow' -and ($rule.FileSystemRights -band $write) -and
-            $rule.IdentityReference.Value -notin @('S-1-5-18','S-1-5-32-544')) {
-            throw 'STATUS_ROOT_UNTRUSTED_WRITE'
-        }
-    }
-}
-
-function Get-Ci7StatusDefault {
-    [ordered]@{
-        schema=1; source_version='ci-jit-v1'; boot_started_utc=(Get-Ci7StatusBootStartedUtc).ToString('O')
-        local_observed_at_utc=[DateTimeOffset]::UtcNow.ToUniversalTime().ToString('O')
-        provenance_valid=$false; proven_failure=$false; controller_phase=$null; capacity='UNKNOWN'; reason_code='LOCAL_STATE_UNAVAILABLE'
-        queue_observed_at_utc=$null; queue_state='UNAVAILABLE'; eligible_queued_count=$null; held_queued_count=$null
-        selected_profile=$null; selected_run_id=$null; selected_job_id=$null
-    }
-}
-
-function Read-Ci7StatusUnsafe {
-    if (-not (Test-Path -LiteralPath $statusPath -PathType Leaf)) { return Get-Ci7StatusDefault }
-    try { $status = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json }
-    catch { return Get-Ci7StatusDefault }
-    $required = @('schema','source_version','boot_started_utc','local_observed_at_utc','provenance_valid','proven_failure','controller_phase','capacity','reason_code','queue_observed_at_utc','queue_state','eligible_queued_count','held_queued_count','selected_profile','selected_run_id','selected_job_id')
-    try { $sameBoot = (([DateTimeOffset]::Parse([string]$status.boot_started_utc).ToUniversalTime() - (Get-Ci7StatusBootStartedUtc)).Duration() -le [TimeSpan]::FromMinutes(2)) }
-    catch { $sameBoot = $false }
-    if ($status.schema -ne 1 -or $status.source_version -cne 'ci-jit-v1' -or
-        @(Compare-Object $required @($status.PSObject.Properties.Name) -CaseSensitive).Count -or -not $sameBoot) {
-        return Get-Ci7StatusDefault
-    }
-    $status
-}
-
-function Write-Ci7StatusUnsafe([object]$Status) {
-    $temp = Join-Path $statusRoot ('status.' + [guid]::NewGuid().ToString('N') + '.pending')
-    Assert-Ci7StatusPath $temp
-    try {
-        $Status | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $temp -Encoding utf8NoBOM
-        if (Test-Path -LiteralPath $statusPath) { [IO.File]::Replace($temp,$statusPath,$null,$true) }
-        else { Move-Item -LiteralPath $temp -Destination $statusPath }
-    } finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force } }
-}
 
 function Test-Ci7PublishedBundle {
     try {
         $bundle = Split-Path $PSScriptRoot -Parent
         $manifestPath = Join-Path $bundle 'manifest.json'
         $dispatchPath = Join-Path $bundle 'ci-dispatch/Dispatch.psm1'
-        if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf) -or -not (Test-Path -LiteralPath $dispatchPath -PathType Leaf)) { return $false }
-        Import-Module $dispatchPath -Force
+        $statusModulePath = Join-Path $bundle 'ci-dispatch/StatusProjection.psm1'
+        if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $dispatchPath -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $statusModulePath -PathType Leaf)) { return $false }
+        Import-Module $dispatchPath -Force -Global
         $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
         $manifestSha = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
         $null = Assert-Ci10Bundle $bundle $manifestSha ([string]$manifest.commit) ([string]$manifest.tree)
+        Import-Module $statusModulePath -Force -Global
         return $true
     } catch { return $false }
 }
@@ -131,24 +43,11 @@ function Set-Ci7StatusPhase {
         [switch]$ProvenFailure,
         [ValidateSet('STALE_RESIDUE')][string]$FailureReason
     )
-    Protect-Ci7StatusRoot
-    Assert-Ci7StatusPath $statusLockPath
-    $statusLock = $null
-    try {
-        $statusLock = [IO.File]::Open($statusLockPath,'OpenOrCreate','ReadWrite','None')
-        $prior = Read-Ci7StatusUnsafe
-        $next = [ordered]@{
-            schema=1; source_version='ci-jit-v1'; boot_started_utc=(Get-Ci7StatusBootStartedUtc).ToString('O')
-            local_observed_at_utc=[DateTimeOffset]::UtcNow.ToUniversalTime().ToString('O')
-            provenance_valid=[bool]$ProvenanceValid; proven_failure=[bool]$ProvenFailure; controller_phase=$Phase
-            capacity=if ($Phase -in $statusActivePhases) { 'BUSY' } else { 'READY' }
-            reason_code=if ($ProvenFailure) { $FailureReason } elseif ($Phase -in $statusActivePhases) { 'BUSY' } else { $null }
-            queue_observed_at_utc=$prior.queue_observed_at_utc; queue_state=$prior.queue_state
-            eligible_queued_count=$prior.eligible_queued_count; held_queued_count=$prior.held_queued_count
-            selected_profile=$prior.selected_profile; selected_run_id=$prior.selected_run_id; selected_job_id=$prior.selected_job_id
-        }
-        Write-Ci7StatusUnsafe $next
-    } finally { if ($statusLock) { $statusLock.Dispose() } }
+    $arguments = @{ Phase = $Phase }
+    if ($ProvenanceValid) { $arguments.ProvenanceValid = $true }
+    if ($ProvenFailure) { $arguments.ProvenFailure = $true }
+    if ($FailureReason) { $arguments.FailureReason = $FailureReason }
+    try { Set-Ci10StatusControllerPhase @arguments } catch { return }
 }
 
 $state = $null
@@ -248,7 +147,7 @@ try {
             }
             $job = Get-Ci7MonitoredJob $state
             if ($job.id -ne $state.JobId -or ($job.runner_id -and $job.runner_id -ne $state.RunnerId)) { throw 'UNEXPECTED_JOB_ASSIGNMENT' }
-            if ([DateTime]::UtcNow - $lastProgress -ge [TimeSpan]::FromSeconds(45)) { 'LIFECYCLE_WAIT=BOUNDED'; $lastProgress = [DateTime]::UtcNow }
+            if ([DateTime]::UtcNow - $lastProgress -ge [TimeSpan]::FromSeconds(45)) { 'LIFECYCLE_WAIT=BOUNDED'; if ($statusProvenanceValid) { Set-Ci7StatusPhase Running -ProvenanceValid }; $lastProgress = [DateTime]::UtcNow }
             if ($job.status -ne 'completed') {
                 $vm = Get-VM -Id $state.VMId -ErrorAction Stop
                 Assert-Ci7OwnedVm $state $vm

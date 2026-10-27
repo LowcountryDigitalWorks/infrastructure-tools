@@ -70,6 +70,14 @@ internal static class CiJitLocalProjectionTests
         Assert(!oldBoot.LocalStateFresh && oldBoot.State == CiJitOwnerState.Unknown && oldBoot.ReasonCode == "LOCAL_STATE_STALE",
             "prior-boot projection fails closed");
 
+        var staleRunning = CiJitLocalProjection.Parse(Projection(
+            controllerPhase: "\"Running\"",
+            capacity: "BUSY",
+            reasonCode: "\"BUSY\"",
+            localObserved: now.AddMinutes(-3)), now, boot);
+        Assert(!staleRunning.LocalStateFresh && staleRunning.State == CiJitOwnerState.Unknown && staleRunning.ReasonCode == "LOCAL_STATE_STALE",
+            "stale active controller projection fails closed until heartbeat refresh");
+
         var unavailable = CiJitLocalProjection.Parse(Projection(
             queueState: "UNAVAILABLE",
             eligible: "null",

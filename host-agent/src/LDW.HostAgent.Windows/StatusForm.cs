@@ -66,7 +66,6 @@ internal sealed class StatusForm : Form
         _name.Text = $"{live.Definition.Name}  ·  LDW Host Agent";
         SetOverall(live.Snapshot.Color, live.Snapshot.Summary);
         _refreshed.Text = $"Last refreshed {live.Snapshot.ObservedAt.ToLocalTime():g}";
-        _groups.Controls.Add(CreateCiJitCard(live.CiJitStatus));
         var observations = live.Snapshot.Components.ToDictionary(x => x.ComponentId, StringComparer.OrdinalIgnoreCase);
         foreach (var environment in live.Definition.Environments)
         {
@@ -89,6 +88,8 @@ internal sealed class StatusForm : Form
             }
             card.Controls.Add(rows);
             _groups.Controls.Add(card);
+            if (environment.Id == "development-automation")
+                _groups.Controls.Add(CreateCiJitCard(live.CiJitStatus));
         }
         _groups.ResumeLayout();
     }
@@ -104,9 +105,10 @@ internal sealed class StatusForm : Form
     private static Panel CreateCiJitCard(CiJitStatusSnapshot status)
     {
         var state = StatusPresentation.For(status.Color);
-        var phase = status.ControllerPhase?.ToString() ?? "None";
-        var detail = $"{status.State} · {status.QueueSummary} · capacity {status.Capacity} · phase {phase}";
-        if (!string.IsNullOrWhiteSpace(status.ReasonCode)) detail += $" · {status.ReasonCode}";
+        var reason = string.IsNullOrWhiteSpace(status.ReasonCode)
+            ? null
+            : status.ReasonCode.Replace('_', ' ').ToLowerInvariant();
+        var detail = reason is null ? status.QueueSummary : $"{status.QueueSummary} · {reason}";
 
         var card = new Panel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, BackColor = Color.White, Padding = new Padding(15), Margin = new Padding(0, 0, 0, 12), MinimumSize = new Size(700, 0), MaximumSize = new Size(760, 0), Width = 700 };
         var rows = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, FlowDirection = FlowDirection.TopDown, WrapContents = false, Dock = DockStyle.Fill, MaximumSize = new Size(720, 0) };

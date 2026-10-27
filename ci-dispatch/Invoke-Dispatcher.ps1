@@ -114,6 +114,7 @@ try {
     $verified = $true
     if ($DiscoverHoldSeconds -and $Mode -cne 'Discover') { throw 'DISCOVERY_HOLD_REQUIRES_DISCOVER_MODE' }
     Import-Module (Join-Path $bundle 'ci-runner/CiRunner.psm1') -Force
+    Import-Module (Join-Path $bundle 'ci-dispatch/StatusProjection.psm1') -Force
     Assert-Ci7Elevated
     $profiles = @(Read-Ci10Profiles (Join-Path $PSScriptRoot 'profiles.json'))
     $lock = Enter-Ci10DispatcherLock $dispatchRoot
@@ -135,6 +136,9 @@ try {
             elseif (@($gates | Where-Object Value -ceq 'CAPACITY').Count) { 'CAPACITY' }
             elseif (@($gates | Where-Object Value -ceq 'READY').Count -eq $profiles.Count) { 'READY' }
             else { 'CONTROLLER_GATE_UNCERTAIN' }
+        $queueProjection = Get-Ci10QueueSnapshot $profiles
+        $projectionCapacity = if ($gate -in @('READY','BUSY','CAPACITY')) { $gate } else { 'UNKNOWN' }
+        try { Set-Ci10StatusQueueProjection -QueueSnapshot $queueProjection -Capacity $projectionCapacity -ProvenanceValid } catch { }
         if ($Mode -eq 'Recover') {
             if ($gate -notin @('READY','CAPACITY')) { throw 'RECOVERY_BUSY_OR_UNCERTAIN' }
             'DISPATCHER_RESULT=RECOVERED'
