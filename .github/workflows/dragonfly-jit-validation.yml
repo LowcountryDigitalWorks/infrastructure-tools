@@ -1,0 +1,37 @@
+name: Dragonfly JIT source validation
+
+on:
+  pull_request:
+    paths:
+      - 'dragonfly-jit/**'
+      - '.github/workflows/dragonfly-jit-validation.yml'
+  push:
+    branches:
+      - 'feat/ci-runner-dragonfly-jit-001'
+    paths:
+      - 'dragonfly-jit/**'
+      - '.github/workflows/dragonfly-jit-validation.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compile controller, owner controls, and local adapter
+        run: python3 -m py_compile dragonfly-jit/dragonfly_jit.py dragonfly-jit/owner_controls.py dragonfly-jit/install_owner_controls.py dragonfly-jit/bridge_adapter.py
+      - name: Run lifecycle contract tests
+        run: python3 -m unittest discover -s dragonfly-jit/tests -p 'test_*.py' -v
+      - name: Refuse credential/provider coupling in foundation slice
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -RInE '(gh api|GITHUB_TOKEN|ACTIONS_RUNTIME_TOKEN|registration-token|jitconfig)' dragonfly-jit --exclude='README.md'; then
+            echo 'Foundation slice must remain credential/provider independent.' >&2
+            exit 1
+          fi
