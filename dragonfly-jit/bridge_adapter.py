@@ -246,6 +246,9 @@ def main() -> int:
     except AdapterError as exc:
         _emit({"marker": MARKER, "result": "FAILED", "reason": str(exc)})
         return 2
+    except Exception:
+        _emit({"marker": MARKER, "result": "FAILED", "reason": "ADAPTER_FAILED"})
+        return 2
 
 
 if __name__ == "__main__":
