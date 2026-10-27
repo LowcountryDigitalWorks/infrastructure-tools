@@ -1,5 +1,6 @@
 import importlib.util
 import io
+import inspect
 import json
 from pathlib import Path
 import subprocess
@@ -21,9 +22,7 @@ def git_blob_sha(data: bytes) -> str:
 
 class Completed:
     def __init__(self, *, rc=0, out="", err=""):
-        self.returncode = rc
-        self.stdout = out
-        self.stderr = err
+        self.returncode, self.stdout, self.stderr = rc, out, err
 
 
 class BridgeAdapterTests(unittest.TestCase):
@@ -36,6 +35,16 @@ class BridgeAdapterTests(unittest.TestCase):
         controller.parent.mkdir(parents=True)
         controller.write_bytes(data)
         return home, controller, data
+
+    def invoke(self, request, **kwargs):
+        return ba._invoke_with_dependencies(
+            request,
+            python_path=ba.PYTHON_PATH,
+            **kwargs,
+        )
+
+    def test_public_invoke_has_no_runtime_override_surface(self):
+        self.assertEqual(list(inspect.signature(ba.invoke).parameters), ["request"])
 
     def test_closed_operation_set_and_empty_arguments(self):
         self.assertEqual(
@@ -90,7 +99,7 @@ class BridgeAdapterTests(unittest.TestCase):
                 )
 
             try:
-                result = ba.invoke(
+                result = self.invoke(
                     self.request("dragonfly.runner.start"),
                     controller_path=controller,
                     home=home,
@@ -148,7 +157,7 @@ class BridgeAdapterTests(unittest.TestCase):
                 )
 
             try:
-                result = ba.invoke(
+                result = self.invoke(
                     self.request("dragonfly.runner.status"),
                     controller_path=controller,
                     home=home,
@@ -186,7 +195,7 @@ class BridgeAdapterTests(unittest.TestCase):
             controller.symlink_to(target)
             runner = mock.Mock()
             with self.assertRaisesRegex(ba.AdapterError, "CONTROLLER_PATH_SYMLINK"):
-                ba.invoke(
+                self.invoke(
                     self.request("dragonfly.runner.status"),
                     controller_path=controller,
                     home=home,
@@ -197,7 +206,7 @@ class BridgeAdapterTests(unittest.TestCase):
             home, controller, _ = self.make_controller(Path(td), b"wrong")
             runner = mock.Mock()
             with self.assertRaisesRegex(ba.AdapterError, "CONTROLLER_IDENTITY_MISMATCH"):
-                ba.invoke(
+                self.invoke(
                     self.request("dragonfly.runner.status"),
                     controller_path=controller,
                     home=home,
@@ -212,16 +221,17 @@ class BridgeAdapterTests(unittest.TestCase):
             ba.EXPECTED_CONTROLLER_BLOB = git_blob_sha(data)
             try:
                 with self.assertRaisesRegex(ba.AdapterError, "^HOST_NOT_AVAILABLE$"):
-                    ba.invoke(
+                    self.invoke(
                         self.request("dragonfly.runner.start"),
                         controller_path=controller,
                         home=home,
                         runner=lambda *a, **k: Completed(
-                            rc=2, err="ERROR:HOST_NOT_AVAILABLE\n"
+                            rc=2,
+                            err="ERROR:HOST_NOT_AVAILABLE\n",
                         ),
                     )
                 with self.assertRaisesRegex(ba.AdapterError, "^CONTROLLER_FAILED$"):
-                    ba.invoke(
+                    self.invoke(
                         self.request("dragonfly.runner.start"),
                         controller_path=controller,
                         home=home,
@@ -244,7 +254,7 @@ class BridgeAdapterTests(unittest.TestCase):
 
             try:
                 with self.assertRaisesRegex(ba.AdapterError, "CONTROLLER_TIMEOUT"):
-                    ba.invoke(
+                    self.invoke(
                         self.request("dragonfly.runner.drain"),
                         controller_path=controller,
                         home=home,
@@ -260,7 +270,7 @@ class BridgeAdapterTests(unittest.TestCase):
             ba.EXPECTED_CONTROLLER_BLOB = git_blob_sha(data)
             try:
                 with self.assertRaisesRegex(ba.AdapterError, "CONTROLLER_OUTPUT_INVALID"):
-                    ba.invoke(
+                    self.invoke(
                         self.request("dragonfly.runner.status"),
                         controller_path=controller,
                         home=home,
@@ -278,7 +288,7 @@ class BridgeAdapterTests(unittest.TestCase):
                     "base_present": True,
                 }
                 with self.assertRaisesRegex(ba.AdapterError, "CONTROLLER_OUTPUT_INVALID"):
-                    ba.invoke(
+                    self.invoke(
                         self.request("dragonfly.runner.status"),
                         controller_path=controller,
                         home=home,
