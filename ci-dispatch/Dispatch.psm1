@@ -16,11 +16,19 @@ $script:AcceptedControllerSnapshots = @(
         'ci-runner/guest/bootstrap.sh'='705b6581a1fecd1b22413b5709b0d90df9f80e277d5d0c94c9abbc27e7eadd80'
         'ci-runner/guest/ci7-runner.service'='68f8a767e0cb6412b28b7e4751dd6dbe0cd586e74365099adbb20eadcdd8b368'
         'ci-runner/guest/run-one.sh'='75f1ba052f024276d6870d84d1d02aa78effacdece41552ad000422e3d1c6db8'
+    } },
+    [pscustomobject]@{ commit='68a535fd3df17bae59fdb86386fac85e024b1650'; tree='46f9601340762c0c6a552028ec3cd5a5c234d340'; files=@{
+        'ci-runner/CiRunner.psm1'='6935ad2082022d08af41e5d675926f6f30b0c3661f89619d33e3850d7a7f8606'
+        'ci-runner/Invoke-IsolatedRunner.ps1'='23987391705c4dcb7247a2bdafcc585f1a9b58a411a31c0601a25942623a9025'
+        'ci-runner/Native.cs'='f5af15fdcd477574114885635870049b199f992a997f061057c547a98b407261'
+        'ci-runner/guest/bootstrap.sh'='9eba5d80e12336fcb45841cb495260121197a69c0819508b46599b720bc58f55'
+        'ci-runner/guest/ci7-runner.service'='3f87a4de95d07bcf75719b728240ffbb9471f64b4b5fab938184bfe46e653104'
+        'ci-runner/guest/run-one.sh'='a6f69f5605aa2a78f42fb32234ff91a097bf1683b7a7ef6e5ec910625ec864b1'
     } }
 )
 $script:RuntimeFiles = @(
     'ci-dispatch/Dispatch.psm1', 'ci-dispatch/Invoke-Dispatcher.ps1', 'ci-dispatch/profiles.json',
-    'ci-dispatch/verifier-provenance.json',
+    'ci-dispatch/verifier-provenance.json', 'ci-dispatch/StatusProjection.psm1',
     'ci-runner/CiRunner.psm1', 'ci-runner/Invoke-IsolatedRunner.ps1', 'ci-runner/Native.cs',
     'ci-runner/guest/bootstrap.sh', 'ci-runner/guest/ci7-runner.service', 'ci-runner/guest/run-one.sh'
 )
