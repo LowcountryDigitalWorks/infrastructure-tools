@@ -1,11 +1,13 @@
 import importlib.util
 import json
 from pathlib import Path
+import stat
 import tempfile
 import unittest
 from unittest import mock
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "dragonfly_jit.py"
+PROVENANCE_PATH = Path(__file__).resolve().parents[1] / "base-provenance.json"
 SPEC = importlib.util.spec_from_file_location("dragonfly_jit", MODULE_PATH)
 mod = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -38,6 +40,14 @@ class DragonflyContractTests(unittest.TestCase):
         self.assertEqual(128, len(mod.BASE_SHA512))
         int(mod.BASE_SHA512, 16)
 
+    def test_provenance_file_matches_runtime_pin(self):
+        provenance = json.loads(PROVENANCE_PATH.read_text())
+        self.assertEqual(mod.BASE_FILENAME, provenance["filename"])
+        self.assertEqual(mod.BASE_SHA512, provenance["sha512"])
+        self.assertEqual("sha512", provenance["runtime_trust"])
+        self.assertFalse(provenance["source_locator_is_immutable"])
+        self.assertFalse(provenance["auto_refresh"])
+
     def test_base_digest_mismatch_fails_closed(self):
         with self.assertRaisesRegex(mod.DragonflyError, "BASE_SHA512_MISMATCH"):
             self.controller.verify_base()
@@ -49,6 +59,17 @@ class DragonflyContractTests(unittest.TestCase):
         self.base.symlink_to(target)
         with self.assertRaisesRegex(mod.DragonflyError, "VERIFIED_BASE_REQUIRED|SYMLINK"):
             self.controller.verify_base()
+
+    def test_state_root_symlink_is_refused_before_chmod(self):
+        outside = self.root / "outside"
+        outside.mkdir(mode=0o755)
+        outside.chmod(0o755)
+        self.state.symlink_to(outside, target_is_directory=True)
+        before = stat.S_IMODE(outside.stat().st_mode)
+        with self.assertRaisesRegex(mod.DragonflyError, "SYMLINK_PATH_REFUSED"):
+            self.controller.ensure_roots()
+        self.assertEqual(before, stat.S_IMODE(outside.stat().st_mode))
+        self.assertFalse((outside / "runs").exists())
 
     def test_admission_memory_disk_and_cpu_are_independent_failures(self):
         good = self.admitted_snapshot()
@@ -93,12 +114,28 @@ class DragonflyContractTests(unittest.TestCase):
         state = self.controller.drain()
         self.assertEqual("STOPPED", state["state"])
 
+    def test_drain_available_with_busy_guest_lock_requests_prelaunch_drain(self):
+        self.controller.ensure_roots()
+        self.controller.write_state("AVAILABLE")
+        with mock.patch.object(self.controller, "_guest_lock_available", return_value=False):
+            state = self.controller.drain()
+        self.assertEqual("DRAINING", state["state"])
+        self.assertEqual("DRAIN_REQUESTED", state["reason"])
+        self.assertIsNone(state["run_id"])
+        self.assertIsNone(state["qemu_pid"])
+
+    def test_drain_stopped_does_not_infer_active_guest_from_busy_lock(self):
+        self.controller.ensure_roots()
+        self.controller.write_state("STOPPED")
+        with mock.patch.object(self.controller, "_guest_lock_available", return_value=False):
+            state = self.controller.drain()
+        self.assertEqual("STOPPED", state["state"])
+
     def test_drain_running_never_kills_process(self):
         self.controller.ensure_roots()
         run_id = "11111111-1111-4111-8111-111111111111"
         self.controller.write_state("RUNNING", run_id=run_id, qemu_pid=999999)
-        with mock.patch.object(self.controller, "_guest_lock_available", return_value=False), \
-             mock.patch.object(mod.os, "kill") as kill:
+        with mock.patch.object(mod.os, "kill") as kill:
             state = self.controller.drain()
         self.assertEqual("DRAINING", state["state"])
         self.assertEqual("DRAIN_REQUESTED", state["reason"])
@@ -119,6 +156,23 @@ class DragonflyContractTests(unittest.TestCase):
         self.controller.state_path.write_text(json.dumps(payload))
         with self.assertRaisesRegex(mod.DragonflyError, "STATE_FIELDS_INVALID"):
             self.controller.read_state()
+
+    def test_state_rejects_invalid_identity_and_pid_types(self):
+        self.controller.ensure_roots()
+        payload = {
+            "schema": mod.STATE_SCHEMA,
+            "marker": mod.MARKER,
+            "state": "STOPPED",
+            "updated_at": None,
+            "run_id": "11111111-1111-4111-8111-111111111111",
+            "qemu_pid": "1234",
+            "reason": None,
+        }
+        self.controller.state_path.write_text(json.dumps(payload))
+        with self.assertRaisesRegex(mod.DragonflyError, "STATE_PID_INVALID"):
+            self.controller.read_state()
+        with self.assertRaisesRegex(mod.DragonflyError, "STATE_IDENTITY_INVALID"):
+            self.controller.write_state("RUNNING")
 
     def test_status_projects_stale_residue_as_hold_without_deleting(self):
         self.controller.ensure_roots()
@@ -143,6 +197,14 @@ class DragonflyContractTests(unittest.TestCase):
         self.assertEqual(-1, status["residue_count"])
         self.assertTrue(contaminant.exists())
 
+    def _mock_smoke_dependencies(self):
+        return (
+            mock.patch.object(self.controller, "verify_base", return_value={}),
+            mock.patch.object(mod, "resource_snapshot", return_value=self.admitted_snapshot()),
+            mock.patch.object(mod.shutil, "which", return_value="/usr/bin/tool"),
+            mock.patch.object(mod, "_pid_alive", return_value=False),
+        )
+
     def test_smoke_qemu_contract_has_kvm_no_inbound_forward_or_host_mount(self):
         self.controller.ensure_roots()
         self.controller.write_state("AVAILABLE")
@@ -157,12 +219,10 @@ class DragonflyContractTests(unittest.TestCase):
             kwargs_seen.append(kwargs)
             return popen
 
-        with mock.patch.object(self.controller, "verify_base", return_value={}), \
-             mock.patch.object(mod, "resource_snapshot", return_value=self.admitted_snapshot()), \
-             mock.patch.object(mod.shutil, "which", return_value="/usr/bin/tool"), \
+        verify, resources, which, pid_alive = self._mock_smoke_dependencies()
+        with verify, resources, which, pid_alive, \
              mock.patch.object(mod.subprocess, "run") as run, \
-             mock.patch.object(mod.subprocess, "Popen", side_effect=capture), \
-             mock.patch.object(mod, "_pid_alive", return_value=False):
+             mock.patch.object(mod.subprocess, "Popen", side_effect=capture):
             result = self.controller.smoke()
 
         self.assertEqual("PASS", result["result"])
@@ -178,6 +238,52 @@ class DragonflyContractTests(unittest.TestCase):
         self.assertIs(kwargs_seen[0]["preexec_fn"], mod._set_parent_death_signal)
         self.assertEqual(2, run.call_count)
         self.assertEqual("AVAILABLE", self.controller.read_state()["state"])
+        self.assertEqual([], list(self.controller.runs_root.iterdir()))
+
+    def test_smoke_honors_prelaunch_drain_without_spawning_qemu(self):
+        self.controller.ensure_roots()
+        self.controller.write_state("AVAILABLE")
+        calls = 0
+
+        def prepare(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                self.controller.drain()
+            return mock.Mock(returncode=0)
+
+        verify, resources, which, pid_alive = self._mock_smoke_dependencies()
+        with verify, resources, which, pid_alive, \
+             mock.patch.object(mod.subprocess, "run", side_effect=prepare), \
+             mock.patch.object(mod.subprocess, "Popen") as popen:
+            result = self.controller.smoke()
+
+        self.assertEqual("DRAINED", result["result"])
+        popen.assert_not_called()
+        self.assertEqual("STOPPED", self.controller.read_state()["state"])
+        self.assertEqual([], list(self.controller.runs_root.iterdir()))
+
+    def test_smoke_failure_during_drain_remains_failed(self):
+        self.controller.ensure_roots()
+        self.controller.write_state("AVAILABLE")
+        popen = mock.Mock()
+        popen.pid = 4242
+
+        def fail_after_drain(*_args, **_kwargs):
+            self.controller.drain()
+            return 1
+
+        popen.wait.side_effect = fail_after_drain
+        verify, resources, which, pid_alive = self._mock_smoke_dependencies()
+        with verify, resources, which, pid_alive, \
+             mock.patch.object(mod.subprocess, "run"), \
+             mock.patch.object(mod.subprocess, "Popen", return_value=popen):
+            with self.assertRaisesRegex(mod.DragonflyError, "QEMU_NONZERO_EXIT"):
+                self.controller.smoke()
+
+        state = self.controller.read_state()
+        self.assertEqual("FAILED", state["state"])
+        self.assertEqual("SMOKE_FAILED", state["reason"])
         self.assertEqual([], list(self.controller.runs_root.iterdir()))
 
     def test_smoke_refuses_preexisting_residue(self):
