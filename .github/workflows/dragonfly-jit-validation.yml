@@ -23,9 +23,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Compile controller, owner controls, and local adapter
-        run: python3 -m py_compile dragonfly-jit/dragonfly_jit.py dragonfly-jit/owner_controls.py dragonfly-jit/install_owner_controls.py dragonfly-jit/bridge_adapter.py
-      - name: Run lifecycle contract tests
+      - name: Compile Dragonfly source contracts
+        run: |
+          python3 -m py_compile \
+            dragonfly-jit/dragonfly_jit.py \
+            dragonfly-jit/owner_controls.py \
+            dragonfly-jit/install_owner_controls.py \
+            dragonfly-jit/bridge_adapter.py \
+            dragonfly-jit/handoff_contract.py \
+            dragonfly-jit/ssh_transport_contract.py \
+            dragonfly-jit/ssh_forced_receiver.py
+      - name: Run lifecycle and transport contract tests
         run: python3 -m unittest discover -s dragonfly-jit/tests -p 'test_*.py' -v
       - name: Refuse credential/provider coupling in foundation slice
         shell: bash

@@ -1,6 +1,7 @@
 # Dragonfly disposable KVM host
 
 Work item: `LowcountryDigitalWorks/infrastructure-tools#96`.
+Transport design slice: `LowcountryDigitalWorks/infrastructure-tools#115`.
 Cross-LDW acceptance/evidence: `LowcountryDigitalWorks/business-operations#552`.
 Existing queue/discovery/auth control plane: `ci-dispatch` / issue #10.
 
@@ -59,12 +60,12 @@ The base is never booted directly. Every smoke run uses a fresh qcow2 overlay.
 - cleanup may delete only manifest-declared files inside the exact owned run
   directory;
 - no host filesystem share, Docker socket, SSH forwarding, public listener, or
-  inbound port forward is created;
+  inbound port forward is created by the controller;
 - QEMU user-mode networking supplies outbound guest networking without exposing
   an inbound host listener;
 - no raw guest console is persisted by the controller;
-- no GitHub token, JIT configuration, customer data, private repository payload,
-  or provider response is accepted by this slice;
+- no GitHub token, customer data, private repository payload, or provider
+  response is accepted by the host foundation;
 - ambiguous state enters HOLD/FAILED and requires explicit reconciliation.
 
 The initial conservative smoke envelope is 2 vCPU / 2 GiB RAM, with at least
@@ -103,6 +104,63 @@ Installation copies the reviewed controller and owner wrapper into the user-leve
 application directory; the launchers invoke that local copy rather than a mutable
 working-tree path.
 
+## Transport-neutral handoff
+
+`handoff_contract.py` is the accepted V6 application-level capsule boundary. It
+is deliberately independent of any network transport. It accepts one bounded
+closed JSON capsule from stdin, binds the dispatch to the fixed REDRIX target and
+exact synthetic job identity, enforces a <=5 minute TTL plus bounded skew, keeps
+`opaque_bootstrap` out of sanitized output/replay state, and creates a durable
+one-time replay claim under the owner state root.
+
+Authenticated transport never replaces those checks. A future transport must
+deliver exactly the already-validated capsule bytes and preserve claim-time
+identity/expiry/replay enforcement.
+
+## #115 forced-command SSH source design
+
+Issue #115 records the preferred first authenticated LDW01 -> REDRIX transport
+shape, subject to a later sanitized live capability/security readback:
+
+`LDW01/#10 -> private Tailscale reachability -> dedicated OpenSSH key -> fixed forced receiver -> handoff claim`
+
+The source in this slice is intentionally **non-operational**:
+
+- `ssh_transport_contract.py` opens no socket and invokes no process. It validates
+  only the exact owner-local non-secret config shape and returns the fixed
+  Windows OpenSSH argv plan for later use.
+- The plan fixes `C:\Windows\System32\OpenSSH\ssh.exe`, remote user `eddie`,
+  port 22, one fixed absolute fail-closed sentinel, batch mode, strict host-key
+  checking, dedicated known-hosts/private-key paths, identities-only, no agent
+  forwarding, clear-all-forwardings, no local command and no TTY.
+  Capsule/bootstrap bytes are never represented in argv.
+- The private endpoint and trusted ED25519 host-key fingerprint belong only in a
+  future owner-local config under `%LOCALAPPDATA%\LDW\CI-JIT\DragonflyTransport`.
+  This public repository contains neither value and does not infer that an
+  arbitrary endpoint is private/Tailscale-reachable.
+- `ssh_forced_receiver.py` opens no listener. It accepts only
+  `SSH_ORIGINAL_COMMAND=/nonexistent/ldw-dragonfly-jit-handoff-v1`, refuses a
+  CLI surface, requires the normal `eddie` Linux identity when used without test
+  injection, refuses symlinked/group-writable or wrong-owner source paths, pins
+  the accepted `handoff_contract.py` Git blob
+  `2f7892275bacd9f56abaa0cdf204f46f79c046c0`, then reuses that contract's
+  bounded stdin validation and durable claim path. Raw bootstrap is never emitted.
+
+The fixed client sentinel is defense in depth: if a future dedicated key were
+accidentally installed without its server-side forced command, the absolute
+`/nonexistent/...` request fails instead of resolving a remote PATH command or
+requesting an interactive shell. The future REDRIX key restriction must
+independently force the reviewed receiver and disable PTY, agent/X11 forwarding,
+TCP/streamlocal forwarding, SFTP/subsystem and arbitrary commands. Exact
+`restrict`/authorized-key syntax is **not** accepted by this source alone; #115
+requires live verification against the actual REDRIX OpenSSH build first.
+
+This source does not create a key, `known_hosts`, `authorized_keys`, sshd state,
+Tailscale/ACL/firewall state, private endpoint, network connection, runner/JIT
+registration, service, schedule, or provider call. The separate #98 Operations
+Bridge bearer remains owner/GM Status/Start/Drain only and is not reused for JIT
+bootstrap material.
+
 ## Validation
 
 Source validation:
@@ -111,27 +169,45 @@ Source validation:
 python3 -m py_compile \
   dragonfly-jit/dragonfly_jit.py \
   dragonfly-jit/owner_controls.py \
-  dragonfly-jit/install_owner_controls.py
+  dragonfly-jit/install_owner_controls.py \
+  dragonfly-jit/bridge_adapter.py \
+  dragonfly-jit/handoff_contract.py \
+  dragonfly-jit/ssh_transport_contract.py \
+  dragonfly-jit/ssh_forced_receiver.py
 
 python3 -m unittest discover -s dragonfly-jit/tests -p 'test_*.py' -v
 ```
 
-The hosted workflow performs these source checks only. It does not use KVM or any
-self-hosted runner and does not route work to Dragonfly.
+The hosted workflow performs these source checks only. It does not use KVM,
+OpenSSH networking, Tailscale, secrets, or any self-hosted runner and does not
+route work to Dragonfly.
+
+The #115 transport tests verify exact config closure, endpoint/option-injection
+refusal, strict host-key/fixed-key/no-forwarding/no-PTY plan construction,
+stdin-only capsule posture, fixed-sentinel receiver behavior, bootstrap
+sanitization, handoff error sanitization and exact accepted handoff-source blob
+pinning. They do not prove private reachability or server-side OpenSSH policy.
 
 ## Next gates
 
-After the owner-control source and local installation behavior are independently
-reviewed and proven on REDRIX:
-
-1. define the authenticated **LDW01 -> Dragonfly** exact host-target handoff
-   without copying broad GitHub auth to Dragonfly;
-2. add a harmless secretless one-job GitHub synthetic profile;
-3. prove provider-positive one-job assignment/start/success plus interruption,
-   duplicate-launch refusal, drain and destructive cleanup;
-4. obtain fresh independent exact-head review before assigning any stronger
+1. obtain fresh hosted validation and independence-clean exact-head review of the
+   #115 source-only transport contract;
+2. from a trusted REDRIX local console, collect the sanitized #115 capability
+   readback: exact OpenSSH server version/restriction support, current sshd
+   posture, private Tailscale reachability, ED25519 host-key SHA-256 fingerprint,
+   owner `.ssh` permission posture, exact receiver/handoff provenance and final
+   STOPPED/no-QEMU-residue state;
+3. only under separate security/runtime authorization, provision a dedicated
+   constrained transport key/known-host identity and prove the forced receiver
+   with a synthetic credential-free capsule;
+4. integrate one short-lived JIT bootstrap only after exact #10 job re-read and
+   accepted transport proof;
+5. use a harmless secretless one-job GitHub synthetic profile and require
+   provider-positive assignment/start/terminal result plus deterministic runner,
+   guest, overlay, seed, bootstrap and state cleanup;
+6. obtain fresh independent exact-head review before assigning any stronger
    isolation/security label or routing real private security work.
 
-No production routing, customer/regulated workload, standing poller, security
-weakening, paid capacity, or claim of Hyper-V-equivalent isolation is authorized
-by this source slice.
+No production routing, customer/regulated workload, standing poller, public SSH,
+generic shell/admin RPC, security weakening, paid capacity, or claim of
+Hyper-V-equivalent isolation is authorized by this source slice.
