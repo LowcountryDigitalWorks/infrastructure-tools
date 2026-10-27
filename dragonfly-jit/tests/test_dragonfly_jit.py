@@ -124,6 +124,13 @@ class DragonflyContractTests(unittest.TestCase):
         self.assertIsNone(state["run_id"])
         self.assertIsNone(state["qemu_pid"])
 
+    def test_prelaunch_draining_converges_to_stopped_after_lock_released(self):
+        self.controller.ensure_roots()
+        self.controller.write_state("DRAINING", reason="DRAIN_REQUESTED")
+        with mock.patch.object(self.controller, "_guest_lock_available", return_value=True):
+            state = self.controller.drain()
+        self.assertEqual("STOPPED", state["state"])
+
     def test_drain_stopped_does_not_infer_active_guest_from_busy_lock(self):
         self.controller.ensure_roots()
         self.controller.write_state("STOPPED")
@@ -346,6 +353,16 @@ class DragonflyContractTests(unittest.TestCase):
             self.controller.recover()
         self.assertEqual("HOLD", self.controller.read_state()["state"])
 
+    def test_recover_refuses_malformed_manifest_and_holds(self):
+        self.controller.ensure_roots()
+        run_dir = self.controller.runs_root / "11111111-1111-4111-8111-111111111111"
+        run_dir.mkdir()
+        (run_dir / "ownership.json").write_text("{")
+        with self.assertRaisesRegex(mod.DragonflyError, "JSON_READ_INVALID"):
+            self.controller.recover()
+        self.assertEqual("HOLD", self.controller.read_state()["state"])
+        self.assertEqual("RECOVERY_UNCERTAIN", self.controller.read_state()["reason"])
+
     def test_recover_refuses_live_owned_pid_and_holds(self):
         _run_id, _run_dir, _overlay, _seed, _user_data, _pidfile = self._make_owned_run(qemu_pid=1234)
         with mock.patch.object(mod, "_pid_alive", side_effect=lambda pid: pid == 1234):
@@ -366,7 +383,16 @@ class DragonflyContractTests(unittest.TestCase):
         self.assertEqual(run_id, state["run_id"])
         self.assertEqual(5678, state["qemu_pid"])
 
-    def test_successful_recovery_converges_to_stopped_not_available(self):
+    def test_recover_always_converges_available_to_stopped(self):
+        self.controller.ensure_roots()
+        self.controller.write_state("AVAILABLE")
+        result = self.controller.recover()
+        self.assertEqual("STOPPED", result["state"])
+        state = self.controller.read_state()
+        self.assertEqual("STOPPED", state["state"])
+        self.assertEqual("RECOVERED", state["reason"])
+
+    def test_successful_recovery_converges_failed_to_stopped(self):
         self.controller.ensure_roots()
         self.controller.write_state("FAILED", reason="SMOKE_FAILED")
         result = self.controller.recover()
