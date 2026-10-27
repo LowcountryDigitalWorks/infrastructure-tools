@@ -45,21 +45,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          chmod +x operations-bridge/scripts/build-dragonfly-linux-package.sh
-          chmod +x operations-bridge/scripts/verify-dragonfly-linux-package.sh
-
           SOURCE_COMMIT="$(git rev-parse HEAD)"
-          SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$SOURCE_COMMIT")"
           PACKAGE_NAME='ldw-operations-bridge-dragonfly-linux-x64.tar.gz'
 
-          operations-bridge/scripts/build-dragonfly-linux-package.sh "$SOURCE_COMMIT" "$SOURCE_DATE_EPOCH" "$RUNNER_TEMP/package-a"
-          operations-bridge/scripts/build-dragonfly-linux-package.sh "$SOURCE_COMMIT" "$SOURCE_DATE_EPOCH" "$RUNNER_TEMP/package-b"
+          bash operations-bridge/scripts/build-dragonfly-linux-package.sh "$SOURCE_COMMIT" "$RUNNER_TEMP/package-a"
+          bash operations-bridge/scripts/build-dragonfly-linux-package.sh "$SOURCE_COMMIT" "$RUNNER_TEMP/package-b"
 
-          operations-bridge/scripts/verify-dragonfly-linux-package.sh \
+          bash operations-bridge/scripts/verify-dragonfly-linux-package.sh \
             "$RUNNER_TEMP/package-a/$PACKAGE_NAME" \
             "$RUNNER_TEMP/package-a/$PACKAGE_NAME.sha256" \
             "$SOURCE_COMMIT"
-          operations-bridge/scripts/verify-dragonfly-linux-package.sh \
+          bash operations-bridge/scripts/verify-dragonfly-linux-package.sh \
             "$RUNNER_TEMP/package-b/$PACKAGE_NAME" \
             "$RUNNER_TEMP/package-b/$PACKAGE_NAME.sha256" \
             "$SOURCE_COMMIT"
