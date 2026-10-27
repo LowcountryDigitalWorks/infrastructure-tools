@@ -16,11 +16,9 @@ import json
 import os
 from pathlib import Path
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
-import time
 import uuid
 
 MARKER = "CI-RUNNER-DRAGONFLY-JIT-001"
@@ -215,6 +213,13 @@ class Controller:
         _assert_no_symlink(self.state_root)
         _assert_no_symlink(self.runs_root)
 
+    def _run_dirs(self) -> list[Path]:
+        entries = list(self.runs_root.iterdir())
+        for entry in entries:
+            if entry.is_symlink() or not entry.is_dir():
+                raise DragonflyError("RUN_ROOT_CONTAMINATED")
+        return entries
+
     def verify_base(self) -> dict:
         if not self.base_path.is_file():
             raise DragonflyError("VERIFIED_BASE_REQUIRED")
@@ -286,6 +291,10 @@ class Controller:
         assert_admission(snapshot)
         with _file_lock(self.state_lock_path):
             current = self.read_state()
+            if current["state"] in {"FAILED", "HOLD"}:
+                raise DragonflyError("RECOVERY_REQUIRED")
+            if self._run_dirs():
+                raise DragonflyError("STALE_RUN_STATE_REFUSED")
             if not self._guest_lock_available() or current["state"] in {"RUNNING", "DRAINING"}:
                 raise DragonflyError("ACTIVE_GUEST_REFUSED")
             return self.write_state("AVAILABLE")
@@ -294,6 +303,8 @@ class Controller:
         self.ensure_roots()
         with _file_lock(self.state_lock_path):
             current = self.read_state()
+            if current["state"] in {"FAILED", "HOLD"}:
+                return current
             if current["state"] in {"RUNNING", "DRAINING"} or not self._guest_lock_available():
                 return self.write_state(
                     "DRAINING",
@@ -306,11 +317,19 @@ class Controller:
     def status(self) -> dict:
         self.ensure_roots()
         current = self.read_state()
+        try:
+            residue_count = len(self._run_dirs())
+        except DragonflyError:
+            residue_count = -1
         if current.get("qemu_pid") and not _pid_alive(current["qemu_pid"]):
             current = dict(current)
             current["reason"] = "PID_NOT_RUNNING"
             if current["state"] in {"RUNNING", "DRAINING"}:
                 current["state"] = "HOLD"
+        if residue_count != 0 and current["state"] in {"STOPPED", "AVAILABLE"}:
+            current = dict(current)
+            current["state"] = "HOLD"
+            current["reason"] = "STALE_RUN_STATE"
         snapshot = resource_snapshot(self.state_root)
         return {
             "marker": MARKER,
@@ -319,11 +338,12 @@ class Controller:
             "run_id": current.get("run_id"),
             "qemu_pid": current.get("qemu_pid"),
             "reason": current.get("reason"),
+            "residue_count": residue_count,
             "base_present": self.base_path.is_file() and not self.base_path.is_symlink(),
             **snapshot,
         }
 
-    def _new_run(self) -> tuple[str, Path, Path, Path, Path]:
+    def _new_run(self) -> tuple[str, Path, Path, Path, Path, Path]:
         run_id = str(uuid.uuid4())
         run_dir = self.runs_root / run_id
         _assert_owned_child(self.runs_root, run_dir)
@@ -370,6 +390,8 @@ power_state:
     def _validate_manifest(self, run_dir: Path) -> dict:
         _assert_owned_child(self.runs_root, run_dir)
         manifest_path = run_dir / "ownership.json"
+        if not manifest_path.is_file() or manifest_path.is_symlink():
+            raise DragonflyError("OWNERSHIP_MANIFEST_REQUIRED")
         value = _read_json(manifest_path)
         required = {
             "schema", "marker", "run_id", "run_dir", "overlay", "seed",
@@ -428,6 +450,8 @@ power_state:
                 current = self.read_state()
                 if current["state"] != "AVAILABLE":
                     raise DragonflyError("HOST_NOT_AVAILABLE")
+                if self._run_dirs():
+                    raise DragonflyError("STALE_RUN_STATE_REFUSED")
 
             run_id, run_dir, overlay, seed, user_data, _manifest_path = self._new_run()
             try:
@@ -502,19 +526,20 @@ power_state:
     def recover(self) -> dict:
         self.ensure_roots()
         with _file_lock(self.guest_lock_path):
-            run_dirs = [entry for entry in self.runs_root.iterdir() if entry.is_dir()]
-            if len(run_dirs) > 1:
+            try:
+                run_dirs = self._run_dirs()
+                if len(run_dirs) > 1:
+                    raise DragonflyError("MULTIPLE_RUN_DIRS")
+                if run_dirs:
+                    self._cleanup_owned_run(run_dirs[0])
+            except DragonflyError:
                 with _file_lock(self.state_lock_path):
-                    self.write_state("HOLD", reason="MULTIPLE_RUN_DIRS")
-                raise DragonflyError("MULTIPLE_RUN_DIRS")
-            if run_dirs:
-                self._cleanup_owned_run(run_dirs[0])
+                    self.write_state("HOLD", reason="RECOVERY_UNCERTAIN")
+                raise
             with _file_lock(self.state_lock_path):
                 current = self.read_state()
-                if current["state"] == "DRAINING":
-                    state = self.write_state("STOPPED")
-                elif current["state"] in {"RUNNING", "FAILED", "HOLD"}:
-                    state = self.write_state("AVAILABLE", reason="RECOVERED")
+                if current["state"] in {"RUNNING", "DRAINING", "FAILED", "HOLD"}:
+                    state = self.write_state("STOPPED", reason="RECOVERED")
                 else:
                     state = current
             return {"result": "CLEAN", "state": state["state"]}
