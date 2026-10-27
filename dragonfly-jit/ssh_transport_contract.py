@@ -16,7 +16,10 @@ MARKER = "DRAGONFLY-JIT-TRANSPORT-001"
 SCHEMA = 1
 TARGET_HOST = "dragonfly-redrix-01"
 REMOTE_USER = "eddie"
-REMOTE_SENTINEL = "ldw-dragonfly-jit-handoff-v1"
+# An absolute path that must not exist on REDRIX. The later server-side forced-command
+# rule replaces it with the reviewed receiver. If that rule is missing, this request
+# fails closed instead of resolving an executable from the remote user's PATH.
+REMOTE_SENTINEL = "/nonexistent/ldw-dragonfly-jit-handoff-v1"
 SSH_PORT = 22
 MAX_ENDPOINT_CHARS = 253
 SSH_EXECUTABLE = PureWindowsPath(r"C:\Windows\System32\OpenSSH\ssh.exe")
