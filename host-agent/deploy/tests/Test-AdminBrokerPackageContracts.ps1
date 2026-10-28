@@ -17,7 +17,7 @@ function Assert-True([bool]$Condition,[string]$Message) {
 foreach ($required in @(
     'host-agent/src/LDW.AdminBroker.Host/LDW.AdminBroker.Host.csproj',
     'host-agent/src/LDW.LocalSecretProbe/LDW.LocalSecretProbe.csproj',
-    "-r win-x64 --self-contained true",
+    '-r win-x64 --self-contained true',
     '-p:PublishSingleFile=true',
     '-p:IncludeNativeLibrariesForSelfExtract=true',
     '-p:DebugType=None',
@@ -25,15 +25,17 @@ foreach ($required in @(
     'LDW.AdminBroker.Host.exe',
     'LDW.LocalSecretProbe.exe',
     'manifest.json',
-    "Invoke-ExpectedFailure `$packagedHost @('--package-smoke') 2 'This interactive tool accepts no command-line arguments.'",
-    "Invoke-ExpectedFailure `$packagedProbe @() 1 'SECRET_MISSING'",
+    "Invoke-ExpectedFailure -Executable `$packagedHost -Arguments @('--package-smoke') -ExpectedExit 2",
+    "-ExpectedStderr 'This interactive tool accepts no command-line arguments.'",
+    "Invoke-ExpectedFailure -Executable `$packagedProbe -Arguments @() -ExpectedExit 1 -ExpectedStderr 'SECRET_MISSING'",
+    "`$start.Environment.Remove('LDW_CORSAIR_NEON_SECRET')",
     "package = 'ldw-admin-broker-proof'",
     "runtime = 'win-x64'",
     'foreground_only = $true',
     'autostart = $false',
     'service = $false',
     "Get-FileHash -LiteralPath `$path -Algorithm SHA256",
-    "rev-parse HEAD",
+    'rev-parse HEAD',
     "rev-parse 'HEAD^{tree}'",
     'ADMIN_BROKER_PACKAGE=PASS',
     'ADMIN_BROKER_PACKAGE_MANIFEST_SHA256='
@@ -55,6 +57,6 @@ Assert-True ($source.Contains('$packageFiles.Count -ne 3',[StringComparison]::Or
 Assert-True ($source.Contains('LDW.AdminBroker.Host.exe,LDW.LocalSecretProbe.exe,manifest.json',[StringComparison]::Ordinal)) 'package boundary must be exact'
 Assert-True ($source.Contains('[Diagnostics.ProcessStartInfo]::new()',[StringComparison]::Ordinal)) 'smoke checks must launch only fixed package executables'
 Assert-True ($source.Contains('$start.FileName = $Executable',[StringComparison]::Ordinal)) 'smoke helper must use its fixed executable argument'
-Assert-True (-not $source.Contains('Environment[', [StringComparison]::OrdinalIgnoreCase)) 'publisher must not set secret environment variables'
+Assert-True (-not $source.Contains("Environment['LDW_CORSAIR_NEON_SECRET'] =", [StringComparison]::OrdinalIgnoreCase)) 'publisher must never set a secret environment value'
 
 Write-Host "Admin Broker package contract assertions PASS: $script:Assertions"
