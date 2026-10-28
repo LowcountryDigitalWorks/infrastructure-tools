@@ -113,8 +113,9 @@ function ConvertFrom-CiJitClientResponse {
         if ($version -ne 1 -or $requestId -cne $ExpectedRequestId -or $operation -cne $ExpectedOperation -or $target -cne $script:TargetIdentity) {
             throw 'CLIENT_RESPONSE_CORRELATION_REFUSED'
         }
+        $parsedTimestamp = [DateTime]::MinValue
         if ($null -eq $summary -or $summary.Length -gt 256 -or $summary.Contains("`r") -or $summary.Contains("`n") -or
-            -not [DateTime]::TryParse($timestamp,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind,[ref]([DateTime]$parsedTimestamp))) {
+            $null -eq $timestamp -or -not [DateTime]::TryParse($timestamp,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind,[ref]$parsedTimestamp)) {
             throw 'CLIENT_RESPONSE_REFUSED'
         }
 
