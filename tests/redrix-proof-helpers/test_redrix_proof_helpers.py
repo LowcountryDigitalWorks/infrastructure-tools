@@ -7,7 +7,7 @@ READBACK = ROOT / 'dragonfly-jit' / 'redrix-accepted-main-readback.sh'
 PROOF = ROOT / 'operations-bridge' / 'scripts' / 'redrix-credential-free-proof.sh'
 
 EXPECTED = {
-    'zip': 'e0091c03c7a0e0c3bdf01c51e8c29fcf70e51788c1a9d3d84a91226cea6b01d4',
+    'original_zip': 'e0091c03c7a0e0c3bdf01c51e8c29fcf70e51788c1a9d3d84a91226cea6b01d4',
     'tar': '27835aad28f13723c831ad4c8d0c5b8a2110cb22eb55e1387199eb8fff960f71',
     'source': 'bcbdfb181f18eacfbceef2bf990c07a0b612915a',
     'adapter': '9ffbfd1dd2ea63fd7eece24e1f3eb791c92da0bf',
@@ -45,15 +45,33 @@ def assert_no_mutating_capability_commands(value: str) -> None:
         assert re.search(pattern, value) is None, pattern
 
 
+def assert_durable_package_identity(value: str) -> None:
+    assert "ORIGINAL_ARTIFACT_ZIP_SHA256=" in value
+    assert EXPECTED['original_zip'] in value
+    assert "EXPECTED_TAR_SHA256=" in value
+    assert EXPECTED['tar'] in value
+    assert EXPECTED['source'] in value
+    assert EXPECTED['adapter'] in value
+    assert "ZIP_TRANSPORT=ORIGINAL_ACCEPTED_RUN" in value
+    assert "ZIP_TRANSPORT=REPACKED_OR_REPRODUCED" in value
+    assert "ERROR:ZIP_SHA256_MISMATCH" not in value
+    assert "ERROR:ZIP_LAYOUT_INVALID" in value
+    assert "ERROR:ZIP_PATH_INVALID" in value
+    assert "ERROR:ZIP_SYMLINK_REFUSED" in value
+    assert "ERROR:TAR_SHA256_MISMATCH" in value
+    assert "ERROR:CHECKSUM_RECORD_INVALID" in value
+    assert "zipfile.ZipFile" in value
+
+
 def test_readback_contract() -> None:
     value = text(READBACK)
     subprocess.run(['bash', '-n', str(READBACK)], check=True)
     compile_embedded_python('readback', value)
     assert_no_mutating_capability_commands(value)
-    for expected in EXPECTED.values():
-        assert expected in value
+    assert_durable_package_identity(value)
     assert "command -v realpath >/dev/null" in value
-    assert 'for cmd in sha256sum sha512sum unzip tar python3 mktemp stat awk id head grep basename rm; do' in value
+    assert 'for cmd in sha256sum sha512sum tar python3 mktemp stat awk id head grep rm tr; do' in value
+    assert 'unzip ' not in value
     assert "AUTHORIZED_KEYS_RESTRICT_DOC=probe_tool_missing" in value
     assert 'tailscale status --json' in value
     assert '/usr/sbin/sshd -V' in value
@@ -74,8 +92,7 @@ def test_credential_free_proof_contract() -> None:
     subprocess.run(['bash', '-n', str(PROOF)], check=True)
     compile_embedded_python('proof', value)
     assert_no_mutating_capability_commands(value)
-    for expected in EXPECTED.values():
-        assert expected in value
+    assert_durable_package_identity(value)
     assert "command -v realpath >/dev/null" in value
     assert 'for cmd in sha256sum sha512sum python3 tar stat awk id mktemp env rm rmdir dirname; do' in value
     assert "EXPECTED_BRIDGE_ID='dragonfly-redrix-01'" in value
