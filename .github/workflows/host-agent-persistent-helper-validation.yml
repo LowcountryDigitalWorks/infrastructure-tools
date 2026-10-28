@@ -2,7 +2,7 @@ name: Host Agent persistent helper validation
 
 on:
   push:
-    branches: [feat/host-agent-persistent-helper-deploy-v2]
+    branches: [main, feat/host-agent-persistent-helper-deploy-v2]
     paths:
       - 'host-agent/**'
       - '.github/workflows/host-agent-persistent-helper-validation.yml'
@@ -49,6 +49,10 @@ jobs:
         shell: pwsh
         run: pwsh ./host-agent/deploy/tests/Test-DeploymentContracts.ps1
 
+      - name: Run Admin Broker package contract tests
+        shell: pwsh
+        run: pwsh ./host-agent/deploy/tests/Test-AdminBrokerPackageContracts.ps1
+
       - name: Run tray autostart contract tests
         shell: pwsh
         run: pwsh ./host-agent/deploy/tests/Test-TrayAutostartContracts.ps1
@@ -81,6 +85,22 @@ jobs:
           pwsh ./host-agent/deploy/Plan-HyperVObserverDeployment.ps1 `
             -PublishedDirectory $publishRoot `
             -PermittedCallerSid 'S-1-5-21-1000000000-1000000001-1000000002-1001'
+
+      - name: Build and smoke-test Admin Broker proof package
+        shell: pwsh
+        run: |
+          $packageRoot = Join-Path $env:RUNNER_TEMP 'ldw-admin-broker-proof'
+          pwsh ./host-agent/deploy/Publish-AdminBrokerProofPackage.ps1 -OutputDirectory $packageRoot
+
+      - name: Retain accepted-main Admin Broker proof package
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ldw-admin-broker-proof-${{ github.sha }}
+          path: ${{ runner.temp }}/ldw-admin-broker-proof/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
 
       - name: Diff whitespace validation
         shell: pwsh
