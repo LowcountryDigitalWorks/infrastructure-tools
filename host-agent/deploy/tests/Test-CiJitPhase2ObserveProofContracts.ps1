@@ -53,8 +53,8 @@ foreach ($forbidden in @(
     Assert-True (-not $source.Contains($forbidden,[StringComparison]::OrdinalIgnoreCase)) "observe proof must exclude mutation/network/process primitive: $forbidden"
 }
 
+Assert-True ($source.StartsWith("[CmdletBinding()]`nparam()`n",[StringComparison]::Ordinal)) 'observe proof top-level contract must expose no caller parameters'
 Assert-True ($source.Contains('$maximumResultPolls = 60',[StringComparison]::Ordinal)) 'observe proof must keep result polling bounded'
 Assert-True ($source.Contains('$resultPollMilliseconds = 500',[StringComparison]::Ordinal)) 'observe proof must keep fixed polling interval'
-Assert-True (-not $source.Contains('param(' + "`n" + '    [', [StringComparison]::Ordinal)) 'observe proof must expose no caller parameters'
 
 Write-Host "CI/JIT Phase-2 observe proof contract assertions PASS: $script:Assertions"
