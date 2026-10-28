@@ -6,6 +6,7 @@ $ErrorActionPreference = 'Stop'
 
 $deployRoot = Split-Path -Parent $PSScriptRoot
 $source = Get-Content -LiteralPath (Join-Path $deployRoot 'Invoke-CiJitPhase2ObserveProof.ps1') -Raw
+$normalizedSource = $source.Replace("`r`n","`n")
 $script:Assertions = 0
 
 function Assert-True([bool]$Condition,[string]$Message) {
@@ -53,7 +54,7 @@ foreach ($forbidden in @(
     Assert-True (-not $source.Contains($forbidden,[StringComparison]::OrdinalIgnoreCase)) "observe proof must exclude mutation/network/process primitive: $forbidden"
 }
 
-Assert-True ($source.StartsWith("[CmdletBinding()]`nparam()`n",[StringComparison]::Ordinal)) 'observe proof top-level contract must expose no caller parameters'
+Assert-True ($normalizedSource.StartsWith("[CmdletBinding()]`nparam()`n",[StringComparison]::Ordinal)) 'observe proof top-level contract must expose no caller parameters'
 Assert-True ($source.Contains('$maximumResultPolls = 60',[StringComparison]::Ordinal)) 'observe proof must keep result polling bounded'
 Assert-True ($source.Contains('$resultPollMilliseconds = 500',[StringComparison]::Ordinal)) 'observe proof must keep fixed polling interval'
 
