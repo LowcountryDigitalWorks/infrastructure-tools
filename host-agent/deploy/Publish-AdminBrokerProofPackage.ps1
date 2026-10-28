@@ -25,7 +25,13 @@ function Invoke-DotNetPublish([string]$Project, [string]$Destination) {
     if ($LASTEXITCODE -ne 0) { throw 'ADMIN_BROKER_PACKAGE_PUBLISH_FAILED' }
 }
 
-function Invoke-ExpectedFailure([string]$Executable,[string[]]$Arguments,[int]$ExpectedExit,[string]$ExpectedStderr) {
+function Invoke-ExpectedFailure {
+    param(
+        [Parameter(Mandatory)][string]$Executable,
+        [string[]]$Arguments = @(),
+        [Parameter(Mandatory)][int]$ExpectedExit,
+        [Parameter(Mandatory)][string]$ExpectedStderr
+    )
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $Executable
     foreach ($argument in $Arguments) { $null = $start.ArgumentList.Add($argument) }
@@ -33,16 +39,18 @@ function Invoke-ExpectedFailure([string]$Executable,[string[]]$Arguments,[int]$E
     $start.CreateNoWindow = $true
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
+    # Smoke proof must be independent of any runner/user secret state.
+    $null = $start.Environment.Remove('LDW_CORSAIR_NEON_SECRET')
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $start
     try {
         if (-not $process.Start()) { throw 'ADMIN_BROKER_PACKAGE_SMOKE_START_FAILED' }
-        $stdout = $process.StandardOutput.ReadToEnd()
-        $stderr = $process.StandardError.ReadToEnd()
         if (-not $process.WaitForExit(10000)) {
             try { $process.Kill($true) } catch { }
             throw 'ADMIN_BROKER_PACKAGE_SMOKE_TIMEOUT'
         }
+        $stdout = $process.StandardOutput.ReadToEnd()
+        $stderr = $process.StandardError.ReadToEnd()
         if ($process.ExitCode -ne $ExpectedExit -or -not [string]::IsNullOrEmpty($stdout) -or $stderr.Trim() -cne $ExpectedStderr) {
             throw 'ADMIN_BROKER_PACKAGE_SMOKE_MISMATCH'
         }
@@ -69,8 +77,9 @@ try {
     Copy-Item -LiteralPath $probeExe -Destination $packagedProbe
 
     # Harmless runtime smoke checks: no pipe is opened and no secret is read or stored.
-    Invoke-ExpectedFailure $packagedHost @('--package-smoke') 2 'This interactive tool accepts no command-line arguments.'
-    Invoke-ExpectedFailure $packagedProbe @() 1 'SECRET_MISSING'
+    Invoke-ExpectedFailure -Executable $packagedHost -Arguments @('--package-smoke') -ExpectedExit 2 `
+        -ExpectedStderr 'This interactive tool accepts no command-line arguments.'
+    Invoke-ExpectedFailure -Executable $packagedProbe -Arguments @() -ExpectedExit 1 -ExpectedStderr 'SECRET_MISSING'
 
     $sourceCommit = (& git -C $repoRoot rev-parse HEAD 2>$null).Trim()
     $sourceTree = (& git -C $repoRoot rev-parse 'HEAD^{tree}' 2>$null).Trim()
