@@ -80,7 +80,8 @@ internal static class LocalCiJitControlAdapterRegressionTests
         var duplicate = engine.ProcessRequestAsync(request, null, CancellationToken.None).GetAwaiter().GetResult();
         Assert(first.Success && first.ResultState == "QUEUED", "real local adapter can return bounded queued state");
         Assert(replayBoundary.QueueCalls.Count == 1, "duplicate broker request id cannot duplicate launch-boundary invocation");
-        Assert(!duplicate.Success && duplicate.ErrorCode == "DUPLICATE_REQUEST", "duplicate launch request fails deterministically");
+        Assert(duplicate.ErrorCode == "DUPLICATE_REQUEST" && duplicate.ResultState == "DuplicateRequest",
+            "duplicate launch request returns the canonical replay classification without reinvocation");
 
         var repoRoot = FindRepositoryRoot();
         var managePath = Path.Combine(repoRoot, "host-agent", "deploy", "Manage-CiJitControlTasks.ps1");
