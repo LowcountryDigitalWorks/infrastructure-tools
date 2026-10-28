@@ -11,7 +11,8 @@ public sealed record CiJitControlResult(
     string? ProfileId = null,
     long? RunId = null,
     long? JobId = null,
-    CiJitStatusSnapshot? Status = null);
+    CiJitStatusSnapshot? Status = null,
+    string? StaleItems = null);
 
 public interface ICiJitControlAdapter
 {
@@ -42,6 +43,7 @@ public static class CiJitControlContract
         "TARGET_REFUSED",
         "QUEUE_UNAVAILABLE",
         "QUEUE_STALE",
+        "NO_ELIGIBLE_JOB",
         "BUSY",
         "CAPACITY",
         "POLICY_HOLD",
@@ -58,6 +60,15 @@ public static class CiJitControlContract
         "PROFILE_MISMATCH",
         "OPERATION_NOT_FOUND",
         "FAILED"
+    };
+
+    private static readonly HashSet<string> StaleReasonCodes = new(StringComparer.Ordinal)
+    {
+        "PR_CLOSED",
+        "PR_MERGED",
+        "PR_HEAD_MOVED",
+        "SUPERSEDED",
+        "PROFILE_MISMATCH"
     };
 
     private static readonly HashSet<string> StatusReasonCodes = new(StringComparer.Ordinal)
@@ -108,6 +119,8 @@ public static class CiJitControlContract
             return false;
         if (result.RunId is <= 0 || result.JobId is <= 0)
             return false;
+        if (result.StaleItems is not null && !IsSafeStaleItems(result.StaleItems))
+            return false;
         return result.Status is null || IsSafeStatus(result.Status);
     }
 
@@ -122,6 +135,7 @@ public static class CiJitControlContract
         Add(details, "profileId", result.ProfileId);
         Add(details, "runId", result.RunId?.ToString(CultureInfo.InvariantCulture));
         Add(details, "jobId", result.JobId?.ToString(CultureInfo.InvariantCulture));
+        Add(details, "staleItems", result.StaleItems);
 
         if (result.Status is { } status)
         {
@@ -141,6 +155,27 @@ public static class CiJitControlContract
         }
 
         return details.Count == 0 ? null : details;
+    }
+
+    private static bool IsSafeStaleItems(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 1024)
+            return false;
+        var entries = value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (entries.Length is < 1 or > 16)
+            return false;
+        var seen = new HashSet<long>();
+        foreach (var entry in entries)
+        {
+            var pair = entry.Split(':', 2, StringSplitOptions.None);
+            if (pair.Length != 2
+                || !long.TryParse(pair[0], NumberStyles.None, CultureInfo.InvariantCulture, out var runId)
+                || runId <= 0
+                || !seen.Add(runId)
+                || !StaleReasonCodes.Contains(pair[1]))
+                return false;
+        }
+        return true;
     }
 
     private static bool IsSafeStatus(CiJitStatusSnapshot status)

@@ -24,7 +24,7 @@ if (new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRo
 var secretStore = new LocalSecretStore();
 var audit = new AdminBrokerAuditLogger();
 var broker = new AdminBrokerPipeServer([callerSid!],
-    new AdminBrokerEngine(new CodyncBotHandler(), new HostAgentOperationHandler()), audit);
+    new AdminBrokerEngine(new CodyncBotHandler(), new HostAgentOperationHandler(new LocalCiJitControlAdapter())), audit);
 var launcher = new CorsairNeonLauncher(secretStore);
 using var shutdown = new CancellationTokenSource();
 Console.CancelKeyPress += (_, eventArgs) => { eventArgs.Cancel = true; shutdown.Cancel(); };
