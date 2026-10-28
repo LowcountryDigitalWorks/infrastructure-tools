@@ -76,9 +76,16 @@ def test_credential_free_proof_contract() -> None:
     assert_no_mutating_capability_commands(value)
     for expected in EXPECTED.values():
         assert expected in value
+    assert "command -v realpath >/dev/null" in value
+    assert 'for cmd in sha256sum sha512sum python3 tar stat awk id mktemp env rm rmdir dirname; do' in value
     assert "EXPECTED_BRIDGE_ID='dragonfly-redrix-01'" in value
     assert 'ERROR:BRIDGE_CREDENTIAL_PRESENT_OR_AMBIGUOUS' in value
+    assert 'ERROR:BRIDGE_CREDENTIAL_ABSENCE_NOT_PROVEN' in value
     assert '/usr/bin/secret-tool lookup service ldw-operations-bridge bridge-id "$EXPECTED_BRIDGE_ID"' in value
+    assert '[[ $secret_rc -ne 1 || -s "$SECRET_STDERR" ]]' in value
+    assert "CREDENTIAL_LOOKUP_NO_TOKEN_RC=1" in value
+    assert 'jit_status_snapshot()' in value
+    assert '"$CONTROLLER" status' not in value
     assert '[[ $runtime_rc -eq 6 ]]' in value
     assert "BRIDGE_STATUS_AFTER=blocked" in value
     assert "JIT_FINAL_STATE=PASS" in value
