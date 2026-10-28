@@ -87,8 +87,10 @@ function ConvertFrom-CiJitClientResponse {
         throw 'CLIENT_RESPONSE_REFUSED'
     }
 
-    $document = [Text.Json.JsonDocument]::Parse($Json)
+    $document = $null
     try {
+        try { $document = [Text.Json.JsonDocument]::Parse($Json) }
+        catch { throw 'CLIENT_RESPONSE_REFUSED' }
         $root = $document.RootElement
         if ($root.ValueKind -ne [Text.Json.JsonValueKind]::Object) { throw 'CLIENT_RESPONSE_REFUSED' }
         $allowed = @('version','requestId','operation','success','targetIdentity','resultState','summary','errorCode','timestampUtc','details')
@@ -99,22 +101,33 @@ function ConvertFrom-CiJitClientResponse {
         foreach ($required in @('version','requestId','operation','success','targetIdentity','resultState','summary','timestampUtc')) {
             if ($required -cnotin $names) { throw 'CLIENT_RESPONSE_REFUSED' }
         }
-        if ($root.GetProperty('version').GetInt32() -ne 1 -or
-            $root.GetProperty('requestId').GetString() -cne $ExpectedRequestId -or
-            $root.GetProperty('operation').GetString() -cne $ExpectedOperation -or
-            $root.GetProperty('targetIdentity').GetString() -cne $script:TargetIdentity) {
+
+        try {
+            $version = $root.GetProperty('version').GetInt32()
+            $requestId = $root.GetProperty('requestId').GetString()
+            $operation = $root.GetProperty('operation').GetString()
+            $target = $root.GetProperty('targetIdentity').GetString()
+            $summary = $root.GetProperty('summary').GetString()
+            $timestamp = $root.GetProperty('timestampUtc').GetString()
+        } catch { throw 'CLIENT_RESPONSE_REFUSED' }
+        if ($version -ne 1 -or $requestId -cne $ExpectedRequestId -or $operation -cne $ExpectedOperation -or $target -cne $script:TargetIdentity) {
             throw 'CLIENT_RESPONSE_CORRELATION_REFUSED'
+        }
+        if ($null -eq $summary -or $summary.Length -gt 256 -or $summary.Contains("`r") -or $summary.Contains("`n") -or
+            -not [DateTime]::TryParse($timestamp,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind,[ref]([DateTime]$parsedTimestamp))) {
+            throw 'CLIENT_RESPONSE_REFUSED'
         }
 
         $successElement = $root.GetProperty('success')
         if ($successElement.ValueKind -notin @([Text.Json.JsonValueKind]::True,[Text.Json.JsonValueKind]::False)) { throw 'CLIENT_RESPONSE_REFUSED' }
         $success = $successElement.GetBoolean()
-        $resultState = $root.GetProperty('resultState').GetString()
+        try { $resultState = $root.GetProperty('resultState').GetString() } catch { throw 'CLIENT_RESPONSE_REFUSED' }
         if ($resultState -cnotin @('QUEUED','STARTED','PASS','BLOCKED','FAILED','STALE','AMBIGUOUS')) { throw 'CLIENT_RESPONSE_REFUSED' }
         if (($success -and $resultState -in @('BLOCKED','FAILED','AMBIGUOUS')) -or
             (-not $success -and $resultState -in @('QUEUED','STARTED','PASS'))) { throw 'CLIENT_RESPONSE_REFUSED' }
 
         $details = [ordered]@{}
+        $detailsElement = [Text.Json.JsonElement]::new()
         if ($root.TryGetProperty('details',[ref]$detailsElement) -and $detailsElement.ValueKind -ne [Text.Json.JsonValueKind]::Null) {
             if ($detailsElement.ValueKind -ne [Text.Json.JsonValueKind]::Object) { throw 'CLIENT_RESPONSE_REFUSED' }
             $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
@@ -131,6 +144,7 @@ function ConvertFrom-CiJitClientResponse {
         }
 
         $errorCode = $null
+        $errorElement = [Text.Json.JsonElement]::new()
         if ($root.TryGetProperty('errorCode',[ref]$errorElement) -and $errorElement.ValueKind -ne [Text.Json.JsonValueKind]::Null) {
             if ($errorElement.ValueKind -ne [Text.Json.JsonValueKind]::String) { throw 'CLIENT_RESPONSE_REFUSED' }
             $errorCode = $errorElement.GetString()
@@ -143,7 +157,9 @@ function ConvertFrom-CiJitClientResponse {
             errorCode = $errorCode
             details = $details
         }
-    } finally { $document.Dispose() }
+    } finally {
+        if ($null -ne $document) { $document.Dispose() }
+    }
 }
 
 function Invoke-CiJitControlPipe {
