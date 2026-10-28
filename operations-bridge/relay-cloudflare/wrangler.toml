@@ -1,11 +1,13 @@
 name = "ldw-operations-bridge-relay"
-main = "src/relay.js"
+main = "src/relay-multi.js"
 compatibility_date = "2026-10-01"
 
 # Secrets (set via `wrangler secret put`, never commit values):
-# - SITE_DISPATCH_TOKEN  (Operations Site -> Worker dispatch/status only)
-# - BRIDGE_CLIENT_TOKEN  (LDW01 bridge -> Worker WebSocket connect/result only)
-# Tokens must be distinct; shared tokens fail closed.
+# - SITE_DISPATCH_TOKEN                 (Operations Site -> Worker dispatch/status only)
+# - BRIDGE_CLIENT_TOKEN                 (LDW01 bridge -> Worker WebSocket connect/result only)
+# - DRAGONFLY_BRIDGE_CLIENT_TOKEN       (REDRIX Dragonfly bridge -> exact Dragonfly connect/result only)
+# Existing Site/LDW01 tokens must remain distinct. A configured Dragonfly token
+# must also be distinct from both; token equality fails closed in the worker.
 
 [vars]
 BRIDGE_ID = "ldw01-bridge"
@@ -14,6 +16,14 @@ BRIDGE_ID = "ldw01-bridge"
 name = "BRIDGE_RELAY"
 class_name = "BridgeRelayDurableObject"
 
+[[durable_objects.bindings]]
+name = "DRAGONFLY_BRIDGE_RELAY"
+class_name = "DragonflyBridgeRelayDurableObject"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["BridgeRelayDurableObject"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["DragonflyBridgeRelayDurableObject"]
