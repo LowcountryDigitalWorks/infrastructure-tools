@@ -51,10 +51,10 @@ foreach ($forbidden in @(
     Assert-True (-not $source.Contains($forbidden,[StringComparison]::OrdinalIgnoreCase)) "publisher must exclude mutation/network primitive: $forbidden"
 }
 
-Assert-True ($source.Contains("$packageFiles.Count -ne 3",[StringComparison]::Ordinal)) 'package must contain exactly three files'
-Assert-True ($source.Contains("LDW.AdminBroker.Host.exe,LDW.LocalSecretProbe.exe,manifest.json",[StringComparison]::Ordinal)) 'package boundary must be exact'
-Assert-True ($source.Contains("[Diagnostics.ProcessStartInfo]::new()",[StringComparison]::Ordinal)) 'smoke checks must launch only fixed package executables'
-Assert-True ($source.Contains("$start.FileName = $Executable",[StringComparison]::Ordinal)) 'smoke helper must use its fixed executable argument'
+Assert-True ($source.Contains('$packageFiles.Count -ne 3',[StringComparison]::Ordinal)) 'package must contain exactly three files'
+Assert-True ($source.Contains('LDW.AdminBroker.Host.exe,LDW.LocalSecretProbe.exe,manifest.json',[StringComparison]::Ordinal)) 'package boundary must be exact'
+Assert-True ($source.Contains('[Diagnostics.ProcessStartInfo]::new()',[StringComparison]::Ordinal)) 'smoke checks must launch only fixed package executables'
+Assert-True ($source.Contains('$start.FileName = $Executable',[StringComparison]::Ordinal)) 'smoke helper must use its fixed executable argument'
 Assert-True (-not $source.Contains('Environment[', [StringComparison]::OrdinalIgnoreCase)) 'publisher must not set secret environment variables'
 
 Write-Host "Admin Broker package contract assertions PASS: $script:Assertions"
