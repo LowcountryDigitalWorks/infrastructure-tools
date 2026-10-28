@@ -36,11 +36,14 @@ fail() {
   exit 1
 }
 
-[[ "$(id -u)" != '0' ]] || fail 'ROOT_USER_REFUSED'
-
+for cmd in id mktemp chmod rm find awk head tail tr; do
+  command -v "$cmd" >/dev/null 2>&1 || fail "REQUIRED_TOOL_MISSING:$cmd"
+done
 for cmd in "$SYSTEMD_CREDS" "$SYSTEMD_RUN" "$SYSTEMCTL" "$PYTHON3" "$TIMEOUT" "$SHA256SUM"; do
   [[ -x "$cmd" ]] || fail 'REQUIRED_TOOL_MISSING'
 done
+
+[[ "$(id -u)" != '0' ]] || fail 'ROOT_USER_REFUSED'
 
 runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 [[ "$runtime_dir" == "/run/user/$(id -u)" ]] || fail 'XDG_RUNTIME_DIR_UNEXPECTED'
@@ -155,11 +158,11 @@ PY
 )"
 expected_digest="$(printf '%s' "$SYNTHETIC" | "$SHA256SUM" | awk '{print $1}')"
 
-if ! printf '%s' "$SYNTHETIC" | "$SYSTEMD_CREDS" encrypt \
+if ! printf '%s' "$SYNTHETIC" | "$SYSTEMD_CREDS" \
     --user \
     --with-key=host \
     --name="$CREDENTIAL_ID" \
-    - "$CIPHER" \
+    encrypt - "$CIPHER" \
     >/dev/null 2>"$ENCRYPT_DIAG"; then
   fail 'SYSTEMD_USER_ENCRYPT_FAILED'
 fi
@@ -170,10 +173,10 @@ unset SYNTHETIC
 chmod 600 "$CIPHER"
 echo 'SYSTEMD_USER_ENCRYPT=PASS'
 
-actual_cli_digest="$({ "$SYSTEMD_CREDS" decrypt \
+actual_cli_digest="$({ "$SYSTEMD_CREDS" \
     --user \
     --name="$CREDENTIAL_ID" \
-    "$CIPHER" - 2>"$DECRYPT_DIAG"; } | "$SHA256SUM" | awk '{print $1}')" \
+    decrypt "$CIPHER" - 2>"$DECRYPT_DIAG"; } | "$SHA256SUM" | awk '{print $1}')" \
   || fail 'SYSTEMD_USER_DECRYPT_FAILED'
 [[ "$actual_cli_digest" == "$expected_digest" ]] || fail 'SYSTEMD_USER_DECRYPT_DIGEST_MISMATCH'
 echo 'SYSTEMD_USER_CLI_DECRYPT_DIGEST=PASS'
