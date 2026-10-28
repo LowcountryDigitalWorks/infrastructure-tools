@@ -160,14 +160,14 @@ foreach ($literal in @(
     Assert-True ($bootstrapSource.Contains($literal, [StringComparison]::Ordinal)) "CI/JIT bootstrap must pin accepted identity $literal"
 }
 Assert-True ($bootstrapSource.Contains("branch','--show-current", [StringComparison]::Ordinal)) 'CI/JIT bootstrap must require a named current branch'
-Assert-True ($bootstrapSource.Contains("$branch -cne 'main'", [StringComparison]::Ordinal)) 'CI/JIT bootstrap must require main'
+Assert-True ($bootstrapSource.Contains('$branch -cne ''main''', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must require main'
 Assert-True ($bootstrapSource.Contains("status','--porcelain", [StringComparison]::Ordinal)) 'CI/JIT bootstrap must require a clean worktree'
 Assert-True ($bootstrapSource.Contains('refs/remotes/origin/main', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must bind local HEAD to fetched origin/main'
 Assert-True ($bootstrapSource.Contains('merge-base --is-ancestor', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must require accepted source ancestry'
 Assert-True ($bootstrapSource.Contains('ACCEPTED_CONTROL_SOURCE_CHANGED', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must reject accepted installer/worker drift'
 Assert-True ($bootstrapSource.Contains('WindowsIdentity]::GetCurrent()', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must derive owner SID locally'
 Assert-True ($bootstrapSource.Contains('OWNER_SID=LOCAL_DERIVED', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must redact owner SID in output'
-Assert-True ($bootstrapSource.Contains("$Mode -ne 'Uninstall'", [StringComparison]::Ordinal)) 'CI/JIT bootstrap must preserve rollback when bundle evidence is unavailable'
+Assert-True ($bootstrapSource.Contains('$Mode -ne ''Uninstall''', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must preserve rollback when bundle evidence is unavailable'
 Assert-True ($bootstrapSource.Contains('$parameters.AcceptInstall = $true', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must forward explicit install acceptance only when supplied'
 Assert-True ($bootstrapSource.Contains('$parameters.AcceptUninstall = $true', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must forward explicit uninstall acceptance only when supplied'
 Assert-True ($bootstrapSource.Contains('& $managePath @parameters', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must delegate to the reviewed installer instead of reimplementing task creation'
