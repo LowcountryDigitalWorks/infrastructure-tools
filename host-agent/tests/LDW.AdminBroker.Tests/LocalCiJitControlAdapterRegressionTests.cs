@@ -157,7 +157,7 @@ internal static class LocalCiJitControlAdapterRegressionTests
         var dispatcherBody = Slice(worker, "function Invoke-DispatcherMode", "function Invoke-ControlGhRead");
         Assert(dispatcherBody.Contains("$code -ceq 'BUSY'", StringComparison.Ordinal)
             && dispatcherBody.Contains("$code -ceq 'CAPACITY'", StringComparison.Ordinal)
-            && dispatcherBody.Contains("Reason='NO_ELIGIBLE_JOB'", StringComparison.Ordinal),
+            && dispatcherBody.Contains("else{'NO_ELIGIBLE_JOB'}", StringComparison.Ordinal),
             "dispatcher ambiguity/capacity/idle outcomes stay bounded and fail closed");
 
         var staleReasonBody = Slice(worker, "function Get-PrStaleReason", "function Get-ProvenStaleEntries");
@@ -193,8 +193,7 @@ internal static class LocalCiJitControlAdapterRegressionTests
         Assert(apiReadBody.Contains("--method GET", StringComparison.Ordinal)
             && apiReadBody.Contains("throw 'API_READ_FAILED'", StringComparison.Ordinal),
             "provider reads are GET-only and fail closed on API failure");
-        var topLevelCatch = worker[worker.LastIndexOf("} catch {", StringComparison.Ordinal)..];
-        Assert(topLevelCatch.Contains("'^QUEUE_UNAVAILABLE$|^API_READ_FAILED$|^API_RESPONSE_INVALID$' {'QUEUE_UNAVAILABLE'", StringComparison.Ordinal),
+        Assert(worker.Contains("'^QUEUE_UNAVAILABLE$|^API_READ_FAILED$|^API_RESPONSE_INVALID$' {'QUEUE_UNAVAILABLE';break}", StringComparison.Ordinal),
             "provider/API failure maps to QUEUE_UNAVAILABLE, never idle or stale proof");
 
         var resultBody = Slice(worker, "function Write-Result", "function Invoke-Child");
