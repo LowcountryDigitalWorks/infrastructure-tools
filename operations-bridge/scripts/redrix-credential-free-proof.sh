@@ -365,9 +365,13 @@ PY
 [[ "$(id -u)" != '0' ]] || { echo 'ERROR:ROOT_USER_REFUSED' >&2; exit 1; }
 [[ "$(id -un)" == "$EXPECTED_USER" ]] || { echo "ERROR:UNEXPECTED_USER:$(id -un)" >&2; exit 1; }
 
-for cmd in /usr/bin/python3 /usr/bin/secret-tool /usr/bin/timeout; do
-  [[ -x "$cmd" && ! -L "$cmd" ]] || { echo "ERROR:REQUIRED_BINARY_INVALID:$cmd" >&2; exit 1; }
-done
+# Match accepted runtime prerequisites: Python is invoked at the fixed
+# /usr/bin/python3 path and may be the normal Debian alternatives/symlink path;
+# secret-tool is separately provenance-checked below with the runtime's stricter
+# regular-file/non-symlink/non-group/world-writable rule.
+[[ -x /usr/bin/python3 ]] || { echo 'ERROR:REQUIRED_BINARY_INVALID:/usr/bin/python3' >&2; exit 1; }
+[[ -x /usr/bin/timeout ]] || { echo 'ERROR:REQUIRED_BINARY_INVALID:/usr/bin/timeout' >&2; exit 1; }
+[[ -x /usr/bin/secret-tool ]] || { echo 'ERROR:REQUIRED_BINARY_INVALID:/usr/bin/secret-tool' >&2; exit 1; }
 
 # Match the accepted runtime's private per-user lock boundary.
 [[ -d "$RUNTIME_DIR" && ! -L "$RUNTIME_DIR" ]] || { echo 'ERROR:USER_RUNTIME_DIR_INVALID' >&2; exit 1; }
