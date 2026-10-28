@@ -287,10 +287,7 @@ function validateDragonflyRouteEnvelope(body) {
 }
 
 function isExactEmptyArgs(args) {
-  if (args === undefined || args === null) {
-    return true;
-  }
-  return typeof args === "object" && !Array.isArray(args) && Object.keys(args).length === 0;
+  return typeof args === "object" && args !== null && !Array.isArray(args) && Object.keys(args).length === 0;
 }
 
 function resolveTokenConfiguration(env) {
