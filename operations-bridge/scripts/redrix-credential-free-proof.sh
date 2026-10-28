@@ -28,12 +28,13 @@ USAGE
 }
 
 [[ $# -ge 1 && $# -le 2 ]] || usage
+command -v realpath >/dev/null 2>&1 || { echo 'ERROR:REQUIRED_TOOL_MISSING:realpath' >&2; exit 2; }
 ZIP_PATH="$(realpath -- "$1")"
 MODE="${2:-}"
 [[ -f "$ZIP_PATH" ]] || { echo 'ERROR:ARTIFACT_ZIP_MISSING' >&2; exit 2; }
 [[ -z "$MODE" || "$MODE" == '--artifact-only' ]] || usage
 
-for cmd in sha256sum sha512sum python3 tar stat awk id; do
+for cmd in sha256sum sha512sum python3 tar stat awk id mktemp env rm rmdir dirname; do
   command -v "$cmd" >/dev/null 2>&1 || { echo "ERROR:REQUIRED_TOOL_MISSING:$cmd" >&2; exit 2; }
 done
 
@@ -52,6 +53,7 @@ CONTROLLER="${HOME:-}/.local/lib/ldw-dragonfly-jit/dragonfly_jit.py"
 OWNER_CONTROLS="${HOME:-}/.local/lib/ldw-dragonfly-jit/owner_controls.py"
 BASE="${XDG_DATA_HOME:-${HOME:-}/.local/share}/ldw-jit/base/debian-13-genericcloud-amd64.qcow2"
 DESKTOP_DIR="${HOME:-}/.local/share/applications"
+JIT_STATE_ROOT="${XDG_STATE_HOME:-${HOME:-}/.local/state}/ldw-dragonfly-jit"
 
 INSTALL_CREATED=0
 CONFIG_CREATED=0
@@ -77,6 +79,59 @@ for proc in Path('/proc').iterdir():
     if argv and argv[0] == entry:
         count += 1
 print(count)
+PY
+}
+
+jit_status_snapshot() {
+  JIT_STATE_ROOT="$JIT_STATE_ROOT" BASE="$BASE" python3 - <<'PY'
+import json, os, uuid
+from pathlib import Path
+root=Path(os.environ['JIT_STATE_ROOT']).absolute()
+status_path=root/'status.json'
+runs_root=root/'runs'
+base=Path(os.environ['BASE']).absolute()
+if root.is_symlink(): raise SystemExit('ERROR:JIT_STATE_ROOT_SYMLINK')
+value={
+ 'schema':1,'marker':'CI-RUNNER-DRAGONFLY-JIT-001','state':'STOPPED',
+ 'updated_at':None,'run_id':None,'qemu_pid':None,'reason':None,
+}
+if status_path.exists() or status_path.is_symlink():
+    if status_path.is_symlink() or not status_path.is_file(): raise SystemExit('ERROR:JIT_STATUS_PATH_INVALID')
+    try: value=json.loads(status_path.read_text(encoding='utf-8'))
+    except Exception as exc: raise SystemExit('ERROR:JIT_STATUS_JSON_INVALID') from exc
+    if not isinstance(value,dict): raise SystemExit('ERROR:JIT_STATUS_OBJECT_REQUIRED')
+allowed={'schema','marker','state','updated_at','run_id','qemu_pid','reason'}
+if set(value)-allowed: raise SystemExit('ERROR:JIT_STATUS_FIELDS_INVALID')
+if value.get('schema')!=1 or value.get('marker')!='CI-RUNNER-DRAGONFLY-JIT-001': raise SystemExit('ERROR:JIT_STATUS_CONTRACT_INVALID')
+state=value.get('state')
+if state not in {'STOPPED','AVAILABLE','RUNNING','DRAINING','HOLD','FAILED'}: raise SystemExit('ERROR:JIT_STATUS_STATE_INVALID')
+run_id=value.get('run_id')
+if run_id is not None:
+    try: uuid.UUID(run_id)
+    except Exception as exc: raise SystemExit('ERROR:JIT_STATUS_RUN_ID_INVALID') from exc
+qemu=value.get('qemu_pid')
+if qemu is not None and (not isinstance(qemu,int) or isinstance(qemu,bool) or qemu<=0): raise SystemExit('ERROR:JIT_STATUS_PID_INVALID')
+if qemu is not None and run_id is None: raise SystemExit('ERROR:JIT_STATUS_IDENTITY_INVALID')
+if state in {'STOPPED','AVAILABLE'} and (run_id is not None or qemu is not None): raise SystemExit('ERROR:JIT_STATUS_IDENTITY_INVALID')
+if state == 'RUNNING' and (run_id is None or qemu is None): raise SystemExit('ERROR:JIT_STATUS_IDENTITY_INVALID')
+if state == 'DRAINING' and ((run_id is None) != (qemu is None)): raise SystemExit('ERROR:JIT_STATUS_IDENTITY_INVALID')
+if runs_root.is_symlink(): raise SystemExit('ERROR:JIT_RUNS_ROOT_SYMLINK')
+residue=0
+if runs_root.exists():
+    if not runs_root.is_dir(): raise SystemExit('ERROR:JIT_RUNS_ROOT_INVALID')
+    for entry in runs_root.iterdir():
+        if entry.is_symlink() or not entry.is_dir(): raise SystemExit('ERROR:JIT_RUN_ROOT_CONTAMINATED')
+        residue += 1
+base_present=base.is_file() and not base.is_symlink()
+out={
+ 'marker':'CI-RUNNER-DRAGONFLY-JIT-001',
+ 'state':state,
+ 'run_id':run_id,
+ 'qemu_pid':qemu,
+ 'residue_count':residue,
+ 'base_present':base_present,
+}
+print(json.dumps(out,sort_keys=True,separators=(',',':')))
 PY
 }
 
@@ -383,7 +438,14 @@ if [[ $secret_rc -eq 0 || -s "$SECRET_STDOUT" ]]; then
   echo 'ERROR:BRIDGE_CREDENTIAL_PRESENT_OR_AMBIGUOUS' >&2
   exit 1
 fi
-echo "CREDENTIAL_LOOKUP_NO_TOKEN_RC=$secret_rc"
+# `secret-tool lookup` returns 1 with no stdout/stderr when no matching item exists.
+# Any other failure is not proof of credential absence; stop rather than treating
+# a locked/broken keyring or D-Bus failure as credential-free evidence.
+if [[ $secret_rc -ne 1 || -s "$SECRET_STDERR" ]]; then
+  echo "ERROR:BRIDGE_CREDENTIAL_ABSENCE_NOT_PROVEN:rc=$secret_rc" >&2
+  exit 1
+fi
+echo 'CREDENTIAL_LOOKUP_NO_TOKEN_RC=1'
 
 # Snapshot the exact existing JIT/owner-control/base state. These are the
 # invariants the proof must preserve.
@@ -404,7 +466,7 @@ STATUS_SHA_BEFORE="$(sha256sum "$DESKTOP_DIR/ldw-runner-status.desktop" | awk '{
 BASE_SHA_BEFORE="$(sha512sum "$BASE" | awk '{print $1}')"
 [[ "$BASE_SHA_BEFORE" == "$EXPECTED_BASE_SHA512" ]] || { echo 'ERROR:BASE_PROVENANCE_MISMATCH' >&2; exit 1; }
 
-controller_status_before="$(/usr/bin/python3 "$CONTROLLER" status)"
+controller_status_before="$(jit_status_snapshot)"
 CONTROLLER_STATUS="$controller_status_before" python3 - <<'PY'
 import json, os
 v=json.loads(os.environ['CONTROLLER_STATUS'])
@@ -514,7 +576,7 @@ echo 'BRIDGE_STATUS_AFTER=blocked'
 [[ "$(bridge_process_count)" == '0' ]] || { echo 'ERROR:BRIDGE_PROCESS_LINGERING' >&2; exit 1; }
 echo 'BRIDGE_PROCESS_CLEANUP=PASS'
 
-controller_status_after="$(/usr/bin/python3 "$CONTROLLER" status)"
+controller_status_after="$(jit_status_snapshot)"
 CONTROLLER_STATUS="$controller_status_after" python3 - <<'PY'
 import json, os
 v=json.loads(os.environ['CONTROLLER_STATUS'])
