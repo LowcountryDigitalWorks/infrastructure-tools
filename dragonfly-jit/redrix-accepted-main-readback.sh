@@ -21,7 +21,7 @@ MODE="${2:-}"
 [[ -f "$ZIP_PATH" ]] || { echo 'ERROR:ARTIFACT_ZIP_MISSING' >&2; exit 2; }
 [[ -z "$MODE" || "$MODE" == '--artifact-only' ]] || usage
 
-for cmd in sha256sum sha512sum tar python3 mktemp stat awk id head grep rm; do
+for cmd in sha256sum sha512sum tar python3 mktemp stat awk id head grep rm tr; do
   command -v "$cmd" >/dev/null || { echo "ERROR:REQUIRED_TOOL_MISSING:$cmd" >&2; exit 2; }
 done
 
