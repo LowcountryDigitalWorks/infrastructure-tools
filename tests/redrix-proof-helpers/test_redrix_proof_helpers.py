@@ -79,6 +79,10 @@ def test_credential_free_proof_contract() -> None:
     assert "command -v realpath >/dev/null" in value
     assert 'for cmd in sha256sum sha512sum python3 tar stat awk id mktemp env rm rmdir dirname; do' in value
     assert "EXPECTED_BRIDGE_ID='dragonfly-redrix-01'" in value
+    assert "[[ -x /usr/bin/python3 ]]" in value
+    assert "[[ -x /usr/bin/timeout ]]" in value
+    assert "[[ -x /usr/bin/secret-tool ]]" in value
+    assert '[[ -x /usr/bin/python3 && ! -L /usr/bin/python3 ]]' not in value
     assert 'ERROR:BRIDGE_CREDENTIAL_PRESENT_OR_AMBIGUOUS' in value
     assert 'ERROR:BRIDGE_CREDENTIAL_ABSENCE_NOT_PROVEN' in value
     assert '/usr/bin/secret-tool lookup service ldw-operations-bridge bridge-id "$EXPECTED_BRIDGE_ID"' in value
