@@ -2,7 +2,7 @@
 set -euo pipefail
 umask 077
 
-EXPECTED_ZIP_SHA256='e0091c03c7a0e0c3bdf01c51e8c29fcf70e51788c1a9d3d84a91226cea6b01d4'
+ORIGINAL_ARTIFACT_ZIP_SHA256='e0091c03c7a0e0c3bdf01c51e8c29fcf70e51788c1a9d3d84a91226cea6b01d4'
 EXPECTED_TAR_SHA256='27835aad28f13723c831ad4c8d0c5b8a2110cb22eb55e1387199eb8fff960f71'
 EXPECTED_SOURCE_COMMIT='bcbdfb181f18eacfbceef2bf990c07a0b612915a'
 EXPECTED_ADAPTER_BLOB='9ffbfd1dd2ea63fd7eece24e1f3eb791c92da0bf'
@@ -10,7 +10,7 @@ EXPECTED_BASE_SHA512='3ace18e33bdd036edb49d1f79342bd01d2ab980e35194edb0b410435cd
 PACKAGE_NAME='ldw-operations-bridge-dragonfly-linux-x64'
 
 usage() {
-  echo "usage: $0 <dragonfly-redrix-linux-x64-main-bcbdfb181.zip> [--artifact-only]" >&2
+  echo "usage: $0 <dragonfly-redrix-linux-x64-package.zip> [--artifact-only]" >&2
   exit 2
 }
 
@@ -21,7 +21,7 @@ MODE="${2:-}"
 [[ -f "$ZIP_PATH" ]] || { echo 'ERROR:ARTIFACT_ZIP_MISSING' >&2; exit 2; }
 [[ -z "$MODE" || "$MODE" == '--artifact-only' ]] || usage
 
-for cmd in sha256sum sha512sum unzip tar python3 mktemp stat awk id head grep basename rm; do
+for cmd in sha256sum sha512sum tar python3 mktemp stat awk id head grep rm; do
   command -v "$cmd" >/dev/null || { echo "ERROR:REQUIRED_TOOL_MISSING:$cmd" >&2; exit 2; }
 done
 
@@ -29,8 +29,39 @@ WORK="$(mktemp -d)"
 trap 'rm -rf -- "$WORK"' EXIT
 
 actual_zip_sha="$(sha256sum "$ZIP_PATH" | awk '{print $1}')"
-[[ "$actual_zip_sha" == "$EXPECTED_ZIP_SHA256" ]] || { echo "ERROR:ZIP_SHA256_MISMATCH:$actual_zip_sha" >&2; exit 1; }
-unzip -q "$ZIP_PATH" -d "$WORK"
+if [[ "$actual_zip_sha" == "$ORIGINAL_ARTIFACT_ZIP_SHA256" ]]; then
+  echo 'ZIP_TRANSPORT=ORIGINAL_ACCEPTED_RUN'
+else
+  echo 'ZIP_TRANSPORT=REPACKED_OR_REPRODUCED'
+fi
+
+# The outer GitHub Actions artifact ZIP is a transport container with finite
+# retention, not the durable trust anchor. Safely require its exact three-file
+# payload, then bind trust to the deterministic inner tar/manifest provenance.
+ZIP_PATH="$ZIP_PATH" WORK="$WORK" PACKAGE_NAME="$PACKAGE_NAME" python3 - <<'PY'
+import os, stat, zipfile
+from pathlib import Path, PurePosixPath
+zip_path=Path(os.environ['ZIP_PATH'])
+work=Path(os.environ['WORK'])
+package=os.environ['PACKAGE_NAME']
+expected={f'{package}.tar.gz', f'{package}.tar.gz.sha256', 'manifest.json'}
+try:
+    with zipfile.ZipFile(zip_path) as zf:
+        infos=zf.infolist()
+        names=[i.filename for i in infos]
+        if len(infos)!=3 or set(names)!=expected or len(set(names))!=3:
+            raise SystemExit('ERROR:ZIP_LAYOUT_INVALID')
+        for info in infos:
+            p=PurePosixPath(info.filename)
+            if p.is_absolute() or '..' in p.parts or len(p.parts)!=1:
+                raise SystemExit('ERROR:ZIP_PATH_INVALID')
+            mode=(info.external_attr >> 16) & 0xffff
+            if mode and stat.S_ISLNK(mode):
+                raise SystemExit('ERROR:ZIP_SYMLINK_REFUSED')
+            (work/info.filename).write_bytes(zf.read(info))
+except zipfile.BadZipFile as exc:
+    raise SystemExit('ERROR:ZIP_INVALID') from exc
+PY
 
 TAR="$WORK/$PACKAGE_NAME.tar.gz"
 CHECKSUM="$TAR.sha256"
@@ -38,12 +69,11 @@ MANIFEST="$WORK/manifest.json"
 [[ -f "$TAR" && -f "$CHECKSUM" && -f "$MANIFEST" ]] || { echo 'ERROR:ARTIFACT_LAYOUT_INVALID' >&2; exit 1; }
 actual_tar_sha="$(sha256sum "$TAR" | awk '{print $1}')"
 [[ "$actual_tar_sha" == "$EXPECTED_TAR_SHA256" ]] || { echo "ERROR:TAR_SHA256_MISMATCH:$actual_tar_sha" >&2; exit 1; }
-(
-  cd "$WORK"
-  sha256sum --check --strict "$(basename "$CHECKSUM")" >/dev/null
-)
+expected_checksum_line="$EXPECTED_TAR_SHA256  $PACKAGE_NAME.tar.gz"
+actual_checksum_line="$(tr -d '\r\n' < "$CHECKSUM")"
+[[ "$actual_checksum_line" == "$expected_checksum_line" ]] || { echo 'ERROR:CHECKSUM_RECORD_INVALID' >&2; exit 1; }
 
-ZIP_PATH="$ZIP_PATH" MANIFEST="$MANIFEST" TAR="$TAR" EXPECTED_SOURCE_COMMIT="$EXPECTED_SOURCE_COMMIT" EXPECTED_ADAPTER_BLOB="$EXPECTED_ADAPTER_BLOB" PACKAGE_NAME="$PACKAGE_NAME" python3 - <<'PY'
+MANIFEST="$MANIFEST" TAR="$TAR" EXPECTED_SOURCE_COMMIT="$EXPECTED_SOURCE_COMMIT" EXPECTED_ADAPTER_BLOB="$EXPECTED_ADAPTER_BLOB" PACKAGE_NAME="$PACKAGE_NAME" python3 - <<'PY'
 import json, os, tarfile
 from pathlib import PurePosixPath
 m=json.load(open(os.environ['MANIFEST'], encoding='utf-8'))
@@ -87,7 +117,7 @@ print('DOTNET_SDK='+m['dotnetSdkVersion'])
 print('PAYLOAD_FILES='+str(len(files)))
 PY
 
-echo "ZIP_SHA256=$actual_zip_sha"
+echo "ZIP_TRANSPORT_SHA256=$actual_zip_sha"
 echo "PACKAGE_SHA256=$actual_tar_sha"
 
 [[ "$MODE" == '--artifact-only' ]] && exit 0
@@ -136,7 +166,7 @@ fi
 # directories. Read and validate the state/run tree directly instead.
 JIT_STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/ldw-dragonfly-jit"
 JIT_STATE_ROOT="$JIT_STATE_ROOT" python3 - <<'PY'
-import json, os, stat, uuid
+import json, os, uuid
 from pathlib import Path
 root=Path(os.environ['JIT_STATE_ROOT']).absolute()
 status_path=root/'status.json'
