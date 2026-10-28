@@ -148,6 +148,33 @@ foreach ($scriptName in @('Disable-HyperVObserver.ps1', 'Enable-HyperVObserver.p
     }
 }
 
+$bootstrapSource = Get-Content -LiteralPath (Join-Path $deployRoot 'Bootstrap-CiJitControlTasks.ps1') -Raw
+foreach ($literal in @(
+    '9187711faffe90bcc9f6f09d936a9f0a95289ed4',
+    '622ded670d2805bf163699a77c076454e92f90bc',
+    '1877c993dabe7e9d1e2a712a317a0d935ab74dfd',
+    'd10cad356a8ee8cb6201a6167b2ca5ab732a967f1945fe543520454c643ae964',
+    '54b9343af44c70db1d1403cf7f45cfc11e8bf167',
+    'beb9b9096b2f4bfa41ad877ad4f6a41150fbcfec'
+)) {
+    Assert-True ($bootstrapSource.Contains($literal, [StringComparison]::Ordinal)) "CI/JIT bootstrap must pin accepted identity $literal"
+}
+Assert-True ($bootstrapSource.Contains("branch','--show-current", [StringComparison]::Ordinal)) 'CI/JIT bootstrap must require a named current branch'
+Assert-True ($bootstrapSource.Contains('$branch -cne ''main''', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must require main'
+Assert-True ($bootstrapSource.Contains("status','--porcelain", [StringComparison]::Ordinal)) 'CI/JIT bootstrap must require a clean worktree'
+Assert-True ($bootstrapSource.Contains('refs/remotes/origin/main', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must bind local HEAD to fetched origin/main'
+Assert-True ($bootstrapSource.Contains('merge-base --is-ancestor', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must require accepted source ancestry'
+Assert-True ($bootstrapSource.Contains('ACCEPTED_CONTROL_SOURCE_CHANGED', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must reject accepted installer/worker drift'
+Assert-True ($bootstrapSource.Contains('WindowsIdentity]::GetCurrent()', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must derive owner SID locally'
+Assert-True ($bootstrapSource.Contains('OWNER_SID=LOCAL_DERIVED', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must redact owner SID in output'
+Assert-True ($bootstrapSource.Contains('$Mode -ne ''Uninstall''', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must preserve rollback when bundle evidence is unavailable'
+Assert-True ($bootstrapSource.Contains('$parameters.AcceptInstall = $true', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must forward explicit install acceptance only when supplied'
+Assert-True ($bootstrapSource.Contains('$parameters.AcceptUninstall = $true', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must forward explicit uninstall acceptance only when supplied'
+Assert-True ($bootstrapSource.Contains('& $managePath @parameters', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must delegate to the reviewed installer instead of reimplementing task creation'
+foreach ($forbidden in @('Invoke-WebRequest','Invoke-RestMethod','curl.exe','Start-BitsTransfer','gh api','Register-ScheduledTask','New-ScheduledTask')) {
+    Assert-True (-not $bootstrapSource.Contains($forbidden, [StringComparison]::OrdinalIgnoreCase)) "CI/JIT bootstrap must not add network or task-definition primitive $forbidden"
+}
+
 $deployFiles = @(Get-ChildItem -LiteralPath $deployRoot -File | Where-Object { $_.Extension -in @('.ps1', '.psm1') })
 $allDeploySource = ($deployFiles | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }) -join "`n"
 foreach ($forbidden in @(
