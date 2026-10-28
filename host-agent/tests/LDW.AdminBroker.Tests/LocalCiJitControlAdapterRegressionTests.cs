@@ -103,6 +103,10 @@ internal static class LocalCiJitControlAdapterRegressionTests
         }
         Assert(manage.Contains("$definition.Triggers.Count -ne 0", StringComparison.Ordinal), "task readback rejects any trigger");
         Assert(manage.Contains("'TRIGGER_COUNT=0'", StringComparison.Ordinal), "plan/status reports zero triggers");
+        Assert(manage.Contains("$definition.Settings.MultipleInstances=2", StringComparison.Ordinal)
+            && manage.Contains("$definition.Settings.AllowDemandStart=$true", StringComparison.Ordinal)
+            && manage.Contains("$definition.Settings.StartWhenAvailable=$false", StringComparison.Ordinal),
+            "fixed task uses demand-only IgnoreNew serialization rather than ambient recurrence");
         Assert(!manage.Contains("Triggers.Create", StringComparison.OrdinalIgnoreCase)
             && !manage.Contains("New-ScheduledTaskTrigger", StringComparison.OrdinalIgnoreCase)
             && !manage.Contains("Repetition", StringComparison.OrdinalIgnoreCase),
@@ -116,6 +120,20 @@ internal static class LocalCiJitControlAdapterRegressionTests
         Assert(!taskSddlLine.Contains("(A;;FA;;;'+$OwnerSid", StringComparison.Ordinal)
             && !taskSddlLine.Contains("(A;;GW;;;'+$OwnerSid", StringComparison.Ordinal),
             "owner task invocation rights do not grant definition replacement rights");
+
+        var uninstallBody = Slice(manage, "function Uninstall-Tasks", "if($Mode -eq 'Plan')");
+        Assert(uninstallBody.Contains("ACTIVE_TASK_REFUSED", StringComparison.Ordinal)
+            && uninstallBody.Contains("PENDING_REQUEST_REFUSED", StringComparison.Ordinal),
+            "rollback refuses to delete active or pending control state ambiguously");
+        Assert(uninstallBody.Contains("$folder.DeleteTask", StringComparison.Ordinal)
+            && uninstallBody.Contains("Remove-Item -LiteralPath $controlRoot -Recurse -Force", StringComparison.Ordinal),
+            "rollback removes every fixed task and the control root");
+        foreach (var forbiddenPersistence in new[] { "New-Service", "Start-Service", "Set-Service", "Register-ScheduledJob", "New-JobTrigger" })
+        {
+            Assert(!manage.Contains(forbiddenPersistence, StringComparison.OrdinalIgnoreCase)
+                && !worker.Contains(forbiddenPersistence, StringComparison.OrdinalIgnoreCase),
+                "control boundary creates no service/poller persistence primitive " + forbiddenPersistence);
+        }
 
         var workerParamBlock = Slice(worker, "[CmdletBinding()]", "$ErrorActionPreference");
         Assert(workerParamBlock.Contains("ValidateSet('DISCOVER','RUN_ONCE','RECOVER','ABORT_ACTIVE','LIST_STALE','RETIRE_STALE')", StringComparison.Ordinal),
@@ -132,6 +150,22 @@ internal static class LocalCiJitControlAdapterRegressionTests
             && worker.Contains("ArgumentList.Add", StringComparison.Ordinal),
             "fixed child invocation uses structured argument-list construction");
 
+        Assert(worker.Contains("'DISCOVER' { $r=Invoke-DispatcherMode Discover", StringComparison.Ordinal)
+            && worker.Contains("'RUN_ONCE' { $r=Invoke-DispatcherMode Once", StringComparison.Ordinal)
+            && worker.Contains("'RECOVER' { $r=Invoke-DispatcherMode Recover", StringComparison.Ordinal),
+            "discover/run-once/recover delegate to the accepted protected #10 dispatcher instead of reimplementing selection or recovery");
+        var dispatcherBody = Slice(worker, "function Invoke-DispatcherMode", "function Invoke-ControlGhRead");
+        Assert(dispatcherBody.Contains("$code -ceq 'BUSY'", StringComparison.Ordinal)
+            && dispatcherBody.Contains("$code -ceq 'CAPACITY'", StringComparison.Ordinal)
+            && dispatcherBody.Contains("Reason='NO_ELIGIBLE_JOB'", StringComparison.Ordinal),
+            "dispatcher ambiguity/capacity/idle outcomes stay bounded and fail closed");
+
+        var staleReasonBody = Slice(worker, "function Get-PrStaleReason", "function Get-ProvenStaleEntries");
+        Assert(staleReasonBody.Contains("if ($pr.merged_at) { return 'PR_MERGED' }", StringComparison.Ordinal)
+            && staleReasonBody.Contains("if ($pr.state -ceq 'closed') { return 'PR_CLOSED' }", StringComparison.Ordinal)
+            && staleReasonBody.Contains("if ($pr.head.sha -cne $Run.head_sha) { return 'PR_HEAD_MOVED' }", StringComparison.Ordinal)
+            && staleReasonBody.Contains("return $null", StringComparison.Ordinal),
+            "current unchanged open PR head has no stale reason; only live moved/closed/merged evidence does");
         var staleBody = Slice(worker, "function Get-ProvenStaleEntries", "function Retire-ProvenStale");
         foreach (var evidence in new[] { "PR_MERGED", "PR_CLOSED", "PR_HEAD_MOVED", "PROFILE_MISMATCH", "Test-UnassignedQueued" })
         {
@@ -150,9 +184,18 @@ internal static class LocalCiJitControlAdapterRegressionTests
         Assert(secondRead >= 0 && cancel > secondRead, "cancel occurs only after the second exact stale-evidence read");
 
         var abortBody = Slice(worker, "'ABORT_ACTIVE' {", "'LIST_STALE' {");
-        Assert(abortBody.Contains("$runs.Count -ne 1", StringComparison.Ordinal)
+        Assert(abortBody.Contains("$runs.Count -eq 0", StringComparison.Ordinal)
+            && abortBody.Contains("$runs.Count -ne 1", StringComparison.Ordinal)
             && abortBody.Contains("'-Mode','Cleanup','-LocalRunId'", StringComparison.Ordinal),
-            "abort refuses ambiguous ownership and reaches only exact local cleanup");
+            "abort refuses absent/ambiguous ownership and reaches only exact local cleanup");
+
+        var apiReadBody = Slice(worker, "function Invoke-ControlGhRead", "function Test-UnassignedQueued");
+        Assert(apiReadBody.Contains("--method GET", StringComparison.Ordinal)
+            && apiReadBody.Contains("throw 'API_READ_FAILED'", StringComparison.Ordinal),
+            "provider reads are GET-only and fail closed on API failure");
+        var topLevelCatch = worker[worker.LastIndexOf("} catch {", StringComparison.Ordinal)..];
+        Assert(topLevelCatch.Contains("'^QUEUE_UNAVAILABLE$|^API_READ_FAILED$|^API_RESPONSE_INVALID$' {'QUEUE_UNAVAILABLE'", StringComparison.Ordinal),
+            "provider/API failure maps to QUEUE_UNAVAILABLE, never idle or stale proof");
 
         var resultBody = Slice(worker, "function Write-Result", "function Invoke-Child");
         foreach (var forbiddenResult in new[] { "stdout", "stderr", "commandLine", "accessToken", "bearer", "secret" })
