@@ -2,7 +2,7 @@
 set -euo pipefail
 umask 077
 
-EXPECTED_ZIP_SHA256='e0091c03c7a0e0c3bdf01c51e8c29fcf70e51788c1a9d3d84a91226cea6b01d4'
+ORIGINAL_ARTIFACT_ZIP_SHA256='e0091c03c7a0e0c3bdf01c51e8c29fcf70e51788c1a9d3d84a91226cea6b01d4'
 EXPECTED_TAR_SHA256='27835aad28f13723c831ad4c8d0c5b8a2110cb22eb55e1387199eb8fff960f71'
 EXPECTED_SOURCE_COMMIT='bcbdfb181f18eacfbceef2bf990c07a0b612915a'
 EXPECTED_ADAPTER_BLOB='9ffbfd1dd2ea63fd7eece24e1f3eb791c92da0bf'
@@ -14,7 +14,7 @@ EXPECTED_USER='eddie'
 
 usage() {
   cat >&2 <<USAGE
-usage: $0 <dragonfly-redrix-linux-x64-main-bcbdfb181.zip> [--artifact-only]
+usage: $0 <dragonfly-redrix-linux-x64-package.zip> [--artifact-only]
 
 Default mode performs the bounded credential-free REDRIX proof. It temporarily
 installs only the accepted package + exact non-secret config, requires no real
@@ -22,7 +22,11 @@ Bridge credential to be available, expects --dragonfly-run to exit 6/blocked,
 verifies the Dragonfly JIT controller remains STOPPED/clean, and rolls back only
 artifacts that this helper created.
 
---artifact-only verifies the accepted artifact and performs no device proof.
+The outer ZIP is only a transport container and may be reproduced after the
+original Actions artifact expires. Trust is bound to the exact three-member ZIP
+layout plus the deterministic inner package SHA/manifest/provenance.
+
+--artifact-only verifies the accepted package and performs no device proof.
 USAGE
   exit 2
 }
@@ -224,9 +228,17 @@ cleanup() {
 }
 trap 'cleanup "$?"' EXIT
 
-# Verify the exact accepted-main GitHub artifact and fully reconcile the package
-# payload inventory before any device-local proof action.
-ZIP_PATH="$ZIP_PATH" WORK="$WORK" EXPECTED_ZIP_SHA256="$EXPECTED_ZIP_SHA256" \
+# Verify the exact accepted inner package and fully reconcile its payload
+# inventory before any device-local proof action. The original Actions ZIP is
+# recorded as evidence but may be safely repacked after finite artifact expiry.
+actual_zip_sha="$(sha256sum "$ZIP_PATH" | awk '{print $1}')"
+if [[ "$actual_zip_sha" == "$ORIGINAL_ARTIFACT_ZIP_SHA256" ]]; then
+  echo 'ZIP_TRANSPORT=ORIGINAL_ACCEPTED_RUN'
+else
+  echo 'ZIP_TRANSPORT=REPACKED_OR_REPRODUCED'
+fi
+
+ZIP_PATH="$ZIP_PATH" WORK="$WORK" \
 EXPECTED_TAR_SHA256="$EXPECTED_TAR_SHA256" EXPECTED_SOURCE_COMMIT="$EXPECTED_SOURCE_COMMIT" \
 EXPECTED_ADAPTER_BLOB="$EXPECTED_ADAPTER_BLOB" PACKAGE_NAME="$PACKAGE_NAME" python3 - <<'PY'
 import hashlib, json, os, stat, tarfile, zipfile
@@ -235,7 +247,6 @@ from pathlib import Path, PurePosixPath
 zip_path=Path(os.environ['ZIP_PATH'])
 work=Path(os.environ['WORK'])
 package=os.environ['PACKAGE_NAME']
-expected_zip=os.environ['EXPECTED_ZIP_SHA256']
 expected_tar=os.environ['EXPECTED_TAR_SHA256']
 
 def sha256(path):
@@ -245,27 +256,28 @@ def sha256(path):
             h.update(b)
     return h.hexdigest()
 
-if sha256(zip_path) != expected_zip:
-    raise SystemExit('ERROR:ZIP_SHA256_MISMATCH')
-
 expected_zip_names={
     f'{package}.tar.gz',
     f'{package}.tar.gz.sha256',
     'manifest.json',
 }
-with zipfile.ZipFile(zip_path) as zf:
-    names=set(zf.namelist())
-    if names != expected_zip_names:
-        raise SystemExit('ERROR:ZIP_LAYOUT_INVALID')
-    for info in zf.infolist():
-        p=PurePosixPath(info.filename)
-        if p.is_absolute() or '..' in p.parts or len(p.parts) != 1:
-            raise SystemExit('ERROR:ZIP_PATH_INVALID')
-        mode=(info.external_attr >> 16) & 0xffff
-        if mode and stat.S_ISLNK(mode):
-            raise SystemExit('ERROR:ZIP_SYMLINK_REFUSED')
-        target=work/info.filename
-        target.write_bytes(zf.read(info))
+try:
+    with zipfile.ZipFile(zip_path) as zf:
+        infos=zf.infolist()
+        names=[i.filename for i in infos]
+        if len(infos)!=3 or set(names)!=expected_zip_names or len(set(names))!=3:
+            raise SystemExit('ERROR:ZIP_LAYOUT_INVALID')
+        for info in infos:
+            p=PurePosixPath(info.filename)
+            if p.is_absolute() or '..' in p.parts or len(p.parts) != 1:
+                raise SystemExit('ERROR:ZIP_PATH_INVALID')
+            mode=(info.external_attr >> 16) & 0xffff
+            if mode and stat.S_ISLNK(mode):
+                raise SystemExit('ERROR:ZIP_SYMLINK_REFUSED')
+            target=work/info.filename
+            target.write_bytes(zf.read(info))
+except zipfile.BadZipFile as exc:
+    raise SystemExit('ERROR:ZIP_INVALID') from exc
 
 archive=work/f'{package}.tar.gz'
 checksum=work/f'{package}.tar.gz.sha256'
@@ -354,10 +366,11 @@ if not entry.is_file() or not (entry.stat().st_mode & stat.S_IXUSR):
 
 print('ARTIFACT_VERIFY=PASS')
 print('SOURCE_COMMIT='+manifest['sourceCommit'])
-print('ZIP_SHA256='+expected_zip)
 print('PACKAGE_SHA256='+expected_tar)
 print('PAYLOAD_FILES='+str(len(actual_files)))
 PY
+
+echo "ZIP_TRANSPORT_SHA256=$actual_zip_sha"
 
 [[ "$MODE" == '--artifact-only' ]] && exit 0
 
