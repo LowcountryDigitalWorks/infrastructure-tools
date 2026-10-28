@@ -5,14 +5,18 @@ on:
     paths:
       - 'dragonfly-jit/redrix-accepted-main-readback.sh'
       - 'operations-bridge/scripts/redrix-credential-free-proof.sh'
+      - 'operations-bridge/scripts/redrix-systemd-credential-feasibility.sh'
       - 'tests/redrix-proof-helpers/test_redrix_proof_helpers.py'
+      - 'tests/redrix-proof-helpers/test_redrix_systemd_credential_feasibility.py'
       - '.github/workflows/redrix-proof-helper-validation.yml'
   push:
     branches: [main]
     paths:
       - 'dragonfly-jit/redrix-accepted-main-readback.sh'
       - 'operations-bridge/scripts/redrix-credential-free-proof.sh'
+      - 'operations-bridge/scripts/redrix-systemd-credential-feasibility.sh'
       - 'tests/redrix-proof-helpers/test_redrix_proof_helpers.py'
+      - 'tests/redrix-proof-helpers/test_redrix_systemd_credential_feasibility.py'
       - '.github/workflows/redrix-proof-helper-validation.yml'
   workflow_dispatch:
 
@@ -35,9 +39,11 @@ jobs:
           set -euo pipefail
           bash -n dragonfly-jit/redrix-accepted-main-readback.sh
           bash -n operations-bridge/scripts/redrix-credential-free-proof.sh
+          bash -n operations-bridge/scripts/redrix-systemd-credential-feasibility.sh
 
       - name: Contract tests
         shell: bash
         run: |
           set -euo pipefail
           python3 tests/redrix-proof-helpers/test_redrix_proof_helpers.py
+          python3 tests/redrix-proof-helpers/test_redrix_systemd_credential_feasibility.py
