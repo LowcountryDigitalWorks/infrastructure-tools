@@ -1,0 +1,31 @@
+name: Dragonfly JIT secretless canary
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dragonfly-canary:
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+      - dragonfly
+      - jit
+      - ldw-ephemeral
+      - synthetic-only
+      - dragonfly-run-${{ github.run_id }}
+    timeout-minutes: 5
+    steps:
+      - name: Assert secretless disposable Dragonfly boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${RUNNER_OS:-}" = "Linux"
+          test "${RUNNER_ARCH:-}" = "X64"
+          test "$(uname -m)" = "x86_64"
+          test -r /etc/os-release
+          test ! -S /var/run/docker.sock
+          printf 'DRAGONFLY_SECRETLESS_CANARY=PASS\n'
