@@ -36,11 +36,14 @@ $echoBootstrap={param($Plan,$CapsuleJson,$TimeoutSeconds)$value=$CapsuleJson|Con
 Assert-ThrowsMessage {Invoke-LdwDragonflyCanaryTransport -CapsuleJson $capsule -Plan $plan -ProcessInvoker $echoBootstrap|Out-Null} 'DRAGONFLY_CANARY_TRANSPORT_BOOTSTRAP_EXPOSED' 'BOOTSTRAP_STDOUT_ECHO_NOT_REFUSED'
 
 $script:Inventory=@();$script:DeleteCalls=0;$script:PostCalls=0;$script:AttemptReads=0
+$runPath='repos/LowcountryDigitalWorks/infrastructure-tools/actions/runs/'+$runId
+$attemptJobsPath='repos/LowcountryDigitalWorks/infrastructure-tools/actions/runs/'+$runId+'/attempts/'+$runAttempt+'/jobs?per_page=100'
+$runnerInventoryPath='repos/LowcountryDigitalWorks/infrastructure-tools/actions/runners?per_page=100'
 $api={
  param($Path,$Method,$Body)
- if($Method -ceq 'GET' -and $Path -ceq 'repos/LowcountryDigitalWorks/infrastructure-tools/actions/runners?per_page=100'){return [pscustomobject]@{total_count=$script:Inventory.Count;runners=@($script:Inventory)}}
- if($Method -ceq 'GET' -and $Path -ceq ('repos/LowcountryDigitalWorks/infrastructure-tools/actions/runs/'+$runId)){return $run}
- if($Method -ceq 'GET' -and $Path -ceq ('repos/LowcountryDigitalWorks/infrastructure-tools/actions/runs/'+$runId+'/attempts/'+$runAttempt+'/jobs?per_page=100')){
+ if($Method -ceq 'GET' -and $Path -ceq $runnerInventoryPath){return [pscustomobject]@{total_count=$script:Inventory.Count;runners=@($script:Inventory)}}
+ if($Method -ceq 'GET' -and $Path -ceq $runPath){return $run}
+ if($Method -ceq 'GET' -and $Path -ceq $attemptJobsPath){
    $script:AttemptReads++
    if($script:AttemptReads -eq 1){return [pscustomobject]@{total_count=1;jobs=@($job)}}
    return [pscustomobject]@{total_count=1;jobs=@([pscustomobject]@{id=$jobId;run_id=$runId;run_attempt=$runAttempt;head_sha=$head;name='dragonfly-canary';status='completed';conclusion='success';runner_id=$runnerId;runner_name=$runnerName;labels=$labels})}
@@ -63,7 +66,7 @@ try{
  # Provider movement between caller snapshot and lock/re-read must fail before registration.
  $script:Inventory=@();$script:PostCalls=0;$script:DeleteCalls=0;$script:AttemptReads=0
  $movedRun=[pscustomobject]@{id=$runId;run_attempt=3;head_sha=$head;path='.github/workflows/dragonfly-jit-canary.yml';event='workflow_dispatch';status='queued';conclusion=$null;repository=$run.repository;head_repository=$run.head_repository}
- $movedApi={param($Path,$Method,$Body);if($Method -ceq 'GET' -and $Path -like '*actions/runs/'+$runId){return $movedRun};if($Method -ceq 'GET' -and $Path -like '*actions/runs/'+$runId+'/attempts/*'){return [pscustomobject]@{total_count=1;jobs=@($job)}};if($Method -ceq 'POST'){$script:PostCalls++;return $jit};if($Method -ceq 'GET' -and $Path -like '*actions/runners*'){return [pscustomobject]@{total_count=0;runners=@()}};throw 'UNEXPECTED_API'}
+ $movedApi={param($Path,$Method,$Body);if($Method -ceq 'GET' -and $Path -ceq $runPath){return $movedRun};if($Method -ceq 'GET' -and $Path -ceq $attemptJobsPath){return [pscustomobject]@{total_count=1;jobs=@($job)}};if($Method -ceq 'POST'){$script:PostCalls++;return $jit};if($Method -ceq 'GET' -and $Path -ceq $runnerInventoryPath){return [pscustomobject]@{total_count=0;runners=@()}};throw ('UNEXPECTED_API:'+$Method+':'+$Path)}
  Assert-ThrowsMessage{Invoke-LdwDragonflyCanaryOnce -Run $run -Job $job -ExpectedHeadSha $head -ApiInvoker $movedApi -DispatcherRoot $ci10Root -StatusProvider{$status} -ProcessInvoker $processFromCapsule -SleepInvoker{param($Seconds)} -LocalAppData '/tmp/ldw-localappdata' -WindowsRoot '/windows' -ProviderTimeoutSeconds 5|Out-Null} 'DRAGONFLY_CANARY_RUN_IDENTITY_INVALID' 'FRESH_PROVIDER_MOVEMENT_NOT_REFUSED'
  Assert-True ($script:PostCalls -eq 0) 'REGISTRATION_OCCURRED_AFTER_PROVIDER_MOVEMENT'
 
@@ -71,9 +74,9 @@ try{
  $script:UnknownInventory=@();$script:UnknownPost=0
  $uncertainApi={
    param($Path,$Method,$Body)
-   if($Method -ceq 'GET' -and $Path -ceq ('repos/LowcountryDigitalWorks/infrastructure-tools/actions/runs/'+$runId)){return $run}
-   if($Method -ceq 'GET' -and $Path -ceq ('repos/LowcountryDigitalWorks/infrastructure-tools/actions/runs/'+$runId+'/attempts/'+$runAttempt+'/jobs?per_page=100')){return [pscustomobject]@{total_count=1;jobs=@($job)}}
-   if($Method -ceq 'GET' -and $Path -ceq 'repos/LowcountryDigitalWorks/infrastructure-tools/actions/runners?per_page=100'){return [pscustomobject]@{total_count=$script:UnknownInventory.Count;runners=@($script:UnknownInventory)}}
+   if($Method -ceq 'GET' -and $Path -ceq $runPath){return $run}
+   if($Method -ceq 'GET' -and $Path -ceq $attemptJobsPath){return [pscustomobject]@{total_count=1;jobs=@($job)}}
+   if($Method -ceq 'GET' -and $Path -ceq $runnerInventoryPath){return [pscustomobject]@{total_count=$script:UnknownInventory.Count;runners=@($script:UnknownInventory)}}
    if($Method -ceq 'POST'){$script:UnknownPost++;throw 'SIMULATED_AMBIGUOUS_POST'}
    throw ('UNEXPECTED_API:'+$Method+':'+$Path)
  }
