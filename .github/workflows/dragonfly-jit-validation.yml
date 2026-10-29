@@ -10,6 +10,7 @@ on:
       - 'ci-dispatch/DragonflyCanary.psm1'
       - 'ci-dispatch/DragonflyCanaryRuntime.psm1'
       - 'ci-dispatch/Invoke-DragonflyCanaryProduction.ps1'
+      - 'ci-dispatch/DragonflyCanaryAdjunctPublisher.psm1'
       - 'ci-dispatch/tests/Test-DragonflyCanary.ps1'
       - 'ci-dispatch/tests/Test-DragonflyCanaryRuntime.ps1'
       - '.github/workflows/dragonfly-jit-validation.yml'
@@ -27,6 +28,7 @@ on:
       - 'ci-dispatch/DragonflyCanary.psm1'
       - 'ci-dispatch/DragonflyCanaryRuntime.psm1'
       - 'ci-dispatch/Invoke-DragonflyCanaryProduction.ps1'
+      - 'ci-dispatch/DragonflyCanaryAdjunctPublisher.psm1'
       - 'ci-dispatch/tests/Test-DragonflyCanary.ps1'
       - 'ci-dispatch/tests/Test-DragonflyCanaryRuntime.ps1'
       - '.github/workflows/dragonfly-jit-validation.yml'
@@ -57,22 +59,30 @@ jobs:
             dragonfly-jit/canary_executor.py \
             tools/dragonfly_canary_publication.py \
             tools/dragonfly_canary_redrix_install.py
-      - name: Parse bounded LDW01 production entry
+      - name: Parse bounded LDW01 publication source
         shell: pwsh
         run: |
-          $tokens = $null
-          $errors = $null
-          $null = [Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path './ci-dispatch/Invoke-DragonflyCanaryProduction.ps1'),
-            [ref]$tokens,
-            [ref]$errors
-          )
-          if (@($errors).Count) { throw 'DRAGONFLY_PRODUCTION_ENTRY_PARSE_FAILED' }
-          'DRAGONFLY_PRODUCTION_ENTRY_PARSE=PASS'
+          foreach ($path in @(
+            './ci-dispatch/Invoke-DragonflyCanaryProduction.ps1',
+            './ci-dispatch/DragonflyCanaryAdjunctPublisher.psm1'
+          )) {
+            $tokens = $null
+            $errors = $null
+            $null = [Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $path),
+              [ref]$tokens,
+              [ref]$errors
+            )
+            if (@($errors).Count) { throw 'DRAGONFLY_PUBLICATION_POWERSHELL_PARSE_FAILED' }
+          }
+          'DRAGONFLY_PUBLICATION_POWERSHELL_PARSE=PASS'
       - name: Run lifecycle, transport, and canary contract tests
         run: python3 -m unittest discover -s dragonfly-jit/tests -p 'test_*.py' -v
       - name: Run publication and install contract tests
         run: python3 -m unittest discover -s tests/dragonfly-canary-publication -p 'test_*.py' -v
+      - name: Validate protected LDW01 adjunct publisher contract
+        shell: pwsh
+        run: ./tests/dragonfly-canary-publication/Test-DragonflyCanaryAdjunctPublisher.ps1
       - name: Validate Dragonfly canary guest bootstrap
         shell: bash
         run: bash -n dragonfly-jit/canary-guest/bootstrap.sh
