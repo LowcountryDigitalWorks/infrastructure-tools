@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Security;
 using System.Text;
 
@@ -17,6 +18,9 @@ public sealed class SystemdCredentialDragonflyBridgeSecretReader : IDragonflyBri
 
         try
         {
+            if (GetEffectiveUserId() == 0)
+                throw Unavailable();
+
             var directory = Environment.GetEnvironmentVariable("CREDENTIALS_DIRECTORY");
             var path = CredentialPathForDirectory(directory);
             VerifyCredentialPath(path);
@@ -26,7 +30,7 @@ public sealed class SystemdCredentialDragonflyBridgeSecretReader : IDragonflyBri
         {
             throw;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or SecurityException or InvalidOperationException or DecoderFallbackException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or SecurityException or InvalidOperationException or DecoderFallbackException or DllNotFoundException or EntryPointNotFoundException)
         {
             throw Unavailable();
         }
@@ -79,6 +83,9 @@ public sealed class SystemdCredentialDragonflyBridgeSecretReader : IDragonflyBri
 
     private static DragonflyBridgeSecretUnavailableException Unavailable()
         => new();
+
+    [DllImport("libc", EntryPoint = "geteuid")]
+    private static extern uint GetEffectiveUserId();
 }
 
 public static class DragonflyBridgeSecretReaderFactory
