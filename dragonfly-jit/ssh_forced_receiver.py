@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""Forced-command receiver for the reviewed Dragonfly JIT handoff contract.
-
-This source opens no listener. It is intended only as the fixed command behind a
-separately reviewed, dedicated OpenSSH key restriction after #115's live REDRIX
-capability/security gate. The receiver accepts one fixed SSH original-command
-sentinel, reads one bounded V6 capsule from stdin, claims it using the already
-accepted handoff contract, and emits only the sanitized claim summary.
-"""
-
+"""Forced-command receiver for the reviewed Dragonfly JIT handoff contract."""
 from __future__ import annotations
 
 import hashlib
@@ -23,8 +15,13 @@ REMOTE_SENTINEL = "/nonexistent/ldw-dragonfly-jit-handoff-v1"
 OWNER_USER = "eddie"
 HANDOFF_MODULE_NAME = "ldw_dragonfly_handoff_contract"
 HANDOFF_FILENAME = "handoff_contract.py"
-EXPECTED_HANDOFF_GIT_BLOB = "2f7892275bacd9f56abaa0cdf204f46f79c046c0"
+EXPECTED_HANDOFF_GIT_BLOB = "fc7da15a283d6d6b921f055d393bc0035fb0f9c1"
+CANARY_EXECUTOR_MODULE_NAME = "ldw_dragonfly_canary_executor"
+CANARY_EXECUTOR_FILENAME = "canary_executor.py"
+EXPECTED_CANARY_EXECUTOR_GIT_BLOB = "6e0802f5fbf80de4a174494d1c3851f1dd4d4ab6"
+CANARY_PROFILE_ID = "dragonfly-github-canary-v1"
 MAX_HANDOFF_BYTES = 256 * 1024
+MAX_EXECUTOR_BYTES = 256 * 1024
 MAX_RECEIVER_BYTES = 64 * 1024
 
 
@@ -33,8 +30,7 @@ class ReceiverError(RuntimeError):
 
 
 def _git_blob_sha1(data: bytes) -> str:
-    header = f"blob {len(data)}\0".encode("ascii")
-    return hashlib.sha1(header + data).hexdigest()
+    return hashlib.sha1(f"blob {len(data)}\0".encode("ascii") + data).hexdigest()
 
 
 def _assert_path_not_symlinked(path: Path) -> Path:
@@ -65,19 +61,24 @@ def _assert_owned_regular_source(path: Path, *, max_bytes: int) -> bytes:
         raise ReceiverError("HANDOFF_SOURCE_UNTRUSTED") from exc
 
 
-def _assert_regular_private_source(path: Path) -> bytes:
-    data = _assert_owned_regular_source(path, max_bytes=MAX_HANDOFF_BYTES)
-    if _git_blob_sha1(data) != EXPECTED_HANDOFF_GIT_BLOB:
+def _assert_pinned_source(path: Path, *, expected_blob: str, max_bytes: int) -> bytes:
+    data = _assert_owned_regular_source(path, max_bytes=max_bytes)
+    if _git_blob_sha1(data) != expected_blob:
         raise ReceiverError("HANDOFF_SOURCE_UNTRUSTED")
     return data
 
 
-def _load_handoff_contract():
-    receiver_path = Path(__file__).absolute()
-    _assert_owned_regular_source(receiver_path, max_bytes=MAX_RECEIVER_BYTES)
-    source_path = receiver_path.parent / HANDOFF_FILENAME
-    _assert_regular_private_source(source_path)
-    spec = importlib.util.spec_from_file_location(HANDOFF_MODULE_NAME, source_path)
+def _assert_regular_private_source(path: Path) -> bytes:
+    return _assert_pinned_source(
+        path,
+        expected_blob=EXPECTED_HANDOFF_GIT_BLOB,
+        max_bytes=MAX_HANDOFF_BYTES,
+    )
+
+
+def _load_module(*, module_name: str, source_path: Path, expected_blob: str, max_bytes: int):
+    _assert_pinned_source(source_path, expected_blob=expected_blob, max_bytes=max_bytes)
+    spec = importlib.util.spec_from_file_location(module_name, source_path)
     if spec is None or spec.loader is None:
         raise ReceiverError("HANDOFF_SOURCE_UNTRUSTED")
     module = importlib.util.module_from_spec(spec)
@@ -86,6 +87,28 @@ def _load_handoff_contract():
     except Exception as exc:
         raise ReceiverError("HANDOFF_SOURCE_UNTRUSTED") from exc
     return module
+
+
+def _load_handoff_contract():
+    receiver_path = Path(__file__).absolute()
+    _assert_owned_regular_source(receiver_path, max_bytes=MAX_RECEIVER_BYTES)
+    return _load_module(
+        module_name=HANDOFF_MODULE_NAME,
+        source_path=receiver_path.parent / HANDOFF_FILENAME,
+        expected_blob=EXPECTED_HANDOFF_GIT_BLOB,
+        max_bytes=MAX_HANDOFF_BYTES,
+    )
+
+
+def _load_canary_executor():
+    receiver_path = Path(__file__).absolute()
+    _assert_owned_regular_source(receiver_path, max_bytes=MAX_RECEIVER_BYTES)
+    return _load_module(
+        module_name=CANARY_EXECUTOR_MODULE_NAME,
+        source_path=receiver_path.parent / CANARY_EXECUTOR_FILENAME,
+        expected_blob=EXPECTED_CANARY_EXECUTOR_GIT_BLOB,
+        max_bytes=MAX_EXECUTOR_BYTES,
+    )
 
 
 def _owner_state_root() -> Path:
@@ -114,6 +137,12 @@ def run_receiver(*, stdin, stdout, stderr, environ: dict[str, str], state_root: 
         handoff.claim_dispatch(summary, state_root=root)
         result = dict(summary)
         result["claimed"] = True
+        if summary.get("profile_id") == CANARY_PROFILE_ID:
+            executor = _load_canary_executor()
+            execution = executor.execute_canary(payload, summary, state_root=root)
+            if not isinstance(execution, dict):
+                raise ReceiverError("CANARY_EXECUTOR_RESULT_INVALID")
+            result["execution"] = execution
         stdout.write((json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
         return 0
     except ReceiverError as exc:
@@ -121,7 +150,11 @@ def run_receiver(*, stdin, stdout, stderr, environ: dict[str, str], state_root: 
         return 2
     except Exception as exc:
         handoff_error = getattr(locals().get("handoff", None), "HandoffError", None)
+        executor_error = getattr(locals().get("executor", None), "CanaryExecutorError", None)
         if handoff_error is not None and isinstance(exc, handoff_error):
+            stderr.write(f"ERROR:{exc}\n".encode("utf-8"))
+            return 2
+        if executor_error is not None and isinstance(exc, executor_error):
             stderr.write(f"ERROR:{exc}\n".encode("utf-8"))
             return 2
         stderr.write(b"ERROR:RECEIVER_FAILED\n")
