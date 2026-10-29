@@ -19,6 +19,12 @@ public sealed class SecretServiceDragonflyBridgeSecretReader : IDragonflyBridgeS
         if (!OperatingSystem.IsLinux())
             throw Unavailable();
 
+        // A system service with LoadCredentialEncrypted= is a separate trust mode.
+        // Once systemd advertises a credential directory, fail closed inside that
+        // provider and never fall back to the interactive Secret Service/keyring.
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CREDENTIALS_DIRECTORY")))
+            return new SystemdCredentialDragonflyBridgeSecretReader().ReadToken();
+
         try
         {
             VerifySecretTool();
