@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
-import json
 import os
 from pathlib import Path
 import tarfile
@@ -126,6 +125,32 @@ class RedrixInstallTests(unittest.TestCase):
                 self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND
             )
         self.assertEqual(self.authorized.read_bytes(), before)
+
+    def test_authorized_keys_mode_must_be_owner_only(self):
+        os.chmod(self.authorized, 0o644)
+        before = self.authorized.read_bytes()
+        with self.assertRaisesRegex(inst.InstallError, "REDRIX_FILE_MODE_INVALID"):
+            inst.install_fixture(
+                self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND
+            )
+        self.assertEqual(self.authorized.read_bytes(), before)
+        self.assertFalse((self.home / inst.TRANSACTION_REL).exists())
+
+    def test_group_writable_target_parent_is_refused(self):
+        app = self.home / ".local/lib/ldw-dragonfly-jit"
+        os.chmod(app, 0o770)
+        with self.assertRaisesRegex(inst.InstallError, "REDRIX_TARGET_PARENT_INVALID"):
+            inst.install_fixture(
+                self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND
+            )
+        self.assertFalse((self.home / inst.TRANSACTION_REL).exists())
+
+    def test_group_writable_home_is_refused(self):
+        os.chmod(self.home, 0o770)
+        with self.assertRaisesRegex(inst.InstallError, "REDRIX_HOME_INVALID"):
+            inst.install_fixture(
+                self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND
+            )
 
     def test_readback_refuses_post_install_authorized_keys_change(self):
         inst.install_fixture(
