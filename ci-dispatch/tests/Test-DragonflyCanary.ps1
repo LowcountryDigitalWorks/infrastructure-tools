@@ -17,7 +17,11 @@ $job = [pscustomobject]@{id=$jobId;name='dragonfly-canary';status='queued';concl
 $runnerName = 'redrix-' + $runId + '-' + $jobId
 $settings = [ordered]@{agentName=$runnerName;agentId=42;gitHubUrl='https://github.com/LowcountryDigitalWorks/infrastructure-tools';ephemeral=$true;disableUpdate=$true} | ConvertTo-Json -Compress
 $files = [ordered]@{'.runner'=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($settings))} | ConvertTo-Json -Compress
-$script:FakeJit = [pscustomobject]@{runner=[pscustomobject]@{id=42;name=$runnerName};encoded_jit_config=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($files))}
+$runnerLabels = @($labels | ForEach-Object { [pscustomobject]@{name=$_} })
+$script:FakeJit = [pscustomobject]@{
+    runner=[pscustomobject]@{id=42;name=$runnerName;labels=$runnerLabels}
+    encoded_jit_config=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($files))
+}
 $script:ApiCalls = 0
 $api = {
     param($Path,$Method,$Body)
@@ -39,12 +43,22 @@ $sanitized = $result.Sanitized | ConvertTo-Json -Depth 6 -Compress
 Assert-True (-not $sanitized.Contains($script:FakeJit.encoded_jit_config)) 'BOOTSTRAP_LEAKED'
 Assert-True ($capsule.opaque_bootstrap -ceq $script:FakeJit.encoded_jit_config) 'BOOTSTRAP_BINDING_INVALID'
 
-$bad = [pscustomobject]@{id=$jobId;name='dragonfly-canary';status='queued';conclusion=$null;runner_id=$null;runner_name='';labels=@($labels[0..($labels.Count-2)])+@('dragonfly-run-1')}
+$badJob = [pscustomobject]@{id=$jobId;name='dragonfly-canary';status='queued';conclusion=$null;runner_id=$null;runner_name='';labels=@($labels[0..($labels.Count-2)])+@('dragonfly-run-1')}
 $before = $script:ApiCalls
 $failed = $false
-try { $null = Invoke-LdwDragonflyCanaryRegistration -Run $run -Job $bad -ExpectedHeadSha $head -ApiInvoker $api }
+try { $null = Invoke-LdwDragonflyCanaryRegistration -Run $run -Job $badJob -ExpectedHeadSha $head -ApiInvoker $api }
 catch { $failed = $_.Exception.Message -ceq 'DRAGONFLY_CANARY_LABELS_INVALID' }
 Assert-True $failed 'INVALID_SELECTION_NOT_REFUSED'
 Assert-True ($script:ApiCalls -eq $before) 'API_CALLED_BEFORE_SELECTION_VALIDATION'
 
-' DRAGONFLY_CANARY_POWERSHELL_CONTRACT=PASS'.Trim()
+$request = New-LdwDragonflyCanaryRegistrationRequest -Selection ([pscustomobject]@{RunId=$runId;JobId=$jobId})
+$badResponse = [pscustomobject]@{
+    runner=[pscustomobject]@{id=42;name=$runnerName;labels=@($runnerLabels[0..($runnerLabels.Count-2)])}
+    encoded_jit_config=$script:FakeJit.encoded_jit_config
+}
+$failed = $false
+try { $null = Assert-LdwDragonflyCanaryJitResponse -Response $badResponse -Request $request }
+catch { $failed = $_.Exception.Message -ceq 'DRAGONFLY_CANARY_JIT_LABELS_INVALID' }
+Assert-True $failed 'PROVIDER_LABEL_DRIFT_NOT_REFUSED'
+
+'DRAGONFLY_CANARY_POWERSHELL_CONTRACT=PASS'
