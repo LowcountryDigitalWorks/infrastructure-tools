@@ -5,9 +5,11 @@ on:
     paths:
       - 'dragonfly-jit/**'
       - 'tools/dragonfly_canary_publication.py'
+      - 'tools/dragonfly_canary_redrix_install.py'
       - 'tests/dragonfly-canary-publication/**'
       - 'ci-dispatch/DragonflyCanary.psm1'
       - 'ci-dispatch/DragonflyCanaryRuntime.psm1'
+      - 'ci-dispatch/Invoke-DragonflyCanaryProduction.ps1'
       - 'ci-dispatch/tests/Test-DragonflyCanary.ps1'
       - 'ci-dispatch/tests/Test-DragonflyCanaryRuntime.ps1'
       - '.github/workflows/dragonfly-jit-validation.yml'
@@ -20,9 +22,11 @@ on:
     paths:
       - 'dragonfly-jit/**'
       - 'tools/dragonfly_canary_publication.py'
+      - 'tools/dragonfly_canary_redrix_install.py'
       - 'tests/dragonfly-canary-publication/**'
       - 'ci-dispatch/DragonflyCanary.psm1'
       - 'ci-dispatch/DragonflyCanaryRuntime.psm1'
+      - 'ci-dispatch/Invoke-DragonflyCanaryProduction.ps1'
       - 'ci-dispatch/tests/Test-DragonflyCanary.ps1'
       - 'ci-dispatch/tests/Test-DragonflyCanaryRuntime.ps1'
       - '.github/workflows/dragonfly-jit-validation.yml'
@@ -51,10 +55,23 @@ jobs:
             dragonfly-jit/ssh_transport_contract.py \
             dragonfly-jit/ssh_forced_receiver.py \
             dragonfly-jit/canary_executor.py \
-            tools/dragonfly_canary_publication.py
+            tools/dragonfly_canary_publication.py \
+            tools/dragonfly_canary_redrix_install.py
+      - name: Parse bounded LDW01 production entry
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          $null = [Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path './ci-dispatch/Invoke-DragonflyCanaryProduction.ps1'),
+            [ref]$tokens,
+            [ref]$errors
+          )
+          if (@($errors).Count) { throw 'DRAGONFLY_PRODUCTION_ENTRY_PARSE_FAILED' }
+          'DRAGONFLY_PRODUCTION_ENTRY_PARSE=PASS'
       - name: Run lifecycle, transport, and canary contract tests
         run: python3 -m unittest discover -s dragonfly-jit/tests -p 'test_*.py' -v
-      - name: Run publication package contract tests
+      - name: Run publication and install contract tests
         run: python3 -m unittest discover -s tests/dragonfly-canary-publication -p 'test_*.py' -v
       - name: Validate Dragonfly canary guest bootstrap
         shell: bash
