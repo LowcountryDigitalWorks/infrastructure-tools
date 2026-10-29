@@ -76,13 +76,19 @@ def _verify_source() -> None:
 
 def _verify_dependency(path: Path, classification: str, *, executable: bool = False) -> None:
     try:
-        info = path.lstat()
+        path.lstat()
     except FileNotFoundError as exc:
         raise ServiceError(classification) from exc
     if path.is_symlink() or not path.is_file():
         raise ServiceError(classification)
     if executable and not os.access(path, os.X_OK):
         raise ServiceError(classification)
+
+
+def _verify_credential_metadata() -> None:
+    result = _run(["/usr/bin/stat", "-Lc", "%u:%g:%a:%F", str(CREDENTIAL)], "BRIDGE_CREDENTIAL_ARTIFACT_INVALID", sudo=True)
+    if result.stdout.strip() != "0:0:600:regular file":
+        raise ServiceError("BRIDGE_CREDENTIAL_ARTIFACT_INVALID")
 
 
 def _verify_installed_unit() -> None:
@@ -98,7 +104,7 @@ def preflight() -> None:
     _verify_source()
     _verify_dependency(BINARY, "BRIDGE_BINARY_INVALID", executable=True)
     _verify_dependency(CONFIG, "BRIDGE_CONFIG_INVALID")
-    _verify_dependency(CREDENTIAL, "BRIDGE_CREDENTIAL_ARTIFACT_INVALID")
+    _verify_credential_metadata()
     if _is_active_or_enabled():
         raise ServiceError("SERVICE_MUST_BE_INACTIVE_AND_DISABLED")
 
