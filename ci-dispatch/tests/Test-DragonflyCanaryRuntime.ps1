@@ -1,7 +1,6 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $dispatchRoot = Split-Path $PSScriptRoot -Parent
-Import-Module (Join-Path $dispatchRoot 'DragonflyCanary.psm1') -Force
 Import-Module (Join-Path $dispatchRoot 'DragonflyCanaryRuntime.psm1') -Force
 
 function Assert-True { param([bool]$Condition,[string]$Message) if (-not $Condition) { throw $Message } }
@@ -10,7 +9,7 @@ function Assert-ThrowsMessage { param([scriptblock]$Action,[string]$Expected,[st
 $runId = 123456789
 $jobId = 987654321
 $head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-$labels = @(Get-LdwDragonflyCanaryLabels -RunId $runId)
+$labels = @('self-hosted','Linux','X64','dragonfly','jit','ldw-ephemeral','synthetic-only',('dragonfly-run-' + $runId))
 $run = [pscustomobject]@{
     id=$runId; run_attempt=1; head_sha=$head; path='.github/workflows/dragonfly-jit-canary.yml'; event='workflow_dispatch'; status='queued'; conclusion=$null
     repository=[pscustomobject]@{full_name='LowcountryDigitalWorks/infrastructure-tools'}
