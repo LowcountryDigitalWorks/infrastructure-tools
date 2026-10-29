@@ -4,7 +4,9 @@ from __future__ import annotations
 import gzip
 import hashlib
 import importlib.util
+import json
 from pathlib import Path
+import stat
 import tarfile
 import tempfile
 import unittest
@@ -27,6 +29,18 @@ class DragonflyCanaryPublicationTests(unittest.TestCase):
             encoding="ascii",
         )
         return checksum
+
+    def _rewrite_zip(self, source: Path, destination: Path, mutate) -> None:
+        with zipfile.ZipFile(source, "r") as src, zipfile.ZipFile(
+            destination, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
+        ) as dst:
+            for old in src.infolist():
+                data = src.read(old.filename)
+                info = zipfile.ZipInfo(old.filename, old.date_time)
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = old.external_attr
+                data, info = mutate(old.filename, data, info)
+                dst.writestr(info, data)
 
     def test_redrix_package_is_reproducible_and_verifies(self):
         with tempfile.TemporaryDirectory() as td:
@@ -56,8 +70,14 @@ class DragonflyCanaryPublicationTests(unittest.TestCase):
             self.assertEqual(manifest["sourceCommit"], mod.SOURCE_COMMIT)
             self.assertEqual(manifest["dispatcherAuthority"]["commit"], mod.DISPATCH_COMMIT)
             self.assertEqual(manifest["dispatcherAuthority"]["blob"], mod.DISPATCH_BLOB)
+            self.assertEqual(manifest["dispatcherAuthority"]["rawSha256"], mod.DISPATCH_RAW_SHA256)
+            self.assertEqual(manifest["dispatcherAuthority"]["windowsSha256"], mod.DISPATCH_WINDOWS_SHA256)
             current_dispatch = str(mod._git(ROOT, "rev-parse", f"{mod.SOURCE_COMMIT}:ci-dispatch/Dispatch.psm1")).strip()
             self.assertNotEqual(current_dispatch, mod.DISPATCH_BLOB)
+            dispatch = next(item for item in manifest["entries"] if item["packagePath"] == "ci-dispatch/Dispatch.psm1")
+            self.assertEqual(dispatch["sourceSha256"], mod.DISPATCH_RAW_SHA256)
+            self.assertEqual(dispatch["sha256"], mod.DISPATCH_WINDOWS_SHA256)
+            self.assertEqual(dispatch["materialization"], "crlf")
             self.assertEqual(len(manifest["entries"]), 3)
 
     def test_redrix_inventory_and_targets_are_closed(self):
@@ -81,19 +101,16 @@ class DragonflyCanaryPublicationTests(unittest.TestCase):
             self.assertEqual(str(mod._git(ROOT, "rev-parse", f"{mod.SOURCE_COMMIT}:{path}")).strip(), blob)
         for path, blob, _, _ in mod.REDRIX_ROLLBACK:
             self.assertEqual(str(mod._git(ROOT, "rev-parse", f"{mod.ROLLBACK_COMMIT}:{path}")).strip(), blob)
-        for commit, path, blob in mod.LDW01_FILES:
+        for commit, path, blob, _ in mod.LDW01_FILES:
             self.assertEqual(str(mod._git(ROOT, "rev-parse", f"{commit}:{path}")).strip(), blob)
 
     def test_dispatcher_sha256_representation_is_explicit(self):
         raw = mod._blob(ROOT, mod.DISPATCH_COMMIT, "ci-dispatch/Dispatch.psm1", mod.DISPATCH_BLOB)
-        lf = hashlib.sha256(raw).hexdigest()
-        crlf_bytes = raw.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
-        crlf = hashlib.sha256(crlf_bytes).hexdigest()
-        self.assertEqual(
-            mod.DISPATCH_SHA256,
-            lf,
-            f"DISPATCH_SHA256_REPRESENTATION_MISMATCH raw={lf} crlf={crlf}",
-        )
+        normalized = raw.replace(b"\r\n", b"\n")
+        crlf_bytes = normalized.replace(b"\n", b"\r\n")
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), mod.DISPATCH_RAW_SHA256)
+        self.assertEqual(hashlib.sha256(crlf_bytes).hexdigest(), mod.DISPATCH_WINDOWS_SHA256)
+        self.assertNotEqual(mod.DISPATCH_RAW_SHA256, mod.DISPATCH_WINDOWS_SHA256)
 
     def test_wrong_checksum_is_refused(self):
         with tempfile.TemporaryDirectory() as td:
@@ -127,6 +144,42 @@ class DragonflyCanaryPublicationTests(unittest.TestCase):
             checksum = self._checksum(archive)
             with self.assertRaisesRegex(mod.PublicationError, "PACKAGE_ARCHIVE_PATH_REFUSED"):
                 mod.verify_ldw01(ROOT, archive, checksum)
+
+    def test_ldw01_manifest_schema_tamper_is_refused_after_rechecksum(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            archive, _ = mod.build_ldw01(ROOT, base / "source")
+            tampered = base / "tampered.zip"
+            manifest_name = f"{mod.LDW01_PACKAGE}/manifest.json"
+
+            def mutate(name, data, info):
+                if name == manifest_name:
+                    manifest = json.loads(data.decode("utf-8"))
+                    manifest["schemaVersion"] = 2
+                    data = (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+                return data, info
+
+            self._rewrite_zip(archive, tampered, mutate)
+            checksum = self._checksum(tampered)
+            with self.assertRaisesRegex(mod.PublicationError, "PACKAGE_MANIFEST_PROVENANCE_MISMATCH"):
+                mod.verify_ldw01(ROOT, tampered, checksum)
+
+    def test_ldw01_member_mode_tamper_is_refused_after_rechecksum(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            archive, _ = mod.build_ldw01(ROOT, base / "source")
+            tampered = base / "mode-tampered.zip"
+            target = f"{mod.LDW01_PACKAGE}/ci-dispatch/DragonflyCanary.psm1"
+
+            def mutate(name, data, info):
+                if name == target:
+                    info.external_attr = (stat.S_IFREG | 0o666) << 16
+                return data, info
+
+            self._rewrite_zip(archive, tampered, mutate)
+            checksum = self._checksum(tampered)
+            with self.assertRaisesRegex(mod.PublicationError, "PACKAGE_FILE_MODE_MISMATCH"):
+                mod.verify_ldw01(ROOT, tampered, checksum)
 
     def test_packages_do_not_contain_key_or_credential_files(self):
         forbidden = {"authorized_keys", "known_hosts", "id_ed25519", "credentials", "credential.secret"}
