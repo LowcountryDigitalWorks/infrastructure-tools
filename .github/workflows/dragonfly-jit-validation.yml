@@ -4,13 +4,24 @@ on:
   pull_request:
     paths:
       - 'dragonfly-jit/**'
+      - 'ci-dispatch/DragonflyCanary.psm1'
+      - 'ci-dispatch/DragonflyCanaryRuntime.psm1'
+      - 'ci-dispatch/tests/Test-DragonflyCanary.ps1'
+      - 'ci-dispatch/tests/Test-DragonflyCanaryRuntime.ps1'
       - '.github/workflows/dragonfly-jit-validation.yml'
+      - '.github/workflows/dragonfly-jit-canary.yml'
   push:
     branches:
       - 'feat/ci-runner-dragonfly-jit-001'
+      - 'feat/dragonfly-jit-canary-001'
     paths:
       - 'dragonfly-jit/**'
+      - 'ci-dispatch/DragonflyCanary.psm1'
+      - 'ci-dispatch/DragonflyCanaryRuntime.psm1'
+      - 'ci-dispatch/tests/Test-DragonflyCanary.ps1'
+      - 'ci-dispatch/tests/Test-DragonflyCanaryRuntime.ps1'
       - '.github/workflows/dragonfly-jit-validation.yml'
+      - '.github/workflows/dragonfly-jit-canary.yml'
 
 permissions:
   contents: read
@@ -32,14 +43,63 @@ jobs:
             dragonfly-jit/bridge_adapter.py \
             dragonfly-jit/handoff_contract.py \
             dragonfly-jit/ssh_transport_contract.py \
-            dragonfly-jit/ssh_forced_receiver.py
-      - name: Run lifecycle and transport contract tests
+            dragonfly-jit/ssh_forced_receiver.py \
+            dragonfly-jit/canary_executor.py
+      - name: Run lifecycle, transport, and canary contract tests
         run: python3 -m unittest discover -s dragonfly-jit/tests -p 'test_*.py' -v
-      - name: Refuse credential/provider coupling in foundation slice
+      - name: Validate Dragonfly canary guest bootstrap
+        shell: bash
+        run: bash -n dragonfly-jit/canary-guest/bootstrap.sh
+      - name: Validate LDW01 Dragonfly canary registration contract
+        shell: pwsh
+        run: ./ci-dispatch/tests/Test-DragonflyCanary.ps1
+      - name: Validate LDW01 Dragonfly canary transport and provider contract
+        shell: pwsh
+        run: ./ci-dispatch/tests/Test-DragonflyCanaryRuntime.ps1
+      - name: Refuse provider authority in REDRIX runtime source
         shell: bash
         run: |
           set -euo pipefail
-          if grep -RInE '(gh api|GITHUB_TOKEN|ACTIONS_RUNTIME_TOKEN|registration-token|jitconfig)' dragonfly-jit --exclude='README.md'; then
-            echo 'Foundation slice must remain credential/provider independent.' >&2
+          if grep -RInE --exclude='*.md' --exclude-dir='tests' \
+            '(gh api|GITHUB_TOKEN|ACTIONS_RUNTIME_TOKEN|registration-token|generate-jitconfig)' \
+            dragonfly-jit; then
+            echo 'REDRIX runtime source must not acquire GitHub provider authority.' >&2
             exit 1
           fi
+          if grep -RIn --exclude='*.md' --exclude-dir='tests' -- 'jitconfig' dragonfly-jit; then
+            echo 'REDRIX host runtime source must not directly consume runner configuration material.' >&2
+            exit 1
+          fi
+          echo 'REDRIX_PROVIDER_AUTHORITY_BOUNDARY=PASS'
+      - name: Audit secretless canary workflow boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path('.github/workflows/dragonfly-jit-canary.yml').read_text(encoding='utf-8')
+          run_label = 'dragonfly-run-$' + '{{ github.run_id }}'
+          attempt_label = 'dragonfly-attempt-$' + '{{ github.run_attempt }}'
+          for value in (
+              'secrets.',
+              'schedule:',
+              'pull_request:',
+              'push:',
+              'permissions:\n  contents:',
+              'actions/checkout',
+          ):
+              if value in text:
+                  raise SystemExit(f'CANARY_WORKFLOW_FORBIDDEN:{value}')
+          for value in (
+              'workflow_dispatch:',
+              'permissions: {}',
+              'dragonfly-canary:',
+              run_label,
+              attempt_label,
+              'synthetic-only',
+              'DRAGONFLY_SECRETLESS_CANARY=PASS',
+          ):
+              if value not in text:
+                  raise SystemExit(f'CANARY_WORKFLOW_REQUIRED_MISSING:{value}')
+          print('DRAGONFLY_CANARY_WORKFLOW_BOUNDARY=PASS')
+          PY
