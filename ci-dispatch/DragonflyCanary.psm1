@@ -33,10 +33,11 @@ function Get-LdwDragonflyCanaryLabels {
     )
     if ($RunId -le 0) { throw 'DRAGONFLY_CANARY_RUN_ID_INVALID' }
     if ($RunAttempt -le 0) { throw 'DRAGONFLY_CANARY_RUN_ATTEMPT_INVALID' }
-    @($script:DragonflyCanaryProfile.StaticLabels) + @(
-        'dragonfly-run-' + $RunId,
-        'dragonfly-attempt-' + $RunAttempt
+    $dynamicLabels = @(
+        "dragonfly-run-$RunId"
+        "dragonfly-attempt-$RunAttempt"
     )
+    @($script:DragonflyCanaryProfile.StaticLabels) + $dynamicLabels
 }
 
 function Assert-LdwDragonflyCanarySelection {
@@ -267,9 +268,6 @@ function Invoke-LdwDragonflyCanaryRegistration {
         $postException = $_.Exception
     }
     if ($null -ne $postException) {
-        # The POST may have committed remotely even though its response was lost. Because the
-        # deterministic attempt-specific name was proven absent immediately before the POST,
-        # only an exact name+label match can be treated as provisionally owned for cleanup.
         $cleanupProved = $false
         try {
             $inventory = @(Get-LdwDragonflyCanaryRunnerInventory -ApiInvoker $ApiInvoker)
@@ -296,12 +294,12 @@ function Invoke-LdwDragonflyCanaryRegistration {
         $provisionalRunnerId = if ($null -ne $runner) { [long](Get-LdwObjectField $runner 'id') } else { 0 }
         $provisionalRunnerName = if ($null -ne $runner) { [string](Get-LdwObjectField $runner 'name') } else { '' }
         if ($provisionalRunnerId -le 0 -or $provisionalRunnerName -cne $request.RunnerName) {
-            throw 'DRAGONFLY_CANARY_REGISTRATION_VALIDATION_FAILED_CLEANUP_UNCERTAIN'
+            throw 'DRAGONFLY_CANARY_REGISTRATION_POST_UNCERTAIN'
         }
         try {
             $null = Remove-LdwDragonflyCanaryRegistration -Selection $selection -RunnerId $provisionalRunnerId -ApiInvoker $ApiInvoker
         } catch {
-            throw 'DRAGONFLY_CANARY_REGISTRATION_VALIDATION_FAILED_CLEANUP_UNCERTAIN'
+            throw 'DRAGONFLY_CANARY_REGISTRATION_POST_UNCERTAIN'
         }
         throw $validationException
     }
