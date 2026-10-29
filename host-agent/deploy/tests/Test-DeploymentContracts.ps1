@@ -150,8 +150,8 @@ foreach ($scriptName in @('Disable-HyperVObserver.ps1', 'Enable-HyperVObserver.p
 
 $bootstrapSource = Get-Content -LiteralPath (Join-Path $deployRoot 'Bootstrap-CiJitControlTasks.ps1') -Raw
 foreach ($literal in @(
-    '9187711faffe90bcc9f6f09d936a9f0a95289ed4',
-    '622ded670d2805bf163699a77c076454e92f90bc',
+    '7755a1f490b2568d228717bd22f8fccd80c529ea',
+    '58b23af25b7e4fe7da17809d9749704fc7366f56',
     '1877c993dabe7e9d1e2a712a317a0d935ab74dfd',
     'd10cad356a8ee8cb6201a6167b2ca5ab732a967f1945fe543520454c643ae964',
     '54b9343af44c70db1d1403cf7f45cfc11e8bf167',
@@ -174,6 +174,65 @@ Assert-True ($bootstrapSource.Contains('& $managePath @parameters', [StringCompa
 foreach ($forbidden in @('Invoke-WebRequest','Invoke-RestMethod','curl.exe','Start-BitsTransfer','gh api','Register-ScheduledTask','New-ScheduledTask')) {
     Assert-True (-not $bootstrapSource.Contains($forbidden, [StringComparison]::OrdinalIgnoreCase)) "CI/JIT bootstrap must not add network or task-definition primitive $forbidden"
 }
+
+# Verify pins against durable accepted Git objects, then exercise only the checkout
+# guard with synthetic Git responses. Never evaluate the bootstrap dispatcher,
+# protected-bundle access, Plan/Install/Uninstall, or any task operation.
+$bootstrapTokens=$null;$bootstrapErrors=$null
+$bootstrapAst=[Management.Automation.Language.Parser]::ParseInput($bootstrapSource,[ref]$bootstrapTokens,[ref]$bootstrapErrors)
+Assert-True ($bootstrapErrors.Count -eq 0) 'bootstrap must parse'
+& {
+    foreach($name in @('acceptedSourceCommit','acceptedManageBlob','acceptedWorkerBlob','manageRelative','workerRelative')){
+        $assignment=$bootstrapAst.Find({param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -ceq ('$'+$name)},$false)
+        . ([scriptblock]::Create($assignment.Extent.Text))
+    }
+    foreach($pair in @(@($manageRelative,$acceptedManageBlob),@($workerRelative,$acceptedWorkerBlob))){
+        $accepted=(& git -C $deployRoot rev-parse ($acceptedSourceCommit+':'+$pair[0])).Trim()
+        Assert-True ($LASTEXITCODE -eq 0 -and $accepted -ceq $pair[1]) 'control pin must match the accepted PR #135 merge'
+        $current=(& git -C $deployRoot rev-parse ('HEAD:'+$pair[0])).Trim()
+        Assert-True ($LASTEXITCODE -eq 0 -and $current -ceq $pair[1]) 'candidate must preserve accepted manager and worker bytes'
+    }
+    $guard=$bootstrapAst.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-AcceptedCheckout'},$false)
+    . ([scriptblock]::Create($guard.Extent.Text))
+    $fixture=[ordered]@{Branch='main';Dirty=$false;Head=$acceptedSourceCommit;Origin=$acceptedSourceCommit;Ancestor=$true;Manage=$acceptedManageBlob;Worker=$acceptedWorkerBlob}
+    function Invoke-GitRead([string[]]$Arguments){
+        switch($Arguments[2]){
+            'branch' {$fixture.Branch;return}
+            'status' {if($fixture.Dirty){' M synthetic'};return}
+            'rev-parse' {
+                switch($Arguments[3]){
+                    '--show-toplevel' {'C:\synthetic-checkout';return}
+                    'HEAD' {$fixture.Head;return}
+                    'refs/remotes/origin/main' {$fixture.Origin;return}
+                    ('HEAD:'+$manageRelative) {$fixture.Manage;return}
+                    ('HEAD:'+$workerRelative) {$fixture.Worker;return}
+                }
+            }
+        }
+        throw 'UNEXPECTED_GIT_READ'
+    }
+    function git {
+        if(($args -join ' ') -cne ('-C C:\synthetic-checkout merge-base --is-ancestor '+$acceptedSourceCommit+' '+$fixture.Head)){throw 'UNEXPECTED_GIT_COMMAND'}
+        $script:LASTEXITCODE=if($fixture.Ancestor){0}else{1}
+    }
+    $context=Assert-AcceptedCheckout
+    Assert-True ($context.Head -ceq $acceptedSourceCommit) 'accepted PR #135 checkout must pass guard'
+    foreach($case in @(
+        @{Field='Manage';Value='622ded670d2805bf163699a77c076454e92f90bc';Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
+        @{Field='Manage';Value=('f'*40);Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
+        @{Field='Worker';Value=('f'*40);Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
+        @{Field='Branch';Value='feature/synthetic';Code='SOURCE_MAIN_REQUIRED'},
+        @{Field='Branch';Value='';Code='SOURCE_MAIN_REQUIRED'},
+        @{Field='Dirty';Value=$true;Code='SOURCE_WORKTREE_DIRTY'},
+        @{Field='Origin';Value=('f'*40);Code='SOURCE_MAIN_NOT_CURRENT'},
+        @{Field='Ancestor';Value=$false;Code='ACCEPTED_SOURCE_ANCESTRY_REQUIRED'}
+    )){
+        $previous=$fixture[$case.Field];$fixture[$case.Field]=$case.Value;$refusal=$null
+        try{$null=Assert-AcceptedCheckout}catch{$refusal=$_.Exception.Message}finally{$fixture[$case.Field]=$previous}
+        Assert-True ($refusal -ceq $case.Code) ('bootstrap must fail closed: '+$case.Code)
+    }
+}
+Assert-True ($bootstrapSource.Contains('DO_NOT_RETRY_INSTALL') -and $bootstrapSource.Contains('DO_NOT_HAND_EDIT')) 'pin refresh must preserve owner-local operational holds'
 
 $deployFiles = @(Get-ChildItem -LiteralPath $deployRoot -File | Where-Object { $_.Extension -in @('.ps1', '.psm1') })
 $allDeploySource = ($deployFiles | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }) -join "`n"
