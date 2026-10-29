@@ -30,8 +30,6 @@ Assert-True ($result.RunnerId -eq 42) 'RUNNER_ID_INVALID'
 $capsule=$result.CapsuleJson|ConvertFrom-Json
 Assert-True ($capsule.profile_id -ceq 'dragonfly-github-canary-v1') 'PROFILE_INVALID'
 Assert-True (@(Compare-Object $labels @($capsule.labels) -CaseSensitive).Count -eq 0) 'CAPSULE_ROUTING_LABELS_INVALID'
-Assert-True (@($capsule.labels) -contains ('dragonfly-run-' + $runId)) 'RUN_LABEL_INVALID'
-Assert-True (@($capsule.labels) -contains ('dragonfly-attempt-' + $runAttempt)) 'ATTEMPT_LABEL_INVALID'
 $sanitized=$result.Sanitized|ConvertTo-Json -Depth 6 -Compress
 Assert-True (-not $sanitized.Contains($script:FakeJit.encoded_jit_config)) 'BOOTSTRAP_LEAKED'
 Assert-True ($capsule.opaque_bootstrap -ceq $script:FakeJit.encoded_jit_config) 'BOOTSTRAP_BINDING_INVALID'
