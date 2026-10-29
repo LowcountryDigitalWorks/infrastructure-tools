@@ -16,6 +16,7 @@ jobs:
       - ldw-ephemeral
       - synthetic-only
       - dragonfly-run-${{ github.run_id }}
+      - dragonfly-attempt-${{ github.run_attempt }}
     timeout-minutes: 5
     steps:
       - name: Assert secretless disposable Dragonfly boundary
