@@ -140,20 +140,32 @@ def build_user_data(*, bootstrap: str, run_id: str, assets: dict[str, str]) -> s
     return "\n".join(lines)
 
 
-def _terminate_process(process) -> None:
-    if process is None or process.poll() is not None:
-        return
+def _terminate_process(process) -> bool:
+    """Return True only when guest death is positively observed."""
+    if process is None:
+        return True
+    try:
+        if process.poll() is not None:
+            return True
+    except Exception:
+        return False
     with contextlib.suppress(Exception):
         process.terminate()
     try:
         process.wait(timeout=10)
-        return
+        return True
     except Exception:
         pass
     with contextlib.suppress(Exception):
         process.kill()
-    with contextlib.suppress(Exception):
+    try:
         process.wait(timeout=5)
+        return True
+    except Exception:
+        try:
+            return process.poll() is not None
+        except Exception:
+            return False
 
 
 def execute_canary(
@@ -180,7 +192,6 @@ def execute_canary(
     process = None
     run_id = None
     run_dir = None
-    cleanup_confirmed = False
     try:
         with controller_module._file_lock(controller.guest_lock_path):
             with controller_module._file_lock(controller.state_lock_path):
@@ -191,9 +202,10 @@ def execute_canary(
                     raise CanaryExecutorError("CANARY_STALE_RUN_STATE")
 
             run_id, run_dir, overlay, seed, user_data, pidfile, _ = controller._new_run()
+            # Establish durable ownership before any bootstrap-bearing plaintext is written.
+            controller._write_manifest(run_id, run_dir, overlay, seed, pidfile)
             user_data.write_text(build_user_data(bootstrap=bootstrap, run_id=run_id, assets=assets), encoding="utf-8")
             os.chmod(user_data, 0o600)
-            controller._write_manifest(run_id, run_dir, overlay, seed, pidfile)
             subprocess.run(
                 ["qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b", str(controller.base_path), str(overlay), "8G"],
                 check=True,
@@ -231,13 +243,14 @@ def execute_canary(
             try:
                 rc = process.wait(timeout=timeout_seconds)
             except subprocess.TimeoutExpired as exc:
-                _terminate_process(process)
+                if not _terminate_process(process):
+                    raise CanaryExecutorError("CANARY_GUEST_TERMINATION_UNCERTAIN") from exc
                 raise CanaryExecutorError("CANARY_GUEST_TIMEOUT") from exc
-            controller._write_manifest(run_id, run_dir, overlay, seed, pidfile, qemu_pid=None)
             if rc != 0:
                 raise CanaryExecutorError("CANARY_QEMU_NONZERO_EXIT")
+            # QEMU death is known here. Preserve the original PID evidence until the
+            # accepted cleanup guard independently verifies it is no longer live.
             controller._cleanup_owned_run(run_dir)
-            cleanup_confirmed = True
             with controller_module._file_lock(controller.state_lock_path):
                 controller.write_state("STOPPED")
             return {
@@ -247,32 +260,45 @@ def execute_canary(
                 "job_id": summary["job_id"],
                 "dispatch_id": summary["dispatch_id"],
             }
-    except Exception:
-        _terminate_process(process)
+    except Exception as original:
+        termination_confirmed = _terminate_process(process)
+        if run_id is not None and not termination_confirmed:
+            qemu_pid = getattr(process, "pid", None)
+            with controller_module._file_lock(controller.state_lock_path):
+                controller.write_state(
+                    "HOLD",
+                    run_id=run_id,
+                    qemu_pid=qemu_pid if isinstance(qemu_pid, int) and qemu_pid > 0 else None,
+                    reason="CANARY_TERMINATION_UNCERTAIN",
+                )
+            raise CanaryExecutorError("CANARY_GUEST_TERMINATION_UNCERTAIN") from original
+
+        cleanup_confirmed = False
         if run_dir is not None and run_dir.exists():
             try:
-                manifest = controller._validate_manifest(run_dir)
-                pidfile = Path(manifest["pidfile"])
-                controller._write_manifest(
-                    manifest["run_id"],
-                    run_dir,
-                    Path(manifest["overlay"]),
-                    Path(manifest["seed"]),
-                    pidfile,
-                    qemu_pid=None,
-                )
-                with contextlib.suppress(FileNotFoundError):
-                    pidfile.unlink()
-                controller._cleanup_owned_run(run_dir)
+                # Reacquire the guest lock for all destructive failure cleanup. The
+                # run manifest/PID evidence remains intact so the controller's live-PID
+                # guard remains authoritative.
+                with controller_module._file_lock(controller.guest_lock_path, blocking=True):
+                    controller._cleanup_owned_run(run_dir)
                 cleanup_confirmed = True
             except Exception:
                 cleanup_confirmed = False
+        elif run_id is None:
+            cleanup_confirmed = True
+
         if run_id is not None:
             with controller_module._file_lock(controller.state_lock_path):
                 if cleanup_confirmed:
                     controller.write_state("STOPPED", reason="CANARY_FAILED")
                 else:
-                    controller.write_state("HOLD", run_id=run_id, reason="CANARY_CLEANUP_UNCERTAIN")
+                    qemu_pid = getattr(process, "pid", None)
+                    controller.write_state(
+                        "HOLD",
+                        run_id=run_id,
+                        qemu_pid=qemu_pid if isinstance(qemu_pid, int) and qemu_pid > 0 and not termination_confirmed else None,
+                        reason="CANARY_CLEANUP_UNCERTAIN",
+                    )
         raise
     finally:
         bootstrap = None
