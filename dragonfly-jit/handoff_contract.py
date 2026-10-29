@@ -51,7 +51,6 @@ CANARY_STATIC_LABELS = (
     "synthetic-only",
 )
 
-# Legacy aliases remain for the already-accepted synthetic contract/tests.
 PROFILE_ID = SYNTHETIC_PROFILE_ID
 WORKFLOW = SYNTHETIC_WORKFLOW
 JOB_NAME = SYNTHETIC_JOB_NAME
@@ -65,22 +64,9 @@ CLAIM_SUBDIR = Path("handoff-claims")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _TIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 _REQUIRED_FIELDS = {
-    "marker",
-    "schema",
-    "dispatch_id",
-    "target_host",
-    "issued_at",
-    "expires_at",
-    "profile_id",
-    "repository",
-    "workflow",
-    "run_id",
-    "run_attempt",
-    "job_id",
-    "head_sha",
-    "job_name",
-    "labels",
-    "opaque_bootstrap",
+    "marker", "schema", "dispatch_id", "target_host", "issued_at", "expires_at",
+    "profile_id", "repository", "workflow", "run_id", "run_attempt", "job_id",
+    "head_sha", "job_name", "labels", "opaque_bootstrap",
 }
 _SUMMARY_FIELDS = (_REQUIRED_FIELDS - {"opaque_bootstrap"}) | {"bootstrap_present"}
 
@@ -129,11 +115,14 @@ def _opaque_bootstrap(value: object) -> str:
     return value
 
 
-def expected_labels(profile_id: str, run_id: int) -> tuple[str, ...]:
+def expected_labels(profile_id: str, run_id: int, run_attempt: int) -> tuple[str, ...]:
     if profile_id == SYNTHETIC_PROFILE_ID:
         return SYNTHETIC_LABELS
     if profile_id == CANARY_PROFILE_ID:
-        return CANARY_STATIC_LABELS + (f"dragonfly-run-{run_id}",)
+        return CANARY_STATIC_LABELS + (
+            f"dragonfly-run-{run_id}",
+            f"dragonfly-attempt-{run_attempt}",
+        )
     raise HandoffError("PROFILE_INVALID")
 
 
@@ -153,16 +142,12 @@ def _expected_job_name(profile_id: str) -> str:
     raise HandoffError("PROFILE_INVALID")
 
 
-def _validate_identity_fields(
-    payload: dict,
-) -> tuple[str, str, int, int, int, str, dt.datetime, dt.datetime]:
+def _validate_identity_fields(payload: dict) -> tuple[str, str, int, int, int, str, dt.datetime, dt.datetime]:
     if payload["marker"] != MARKER or type(payload["schema"]) is not int or payload["schema"] != SCHEMA:
         raise HandoffError("CAPSULE_IDENTITY_INVALID")
-
     dispatch_id = _canonical_uuid4(payload["dispatch_id"])
     if payload["target_host"] != TARGET_HOST:
         raise HandoffError("TARGET_HOST_INVALID")
-
     profile_id = payload["profile_id"]
     if not isinstance(profile_id, str) or profile_id not in {SYNTHETIC_PROFILE_ID, CANARY_PROFILE_ID}:
         raise HandoffError("PROFILE_INVALID")
@@ -174,15 +159,13 @@ def _validate_identity_fields(
         raise HandoffError("JOB_NAME_INVALID")
 
     run_id = _positive_int(payload["run_id"], "run_id")
-    if payload["labels"] != list(expected_labels(profile_id, run_id)):
-        raise HandoffError("LABELS_INVALID")
     run_attempt = _positive_int(payload["run_attempt"], "run_attempt")
+    if payload["labels"] != list(expected_labels(profile_id, run_id, run_attempt)):
+        raise HandoffError("LABELS_INVALID")
     job_id = _positive_int(payload["job_id"], "job_id")
-
     head_sha = payload["head_sha"]
     if not isinstance(head_sha, str) or not _SHA_RE.fullmatch(head_sha):
         raise HandoffError("HEAD_SHA_INVALID")
-
     issued_at = _parse_utc(payload["issued_at"], "issued_at")
     expires_at = _parse_utc(payload["expires_at"], "expires_at")
     if expires_at <= issued_at:
@@ -190,16 +173,10 @@ def _validate_identity_fields(
     ttl = int((expires_at - issued_at).total_seconds())
     if ttl > MAX_TTL_SECONDS:
         raise HandoffError("TTL_INVALID")
-
     return dispatch_id, profile_id, run_id, run_attempt, job_id, head_sha, issued_at, expires_at
 
 
-def _validate_time_window(
-    issued_at: dt.datetime,
-    expires_at: dt.datetime,
-    *,
-    now: dt.datetime | None,
-) -> None:
+def _validate_time_window(issued_at: dt.datetime, expires_at: dt.datetime, *, now: dt.datetime | None) -> None:
     current = (now or _utc_now()).astimezone(dt.timezone.utc).replace(microsecond=0)
     if issued_at > current + dt.timedelta(seconds=CLOCK_SKEW_SECONDS):
         raise HandoffError("NOT_YET_VALID")
@@ -207,17 +184,8 @@ def _validate_time_window(
         raise HandoffError("EXPIRED")
 
 
-def _summary(
-    *,
-    dispatch_id: str,
-    profile_id: str,
-    run_id: int,
-    run_attempt: int,
-    job_id: int,
-    head_sha: str,
-    issued_at: str,
-    expires_at: str,
-) -> dict:
+def _summary(*, dispatch_id: str, profile_id: str, run_id: int, run_attempt: int, job_id: int,
+             head_sha: str, issued_at: str, expires_at: str) -> dict:
     return {
         "marker": MARKER,
         "schema": SCHEMA,
@@ -231,7 +199,7 @@ def _summary(
         "job_id": job_id,
         "head_sha": head_sha,
         "job_name": _expected_job_name(profile_id),
-        "labels": list(expected_labels(profile_id, run_id)),
+        "labels": list(expected_labels(profile_id, run_id, run_attempt)),
         "issued_at": issued_at,
         "expires_at": expires_at,
         "bootstrap_present": True,
@@ -243,59 +211,25 @@ def validate_capsule(payload: object, *, now: dt.datetime | None = None) -> dict
         raise HandoffError("CAPSULE_INVALID")
     if set(payload) != _REQUIRED_FIELDS:
         raise HandoffError("CAPSULE_FIELDS_INVALID")
-
-    (
-        dispatch_id,
-        profile_id,
-        run_id,
-        run_attempt,
-        job_id,
-        head_sha,
-        issued_at,
-        expires_at,
-    ) = _validate_identity_fields(payload)
+    dispatch_id, profile_id, run_id, run_attempt, job_id, head_sha, issued_at, expires_at = _validate_identity_fields(payload)
     _validate_time_window(issued_at, expires_at, now=now)
     _opaque_bootstrap(payload["opaque_bootstrap"])
-
     return _summary(
-        dispatch_id=dispatch_id,
-        profile_id=profile_id,
-        run_id=run_id,
-        run_attempt=run_attempt,
-        job_id=job_id,
-        head_sha=head_sha,
-        issued_at=payload["issued_at"],
-        expires_at=payload["expires_at"],
+        dispatch_id=dispatch_id, profile_id=profile_id, run_id=run_id, run_attempt=run_attempt,
+        job_id=job_id, head_sha=head_sha, issued_at=payload["issued_at"], expires_at=payload["expires_at"],
     )
 
 
 def _validate_claim_summary(summary: object, *, now: dt.datetime | None = None) -> dict:
     if not isinstance(summary, dict) or set(summary) != _SUMMARY_FIELDS:
         raise HandoffError("SUMMARY_FIELDS_INVALID")
-
-    (
-        dispatch_id,
-        profile_id,
-        run_id,
-        run_attempt,
-        job_id,
-        head_sha,
-        issued_at,
-        expires_at,
-    ) = _validate_identity_fields(summary)
+    dispatch_id, profile_id, run_id, run_attempt, job_id, head_sha, issued_at, expires_at = _validate_identity_fields(summary)
     _validate_time_window(issued_at, expires_at, now=now)
     if summary["bootstrap_present"] is not True:
         raise HandoffError("BOOTSTRAP_FLAG_INVALID")
-
     return _summary(
-        dispatch_id=dispatch_id,
-        profile_id=profile_id,
-        run_id=run_id,
-        run_attempt=run_attempt,
-        job_id=job_id,
-        head_sha=head_sha,
-        issued_at=summary["issued_at"],
-        expires_at=summary["expires_at"],
+        dispatch_id=dispatch_id, profile_id=profile_id, run_id=run_id, run_attempt=run_attempt,
+        job_id=job_id, head_sha=head_sha, issued_at=summary["issued_at"], expires_at=summary["expires_at"],
     )
 
 
@@ -308,10 +242,9 @@ def read_capsule(stream) -> dict:
     except UnicodeDecodeError as exc:
         raise HandoffError("CAPSULE_UTF8_INVALID") from exc
     try:
-        payload = json.loads(text)
+        return json.loads(text)
     except json.JSONDecodeError as exc:
         raise HandoffError("CAPSULE_JSON_INVALID") from exc
-    return payload
 
 
 def _assert_no_symlink(path: Path, *, allow_missing_leaf: bool = False) -> None:
@@ -377,9 +310,7 @@ def claim_dispatch(summary: dict, *, state_root: Path, now: dt.datetime | None =
         "job_id": summary["job_id"],
         "head_sha": summary["head_sha"],
         "expires_at": summary["expires_at"],
-        "claimed_at": (now or _utc_now()).astimezone(dt.timezone.utc).replace(microsecond=0).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        ),
+        "claimed_at": (now or _utc_now()).astimezone(dt.timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     data = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -404,7 +335,6 @@ def claim_dispatch(summary: dict, *, state_root: Path, now: dt.datetime | None =
         except (OSError, HandoffError):
             pass
         raise HandoffError("CLAIM_WRITE_FAILED") from exc
-
     _fsync_directory(claims)
     return claim_path
 
