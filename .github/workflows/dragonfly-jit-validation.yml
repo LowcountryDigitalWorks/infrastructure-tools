@@ -5,7 +5,9 @@ on:
     paths:
       - 'dragonfly-jit/**'
       - 'ci-dispatch/DragonflyCanary.psm1'
+      - 'ci-dispatch/DragonflyCanaryRuntime.psm1'
       - 'ci-dispatch/tests/Test-DragonflyCanary.ps1'
+      - 'ci-dispatch/tests/Test-DragonflyCanaryRuntime.ps1'
       - '.github/workflows/dragonfly-jit-validation.yml'
       - '.github/workflows/dragonfly-jit-canary.yml'
   push:
@@ -15,7 +17,9 @@ on:
     paths:
       - 'dragonfly-jit/**'
       - 'ci-dispatch/DragonflyCanary.psm1'
+      - 'ci-dispatch/DragonflyCanaryRuntime.psm1'
       - 'ci-dispatch/tests/Test-DragonflyCanary.ps1'
+      - 'ci-dispatch/tests/Test-DragonflyCanaryRuntime.ps1'
       - '.github/workflows/dragonfly-jit-validation.yml'
       - '.github/workflows/dragonfly-jit-canary.yml'
 
@@ -46,9 +50,12 @@ jobs:
       - name: Validate Dragonfly canary guest bootstrap
         shell: bash
         run: bash -n dragonfly-jit/canary-guest/bootstrap.sh
-      - name: Validate LDW01 Dragonfly canary adapter contract
+      - name: Validate LDW01 Dragonfly canary registration contract
         shell: pwsh
         run: ./ci-dispatch/tests/Test-DragonflyCanary.ps1
+      - name: Validate LDW01 Dragonfly canary transport and provider contract
+        shell: pwsh
+        run: ./ci-dispatch/tests/Test-DragonflyCanaryRuntime.ps1
       - name: Refuse provider authority in REDRIX runtime source
         shell: bash
         run: |
