@@ -49,6 +49,10 @@ jobs:
         shell: pwsh
         run: pwsh ./host-agent/deploy/tests/Test-DeploymentContracts.ps1
 
+      - name: Verify CI/JIT task readback and throwaway Task Scheduler semantics
+        shell: pwsh
+        run: pwsh ./host-agent/deploy/tests/Test-CiJitTaskReadbackContracts.ps1 -HostedTaskSchedulerSemantic
+
       - name: Run CI/JIT Phase-2 observe proof contract tests
         shell: pwsh
         run: pwsh ./host-agent/deploy/tests/Test-CiJitPhase2ObserveProofContracts.ps1

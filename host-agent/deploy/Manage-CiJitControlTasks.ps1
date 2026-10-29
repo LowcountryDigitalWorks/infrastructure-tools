@@ -90,6 +90,48 @@ function Get-TaskService {
     $service=New-Object -ComObject 'Schedule.Service';$service.Connect();$service
 }
 
+function Assert-TaskPrincipal([object]$Principal){
+    try {
+        $userId=[string]$Principal.UserId
+        if([string]::IsNullOrWhiteSpace($userId)){throw 'IDENTITY_REQUIRED'}
+        $identity=if($userId.StartsWith('S-', [StringComparison]::OrdinalIgnoreCase)){
+            [Security.Principal.SecurityIdentifier]::new($userId)
+        }else{[Security.Principal.NTAccount]::new($userId)}
+        $sid=$identity.Translate([Security.Principal.SecurityIdentifier]).Value
+        if($sid -cne $OwnerSid -or $Principal.LogonType -ne 3 -or $Principal.RunLevel -ne 1){throw 'PRINCIPAL_MISMATCH'}
+    }catch{throw 'TASK_PRINCIPAL_REFUSED'}
+}
+
+function Assert-TaskDacl([string]$Sddl){
+    try {
+        $descriptor=[Security.AccessControl.RawSecurityDescriptor]::new($Sddl)
+        if($descriptor.Owner.Value -notin @('S-1-5-18','S-1-5-32-544') -or
+            -not ($descriptor.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclPresent) -or
+            -not ($descriptor.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected) -or
+            $null -eq $descriptor.DiscretionaryAcl){throw 'DACL_REQUIRED'}
+        $rights=@{'S-1-5-18'=[long]0;'S-1-5-32-544'=[long]0;$OwnerSid=[long]0}
+        foreach($ace in $descriptor.DiscretionaryAcl){
+            if($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback -or
+                $ace.AceQualifier -ne [Security.AccessControl.AceQualifier]::AccessAllowed -or
+                $ace.AceFlags -ne [Security.AccessControl.AceFlags]::None){throw 'ACE_REFUSED'}
+            $sid=$ace.SecurityIdentifier.Value
+            if(-not $rights.ContainsKey($sid)){throw 'TRUSTEE_REFUSED'}
+            # Task Scheduler uses file access rights (MS-TSCH SchRpcRegisterTask).
+            # Expand generic rights before checking the closed specific-rights allowlist.
+            $mask=([long]$ace.AccessMask -band 0xFFFFFFFFL)
+            if($mask -band 0x80000000L){$mask=($mask -band 0x7FFFFFFFL) -bor 0x00120089L} # GR
+            if($mask -band 0x40000000L){$mask=($mask -band 0xBFFFFFFFL) -bor 0x00120116L} # GW
+            if($mask -band 0x20000000L){$mask=($mask -band 0xDFFFFFFFL) -bor 0x001200A0L} # GX
+            if($mask -band 0x10000000L){$mask=($mask -band 0xEFFFFFFFL) -bor 0x001F01FFL} # GA
+            $allowed=if($sid -ceq $OwnerSid){0x001200A9L}else{0x001F01FFL}
+            if($mask -eq 0 -or ($mask -band (-bnot $allowed)) -ne 0){throw 'ACCESS_MASK_REFUSED'}
+            $rights[$sid]=$rights[$sid] -bor $mask
+        }
+        if($rights['S-1-5-18'] -ne 0x001F01FFL -or $rights['S-1-5-32-544'] -ne 0x001F01FFL -or
+            $rights[$OwnerSid] -ne 0x001200A9L){throw 'REQUIRED_ACCESS_MISSING'}
+    }catch{throw 'TASK_DACL_REFUSED'}
+}
+
 function Assert-TaskDefinition([object]$Task,[string]$TaskName,[string]$Operation,[string]$WorkerSha){
     $definition=$Task.Definition
     if($definition.Triggers.Count -ne 0){throw 'TASK_TRIGGER_REFUSED'}
@@ -98,12 +140,12 @@ function Assert-TaskDefinition([object]$Task,[string]$TaskName,[string]$Operatio
     $pwsh=(Get-Command pwsh -ErrorAction Stop).Source
     if(-not [string]::Equals($action.Path,$pwsh,[StringComparison]::OrdinalIgnoreCase) -or
         $action.Arguments -cne (Get-ExpectedArguments $Operation $WorkerSha) -or $action.WorkingDirectory){throw 'TASK_ACTION_REFUSED'}
-    if($definition.Principal.UserId -cne $OwnerSid -or $definition.Principal.LogonType -ne 3 -or $definition.Principal.RunLevel -ne 1){throw 'TASK_PRINCIPAL_REFUSED'}
-    if(-not $definition.Settings.AllowDemandStart -or $definition.Settings.StartWhenAvailable -or $definition.Settings.MultipleInstances -ne 2){throw 'TASK_SETTINGS_REFUSED'}
-    $sddl=$Task.GetSecurityDescriptor(0xF)
-    if($sddl -notmatch [regex]::Escape('(A;;GRGX;;;'+$OwnerSid+')') -or
-        $sddl -notmatch '\(A;;FA;;;SY\)' -or $sddl -notmatch '\(A;;FA;;;BA\)'){throw 'TASK_DACL_REFUSED'}
-    if($sddl -match [regex]::Escape('(A;;FA;;;'+$OwnerSid+')') -or $sddl -match [regex]::Escape('(A;;GW;;;'+$OwnerSid+')')){throw 'OWNER_TASK_MODIFY_REFUSED'}
+    Assert-TaskPrincipal $definition.Principal
+    if(-not $definition.Settings.Enabled -or -not $definition.Settings.AllowDemandStart -or
+        $definition.Settings.StartWhenAvailable -or $definition.Settings.MultipleInstances -ne 2 -or
+        $definition.Settings.DisallowStartIfOnBatteries -or $definition.Settings.StopIfGoingOnBatteries -or
+        $definition.Settings.ExecutionTimeLimit -cne 'PT35M'){throw 'TASK_SETTINGS_REFUSED'}
+    Assert-TaskDacl ($Task.GetSecurityDescriptor(0xF))
 }
 
 function Install-Tasks {
@@ -130,7 +172,9 @@ function Install-Tasks {
         $definition.Settings.MultipleInstances=2;$definition.Settings.ExecutionTimeLimit='PT35M'
         $action=$definition.Actions.Create(0);$action.Path=$pwsh;$action.Arguments=Get-ExpectedArguments $entry.Value $workerSha
         $name=$entry.Key.TrimStart('\')
-        $null=$folder.RegisterTaskDefinition($name,$definition,6,$OwnerSid,$null,3,$taskSddl)
+        # CREATE_OR_UPDATE | DONT_ADD_PRINCIPAL_ACE: keep only the explicit reviewed SDDL.
+        # https://learn.microsoft.com/en-us/windows/win32/api/taskschd/ne-taskschd-task_creation
+        $null=$folder.RegisterTaskDefinition($name,$definition,0x16,$OwnerSid,$null,3,$taskSddl)
         Assert-TaskDefinition ($folder.GetTask($entry.Key)) $entry.Key $entry.Value $workerSha
     }
     'CI_JIT_CONTROL_TASK_INSTALL=PASS'
