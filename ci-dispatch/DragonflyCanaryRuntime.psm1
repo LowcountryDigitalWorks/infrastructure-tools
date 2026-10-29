@@ -2,6 +2,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'DragonflyCanary.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'Dispatch.psm1') -Force
 
 $script:Repository = 'LowcountryDigitalWorks/infrastructure-tools'
 $script:WorkflowPath = '.github/workflows/dragonfly-jit-canary.yml'
@@ -10,7 +11,6 @@ $script:TargetHost = 'dragonfly-redrix-01'
 $script:RemoteUser = 'eddie'
 $script:RemoteSentinel = '/nonexistent/ldw-dragonfly-jit-handoff-v1'
 $script:TransportRelativeRoot = 'LDW\CI-JIT\DragonflyTransport'
-$script:ExpectedStaticLabels = @('self-hosted','Linux','X64','dragonfly','jit','ldw-ephemeral','synthetic-only')
 
 function Get-LdwRuntimeObjectField {
     param([Parameter(Mandatory)][object]$Object,[Parameter(Mandatory)][string]$Name)
@@ -39,9 +39,10 @@ function Get-LdwDragonflyCanaryPrivateEndpoint {
         try { $raw | ConvertFrom-Json }
         catch { throw 'DRAGONFLY_CANARY_TAILSCALE_STATUS_INVALID' }
     }
-    if ($null -eq $status -or
+    $self = if ($null -ne $status) { Get-LdwRuntimeObjectField $status 'Self' } else { $null }
+    if ($null -eq $status -or $null -eq $self -or
         (Get-LdwRuntimeObjectField $status 'BackendState') -cne 'Running' -or
-        -not [bool](Get-LdwRuntimeObjectField (Get-LdwRuntimeObjectField $status 'Self') 'Online')) {
+        -not [bool](Get-LdwRuntimeObjectField $self 'Online')) {
         throw 'DRAGONFLY_CANARY_TAILSCALE_NOT_READY'
     }
     $peerRoot = Get-LdwRuntimeObjectField $status 'Peer'
@@ -51,13 +52,17 @@ function Get-LdwDragonflyCanaryPrivateEndpoint {
         $peer = $prop.Value
         $host = [string](Get-LdwRuntimeObjectField $peer 'HostName')
         $dns = [string](Get-LdwRuntimeObjectField $peer 'DNSName')
-        $named = $host -in @('penguin','redrix') -or $dns.StartsWith('penguin.',[StringComparison]::OrdinalIgnoreCase) -or $dns.StartsWith('redrix.',[StringComparison]::OrdinalIgnoreCase)
+        $named = $host -in @('penguin','redrix') -or
+            $dns.StartsWith('penguin.',[StringComparison]::OrdinalIgnoreCase) -or
+            $dns.StartsWith('redrix.',[StringComparison]::OrdinalIgnoreCase)
         if ($named) { $matches += $peer }
     }
     if ($matches.Count -ne 1 -or -not [bool](Get-LdwRuntimeObjectField $matches[0] 'Online')) {
         throw 'DRAGONFLY_CANARY_TAILSCALE_PEER_NOT_UNIQUE'
     }
-    $addresses = @((Get-LdwRuntimeObjectField $matches[0] 'TailscaleIPs') | Where-Object { $_ -is [string] -and (Test-LdwTailscaleIPv4 $_) })
+    $addresses = @((Get-LdwRuntimeObjectField $matches[0] 'TailscaleIPs') | Where-Object {
+        $_ -is [string] -and (Test-LdwTailscaleIPv4 $_)
+    })
     if ($addresses.Count -ne 1) { throw 'DRAGONFLY_CANARY_TAILSCALE_ENDPOINT_INVALID' }
     $addresses[0]
 }
@@ -112,7 +117,14 @@ function Invoke-LdwDragonflyCanaryTransport {
         [int]$TimeoutSeconds=780
     )
     if ([string]::IsNullOrWhiteSpace($CapsuleJson) -or $CapsuleJson.Length -gt 65536) { throw 'DRAGONFLY_CANARY_CAPSULE_INVALID' }
-    if (-not [bool]$Plan.CapsuleOnStdin -or @($Plan.Arguments) -contains $CapsuleJson) { throw 'DRAGONFLY_CANARY_TRANSPORT_PLAN_INVALID' }
+    try { $capsule = $CapsuleJson | ConvertFrom-Json }
+    catch { throw 'DRAGONFLY_CANARY_CAPSULE_INVALID' }
+    $bootstrap = [string](Get-LdwRuntimeObjectField $capsule 'opaque_bootstrap')
+    if ([string]::IsNullOrEmpty($bootstrap)) { throw 'DRAGONFLY_CANARY_CAPSULE_INVALID' }
+    $argumentText = @($Plan.Arguments) -join "`n"
+    if (-not [bool]$Plan.CapsuleOnStdin -or $argumentText.Contains($CapsuleJson) -or $argumentText.Contains($bootstrap)) {
+        throw 'DRAGONFLY_CANARY_TRANSPORT_PLAN_INVALID'
+    }
     $rawResult = if ($ProcessInvoker) {
         & $ProcessInvoker $Plan $CapsuleJson $TimeoutSeconds
     } else {
@@ -150,7 +162,9 @@ function Invoke-LdwDragonflyCanaryTransport {
         } finally { $process.Dispose() }
     }
     if ($null -eq $rawResult -or [int]$rawResult.ExitCode -ne 0) { throw 'DRAGONFLY_CANARY_TRANSPORT_FAILED' }
-    try { $result = ([string]$rawResult.Stdout) | ConvertFrom-Json }
+    $stdout = [string]$rawResult.Stdout
+    if ($stdout.Contains($bootstrap)) { throw 'DRAGONFLY_CANARY_TRANSPORT_BOOTSTRAP_EXPOSED' }
+    try { $result = $stdout | ConvertFrom-Json }
     catch { throw 'DRAGONFLY_CANARY_TRANSPORT_RESULT_INVALID' }
     if ($result.claimed -ne $true -or $result.profile_id -cne 'dragonfly-github-canary-v1' -or $null -eq $result.execution) {
         throw 'DRAGONFLY_CANARY_TRANSPORT_RESULT_INVALID'
@@ -163,7 +177,9 @@ function Invoke-LdwDragonflyCanaryTransport {
         throw 'DRAGONFLY_CANARY_EXECUTION_RESULT_INVALID'
     }
     $serialized = $result | ConvertTo-Json -Depth 8 -Compress
-    if ($serialized.Contains('opaque_bootstrap')) { throw 'DRAGONFLY_CANARY_TRANSPORT_SECRET_FIELD_EXPOSED' }
+    if ($serialized.Contains('opaque_bootstrap') -or $serialized.Contains($bootstrap)) {
+        throw 'DRAGONFLY_CANARY_TRANSPORT_BOOTSTRAP_EXPOSED'
+    }
     [pscustomobject]@{
         Claimed=$true
         DispatchId=[string]$result.dispatch_id
@@ -251,6 +267,7 @@ function Invoke-LdwDragonflyCanaryOnce {
         [Parameter(Mandatory)][object]$Job,
         [Parameter(Mandatory)][string]$ExpectedHeadSha,
         [Parameter(Mandatory)][scriptblock]$ApiInvoker,
+        [Parameter(Mandatory)][string]$DispatcherRoot,
         [scriptblock]$StatusProvider,
         [scriptblock]$ProcessInvoker,
         [scriptblock]$SleepInvoker,
@@ -258,10 +275,15 @@ function Invoke-LdwDragonflyCanaryOnce {
         [string]$WindowsRoot=$env:SystemRoot,
         [int]$ProviderTimeoutSeconds=360
     )
+    if ([string]::IsNullOrWhiteSpace($DispatcherRoot) -or -not [IO.Path]::IsPathRooted($DispatcherRoot)) {
+        throw 'DRAGONFLY_CANARY_DISPATCHER_ROOT_INVALID'
+    }
+    $dispatcherLock = $null
     $registration = $null
     $primary = $null
     $final = $null
     try {
+        $dispatcherLock = Enter-Ci10DispatcherLock -Root $DispatcherRoot
         $registration = Invoke-LdwDragonflyCanaryRegistration -Run $Run -Job $Job -ExpectedHeadSha $ExpectedHeadSha -ApiInvoker $ApiInvoker
         $endpoint = Get-LdwDragonflyCanaryPrivateEndpoint -StatusProvider $StatusProvider
         $plan = New-LdwDragonflyCanarySshPlan -PrivateEndpoint $endpoint -LocalAppData $LocalAppData -WindowsRoot $WindowsRoot
@@ -280,17 +302,22 @@ function Invoke-LdwDragonflyCanaryOnce {
             GuestCleanup=$transport.GuestCleanup
             RedrixState=$transport.State
             BootstrapExposed=$false
+            Ci10Serialized=$true
         }
     } catch {
         $primary = $_.Exception
     } finally {
-        if ($null -ne $registration) {
-            try {
-                $cleanup = Remove-LdwDragonflyCanaryRegistration -Selection $registration.Selection -RunnerId $registration.RunnerId -ApiInvoker $ApiInvoker
-                if (-not $cleanup.Absent) { throw 'DRAGONFLY_CANARY_FINAL_CLEANUP_UNCONFIRMED' }
-            } catch {
-                throw 'DRAGONFLY_CANARY_FINAL_CLEANUP_UNCERTAIN'
+        try {
+            if ($null -ne $registration) {
+                try {
+                    $cleanup = Remove-LdwDragonflyCanaryRegistration -Selection $registration.Selection -RunnerId $registration.RunnerId -ApiInvoker $ApiInvoker
+                    if (-not $cleanup.Absent) { throw 'DRAGONFLY_CANARY_FINAL_CLEANUP_UNCONFIRMED' }
+                } catch {
+                    throw 'DRAGONFLY_CANARY_FINAL_CLEANUP_UNCERTAIN'
+                }
             }
+        } finally {
+            if ($null -ne $dispatcherLock) { $dispatcherLock.Dispose() }
         }
     }
     if ($null -ne $primary) { throw $primary }
