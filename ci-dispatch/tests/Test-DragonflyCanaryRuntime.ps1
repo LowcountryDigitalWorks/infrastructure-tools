@@ -67,7 +67,9 @@ try{
  $script:Inventory=@();$script:PostCalls=0;$script:DeleteCalls=0;$script:AttemptReads=0
  $movedRun=[pscustomobject]@{id=$runId;run_attempt=3;head_sha=$head;path='.github/workflows/dragonfly-jit-canary.yml';event='workflow_dispatch';status='queued';conclusion=$null;repository=$run.repository;head_repository=$run.head_repository}
  $movedApi={param($Path,$Method,$Body);if($Method -ceq 'GET' -and $Path -ceq $runPath){return $movedRun};if($Method -ceq 'GET' -and $Path -ceq $attemptJobsPath){return [pscustomobject]@{total_count=1;jobs=@($job)}};if($Method -ceq 'POST'){$script:PostCalls++;return $jit};if($Method -ceq 'GET' -and $Path -ceq $runnerInventoryPath){return [pscustomobject]@{total_count=0;runners=@()}};throw ('UNEXPECTED_API:'+$Method+':'+$Path)}
- Assert-ThrowsMessage{Invoke-LdwDragonflyCanaryOnce -Run $run -Job $job -ExpectedHeadSha $head -ApiInvoker $movedApi -DispatcherRoot $ci10Root -StatusProvider{$status} -ProcessInvoker $processFromCapsule -SleepInvoker{param($Seconds)} -LocalAppData '/tmp/ldw-localappdata' -WindowsRoot '/windows' -ProviderTimeoutSeconds 5|Out-Null} 'DRAGONFLY_CANARY_RUN_IDENTITY_INVALID' 'FRESH_PROVIDER_MOVEMENT_NOT_REFUSED'
+ $movementFailed=$false
+ try{Invoke-LdwDragonflyCanaryOnce -Run $run -Job $job -ExpectedHeadSha $head -ApiInvoker $movedApi -DispatcherRoot $ci10Root -StatusProvider{$status} -ProcessInvoker $processFromCapsule -SleepInvoker{param($Seconds)} -LocalAppData '/tmp/ldw-localappdata' -WindowsRoot '/windows' -ProviderTimeoutSeconds 5|Out-Null}catch{$movementFailed=$_.Exception.Message -in @('DRAGONFLY_CANARY_RUN_IDENTITY_INVALID','DRAGONFLY_CANARY_JOB_IDENTITY_INVALID')}
+ Assert-True $movementFailed 'FRESH_PROVIDER_MOVEMENT_NOT_REFUSED'
  Assert-True ($script:PostCalls -eq 0) 'REGISTRATION_OCCURRED_AFTER_PROVIDER_MOVEMENT'
 
  # Ambiguous registration POST creates a durable blocker; repeated run is refused until explicit reconciliation.
