@@ -27,6 +27,7 @@ CHOWN = "/usr/bin/chown"
 LN = "/usr/bin/ln"
 RM = "/usr/bin/rm"
 MKDIR = "/usr/bin/mkdir"
+STAT = "/usr/bin/stat"
 
 BRIDGE_ID = "dragonfly-redrix-01"
 CREDENTIAL_NAME = "bridge-bearer"
@@ -59,8 +60,21 @@ def _secret_lookup() -> subprocess.Popen[bytes]:
     )
 
 
+def _kill_process(process: subprocess.Popen[object]) -> None:
+    if process.poll() is None:
+        try:
+            process.kill()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
 def _digest_stream(producer: subprocess.Popen[bytes]) -> str:
     if producer.stdout is None:
+        _kill_process(producer)
         raise MigrationError("SECRET_PIPE_UNAVAILABLE")
     digest = subprocess.Popen(
         [SHA256SUM],
@@ -71,8 +85,18 @@ def _digest_stream(producer: subprocess.Popen[bytes]) -> str:
         text=True,
     )
     producer.stdout.close()
-    digest_stdout, _ = digest.communicate(timeout=15)
-    producer.wait(timeout=15)
+    try:
+        digest_stdout, _ = digest.communicate(timeout=15)
+        producer.wait(timeout=15)
+    except subprocess.TimeoutExpired as exc:
+        _kill_process(digest)
+        _kill_process(producer)
+        raise MigrationError("CREDENTIAL_DIGEST_TIMEOUT") from exc
+    finally:
+        if digest.poll() is None:
+            _kill_process(digest)
+        if producer.poll() is None:
+            _kill_process(producer)
     if producer.returncode != 0 or digest.returncode != 0:
         raise MigrationError("CREDENTIAL_DIGEST_FAILED")
     value = digest_stdout.split()[0] if digest_stdout.split() else ""
@@ -169,9 +193,25 @@ def _assert_service_safe_for_credential_mutation() -> None:
         raise MigrationError("SERVICE_MUST_BE_INACTIVE_AND_DISABLED")
 
 
-def _verify_ciphertext_metadata() -> None:
+def _verify_directory_metadata() -> None:
     result = subprocess.run(
-        [SUDO, "-n", "/usr/bin/stat", "-Lc", "%u:%g:%a:%F", str(CREDENTIAL_PATH)],
+        [SUDO, "-n", STAT, "-Lc", "%u:%g:%a:%F", str(CREDENTIAL_DIRECTORY)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        env={},
+        timeout=10,
+        check=False,
+        text=True,
+    )
+    if result.returncode != 0 or result.stdout.strip() != "0:0:700:directory":
+        raise MigrationError("CREDENTIAL_DIRECTORY_METADATA_INVALID")
+
+
+def _verify_ciphertext_metadata() -> None:
+    _verify_directory_metadata()
+    result = subprocess.run(
+        [SUDO, "-n", STAT, "-Lc", "%u:%g:%a:%F", str(CREDENTIAL_PATH)],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -185,15 +225,18 @@ def _verify_ciphertext_metadata() -> None:
 
 
 def migrate() -> None:
+    _assert_service_safe_for_credential_mutation()
     if _artifact_present_privileged():
         raise MigrationError("CREDENTIAL_ARTIFACT_EXISTS")
 
     source_digest = secret_service_digest()
     _run_sudo([MKDIR, "-p", "-m", "0700", str(CREDENTIAL_DIRECTORY)], "CREDENTIAL_DIRECTORY_CREATE_FAILED")
+    _verify_directory_metadata()
 
     temp_path = CREDENTIAL_DIRECTORY / (".bridge-bearer.cred." + secrets.token_hex(12) + ".tmp")
     lookup = _secret_lookup()
     if lookup.stdout is None:
+        _kill_process(lookup)
         raise MigrationError("SECRET_PIPE_UNAVAILABLE")
     encrypt = subprocess.Popen(
         [
@@ -213,9 +256,14 @@ def migrate() -> None:
         env={},
     )
     lookup.stdout.close()
-    encrypt.wait(timeout=20)
-    lookup.wait(timeout=20)
     try:
+        try:
+            encrypt.wait(timeout=20)
+            lookup.wait(timeout=20)
+        except subprocess.TimeoutExpired as exc:
+            _kill_process(encrypt)
+            _kill_process(lookup)
+            raise MigrationError("CREDENTIAL_ENCRYPT_TIMEOUT") from exc
         if lookup.returncode != 0 or encrypt.returncode != 0:
             raise MigrationError("CREDENTIAL_ENCRYPT_FAILED")
         _run_sudo([CHOWN, "root:root", str(temp_path)], "CREDENTIAL_TEMP_METADATA_FAILED")
@@ -223,6 +271,8 @@ def migrate() -> None:
         # Atomic exclusive publication: hard-link fails if the final path already exists.
         _run_sudo([LN, str(temp_path), str(CREDENTIAL_PATH)], "CREDENTIAL_ARTIFACT_EXISTS")
     finally:
+        _kill_process(encrypt)
+        _kill_process(lookup)
         _run_sudo([RM, "-f", str(temp_path)], "CREDENTIAL_TEMP_CLEANUP_FAILED")
 
     _verify_ciphertext_metadata()
