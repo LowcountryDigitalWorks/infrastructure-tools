@@ -74,12 +74,27 @@ class SystemdBridgeLifecycleTests(unittest.TestCase):
         self.assertIn('[LN, str(temp_path), str(CREDENTIAL_PATH)]', text)
         self.assertIn('"CREDENTIAL_ARTIFACT_EXISTS"', text)
         self.assertIn('secrets.token_hex(12)', text)
+        self.assertIn('CREDENTIAL_DIRECTORY_METADATA_INVALID', text)
+        self.assertIn('CREDENTIAL_ENCRYPT_TIMEOUT', text)
+        self.assertIn('CREDENTIAL_DIGEST_TIMEOUT', text)
         self.assertNotIn('tempfile._get_candidate_names', text)
+
+    def test_service_state_is_exact_and_ambiguous_states_fail_closed(self):
+        combined = CREDENTIAL_HELPER.read_text(encoding="utf-8") + SERVICE_HELPER.read_text(encoding="utf-8")
+        for value in (
+            '"--property=LoadState"',
+            '"--property=ActiveState"',
+            '"--property=UnitFileState"',
+            '"SERVICE_STATE_UNAVAILABLE"',
+            '"SERVICE_STATE_AMBIGUOUS"',
+            '"SERVICE_MUST_BE_INACTIVE_AND_DISABLED"',
+        ):
+            self.assertIn(value, combined)
+        self.assertNotIn('"is-active"', combined)
+        self.assertNotIn('"is-enabled"', combined)
 
     def test_service_helper_has_no_enable_or_start_mutation(self):
         text = SERVICE_HELPER.read_text(encoding="utf-8")
-        self.assertIn('"is-active"', text)
-        self.assertIn('"is-enabled"', text)
         self.assertIn('SYSTEMCTL, "daemon-reload"', text)
         self.assertNotRegex(text, r'SYSTEMCTL,\s*"(?:enable|start|restart|try-restart|reenable)"')
         self.assertNotIn("--now", text)
