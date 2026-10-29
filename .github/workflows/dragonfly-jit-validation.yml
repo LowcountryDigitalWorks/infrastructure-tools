@@ -69,10 +69,11 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           text = Path('.github/workflows/dragonfly-jit-canary.yml').read_text(encoding='utf-8')
+          dynamic_label = 'dragonfly-run-$' + '{{ github.run_id }}'
           for value in ('secrets.', 'schedule:', 'pull_request:', 'push:', 'permissions: write', 'actions/checkout'):
               if value in text:
                   raise SystemExit(f'CANARY_WORKFLOW_FORBIDDEN:{value}')
-          for value in ('workflow_dispatch:', 'dragonfly-canary:', 'dragonfly-run-${{ github.run_id }}', 'synthetic-only', 'DRAGONFLY_SECRETLESS_CANARY=PASS'):
+          for value in ('workflow_dispatch:', 'dragonfly-canary:', dynamic_label, 'synthetic-only', 'DRAGONFLY_SECRETLESS_CANARY=PASS'):
               if value not in text:
                   raise SystemExit(f'CANARY_WORKFLOW_REQUIRED_MISSING:{value}')
           print('DRAGONFLY_CANARY_WORKFLOW_BOUNDARY=PASS')
