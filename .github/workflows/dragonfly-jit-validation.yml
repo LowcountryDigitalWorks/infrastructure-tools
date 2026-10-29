@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - 'dragonfly-jit/**'
+      - 'tools/dragonfly_canary_publication.py'
+      - 'tests/dragonfly-canary-publication/**'
       - 'ci-dispatch/DragonflyCanary.psm1'
       - 'ci-dispatch/DragonflyCanaryRuntime.psm1'
       - 'ci-dispatch/tests/Test-DragonflyCanary.ps1'
@@ -14,8 +16,11 @@ on:
     branches:
       - 'feat/ci-runner-dragonfly-jit-001'
       - 'feat/dragonfly-jit-canary-001'
+      - 'feat/dragonfly-jit-canary-publish-001'
     paths:
       - 'dragonfly-jit/**'
+      - 'tools/dragonfly_canary_publication.py'
+      - 'tests/dragonfly-canary-publication/**'
       - 'ci-dispatch/DragonflyCanary.psm1'
       - 'ci-dispatch/DragonflyCanaryRuntime.psm1'
       - 'ci-dispatch/tests/Test-DragonflyCanary.ps1'
@@ -34,6 +39,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Compile Dragonfly source contracts
         run: |
           python3 -m py_compile \
@@ -44,9 +50,12 @@ jobs:
             dragonfly-jit/handoff_contract.py \
             dragonfly-jit/ssh_transport_contract.py \
             dragonfly-jit/ssh_forced_receiver.py \
-            dragonfly-jit/canary_executor.py
+            dragonfly-jit/canary_executor.py \
+            tools/dragonfly_canary_publication.py
       - name: Run lifecycle, transport, and canary contract tests
         run: python3 -m unittest discover -s dragonfly-jit/tests -p 'test_*.py' -v
+      - name: Run publication package contract tests
+        run: python3 -m unittest discover -s tests/dragonfly-canary-publication -p 'test_*.py' -v
       - name: Validate Dragonfly canary guest bootstrap
         shell: bash
         run: bash -n dragonfly-jit/canary-guest/bootstrap.sh
