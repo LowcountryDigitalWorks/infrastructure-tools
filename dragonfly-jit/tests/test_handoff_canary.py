@@ -16,6 +16,7 @@ class CanaryHandoffContractTests(unittest.TestCase):
     def capsule(self):
         now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
         run_id = 123456789
+        run_attempt = 2
         return {
             "marker": handoff.MARKER,
             "schema": handoff.SCHEMA,
@@ -27,23 +28,30 @@ class CanaryHandoffContractTests(unittest.TestCase):
             "repository": handoff.REPOSITORY,
             "workflow": handoff.CANARY_WORKFLOW,
             "run_id": run_id,
-            "run_attempt": 1,
+            "run_attempt": run_attempt,
             "job_id": 987654321,
             "head_sha": "a" * 40,
             "job_name": handoff.CANARY_JOB_NAME,
-            "labels": list(handoff.expected_labels(handoff.CANARY_PROFILE_ID, run_id)),
+            "labels": list(handoff.expected_labels(handoff.CANARY_PROFILE_ID, run_id, run_attempt)),
             "opaque_bootstrap": "QUJDREVGR0g=",
         }
 
-    def test_canary_profile_accepts_exact_dynamic_run_label(self):
+    def test_canary_profile_accepts_exact_run_and_attempt_labels(self):
         payload = self.capsule()
         summary = handoff.validate_capsule(payload)
-        self.assertEqual(summary["labels"][-1], f"dragonfly-run-{payload['run_id']}")
+        self.assertEqual(summary["labels"][-2], f"dragonfly-run-{payload['run_id']}")
+        self.assertEqual(summary["labels"][-1], f"dragonfly-attempt-{payload['run_attempt']}")
         self.assertNotIn("opaque_bootstrap", summary)
 
     def test_wrong_dynamic_label_fails_closed(self):
         payload = self.capsule()
-        payload["labels"][-1] = "dragonfly-run-1"
+        payload["labels"][-1] = "dragonfly-attempt-1"
+        with self.assertRaisesRegex(handoff.HandoffError, "LABELS_INVALID"):
+            handoff.validate_capsule(payload)
+
+    def test_attempt_change_without_label_change_fails_closed(self):
+        payload = self.capsule()
+        payload["run_attempt"] += 1
         with self.assertRaisesRegex(handoff.HandoffError, "LABELS_INVALID"):
             handoff.validate_capsule(payload)
 
@@ -67,6 +75,7 @@ class CanaryHandoffContractTests(unittest.TestCase):
             text = claim.read_text(encoding="utf-8")
             record = json.loads(text)
             self.assertEqual(record["profile_id"], handoff.CANARY_PROFILE_ID)
+            self.assertEqual(record["run_attempt"], payload["run_attempt"])
             self.assertNotIn("opaque_bootstrap", record)
             self.assertNotIn(payload["opaque_bootstrap"], text)
 
