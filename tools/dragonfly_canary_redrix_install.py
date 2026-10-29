@@ -98,32 +98,52 @@ def _assert_owned_regular(path: Path, uid: int, mode: int | None = None) -> byte
         info = path.lstat()
     except FileNotFoundError as exc:
         raise InstallError("REDRIX_REQUIRED_FILE_MISSING") from exc
-    if not stat.S_ISREG(info.st_mode) or path.is_symlink() or info.st_uid != uid:
+    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != uid:
         raise InstallError("REDRIX_FILE_OWNERSHIP_INVALID")
     if mode is not None and stat.S_IMODE(info.st_mode) != mode:
         raise InstallError("REDRIX_FILE_MODE_INVALID")
     return path.read_bytes()
 
 
+def _assert_home(home: Path, uid: int) -> Path:
+    candidate = home.absolute()
+    try:
+        info = candidate.lstat()
+    except FileNotFoundError as exc:
+        raise InstallError("REDRIX_HOME_INVALID") from exc
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != uid or stat.S_IMODE(info.st_mode) & 0o022:
+        raise InstallError("REDRIX_HOME_INVALID")
+    resolved = candidate.resolve(strict=True)
+    if resolved != candidate:
+        raise InstallError("REDRIX_HOME_INVALID")
+    return resolved
+
+
 def _assert_path_chain(home: Path, target: Path, uid: int) -> None:
-    home = home.resolve(strict=True)
+    home = _assert_home(home, uid)
     candidate = target.absolute()
     try:
-        candidate.relative_to(home)
+        relative = candidate.relative_to(home)
     except ValueError as exc:
         raise InstallError("REDRIX_TARGET_OUTSIDE_HOME") from exc
     cursor = home
-    for part in candidate.relative_to(home).parts[:-1]:
+    for part in relative.parts[:-1]:
         cursor = cursor / part
         if cursor.exists() or cursor.is_symlink():
             info = cursor.lstat()
-            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != uid:
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != uid
+                or stat.S_IMODE(info.st_mode) & 0o022
+            ):
                 raise InstallError("REDRIX_TARGET_PARENT_INVALID")
 
 
 def _authorized_keys_digest(home: Path, uid: int, forced_command: str) -> str:
     path = home / AUTHORIZED_KEYS_REL
-    data = _assert_owned_regular(path, uid)
+    _assert_path_chain(home, path, uid)
+    data = _assert_owned_regular(path, uid, 0o600)
     if len(data) > 1024 * 1024 or b"\x00" in data:
         raise InstallError("REDRIX_AUTHORIZED_KEYS_INVALID")
     try:
@@ -267,14 +287,13 @@ def _write_transaction(path: Path, record: dict[str, Any]) -> None:
     _atomic_write(path, _canonical(record), 0o600)
 
 
-def _install_one(source: Path, target: Path, mode: int, uid: int) -> None:
-    _assert_path_chain(target.parents[len(target.parts) - len(target.parts)], target, uid) if False else None
+def _install_one(home: Path, source: Path, target: Path, mode: int, uid: int) -> None:
+    _assert_path_chain(home, target, uid)
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if target.parent.is_symlink():
-        raise InstallError("REDRIX_TARGET_PARENT_INVALID")
+    _assert_path_chain(home, target, uid)
     _atomic_write(target, source.read_bytes(), mode)
     info = target.lstat()
-    if info.st_uid != uid or stat.S_IMODE(info.st_mode) != mode:
+    if stat.S_ISLNK(info.st_mode) or info.st_uid != uid or stat.S_IMODE(info.st_mode) != mode:
         raise InstallError("REDRIX_INSTALL_READBACK_INVALID")
 
 
@@ -285,9 +304,10 @@ def _restore(home: Path, package_root: Path, record: dict[str, Any], uid: int) -
     preexisting = record["preexisting"]
     for rel, (source_path, _, mode) in current.items():
         target = home / rel
+        _assert_path_chain(home, target, uid)
         if rel in rollback and baseline == "accepted-115":
             rollback_source, _, rollback_mode = rollback[rel]
-            _install_one(package_root / "rollback" / rollback_source, target, rollback_mode, uid)
+            _install_one(home, package_root / "rollback" / rollback_source, target, rollback_mode, uid)
         elif preexisting.get(rel.as_posix()) is False:
             if target.exists() and not target.is_symlink():
                 data = target.read_bytes()
@@ -296,19 +316,21 @@ def _restore(home: Path, package_root: Path, record: dict[str, Any], uid: int) -
                 target.unlink()
                 _fsync_dir(target.parent)
         else:
-            if not target.exists() or _git_blob(target.read_bytes()) != current[rel][1]:
+            if not target.exists() or target.is_symlink() or _git_blob(target.read_bytes()) != current[rel][1]:
                 raise InstallError("REDRIX_ROLLBACK_TARGET_UNRECOGNIZED")
 
 
 def install_fixture(archive: Path, checksum: Path, home: Path, uid: int, forced_command: str, fault_after: int | None = None) -> dict[str, Any]:
-    home = home.resolve(strict=True)
+    home = _assert_home(home, uid)
     transaction = home / TRANSACTION_REL
     receipt = home / RECEIPT_REL
+    _assert_path_chain(home, transaction, uid)
     if transaction.exists() or transaction.is_symlink():
         raise InstallError("REDRIX_TRANSACTION_RECOVERY_REQUIRED")
     auth_before = _authorized_keys_digest(home, uid, forced_command)
     baseline, preexisting = _recognize_baseline(home, uid)
     transaction.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _assert_path_chain(home, transaction, uid)
     with tempfile.TemporaryDirectory(dir=transaction.parent, prefix="stage-") as td:
         package_root, _, archive_digest = _extract_verified_package(archive, checksum, Path(td))
         record = {
@@ -326,8 +348,7 @@ def install_fixture(archive: Path, checksum: Path, home: Path, uid: int, forced_
             for source_path, blob, rel, mode in CURRENT:
                 source = package_root / "payload" / source_path
                 target = home / rel
-                _assert_path_chain(home, target, uid)
-                _install_one(source, target, mode, uid)
+                _install_one(home, source, target, mode, uid)
                 if _git_blob(target.read_bytes()) != blob:
                     raise InstallError("REDRIX_INSTALL_READBACK_INVALID")
                 count += 1
@@ -336,6 +357,7 @@ def install_fixture(archive: Path, checksum: Path, home: Path, uid: int, forced_
             auth_after = _authorized_keys_digest(home, uid, forced_command)
             if auth_after != auth_before:
                 raise InstallError("REDRIX_AUTHORIZED_KEYS_CHANGED")
+            _assert_path_chain(home, receipt, uid)
             receipt_record = {
                 "schema": 1,
                 "sourceCommit": SOURCE_COMMIT,
@@ -361,11 +383,13 @@ def install_fixture(archive: Path, checksum: Path, home: Path, uid: int, forced_
 
 
 def recover_fixture(archive: Path, checksum: Path, home: Path, uid: int, forced_command: str) -> None:
-    home = home.resolve(strict=True)
+    home = _assert_home(home, uid)
     transaction = home / TRANSACTION_REL
+    _assert_path_chain(home, transaction, uid)
     if not transaction.is_file() or transaction.is_symlink():
         raise InstallError("REDRIX_TRANSACTION_MARKER_INVALID")
-    record = json.loads(transaction.read_text(encoding="utf-8"))
+    marker_data = _assert_owned_regular(transaction, uid, 0o600)
+    record = json.loads(marker_data.decode("utf-8"))
     if record.get("schema") != 1 or record.get("sourceCommit") != SOURCE_COMMIT or record.get("phase") != "installing":
         raise InstallError("REDRIX_TRANSACTION_MARKER_INVALID")
     if _authorized_keys_digest(home, uid, forced_command) != record.get("authorizedKeysSha256"):
@@ -382,11 +406,13 @@ def recover_fixture(archive: Path, checksum: Path, home: Path, uid: int, forced_
 
 
 def readback_fixture(home: Path, uid: int, forced_command: str) -> dict[str, Any]:
-    home = home.resolve(strict=True)
+    home = _assert_home(home, uid)
     transaction = home / TRANSACTION_REL
+    _assert_path_chain(home, transaction, uid)
     if transaction.exists() or transaction.is_symlink():
         raise InstallError("REDRIX_TRANSACTION_RECOVERY_REQUIRED")
     receipt = home / RECEIPT_REL
+    _assert_path_chain(home, receipt, uid)
     receipt_data = json.loads(_assert_owned_regular(receipt, uid, 0o600).decode("utf-8"))
     if receipt_data.get("schema") != 1 or receipt_data.get("sourceCommit") != SOURCE_COMMIT or receipt_data.get("sourceTree") != SOURCE_TREE:
         raise InstallError("REDRIX_RECEIPT_INVALID")
@@ -394,6 +420,7 @@ def readback_fixture(home: Path, uid: int, forced_command: str) -> dict[str, Any
         raise InstallError("REDRIX_AUTHORIZED_KEYS_CHANGED")
     for _, blob, rel, mode in CURRENT:
         path = home / rel
+        _assert_path_chain(home, path, uid)
         data = _assert_owned_regular(path, uid, mode)
         if _git_blob(data) != blob:
             raise InstallError("REDRIX_INSTALL_READBACK_INVALID")
@@ -413,6 +440,7 @@ def _assert_production_identity() -> None:
         raise InstallError("REDRIX_OWNER_IDENTITY_INVALID") from exc
     if account.pw_uid != PRODUCTION_UID or os.geteuid() != PRODUCTION_UID or Path(account.pw_dir) != PRODUCTION_HOME:
         raise InstallError("REDRIX_OWNER_IDENTITY_INVALID")
+    _assert_home(PRODUCTION_HOME, PRODUCTION_UID)
 
 
 def main() -> int:
