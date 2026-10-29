@@ -196,11 +196,15 @@ def execute_canary(
             controller._write_manifest(run_id, run_dir, overlay, seed, pidfile)
             subprocess.run(
                 ["qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b", str(controller.base_path), str(overlay), "8G"],
-                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             subprocess.run(
                 ["cloud-localds", str(seed), str(user_data)],
-                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             user_data.unlink()
 
@@ -237,7 +241,7 @@ def execute_canary(
             with controller_module._file_lock(controller.state_lock_path):
                 controller.write_state("STOPPED")
             return {
-                "guest_execution": "PASS",
+                "guest_qemu_exit": "PASS",
                 "guest_cleanup": "PASS",
                 "state": "STOPPED",
                 "job_id": summary["job_id"],
@@ -250,7 +254,12 @@ def execute_canary(
                 manifest = controller._validate_manifest(run_dir)
                 pidfile = Path(manifest["pidfile"])
                 controller._write_manifest(
-                    manifest["run_id"], run_dir, Path(manifest["overlay"]), Path(manifest["seed"]), pidfile, qemu_pid=None
+                    manifest["run_id"],
+                    run_dir,
+                    Path(manifest["overlay"]),
+                    Path(manifest["seed"]),
+                    pidfile,
+                    qemu_pid=None,
                 )
                 with contextlib.suppress(FileNotFoundError):
                     pidfile.unlink()
