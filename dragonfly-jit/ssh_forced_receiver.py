@@ -15,10 +15,10 @@ REMOTE_SENTINEL = "/nonexistent/ldw-dragonfly-jit-handoff-v1"
 OWNER_USER = "eddie"
 HANDOFF_MODULE_NAME = "ldw_dragonfly_handoff_contract"
 HANDOFF_FILENAME = "handoff_contract.py"
-EXPECTED_HANDOFF_GIT_BLOB = "e0a100c25d6105a32bdb9fa6503a07dd9cd1d91f"
+EXPECTED_HANDOFF_GIT_BLOB = "cedf75fb360f05893afea119782f646da8a2e28b"
 CANARY_EXECUTOR_MODULE_NAME = "ldw_dragonfly_canary_executor"
 CANARY_EXECUTOR_FILENAME = "canary_executor.py"
-EXPECTED_CANARY_EXECUTOR_GIT_BLOB = "b200da84f187c71fd390c27e48d3e837933e1a5b"
+EXPECTED_CANARY_EXECUTOR_GIT_BLOB = "0c7495d8f5a2e3b424545767e167e3a219a3ae0d"
 CANARY_PROFILE_ID = "dragonfly-github-canary-v1"
 MAX_HANDOFF_BYTES = 256 * 1024
 MAX_EXECUTOR_BYTES = 256 * 1024
@@ -69,11 +69,7 @@ def _assert_pinned_source(path: Path, *, expected_blob: str, max_bytes: int) -> 
 
 
 def _assert_regular_private_source(path: Path) -> bytes:
-    return _assert_pinned_source(
-        path,
-        expected_blob=EXPECTED_HANDOFF_GIT_BLOB,
-        max_bytes=MAX_HANDOFF_BYTES,
-    )
+    return _assert_pinned_source(path, expected_blob=EXPECTED_HANDOFF_GIT_BLOB, max_bytes=MAX_HANDOFF_BYTES)
 
 
 def _load_module(*, module_name: str, source_path: Path, expected_blob: str, max_bytes: int):
