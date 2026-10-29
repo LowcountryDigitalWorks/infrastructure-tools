@@ -3,6 +3,7 @@ import contextlib
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import types
 import unittest
@@ -33,11 +34,30 @@ class FakeProcess:
         self._alive = False
 
 
+class UnkillableProcess:
+    def __init__(self):
+        self.pid = 5252
+
+    def poll(self):
+        return None
+
+    def wait(self, timeout=None):
+        raise subprocess.TimeoutExpired("qemu", timeout or 1)
+
+    def terminate(self):
+        return None
+
+    def kill(self):
+        return None
+
+
 def fake_controller_module(root: Path, *, state="AVAILABLE"):
     module = types.SimpleNamespace(
         GUEST_CPUS=2,
         GUEST_MEMORY_MIB=2048,
         _set_parent_death_signal=lambda: None,
+        cleanup_calls=0,
+        last_controller=None,
     )
     module.resource_snapshot = lambda _: {
         "mem_available_mib": 16384,
@@ -48,7 +68,7 @@ def fake_controller_module(root: Path, *, state="AVAILABLE"):
     module.assert_admission = lambda _: None
 
     @contextlib.contextmanager
-    def file_lock(_):
+    def file_lock(_, *, blocking=False):
         yield object()
 
     module._file_lock = file_lock
@@ -62,6 +82,8 @@ def fake_controller_module(root: Path, *, state="AVAILABLE"):
             self.guest_lock_path = self.state_root / "guest.lock"
             self.state_lock_path = self.state_root / "state.lock"
             self._state = state
+            self.last_kwargs = {}
+            module.last_controller = self
 
         def ensure_roots(self):
             self.runs_root.mkdir(parents=True, exist_ok=True)
@@ -72,10 +94,11 @@ def fake_controller_module(root: Path, *, state="AVAILABLE"):
             return {"ok": True}
 
         def read_state(self):
-            return {"state": self._state, "run_id": None, "qemu_pid": None}
+            return {"state": self._state, "run_id": self.last_kwargs.get("run_id"), "qemu_pid": self.last_kwargs.get("qemu_pid")}
 
         def write_state(self, state_value, **kwargs):
             self._state = state_value
+            self.last_kwargs = dict(kwargs)
             return {"state": state_value, **kwargs}
 
         def _run_dirs(self):
@@ -97,13 +120,7 @@ def fake_controller_module(root: Path, *, state="AVAILABLE"):
 
         def _write_manifest(self, run_id, run_dir, overlay, seed, pidfile, qemu_pid=None):
             (run_dir / "ownership.json").write_text(
-                json.dumps({
-                    "run_id": run_id,
-                    "overlay": str(overlay),
-                    "seed": str(seed),
-                    "pidfile": str(pidfile),
-                    "qemu_pid": qemu_pid,
-                }),
+                json.dumps({"run_id": run_id, "overlay": str(overlay), "seed": str(seed), "pidfile": str(pidfile), "qemu_pid": qemu_pid}),
                 encoding="utf-8",
             )
             if qemu_pid is not None:
@@ -113,6 +130,7 @@ def fake_controller_module(root: Path, *, state="AVAILABLE"):
             return json.loads((run_dir / "ownership.json").read_text(encoding="utf-8"))
 
         def _cleanup_owned_run(self, run_dir):
+            module.cleanup_calls += 1
             for child in list(run_dir.iterdir()):
                 child.unlink()
             run_dir.rmdir()
@@ -130,11 +148,11 @@ class CanaryExecutorTests(unittest.TestCase):
             "repository": "LowcountryDigitalWorks/infrastructure-tools",
             "workflow": ".github/workflows/dragonfly-jit-canary.yml",
             "run_id": 123,
-            "run_attempt": 1,
+            "run_attempt": 2,
             "job_id": 456,
             "head_sha": "a" * 40,
             "job_name": "dragonfly-canary",
-            "labels": ["self-hosted","Linux","X64","dragonfly","jit","ldw-ephemeral","synthetic-only","dragonfly-run-123"],
+            "labels": ["self-hosted","Linux","X64","dragonfly","jit","ldw-ephemeral","synthetic-only","dragonfly-run-123","dragonfly-attempt-2"],
             "issued_at": "2026-10-29T08:00:00Z",
             "expires_at": "2026-10-29T08:04:00Z",
             "opaque_bootstrap": "QUJDREVGR0g=",
@@ -179,16 +197,41 @@ class CanaryExecutorTests(unittest.TestCase):
             with mock.patch.object(executor.shutil, "which", return_value="/usr/bin/tool"), \
                  mock.patch.object(executor.subprocess, "run", side_effect=self.fake_run), \
                  mock.patch.object(executor.subprocess, "Popen", return_value=FakeProcess()):
-                result = executor.execute_canary(
-                    payload,
-                    summary,
-                    state_root=root / "state",
-                    data_root=root / "data",
-                    controller_module=module,
-                    source_root=ROOT,
-                )
+                result = executor.execute_canary(payload, summary, state_root=root / "state", data_root=root / "data", controller_module=module, source_root=ROOT)
             self.assertEqual(result["state"], "STOPPED")
             self.assertEqual(list((root / "state" / "runs").iterdir()), [])
+
+    def test_manifest_precedes_bootstrap_and_failure_is_recoverably_cleaned(self):
+        payload, summary = self.payload_and_summary()
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            module = fake_controller_module(root)
+            with mock.patch.object(executor.shutil, "which", return_value="/usr/bin/tool"), \
+                 mock.patch.object(executor, "build_user_data", side_effect=RuntimeError("interrupt-after-manifest")):
+                with self.assertRaisesRegex(RuntimeError, "interrupt-after-manifest"):
+                    executor.execute_canary(payload, summary, state_root=root / "state", data_root=root / "data", controller_module=module, source_root=ROOT)
+            self.assertEqual(module.cleanup_calls, 1)
+            self.assertEqual(list((root / "state" / "runs").iterdir()), [])
+            self.assertEqual(module.last_controller._state, "STOPPED")
+
+    def test_unconfirmed_guest_termination_preserves_ownership_and_holds(self):
+        payload, summary = self.payload_and_summary()
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            module = fake_controller_module(root)
+            process = UnkillableProcess()
+            with mock.patch.object(executor.shutil, "which", return_value="/usr/bin/tool"), \
+                 mock.patch.object(executor.subprocess, "run", side_effect=self.fake_run), \
+                 mock.patch.object(executor.subprocess, "Popen", return_value=process):
+                with self.assertRaisesRegex(executor.CanaryExecutorError, "CANARY_GUEST_TERMINATION_UNCERTAIN"):
+                    executor.execute_canary(payload, summary, state_root=root / "state", data_root=root / "data", controller_module=module, source_root=ROOT, timeout_seconds=1)
+            runs = list((root / "state" / "runs").iterdir())
+            self.assertEqual(len(runs), 1)
+            self.assertTrue((runs[0] / "ownership.json").exists())
+            self.assertTrue((runs[0] / "qemu.pid").exists())
+            self.assertEqual(module.cleanup_calls, 0)
+            self.assertEqual(module.last_controller._state, "HOLD")
+            self.assertEqual(module.last_controller.last_kwargs.get("qemu_pid"), process.pid)
 
     def test_prelaunch_not_available_creates_no_run(self):
         payload, summary = self.payload_and_summary()
@@ -197,14 +240,7 @@ class CanaryExecutorTests(unittest.TestCase):
             module = fake_controller_module(root, state="STOPPED")
             with mock.patch.object(executor.shutil, "which", return_value="/usr/bin/tool"):
                 with self.assertRaisesRegex(executor.CanaryExecutorError, "CANARY_HOST_NOT_AVAILABLE"):
-                    executor.execute_canary(
-                        payload,
-                        summary,
-                        state_root=root / "state",
-                        data_root=root / "data",
-                        controller_module=module,
-                        source_root=ROOT,
-                    )
+                    executor.execute_canary(payload, summary, state_root=root / "state", data_root=root / "data", controller_module=module, source_root=ROOT)
             self.assertEqual(list((root / "state" / "runs").iterdir()), [])
 
 
