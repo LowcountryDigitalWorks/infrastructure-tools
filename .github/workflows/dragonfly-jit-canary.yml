@@ -3,8 +3,7 @@ name: Dragonfly JIT secretless canary
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   dragonfly-canary:
