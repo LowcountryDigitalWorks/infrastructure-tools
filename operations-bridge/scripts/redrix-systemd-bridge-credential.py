@@ -123,25 +123,50 @@ def _run_sudo(args: list[str], classification: str) -> None:
 
 
 def _artifact_present_privileged() -> bool:
-    exists = _sudo_result([TEST, "-e", str(CREDENTIAL_PATH)]).returncode == 0
-    symlink = _sudo_result([TEST, "-L", str(CREDENTIAL_PATH)]).returncode == 0
-    return exists or symlink
+    exists_result = _sudo_result([TEST, "-e", str(CREDENTIAL_PATH)])
+    link_result = _sudo_result([TEST, "-L", str(CREDENTIAL_PATH)])
+    if exists_result.returncode not in {0, 1} or link_result.returncode not in {0, 1}:
+        raise MigrationError("CREDENTIAL_ARTIFACT_STATE_UNAVAILABLE")
+    return exists_result.returncode == 0 or link_result.returncode == 0
 
 
-def _service_is_active_or_enabled() -> bool:
-    for verb in ("is-active", "is-enabled"):
-        result = subprocess.run(
-            [SUDO, "-n", SYSTEMCTL, verb, "--quiet", UNIT_NAME],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env={},
-            timeout=10,
-            check=False,
-        )
-        if result.returncode == 0:
-            return True
-    return False
+def _assert_service_safe_for_credential_mutation() -> None:
+    result = subprocess.run(
+        [
+            SUDO,
+            "-n",
+            SYSTEMCTL,
+            "show",
+            "--no-pager",
+            "--property=LoadState",
+            "--property=ActiveState",
+            "--property=UnitFileState",
+            UNIT_NAME,
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        env={},
+        timeout=10,
+        check=False,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise MigrationError("SERVICE_STATE_UNAVAILABLE")
+    values: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        if "=" not in line:
+            raise MigrationError("SERVICE_STATE_AMBIGUOUS")
+        key, value = line.split("=", 1)
+        if key in values or key not in {"LoadState", "ActiveState", "UnitFileState"}:
+            raise MigrationError("SERVICE_STATE_AMBIGUOUS")
+        values[key] = value
+    if set(values) != {"LoadState", "ActiveState", "UnitFileState"}:
+        raise MigrationError("SERVICE_STATE_AMBIGUOUS")
+    safe_not_found = values["LoadState"] == "not-found" and values["ActiveState"] == "inactive" and values["UnitFileState"] in {"", "disabled"}
+    safe_disabled = values["LoadState"] == "loaded" and values["ActiveState"] == "inactive" and values["UnitFileState"] == "disabled"
+    if not (safe_not_found or safe_disabled):
+        raise MigrationError("SERVICE_MUST_BE_INACTIVE_AND_DISABLED")
 
 
 def _verify_ciphertext_metadata() -> None:
@@ -213,8 +238,7 @@ def verify() -> None:
 
 
 def rollback() -> None:
-    if _service_is_active_or_enabled():
-        raise MigrationError("SERVICE_MUST_BE_INACTIVE_AND_DISABLED")
+    _assert_service_safe_for_credential_mutation()
     verify()
     _run_sudo([RM, "-f", str(CREDENTIAL_PATH)], "CREDENTIAL_ARTIFACT_ROLLBACK_FAILED")
     if _artifact_present_privileged():
