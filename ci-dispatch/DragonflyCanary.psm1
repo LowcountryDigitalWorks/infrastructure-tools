@@ -91,6 +91,31 @@ function New-LdwDragonflyCanaryRegistrationRequest {
     }
 }
 
+function Get-LdwDragonflyCanaryRunnerInventory {
+    [CmdletBinding()]param([Parameter(Mandatory)][scriptblock]$ApiInvoker)
+    $path = 'repos/' + $script:DragonflyCanaryProfile.Repository + '/actions/runners?per_page=100'
+    $response = & $ApiInvoker $path 'GET' $null
+    if ($null -eq $response) { throw 'DRAGONFLY_CANARY_RUNNER_INVENTORY_INVALID' }
+    $total = [long](Get-LdwObjectField $response 'total_count')
+    $runners = @((Get-LdwObjectField $response 'runners'))
+    if ($total -lt 0 -or $total -gt 100 -or $runners.Count -ne $total) {
+        throw 'DRAGONFLY_CANARY_RUNNER_INVENTORY_INVALID'
+    }
+    $runners
+}
+
+function Assert-LdwDragonflyCanaryRunnerNameAvailable {
+    [CmdletBinding()]param(
+        [Parameter(Mandatory)][string]$RunnerName,
+        [Parameter(Mandatory)][scriptblock]$ApiInvoker
+    )
+    if ($RunnerName -cnotmatch '^redrix-[1-9][0-9]*-[1-9][0-9]*$') { throw 'DRAGONFLY_CANARY_RUNNER_NAME_INVALID' }
+    $runners = @(Get-LdwDragonflyCanaryRunnerInventory -ApiInvoker $ApiInvoker)
+    if (@($runners | Where-Object { [string](Get-LdwObjectField $_ 'name') -ceq $RunnerName }).Count) {
+        throw 'DRAGONFLY_CANARY_STALE_RUNNER_NAME_PRESENT'
+    }
+}
+
 function Assert-LdwDragonflyCanaryJitResponse {
     [CmdletBinding()]param(
         [Parameter(Mandatory)][object]$Response,
@@ -137,6 +162,40 @@ function Assert-LdwDragonflyCanaryJitResponse {
     }
 }
 
+function Remove-LdwDragonflyCanaryRegistration {
+    [CmdletBinding()]param(
+        [Parameter(Mandatory)][object]$Selection,
+        [Parameter(Mandatory)][long]$RunnerId,
+        [Parameter(Mandatory)][scriptblock]$ApiInvoker
+    )
+    if ($RunnerId -le 0) { throw 'DRAGONFLY_CANARY_CLEANUP_RUNNER_ID_INVALID' }
+    $request = New-LdwDragonflyCanaryRegistrationRequest -Selection $Selection
+    $runnerName = $request.RunnerName
+    $runners = @(Get-LdwDragonflyCanaryRunnerInventory -ApiInvoker $ApiInvoker)
+    $matches = @($runners | Where-Object {
+        [long](Get-LdwObjectField $_ 'id') -eq $RunnerId -or
+        [string](Get-LdwObjectField $_ 'name') -ceq $runnerName
+    })
+    if ($matches.Count -eq 0) {
+        return [pscustomobject]@{ RunnerId=$RunnerId; RunnerName=$runnerName; Removed=$false; Absent=$true }
+    }
+    if ($matches.Count -ne 1 -or
+        [long](Get-LdwObjectField $matches[0] 'id') -ne $RunnerId -or
+        [string](Get-LdwObjectField $matches[0] 'name') -cne $runnerName) {
+        throw 'DRAGONFLY_CANARY_RUNNER_CLEANUP_OWNERSHIP_AMBIGUOUS'
+    }
+    $deletePath = 'repos/' + $script:DragonflyCanaryProfile.Repository + '/actions/runners/' + $RunnerId
+    $null = & $ApiInvoker $deletePath 'DELETE' $null
+    $after = @(Get-LdwDragonflyCanaryRunnerInventory -ApiInvoker $ApiInvoker)
+    if (@($after | Where-Object {
+        [long](Get-LdwObjectField $_ 'id') -eq $RunnerId -or
+        [string](Get-LdwObjectField $_ 'name') -ceq $runnerName
+    }).Count) {
+        throw 'DRAGONFLY_CANARY_RUNNER_CLEANUP_UNCONFIRMED'
+    }
+    [pscustomobject]@{ RunnerId=$RunnerId; RunnerName=$runnerName; Removed=$true; Absent=$true }
+}
+
 function New-LdwDragonflyCanaryCapsule {
     [CmdletBinding()]param(
         [Parameter(Mandatory)][object]$Selection,
@@ -176,10 +235,36 @@ function Invoke-LdwDragonflyCanaryRegistration {
     )
     $selection = Assert-LdwDragonflyCanarySelection -Run $Run -Job $Job -ExpectedHeadSha $ExpectedHeadSha
     $request = New-LdwDragonflyCanaryRegistrationRequest -Selection $selection
+    Assert-LdwDragonflyCanaryRunnerNameAvailable -RunnerName $request.RunnerName -ApiInvoker $ApiInvoker
     $response = & $ApiInvoker $request.Path $request.Method $request.Body
-    $registration = Assert-LdwDragonflyCanaryJitResponse -Response $response -Request $request
+
+    try {
+        $registration = Assert-LdwDragonflyCanaryJitResponse -Response $response -Request $request
+    } catch {
+        $validationException = $_.Exception
+        $runner = if ($null -ne $response) { Get-LdwObjectField $response 'runner' } else { $null }
+        $provisionalRunnerId = if ($null -ne $runner) { [long](Get-LdwObjectField $runner 'id') } else { 0 }
+        $provisionalRunnerName = if ($null -ne $runner) { [string](Get-LdwObjectField $runner 'name') } else { '' }
+        if ($provisionalRunnerId -le 0 -or $provisionalRunnerName -cne $request.RunnerName) {
+            throw 'DRAGONFLY_CANARY_REGISTRATION_VALIDATION_FAILED_CLEANUP_UNCERTAIN'
+        }
+        try {
+            $null = Remove-LdwDragonflyCanaryRegistration -Selection $selection -RunnerId $provisionalRunnerId -ApiInvoker $ApiInvoker
+        } catch {
+            throw 'DRAGONFLY_CANARY_REGISTRATION_VALIDATION_FAILED_CLEANUP_UNCERTAIN'
+        }
+        throw $validationException
+    }
+
     $capsule = New-LdwDragonflyCanaryCapsule -Selection $selection -Registration $registration -UtcNow $UtcNow
-    [pscustomobject]@{ RunnerId=$registration.RunnerId; RunnerName=$registration.RunnerName; CleanupPath=$registration.CleanupPath; CapsuleJson=$capsule.CapsuleJson; Sanitized=$capsule.Sanitized }
+    [pscustomobject]@{
+        Selection=$selection
+        RunnerId=$registration.RunnerId
+        RunnerName=$registration.RunnerName
+        CleanupPath=$registration.CleanupPath
+        CapsuleJson=$capsule.CapsuleJson
+        Sanitized=$capsule.Sanitized
+    }
 }
 
-Export-ModuleMember -Function Get-LdwDragonflyCanaryProfile,Get-LdwDragonflyCanaryLabels,Assert-LdwDragonflyCanarySelection,New-LdwDragonflyCanaryRegistrationRequest,Assert-LdwDragonflyCanaryJitResponse,New-LdwDragonflyCanaryCapsule,Invoke-LdwDragonflyCanaryRegistration
+Export-ModuleMember -Function Get-LdwDragonflyCanaryProfile,Get-LdwDragonflyCanaryLabels,Assert-LdwDragonflyCanarySelection,New-LdwDragonflyCanaryRegistrationRequest,Get-LdwDragonflyCanaryRunnerInventory,Assert-LdwDragonflyCanaryRunnerNameAvailable,Assert-LdwDragonflyCanaryJitResponse,Remove-LdwDragonflyCanaryRegistration,New-LdwDragonflyCanaryCapsule,Invoke-LdwDragonflyCanaryRegistration
