@@ -66,6 +66,16 @@ class SystemdBridgeLifecycleTests(unittest.TestCase):
         self.assertNotRegex(text, r"print\([^\n]*(token|bearer|digest_stdout)")
         self.assertNotIn("capture_output=True", text)
 
+    def test_credential_publication_is_privileged_atomic_and_no_clobber(self):
+        text = CREDENTIAL_HELPER.read_text(encoding="utf-8")
+        self.assertIn('_artifact_present_privileged()', text)
+        self.assertIn('[TEST, "-e", str(CREDENTIAL_PATH)]', text)
+        self.assertIn('[TEST, "-L", str(CREDENTIAL_PATH)]', text)
+        self.assertIn('[LN, str(temp_path), str(CREDENTIAL_PATH)]', text)
+        self.assertIn('"CREDENTIAL_ARTIFACT_EXISTS"', text)
+        self.assertIn('secrets.token_hex(12)', text)
+        self.assertNotIn('tempfile._get_candidate_names', text)
+
     def test_service_helper_has_no_enable_or_start_mutation(self):
         text = SERVICE_HELPER.read_text(encoding="utf-8")
         self.assertIn('"is-active"', text)
@@ -76,6 +86,21 @@ class SystemdBridgeLifecycleTests(unittest.TestCase):
         self.assertIn('SERVICE_ENABLED=no', text)
         self.assertIn('SERVICE_STARTED=no', text)
 
+    def test_service_preflight_binds_installed_binary_to_package_manifest(self):
+        text = SERVICE_HELPER.read_text(encoding="utf-8")
+        for required in (
+            'PACKAGE_MANIFEST = PACKAGE_ROOT / "manifest.json"',
+            '"artifact": "ldw-operations-bridge-dragonfly-linux-x64"',
+            '"entrypoint": "payload/LDW.OperationsBridge.Runner"',
+            '"containsCredential": False',
+            '"containsConfiguration": False',
+            'GIT_SHA_RE.fullmatch',
+            'BINARY.stat().st_size != record["size"]',
+            '_sha256(BINARY) != record["sha256"]',
+            'BRIDGE_BINARY_PROVENANCE_INVALID',
+        ):
+            self.assertIn(required, text)
+
     def test_helpers_pin_expected_paths_and_unit_digest(self):
         credential = load_module(CREDENTIAL_HELPER, "redrix_systemd_bridge_credential")
         service = load_module(SERVICE_HELPER, "redrix_systemd_bridge_service")
@@ -85,6 +110,7 @@ class SystemdBridgeLifecycleTests(unittest.TestCase):
         self.assertEqual(service.EXPECTED_UNIT_SHA256, EXPECTED_UNIT_SHA256)
         self.assertEqual(str(service.UNIT_DESTINATION), "/etc/systemd/system/ldw-operations-bridge-dragonfly.service")
         self.assertEqual(str(service.BINARY), "/home/eddie/.local/lib/ldw/operations-bridge/dragonfly/payload/LDW.OperationsBridge.Runner")
+        self.assertEqual(str(service.PACKAGE_MANIFEST), "/home/eddie/.local/lib/ldw/operations-bridge/dragonfly/manifest.json")
         self.assertEqual(str(service.CONFIG), "/home/eddie/.config/ldw/operations-bridge/dragonfly/config.json")
 
     def test_source_has_no_runtime_authority_or_provider_surface(self):
