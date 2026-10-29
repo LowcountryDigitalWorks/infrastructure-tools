@@ -78,7 +78,8 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           text = Path('.github/workflows/dragonfly-jit-canary.yml').read_text(encoding='utf-8')
-          dynamic_label = 'dragonfly-run-$' + '{{ github.run_id }}'
+          run_label = 'dragonfly-run-$' + '{{ github.run_id }}'
+          attempt_label = 'dragonfly-attempt-$' + '{{ github.run_attempt }}'
           for value in (
               'secrets.',
               'schedule:',
@@ -93,7 +94,8 @@ jobs:
               'workflow_dispatch:',
               'permissions: {}',
               'dragonfly-canary:',
-              dynamic_label,
+              run_label,
+              attempt_label,
               'synthetic-only',
               'DRAGONFLY_SECRETLESS_CANARY=PASS',
           ):
