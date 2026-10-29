@@ -60,15 +60,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if grep -RInE '(gh api|GITHUB_TOKEN|ACTIONS_RUNTIME_TOKEN|registration-token|generate-jitconfig)' \
-            dragonfly-jit --exclude='*.md' --exclude-dir='tests'; then
+          if grep -RInE --exclude='*.md' --exclude-dir='tests' \
+            '(gh api|GITHUB_TOKEN|ACTIONS_RUNTIME_TOKEN|registration-token|generate-jitconfig)' \
+            dragonfly-jit; then
             echo 'REDRIX runtime source must not acquire GitHub provider authority.' >&2
             exit 1
           fi
-          if grep -RIn -- 'jitconfig' dragonfly-jit --exclude='*.md' --exclude-dir='tests'; then
+          if grep -RIn --exclude='*.md' --exclude-dir='tests' -- 'jitconfig' dragonfly-jit; then
             echo 'REDRIX host runtime source must not directly consume runner configuration material.' >&2
             exit 1
           fi
+          echo 'REDRIX_PROVIDER_AUTHORITY_BOUNDARY=PASS'
       - name: Audit secretless canary workflow boundary
         shell: bash
         run: |
