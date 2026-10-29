@@ -1,0 +1,44 @@
+[Unit]
+Description=LDW Operations Bridge for REDRIX
+Documentation=https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/98
+Wants=network-online.target
+After=network-online.target tailscaled.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=eddie
+WorkingDirectory=/home/eddie/.local/lib/ldw/operations-bridge/dragonfly
+ExecStart=/home/eddie/.local/lib/ldw/operations-bridge/dragonfly/payload/LDW.OperationsBridge.Runner --dragonfly-run
+LoadCredentialEncrypted=dragonfly-bridge-token:/etc/credstore.encrypted/dragonfly-bridge-token
+Restart=on-failure
+RestartSec=5s
+RestartPreventExitStatus=6
+TimeoutStopSec=20s
+KillSignal=SIGINT
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/eddie/.local/state/ldw/operations-bridge/dragonfly
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+Environment=DOTNET_EnableDiagnostics=0
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target
