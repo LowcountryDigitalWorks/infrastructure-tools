@@ -227,8 +227,8 @@ def _verify_checksum(archive: Path, checksum: Path) -> str:
 
 def _extract_verified_package(archive: Path, checksum: Path, work: Path) -> tuple[Path, dict[str, Any], str]:
     archive_digest = _verify_checksum(archive, checksum)
-    expected = {"payload/" + path: (blob, target, mode, "current") for path, blob, target, mode in CURRENT}
-    expected.update({"rollback/" + path: (blob, target, mode, "rollback") for path, blob, target, mode in ROLLBACK})
+    expected = {"payload/" + path: (path, blob, target, mode, "current", SOURCE_COMMIT) for path, blob, target, mode in CURRENT}
+    expected.update({"rollback/" + path: (path, blob, target, mode, "rollback", ROLLBACK_COMMIT) for path, blob, target, mode in ROLLBACK})
     modes: dict[str, int] = {}
     with tarfile.open(archive, "r:gz") as tf:
         members = tf.getmembers()
@@ -248,6 +248,13 @@ def _extract_verified_package(archive: Path, checksum: Path, work: Path) -> tupl
     if not manifest_path.is_file() or manifest_path.is_symlink():
         raise InstallError("REDRIX_PACKAGE_MANIFEST_INVALID")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_keys = {
+        "schemaVersion", "artifact", "sourceCommit", "sourceTree", "rollbackCommit", "rollbackTree",
+        "sourceDateEpoch", "owner", "containsCredential", "containsBootstrap", "containsPrivateKey",
+        "authorizedKeysMutationAuthorized", "entries",
+    }
+    if set(manifest) != manifest_keys:
+        raise InstallError("REDRIX_PACKAGE_MANIFEST_INVALID")
     required = {
         "schemaVersion": 1,
         "artifact": PACKAGE,
@@ -264,6 +271,9 @@ def _extract_verified_package(archive: Path, checksum: Path, work: Path) -> tupl
     for key, value in required.items():
         if manifest.get(key) != value:
             raise InstallError("REDRIX_PACKAGE_MANIFEST_INVALID")
+    epoch = manifest.get("sourceDateEpoch")
+    if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 0:
+        raise InstallError("REDRIX_PACKAGE_MANIFEST_INVALID")
     records = manifest.get("entries")
     if not isinstance(records, list) or len(records) != len(expected):
         raise InstallError("REDRIX_PACKAGE_INVENTORY_INVALID")
@@ -273,12 +283,21 @@ def _extract_verified_package(archive: Path, checksum: Path, work: Path) -> tupl
     actual_files = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
     if actual_files != set(expected) | {"manifest.json"}:
         raise InstallError("REDRIX_PACKAGE_INVENTORY_INVALID")
-    for package_path, (blob, target, mode, role) in expected.items():
+    record_keys = {
+        "role", "packagePath", "sourceCommit", "sourcePath", "gitBlob", "sourceSha256",
+        "materialization", "sha256", "size", "mode", "targetPath",
+    }
+    for package_path, (source_path, blob, target, mode, role, source_commit) in expected.items():
         record = by_path[package_path]
         path = root.joinpath(*PurePosixPath(package_path).parts)
         data = path.read_bytes()
+        if set(record) != record_keys:
+            raise InstallError("REDRIX_PACKAGE_MANIFEST_INVALID")
         if (
             record.get("role") != role
+            or record.get("packagePath") != package_path
+            or record.get("sourceCommit") != source_commit
+            or record.get("sourcePath") != source_path
             or record.get("gitBlob") != blob
             or record.get("materialization") != "raw"
             or record.get("targetPath") != "~/" + target.as_posix()
@@ -372,7 +391,7 @@ def _restore(home: Path, package_root: Path, record: dict[str, Any], uid: int) -
     current = {rel: (path, blob, mode) for path, blob, rel, mode in CURRENT}
     baseline = record["baseline"]
     preexisting = record["preexisting"]
-    for rel, (source_path, _, _) in current.items():
+    for rel, (_, _, _) in current.items():
         target = home / rel
         _assert_path_chain(home, target, uid)
         if rel in rollback and baseline == "accepted-115":
@@ -537,21 +556,16 @@ def rollback_fixture(archive: Path, checksum: Path, home: Path, uid: int, forced
             "preexisting": receipt["preexisting"],
         })
         _write_transaction(transaction, record)
-        try:
-            # Synthetic fault is deliberately test-only: the production CLI never supplies it.
-            if fault_after == 0:
-                raise InstallError("REDRIX_SYNTHETIC_ROLLBACK_FAULT")
-            _restore(home, package_root, record, uid)
-            if fault_after == 1:
-                raise InstallError("REDRIX_SYNTHETIC_ROLLBACK_FAULT")
-            if _authorized_keys_digest(home, uid, forced_command) != auth:
-                raise InstallError("REDRIX_AUTHORIZED_KEYS_CHANGED")
-            _remove_matching_receipt(home, uid, archive_digest, auth)
-            transaction.unlink()
-            _fsync_dir(transaction.parent)
-        except Exception:
-            # Keep the durable marker so ordinary install/rollback cannot blindly retry.
-            raise
+        if fault_after == 0:
+            raise InstallError("REDRIX_SYNTHETIC_ROLLBACK_FAULT")
+        _restore(home, package_root, record, uid)
+        if fault_after == 1:
+            raise InstallError("REDRIX_SYNTHETIC_ROLLBACK_FAULT")
+        if _authorized_keys_digest(home, uid, forced_command) != auth:
+            raise InstallError("REDRIX_AUTHORIZED_KEYS_CHANGED")
+        _remove_matching_receipt(home, uid, archive_digest, auth)
+        transaction.unlink()
+        _fsync_dir(transaction.parent)
 
 
 def readback_fixture(home: Path, uid: int, forced_command: str) -> dict[str, Any]:
