@@ -130,9 +130,11 @@ function Invoke-LdwDragonflyCanaryTransport {
             [pscustomobject]@{ ExitCode=$process.ExitCode; Stdout=$stdoutTask.GetAwaiter().GetResult(); Stderr=$stderrTask.GetAwaiter().GetResult() }
         } finally { $process.Dispose() }
     }
-    if ($null -eq $rawResult -or [int]$rawResult.ExitCode -ne 0) { throw 'DRAGONFLY_CANARY_TRANSPORT_FAILED' }
+    if ($null -eq $rawResult) { throw 'DRAGONFLY_CANARY_TRANSPORT_FAILED' }
     $stdout = [string]$rawResult.Stdout
-    if ($stdout.Contains($bootstrap)) { throw 'DRAGONFLY_CANARY_TRANSPORT_BOOTSTRAP_EXPOSED' }
+    $stderr = [string]$rawResult.Stderr
+    if ($stdout.Contains($bootstrap) -or $stderr.Contains($bootstrap)) { throw 'DRAGONFLY_CANARY_TRANSPORT_BOOTSTRAP_EXPOSED' }
+    if ([int]$rawResult.ExitCode -ne 0) { throw 'DRAGONFLY_CANARY_TRANSPORT_FAILED' }
     try { $result = $stdout | ConvertFrom-Json } catch { throw 'DRAGONFLY_CANARY_TRANSPORT_RESULT_INVALID' }
     if ($result.claimed -ne $true -or $result.profile_id -cne 'dragonfly-github-canary-v1' -or $null -eq $result.execution) {
         throw 'DRAGONFLY_CANARY_TRANSPORT_RESULT_INVALID'
@@ -181,11 +183,16 @@ function Get-LdwDragonflyCanaryUncertaintyMarkerPath {
 }
 
 function Write-LdwDragonflyCanaryRegistrationUncertainty {
-    param([Parameter(Mandatory)][string]$DispatcherRoot,[Parameter(Mandatory)][object]$Selection)
+    param(
+        [Parameter(Mandatory)][string]$DispatcherRoot,[Parameter(Mandatory)][object]$Selection,
+        [ValidateSet('registration_post','final_cleanup')][string]$Phase='registration_post',
+        [long]$RunnerId=0
+    )
+    if (($Phase -ceq 'final_cleanup' -and $RunnerId -le 0) -or ($Phase -ceq 'registration_post' -and $RunnerId -ne 0)) { throw 'DRAGONFLY_CANARY_UNCERTAINTY_IDENTITY_INVALID' }
     $path = Get-LdwDragonflyCanaryUncertaintyMarkerPath -DispatcherRoot $DispatcherRoot
     if (Test-Path -LiteralPath $path) { throw 'DRAGONFLY_CANARY_RECONCILIATION_REQUIRED' }
     $request = New-LdwDragonflyCanaryRegistrationRequest -Selection $Selection
-    $record = [ordered]@{ schema=1; run_id=[long]$Selection.RunId; run_attempt=[int]$Selection.RunAttempt; job_id=[long]$Selection.JobId; head_sha=[string]$Selection.HeadSha; runner_name=[string]$request.RunnerName; recorded_at=[DateTime]::UtcNow.ToString('o') }
+    $record = [ordered]@{ schema=2; phase=$Phase; runner_id=$RunnerId; run_id=[long]$Selection.RunId; run_attempt=[int]$Selection.RunAttempt; job_id=[long]$Selection.JobId; head_sha=[string]$Selection.HeadSha; runner_name=[string]$request.RunnerName; recorded_at=[DateTime]::UtcNow.ToString('o') }
     $temp = $path + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
     try {
         [IO.File]::WriteAllText($temp, (($record | ConvertTo-Json -Compress) + "`n"), [Text.UTF8Encoding]::new($false))
@@ -214,19 +221,30 @@ function Resolve-LdwDragonflyCanaryRegistrationUncertainty {
         $path = Get-LdwDragonflyCanaryUncertaintyMarkerPath -DispatcherRoot $DispatcherRoot
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return [pscustomobject]@{ Reconciled=$true; MarkerPresent=$false } }
         try { $record = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json } catch { throw 'DRAGONFLY_CANARY_UNCERTAINTY_MARKER_INVALID' }
-        if ($record.schema -ne 1 -or [long]$record.run_id -le 0 -or [int]$record.run_attempt -le 0 -or [long]$record.job_id -le 0 -or
+        if ($record.schema -notin @(1,2) -or [long]$record.run_id -le 0 -or [int]$record.run_attempt -le 0 -or [long]$record.job_id -le 0 -or
             [string]$record.head_sha -cnotmatch '^[0-9a-f]{40}$') { throw 'DRAGONFLY_CANARY_UNCERTAINTY_MARKER_INVALID' }
+        $cleanupRunnerId = 0L
+        if ($record.schema -eq 2) {
+            if ($record.phase -notin @('registration_post','final_cleanup') -or
+                ($record.phase -ceq 'registration_post' -and [long]$record.runner_id -ne 0) -or
+                ($record.phase -ceq 'final_cleanup' -and [long]$record.runner_id -le 0)) { throw 'DRAGONFLY_CANARY_UNCERTAINTY_MARKER_INVALID' }
+            if ($record.phase -ceq 'final_cleanup') { $cleanupRunnerId = [long]$record.runner_id }
+        }
         $selection = [pscustomobject]@{ RunId=[long]$record.run_id; RunAttempt=[int]$record.run_attempt; JobId=[long]$record.job_id; HeadSha=[string]$record.head_sha }
         $request = New-LdwDragonflyCanaryRegistrationRequest -Selection $selection
         if ([string]$record.runner_name -cne [string]$request.RunnerName) { throw 'DRAGONFLY_CANARY_UNCERTAINTY_MARKER_INVALID' }
         $absentReads = 0
         for ($i=0; $i -lt $AbsentProofReads; $i++) {
             $inventory = @(Get-LdwDragonflyCanaryRunnerInventory -ApiInvoker $ApiInvoker)
-            $matches = @($inventory | Where-Object { [string](Get-LdwRuntimeObjectField $_ 'name') -ceq $request.RunnerName })
+            $matches = @($inventory | Where-Object {
+                [string](Get-LdwRuntimeObjectField $_ 'name') -ceq $request.RunnerName -or
+                ($cleanupRunnerId -gt 0 -and [long](Get-LdwRuntimeObjectField $_ 'id') -eq $cleanupRunnerId)
+            })
             if ($matches.Count -gt 1) { throw 'DRAGONFLY_CANARY_RECONCILIATION_AMBIGUOUS' }
             if ($matches.Count -eq 1) {
                 if (-not (Test-LdwDragonflyCanaryRunnerMatchesRequest -Runner $matches[0] -Request $request)) { throw 'DRAGONFLY_CANARY_RECONCILIATION_AMBIGUOUS' }
                 $runnerId = [long](Get-LdwRuntimeObjectField $matches[0] 'id')
+                if ($cleanupRunnerId -gt 0 -and $runnerId -ne $cleanupRunnerId) { throw 'DRAGONFLY_CANARY_RECONCILIATION_AMBIGUOUS' }
                 $removed = Remove-LdwDragonflyCanaryRegistration -Selection $selection -RunnerId $runnerId -ApiInvoker $ApiInvoker
                 if (-not $removed.Absent) { throw 'DRAGONFLY_CANARY_RECONCILIATION_UNCONFIRMED' }
                 $absentReads = $AbsentProofReads
@@ -327,7 +345,7 @@ function Invoke-LdwDragonflyCanaryOnce {
         [int]$ProviderTimeoutSeconds=360
     )
     if ([string]::IsNullOrWhiteSpace($DispatcherRoot) -or -not [IO.Path]::IsPathRooted($DispatcherRoot)) { throw 'DRAGONFLY_CANARY_DISPATCHER_ROOT_INVALID' }
-    $dispatcherLock = $null; $registration = $null; $primary = $null; $final = $null; $fresh = $null
+    $dispatcherLock = $null; $registration = $null; $primary = $null; $final = $null; $fresh = $null; $cleanupUncertain = $false
     try {
         $dispatcherLock = Enter-Ci10DispatcherLock -Root $DispatcherRoot
         Assert-LdwDragonflyNoRegistrationUncertainty -DispatcherRoot $DispatcherRoot
@@ -350,11 +368,36 @@ function Invoke-LdwDragonflyCanaryOnce {
         try {
             if ($null -ne $registration) {
                 try {
+                    # Write-ahead gate survives DELETE failure, lost responses and process interruption.
+                    $markerPath = Write-LdwDragonflyCanaryRegistrationUncertainty -DispatcherRoot $DispatcherRoot -Selection $registration.Selection -Phase final_cleanup -RunnerId $registration.RunnerId
                     $cleanup = Remove-LdwDragonflyCanaryRegistration -Selection $registration.Selection -RunnerId $registration.RunnerId -ApiInvoker $ApiInvoker
                     if (-not $cleanup.Absent) { throw 'DRAGONFLY_CANARY_FINAL_CLEANUP_UNCONFIRMED' }
-                } catch { throw 'DRAGONFLY_CANARY_FINAL_CLEANUP_UNCERTAIN' }
+                    Remove-Item -LiteralPath $markerPath -Force -ErrorAction Stop
+                    if (Test-Path -LiteralPath $markerPath) { throw 'DRAGONFLY_CANARY_FINAL_CLEANUP_UNCONFIRMED' }
+                } catch { $cleanupUncertain = $true }
             }
         } finally { if ($null -ne $dispatcherLock) { $dispatcherLock.Dispose() } }
+    }
+    if ($cleanupUncertain) {
+        # Never expose an upstream body/exception or mask a known primary failure with cleanup.
+        $code = 'DRAGONFLY_CANARY_FINAL_CLEANUP_UNCERTAIN'
+        if ($null -ne $primary) {
+            $code = 'DRAGONFLY_CANARY_OPERATION_FAILED'
+            if ($primary.Message -in @(
+                'DRAGONFLY_CANARY_TRANSPORT_FAILED','DRAGONFLY_CANARY_TRANSPORT_BOOTSTRAP_EXPOSED',
+                'DRAGONFLY_CANARY_TRANSPORT_RESULT_INVALID','DRAGONFLY_CANARY_EXECUTION_RESULT_INVALID',
+                'DRAGONFLY_CANARY_TRANSPORT_CORRELATION_INVALID','DRAGONFLY_CANARY_SSH_TIMEOUT',
+                'DRAGONFLY_CANARY_TRANSPORT_ARTIFACT_MISSING','DRAGONFLY_CANARY_TRANSPORT_PLAN_INVALID',
+                'DRAGONFLY_CANARY_PROVIDER_RUN_DRIFT','DRAGONFLY_CANARY_PROVIDER_JOB_DRIFT',
+                'DRAGONFLY_CANARY_PROVIDER_JOB_LABEL_DRIFT','DRAGONFLY_CANARY_PROVIDER_RUNNER_DRIFT',
+                'DRAGONFLY_CANARY_PROVIDER_TERMINAL_FAILED','DRAGONFLY_CANARY_PROVIDER_TIMEOUT','DRAGONFLY_CANARY_PROVIDER_JOB_STATUS_INVALID',
+                'DRAGONFLY_CANARY_TAILSCALE_NOT_READY','DRAGONFLY_CANARY_TAILSCALE_PEER_NOT_UNIQUE',
+                'DRAGONFLY_CANARY_TAILSCALE_ENDPOINT_INVALID','DRAGONFLY_CANARY_TAILSCALE_STATUS_FAILED','DRAGONFLY_CANARY_TAILSCALE_STATUS_INVALID'
+            )) { $code = $primary.Message }
+        }
+        $failure = [InvalidOperationException]::new($code)
+        $failure.Data['CleanupUncertainty'] = 'DRAGONFLY_CANARY_FINAL_CLEANUP_UNCERTAIN'
+        throw $failure
     }
     if ($null -ne $primary) { throw $primary }
     if ($null -eq $final) { throw 'DRAGONFLY_CANARY_RESULT_MISSING' }

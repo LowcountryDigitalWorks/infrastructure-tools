@@ -40,6 +40,22 @@ class DragonflyContractTests(unittest.TestCase):
         self.assertEqual(128, len(mod.BASE_SHA512))
         int(mod.BASE_SHA512, 16)
 
+    def test_hold_manifest_tolerates_absent_seed_without_losing_ownership(self):
+        self.controller.ensure_roots()
+        run_id, directory, overlay, seed, user_data, pidfile, manifest = self.controller._new_run()
+        self.controller._write_manifest(run_id, directory, overlay, seed, pidfile)
+        overlay.write_bytes(b"synthetic overlay")
+        seed.write_bytes(b"synthetic seed")
+        seed.unlink()
+        saved = manifest.read_bytes()
+        validated = self.controller._validate_manifest(directory)
+        self.assertEqual(validated["seed"], str(seed))
+        self.assertEqual(manifest.read_bytes(), saved)
+        self.assertTrue(overlay.exists())
+        with mock.patch.object(mod, "_pid_alive", return_value=False):
+            self.controller._cleanup_owned_run(directory)
+        self.assertFalse(directory.exists())
+
     def test_provenance_file_matches_runtime_pin(self):
         provenance = json.loads(PROVENANCE_PATH.read_text())
         self.assertEqual(mod.BASE_FILENAME, provenance["filename"])

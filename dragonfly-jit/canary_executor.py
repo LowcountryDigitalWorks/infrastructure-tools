@@ -168,6 +168,36 @@ def _terminate_process(process) -> bool:
             return False
 
 
+def _remove_owned_bootstrap_material(controller, run_id: str, run_dir: Path) -> None:
+    """Unlink only proven owned transient inputs; never remove guest ownership evidence.
+
+    Linux permits unlinking the readonly seed while QEMU holds its FD. This does
+    not stop the guest, revoke its open FD, or authorize deleting its overlay.
+    The pinned controller validates manifest paths even when the seed is absent.
+    """
+    manifest = controller._validate_manifest(run_dir)
+    if run_dir.name != run_id or manifest.get("run_id") != run_id:
+        raise CanaryExecutorError("CANARY_SENSITIVE_ARTIFACT_OWNERSHIP_INVALID")
+    if run_dir.parent.resolve(strict=True) != controller.runs_root.resolve(strict=True):
+        raise CanaryExecutorError("CANARY_SENSITIVE_ARTIFACT_OWNERSHIP_INVALID")
+    if Path(manifest["seed"]).absolute() != (run_dir / "seed.img").absolute():
+        raise CanaryExecutorError("CANARY_SENSITIVE_ARTIFACT_OWNERSHIP_INVALID")
+    cursor = Path(run_dir.absolute().anchor)
+    for part in run_dir.absolute().parts[1:]:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise CanaryExecutorError("CANARY_SENSITIVE_ARTIFACT_OWNERSHIP_INVALID")
+    for name in ("user-data", "seed.img"):
+        candidate = run_dir / name
+        try:
+            info = candidate.lstat()
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(info.st_mode) or (hasattr(os, "geteuid") and info.st_uid != os.geteuid()):
+            raise CanaryExecutorError("CANARY_SENSITIVE_ARTIFACT_OWNERSHIP_INVALID")
+        candidate.unlink()
+
+
 def execute_canary(
     payload: dict,
     summary: dict,
@@ -264,12 +294,21 @@ def execute_canary(
         termination_confirmed = _terminate_process(process)
         if run_id is not None and not termination_confirmed:
             qemu_pid = getattr(process, "pid", None)
+            sensitive_removed = False
+            try:
+                # Serialize against other guest/recovery operations, without requiring
+                # death and without invoking the destructive owned-run cleanup path.
+                with controller_module._file_lock(controller.guest_lock_path, blocking=True):
+                    _remove_owned_bootstrap_material(controller, run_id, run_dir)
+                sensitive_removed = True
+            except Exception:
+                pass
             with controller_module._file_lock(controller.state_lock_path):
                 controller.write_state(
                     "HOLD",
                     run_id=run_id,
                     qemu_pid=qemu_pid if isinstance(qemu_pid, int) and qemu_pid > 0 else None,
-                    reason="CANARY_TERMINATION_UNCERTAIN",
+                    reason="CANARY_TERMINATION_UNCERTAIN" if sensitive_removed else "CANARY_SENSITIVE_CLEANUP_UNCERTAIN",
                 )
             raise CanaryExecutorError("CANARY_GUEST_TERMINATION_UNCERTAIN") from original
 

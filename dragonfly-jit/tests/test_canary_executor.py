@@ -2,6 +2,7 @@ import base64
 import contextlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -168,7 +169,7 @@ class CanaryExecutorTests(unittest.TestCase):
         self.assertIn("ExecStopPost", assets["ci7-runner.service"])
 
     def test_user_data_never_contains_plaintext_bootstrap(self):
-        assets = executor._load_guest_assets(ROOT)
+        assets = {name: "synthetic guest asset" for name in executor.ASSET_SPECS}
         bootstrap = "QUJDREVGR0g="
         user_data = executor.build_user_data(bootstrap=bootstrap, run_id="run-123", assets=assets)
         self.assertNotIn(bootstrap, user_data)
@@ -195,6 +196,7 @@ class CanaryExecutorTests(unittest.TestCase):
             root = Path(temp)
             module = fake_controller_module(root)
             with mock.patch.object(executor.shutil, "which", return_value="/usr/bin/tool"), \
+                 mock.patch.object(executor, "_load_guest_assets", return_value={name: "synthetic asset" for name in executor.ASSET_SPECS}), \
                  mock.patch.object(executor.subprocess, "run", side_effect=self.fake_run), \
                  mock.patch.object(executor.subprocess, "Popen", return_value=FakeProcess()):
                 result = executor.execute_canary(payload, summary, state_root=root / "state", data_root=root / "data", controller_module=module, source_root=ROOT)
@@ -207,6 +209,7 @@ class CanaryExecutorTests(unittest.TestCase):
             root = Path(temp)
             module = fake_controller_module(root)
             with mock.patch.object(executor.shutil, "which", return_value="/usr/bin/tool"), \
+                 mock.patch.object(executor, "_load_guest_assets", return_value={name: "synthetic asset" for name in executor.ASSET_SPECS}), \
                  mock.patch.object(executor, "build_user_data", side_effect=RuntimeError("interrupt-after-manifest")):
                 with self.assertRaisesRegex(RuntimeError, "interrupt-after-manifest"):
                     executor.execute_canary(payload, summary, state_root=root / "state", data_root=root / "data", controller_module=module, source_root=ROOT)
@@ -221,6 +224,7 @@ class CanaryExecutorTests(unittest.TestCase):
             module = fake_controller_module(root)
             process = UnkillableProcess()
             with mock.patch.object(executor.shutil, "which", return_value="/usr/bin/tool"), \
+                 mock.patch.object(executor, "_load_guest_assets", return_value={name: "synthetic asset" for name in executor.ASSET_SPECS}), \
                  mock.patch.object(executor.subprocess, "run", side_effect=self.fake_run), \
                  mock.patch.object(executor.subprocess, "Popen", return_value=process):
                 with self.assertRaisesRegex(executor.CanaryExecutorError, "CANARY_GUEST_TERMINATION_UNCERTAIN"):
@@ -229,6 +233,14 @@ class CanaryExecutorTests(unittest.TestCase):
             self.assertEqual(len(runs), 1)
             self.assertTrue((runs[0] / "ownership.json").exists())
             self.assertTrue((runs[0] / "qemu.pid").exists())
+            self.assertTrue((runs[0] / "guest.qcow2").exists())
+            self.assertFalse((runs[0] / "user-data").exists())
+            self.assertFalse((runs[0] / "seed.img").exists())
+            manifest = module.last_controller._validate_manifest(runs[0])
+            self.assertEqual(manifest["qemu_pid"], process.pid)
+            for value in (json.dumps(manifest), json.dumps(module.last_controller.read_state()), json.dumps(summary)):
+                self.assertNotIn(payload["opaque_bootstrap"], value)
+                self.assertNotIn(base64.b64encode(payload["opaque_bootstrap"].encode()).decode(), value)
             self.assertEqual(module.cleanup_calls, 0)
             self.assertEqual(module.last_controller._state, "HOLD")
             self.assertEqual(module.last_controller.last_kwargs.get("qemu_pid"), process.pid)
@@ -238,10 +250,78 @@ class CanaryExecutorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             module = fake_controller_module(root, state="STOPPED")
-            with mock.patch.object(executor.shutil, "which", return_value="/usr/bin/tool"):
+            with mock.patch.object(executor.shutil, "which", return_value="/usr/bin/tool"), \
+                 mock.patch.object(executor, "_load_guest_assets", return_value={name: "synthetic asset" for name in executor.ASSET_SPECS}):
                 with self.assertRaisesRegex(executor.CanaryExecutorError, "CANARY_HOST_NOT_AVAILABLE"):
                     executor.execute_canary(payload, summary, state_root=root / "state", data_root=root / "data", controller_module=module, source_root=ROOT)
             self.assertEqual(list((root / "state" / "runs").iterdir()), [])
+
+    def test_sensitive_unlink_preserves_ownership_and_refuses_wrong_seed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            module = fake_controller_module(root)
+            controller = module.Controller()
+            controller.ensure_roots()
+            run_id, directory, overlay, seed, user, pidfile, manifest = controller._new_run()
+            controller._write_manifest(run_id, directory, overlay, seed, pidfile, qemu_pid=5252)
+            overlay.write_bytes(b"overlay")
+            seed.write_bytes(b"synthetic bootstrap-equivalent seed")
+            user.write_bytes(b"synthetic bootstrap-equivalent user-data")
+            saved_manifest = manifest.read_bytes()
+            saved_pid = pidfile.read_bytes()
+            executor._remove_owned_bootstrap_material(controller, run_id, directory)
+            executor._remove_owned_bootstrap_material(controller, run_id, directory)
+            self.assertFalse(seed.exists())
+            self.assertFalse(user.exists())
+            self.assertEqual(manifest.read_bytes(), saved_manifest)
+            self.assertEqual(pidfile.read_bytes(), saved_pid)
+            self.assertTrue(overlay.exists())
+            self.assertEqual(module.cleanup_calls, 0)
+            outside = root / "outside-seed"
+            outside.write_bytes(b"must survive")
+            record = json.loads(saved_manifest)
+            record["seed"] = str(outside)
+            manifest.write_text(json.dumps(record), encoding="utf-8")
+            with self.assertRaisesRegex(executor.CanaryExecutorError, "OWNERSHIP_INVALID"):
+                executor._remove_owned_bootstrap_material(controller, run_id, directory)
+            self.assertEqual(outside.read_bytes(), b"must survive")
+
+    def test_unconfirmed_guest_with_sensitive_unlink_failure_still_holds(self):
+        payload, summary = self.payload_and_summary()
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            module = fake_controller_module(root)
+            with mock.patch.object(executor.shutil, "which", return_value="/usr/bin/tool"), \
+                 mock.patch.object(executor, "_load_guest_assets", return_value={name: "synthetic asset" for name in executor.ASSET_SPECS}), \
+                 mock.patch.object(executor.subprocess, "run", side_effect=self.fake_run), \
+                 mock.patch.object(executor.subprocess, "Popen", return_value=UnkillableProcess()), \
+                 mock.patch.object(executor, "_remove_owned_bootstrap_material", side_effect=OSError("synthetic unlink failure")):
+                with self.assertRaisesRegex(executor.CanaryExecutorError, "CANARY_GUEST_TERMINATION_UNCERTAIN"):
+                    executor.execute_canary(payload, summary, controller_module=module, timeout_seconds=1)
+            self.assertEqual(module.cleanup_calls, 0)
+            self.assertEqual(module.last_controller._state, "HOLD")
+            self.assertEqual(module.last_controller.last_kwargs["reason"], "CANARY_SENSITIVE_CLEANUP_UNCERTAIN")
+            self.assertEqual(len(module.last_controller._run_dirs()), 1)
+
+    @unittest.skipIf(os.name == "nt", "POSIX open-FD unlink semantics require Linux")
+    def test_sensitive_seed_unlink_keeps_open_fd_and_ownership_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            module = fake_controller_module(root)
+            controller = module.Controller()
+            controller.ensure_roots()
+            run_id, directory, overlay, seed, user, pidfile, manifest = controller._new_run()
+            controller._write_manifest(run_id, directory, overlay, seed, pidfile, qemu_pid=5252)
+            overlay.write_bytes(b"overlay")
+            seed.write_bytes(b"synthetic seed")
+            with seed.open("rb") as guest_fd:
+                executor._remove_owned_bootstrap_material(controller, run_id, directory)
+                self.assertFalse(seed.exists())
+                self.assertEqual(guest_fd.read(), b"synthetic seed")
+            self.assertTrue(overlay.exists())
+            self.assertTrue(pidfile.exists())
+            self.assertEqual(controller._validate_manifest(directory)["qemu_pid"], 5252)
+            self.assertEqual(module.cleanup_calls, 0)
 
 
 if __name__ == "__main__":

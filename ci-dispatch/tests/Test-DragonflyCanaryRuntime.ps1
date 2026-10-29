@@ -34,6 +34,10 @@ $transport=Invoke-LdwDragonflyCanaryTransport -CapsuleJson $capsule -Plan $plan 
 Assert-True ($transport.GuestCleanup -ceq 'PASS') 'TRANSPORT_SUCCESS_NOT_ACCEPTED'
 $echoBootstrap={param($Plan,$CapsuleJson,$TimeoutSeconds)$value=$CapsuleJson|ConvertFrom-Json;[pscustomobject]@{ExitCode=0;Stderr='';Stdout=([ordered]@{marker='CI-RUNNER-DRAGONFLY-JIT-001';profile_id='dragonfly-github-canary-v1';dispatch_id=$value.dispatch_id;job_id=$value.job_id;claimed=$true;accidental_echo=$value.opaque_bootstrap;execution=[ordered]@{guest_qemu_exit='PASS';guest_cleanup='PASS';state='STOPPED';job_id=$value.job_id;dispatch_id=$value.dispatch_id}}|ConvertTo-Json -Depth 6 -Compress)}}
 Assert-ThrowsMessage {Invoke-LdwDragonflyCanaryTransport -CapsuleJson $capsule -Plan $plan -ProcessInvoker $echoBootstrap|Out-Null} 'DRAGONFLY_CANARY_TRANSPORT_BOOTSTRAP_EXPOSED' 'BOOTSTRAP_STDOUT_ECHO_NOT_REFUSED'
+foreach($exitCode in @(0,1)){
+ $echoStderr={param($Plan,$CapsuleJson,$TimeoutSeconds)$value=$CapsuleJson|ConvertFrom-Json;[pscustomobject]@{ExitCode=$exitCode;Stderr=('prefix '+$value.opaque_bootstrap+' suffix');Stdout='{}'}}
+ Assert-ThrowsMessage {Invoke-LdwDragonflyCanaryTransport -CapsuleJson $capsule -Plan $plan -ProcessInvoker $echoStderr|Out-Null} 'DRAGONFLY_CANARY_TRANSPORT_BOOTSTRAP_EXPOSED' 'BOOTSTRAP_STDERR_ECHO_NOT_REFUSED'
+}
 
 $script:Inventory=@();$script:DeleteCalls=0;$script:PostCalls=0;$script:AttemptReads=0
 $runPath='repos/LowcountryDigitalWorks/infrastructure-tools/actions/runs/'+$runId
@@ -87,8 +91,63 @@ try{
  $before=$script:UnknownPost
  Assert-ThrowsMessage{Invoke-LdwDragonflyCanaryOnce -Run $run -Job $job -ExpectedHeadSha $head -ApiInvoker $uncertainApi -DispatcherRoot $ci10Root -StatusProvider{$status} -ProcessInvoker $processFromCapsule -SleepInvoker{param($Seconds)} -LocalAppData '/tmp/ldw-localappdata' -WindowsRoot '/windows' -ProviderTimeoutSeconds 5|Out-Null} 'DRAGONFLY_CANARY_RECONCILIATION_REQUIRED' 'BLIND_RETRY_NOT_BLOCKED'
  Assert-True ($script:UnknownPost -eq $before) 'BLIND_RETRY_REPOSTED'
+ $legacyRecord=Get-Content -LiteralPath (Join-Path $ci10Root 'dragonfly-canary-registration-uncertain.json') -Raw|ConvertFrom-Json
  $reconciled=Resolve-LdwDragonflyCanaryRegistrationUncertainty -DispatcherRoot $ci10Root -ApiInvoker $uncertainApi -SleepInvoker{param($Seconds)} -AbsentProofReads 3
  Assert-True ($reconciled.Reconciled -and -not (Test-Path -LiteralPath (Join-Path $ci10Root 'dragonfly-canary-registration-uncertain.json'))) 'UNCERTAINTY_NOT_RECONCILED'
+ $legacyRecord.schema=1;$legacyRecord.PSObject.Properties.Remove('phase');$legacyRecord.PSObject.Properties.Remove('runner_id')
+ $legacyRecord|ConvertTo-Json -Compress|Set-Content -LiteralPath (Join-Path $ci10Root 'dragonfly-canary-registration-uncertain.json')
+ $legacyResolved=Resolve-LdwDragonflyCanaryRegistrationUncertainty -DispatcherRoot $ci10Root -ApiInvoker $uncertainApi -SleepInvoker{param($Seconds)} -AbsentProofReads 3
+ Assert-True $legacyResolved.Reconciled 'LEGACY_REGISTRATION_MARKER_NOT_RECONCILED'
+
+ # Cleanup faults never become a new registration, even if inventory later appears empty.
+ foreach($fault in @('delete','absence-read','residual','primary-and-delete','provider-and-delete','private-and-delete')){
+  $script:Inventory=@();$script:AttemptReads=0;$script:PostCalls=0;$script:AllCalls=0
+  $script:CleanupFault=$fault;$script:Deleted=$false
+  $cleanupApi={
+   param($Path,$Method,$Body)
+   $script:AllCalls++
+   if($Method -ceq 'GET' -and $Path -ceq $runnerInventoryPath){
+    if($script:Deleted -and $script:CleanupFault -ceq 'absence-read'){throw ('UPSTREAM_PRIVATE_'+$jit.encoded_jit_config)}
+    return [pscustomobject]@{total_count=$script:Inventory.Count;runners=@($script:Inventory)}
+   }
+   if($Method -ceq 'DELETE'){
+    Assert-True (Test-Path -LiteralPath (Join-Path $ci10Root 'dragonfly-canary-registration-uncertain.json')) 'DELETE_PRECEDED_DURABLE_GATE'
+    if($script:CleanupFault -in @('delete','primary-and-delete','provider-and-delete','private-and-delete')){throw ('UPSTREAM_PRIVATE_'+$jit.encoded_jit_config)}
+    $script:Deleted=$true
+    if($script:CleanupFault -cne 'residual'){$script:Inventory=@()}
+    return $null
+   }
+   if($Method -ceq 'GET' -and $Path -ceq $attemptJobsPath -and $script:AttemptReads -gt 0 -and $script:CleanupFault -ceq 'provider-and-delete'){throw 'DRAGONFLY_CANARY_PROVIDER_JOB_DRIFT'}
+   & $api $Path $Method $Body
+  }
+  $transportForCase=if($fault -ceq 'primary-and-delete'){
+   {param($Plan,$CapsuleJson,$TimeoutSeconds)[pscustomobject]@{ExitCode=1;Stderr='synthetic private transport failure';Stdout=''}}
+  }elseif($fault -ceq 'private-and-delete'){{param($Plan,$CapsuleJson,$TimeoutSeconds)throw ('UPSTREAM_PRIVATE_'+$jit.encoded_jit_config)}}else{$processFromCapsule}
+  $caught=$null
+  try{Invoke-LdwDragonflyCanaryOnce -Run $run -Job $job -ExpectedHeadSha $head -ApiInvoker $cleanupApi -DispatcherRoot $ci10Root -StatusProvider{$status} -ProcessInvoker $transportForCase -SleepInvoker{param($Seconds)} -LocalAppData '/tmp/ldw-localappdata' -WindowsRoot '/windows' -ProviderTimeoutSeconds 5|Out-Null}catch{$caught=$_.Exception}
+  Assert-True ($null -ne $caught) ('CLEANUP_FAULT_NOT_REFUSED:'+$fault)
+  $expected=switch($fault){'primary-and-delete'{'DRAGONFLY_CANARY_TRANSPORT_FAILED'}'provider-and-delete'{'DRAGONFLY_CANARY_PROVIDER_JOB_DRIFT'}'private-and-delete'{'DRAGONFLY_CANARY_OPERATION_FAILED'}default{'DRAGONFLY_CANARY_FINAL_CLEANUP_UNCERTAIN'}}
+  Assert-True ($caught.Message -ceq $expected) ('PRIMARY_FAILURE_MASKED:'+$fault)
+  if($fault -like '*and-delete'){Assert-True ($caught.Data['CleanupUncertainty'] -ceq 'DRAGONFLY_CANARY_FINAL_CLEANUP_UNCERTAIN') 'SECONDARY_CLEANUP_STATE_MISSING'}
+  $markerPath=Join-Path $ci10Root 'dragonfly-canary-registration-uncertain.json'
+  Assert-True (Test-Path -LiteralPath $markerPath) ('CLEANUP_MARKER_MISSING:'+$fault)
+  $markerText=Get-Content -LiteralPath $markerPath -Raw;$record=$markerText|ConvertFrom-Json
+  Assert-True ($record.phase -ceq 'final_cleanup' -and $record.runner_id -eq $runnerId) 'CLEANUP_IDENTITY_NOT_DURABLE'
+  Assert-True (-not $markerText.Contains($jit.encoded_jit_config) -and -not $caught.ToString().Contains($jit.encoded_jit_config) -and -not $caught.ToString().Contains('UPSTREAM_PRIVATE')) 'CLEANUP_FAILURE_LEAKED_PRIVATE_TEXT'
+  $script:Inventory=@();$calls=$script:AllCalls
+  Assert-ThrowsMessage {Invoke-LdwDragonflyCanaryOnce -Run $run -Job $job -ExpectedHeadSha $head -ApiInvoker $cleanupApi -DispatcherRoot $ci10Root -StatusProvider{$status} -ProcessInvoker $processFromCapsule -LocalAppData '/tmp/ldw-localappdata' -WindowsRoot '/windows'|Out-Null} 'DRAGONFLY_CANARY_RECONCILIATION_REQUIRED' 'EMPTY_INVENTORY_BYPASSED_MARKER'
+  Assert-True ($calls -eq $script:AllCalls) 'BLOCKED_ONCE_CALLED_PROVIDER'
+  $script:CleanupFault='none'
+  if($fault -ceq 'delete'){
+   # Matching name/labels with a different ID is never the original owned runner.
+   $script:Inventory=@([pscustomobject]@{id=43;name=$runnerName;labels=$runnerLabels})
+   Assert-ThrowsMessage {Resolve-LdwDragonflyCanaryRegistrationUncertainty -DispatcherRoot $ci10Root -ApiInvoker $cleanupApi -SleepInvoker{param($Seconds)}|Out-Null} 'DRAGONFLY_CANARY_RECONCILIATION_AMBIGUOUS' 'RECONCILE_RETARGETED_RUNNER'
+   Assert-True (Test-Path -LiteralPath $markerPath) 'AMBIGUOUS_RECONCILE_CLEARED_MARKER'
+   $script:Inventory=@($jit.runner)
+  }
+  $resolved=Resolve-LdwDragonflyCanaryRegistrationUncertainty -DispatcherRoot $ci10Root -ApiInvoker $cleanupApi -SleepInvoker{param($Seconds)} -AbsentProofReads 3
+  Assert-True ($resolved.Reconciled -and -not (Test-Path -LiteralPath $markerPath)) ('CLEANUP_RECONCILE_FAILED:'+$fault)
+ }
 }finally{Remove-Item -LiteralPath $ci10Root -Recurse -Force -ErrorAction SilentlyContinue}
 
 'DRAGONFLY_CANARY_RUNTIME_CONTRACT=PASS'
