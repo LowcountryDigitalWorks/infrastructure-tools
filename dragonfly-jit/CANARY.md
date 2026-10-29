@@ -8,9 +8,9 @@ LDW01 / `#10` remains the only GitHub queue, exact-job re-read, selection, regis
 
 ## Closed canary profile
 
-Repository `LowcountryDigitalWorks/infrastructure-tools`; workflow `.github/workflows/dragonfly-jit-canary.yml`; event `workflow_dispatch`; job `dragonfly-canary`; static labels `self-hosted`, `Linux`, `X64`, `dragonfly`, `jit`, `ldw-ephemeral`, `synthetic-only`; dynamic label `dragonfly-run-<run_id>`; capsule TTL 240 seconds. The workflow has one intended job, no deploy/publish/write action, no checkout, and no repository/environment/organization secret reference.
+Repository `LowcountryDigitalWorks/infrastructure-tools`; workflow `.github/workflows/dragonfly-jit-canary.yml`; event `workflow_dispatch`; job `dragonfly-canary`; static labels `self-hosted`, `Linux`, `X64`, `dragonfly`, `jit`, `ldw-ephemeral`, `synthetic-only`; dynamic labels `dragonfly-run-<run_id>` and `dragonfly-attempt-<attempt>`; capsule TTL 240 seconds. The workflow has one intended job, no deploy/publish/write action, no checkout, and no repository/environment/organization secret reference.
 
-The run-scoped label is required in both the queued job and generated ephemeral runner registration so a runner minted for one run cannot match a different queued canary.
+Both dynamic labels are required in the queued job and generated ephemeral runner registration. The run label prevents a runner minted for one run from matching another run, while the attempt label prevents a runner minted for one retry/attempt from matching another attempt of the same run.
 
 ## REDRIX executor boundary
 
