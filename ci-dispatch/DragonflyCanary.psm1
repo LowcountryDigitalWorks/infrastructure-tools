@@ -106,6 +106,15 @@ function Assert-LdwDragonflyCanaryJitResponse {
     $runnerId = [long](Get-LdwObjectField $runner 'id')
     $runnerName = [string](Get-LdwObjectField $runner 'name')
     if ($runnerId -le 0 -or $runnerName -cne $Request.RunnerName) { throw 'DRAGONFLY_CANARY_JIT_IDENTITY_INVALID' }
+
+    $runnerLabels = @((Get-LdwObjectField $runner 'labels'))
+    $actualLabelNames = @($runnerLabels | ForEach-Object { [string](Get-LdwObjectField $_ 'name') })
+    $expectedLabelNames = @($Request.Body.labels)
+    if ($actualLabelNames.Count -ne $expectedLabelNames.Count -or
+        @(Compare-Object $expectedLabelNames $actualLabelNames -CaseSensitive).Count) {
+        throw 'DRAGONFLY_CANARY_JIT_LABELS_INVALID'
+    }
+
     try {
         $files = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encoded)) | ConvertFrom-Json
         $runnerProperty = $files.PSObject.Properties['.runner']
