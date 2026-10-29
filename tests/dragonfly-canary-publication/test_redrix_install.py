@@ -65,23 +65,50 @@ class RedrixInstallTests(unittest.TestCase):
             self.assertEqual(inst._git_blob(data), blob)
             self._write(rel, data, mode)
 
+    def _write_current_baseline(self):
+        for source_path, blob, rel, mode in inst.CURRENT:
+            data = (self.package_root / "payload" / source_path).read_bytes()
+            self.assertEqual(inst._git_blob(data), blob)
+            self._write(rel, data, mode)
+
     def _auth_digest(self):
         return hashlib.sha256(self.authorized.read_bytes()).hexdigest()
+
+    def _assert_accepted_115_restored(self):
+        for _, blob, rel, mode in inst.ROLLBACK:
+            target = self.home / rel
+            self.assertEqual(inst._git_blob(target.read_bytes()), blob)
+            self.assertEqual(target.stat().st_mode & 0o777, mode)
+        rollback_rels = {item[2] for item in inst.ROLLBACK}
+        for _, _, rel, _ in inst.CURRENT:
+            if rel not in rollback_rels:
+                self.assertFalse((self.home / rel).exists())
 
     def test_install_and_readback_preserve_authorized_keys(self):
         before = self._auth_digest()
         receipt = inst.install_fixture(
             self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND
         )
-        self.assertEqual(receipt["baseline"], "accepted-115")
+        self.assertEqual(receipt["rollbackBaseline"], "accepted-115")
         self.assertEqual(self._auth_digest(), before)
         result = inst.readback_fixture(self.home, self.uid, inst.FORCED_COMMAND)
         self.assertTrue(result["authorizedKeysInvariant"])
+        self.assertEqual(result["rollbackBaseline"], "accepted-115")
         self.assertEqual(result["files"], 7)
         for _, blob, rel, mode in inst.CURRENT:
             target = self.home / rel
             self.assertEqual(inst._git_blob(target.read_bytes()), blob)
             self.assertEqual(target.stat().st_mode & 0o777, mode)
+
+    def test_reinstall_of_current_receipted_state_is_idempotent(self):
+        first = inst.install_fixture(
+            self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND
+        )
+        second = inst.install_fixture(
+            self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND
+        )
+        self.assertEqual(first, second)
+        self.assertFalse((self.home / inst.TRANSACTION_REL).exists())
 
     def test_partial_failure_rolls_back_exact_accepted_115_baseline(self):
         before = self._auth_digest()
@@ -96,14 +123,54 @@ class RedrixInstallTests(unittest.TestCase):
             )
         self.assertEqual(self._auth_digest(), before)
         self.assertFalse((self.home / inst.TRANSACTION_REL).exists())
-        for source_path, blob, rel, mode in inst.ROLLBACK:
-            target = self.home / rel
-            self.assertEqual(inst._git_blob(target.read_bytes()), blob)
-            self.assertEqual(target.stat().st_mode & 0o777, mode)
-        rollback_rels = {item[2] for item in inst.ROLLBACK}
-        for _, _, rel, _ in inst.CURRENT:
-            if rel not in rollback_rels:
-                self.assertFalse((self.home / rel).exists())
+        self.assertFalse((self.home / inst.RECEIPT_REL).exists())
+        self._assert_accepted_115_restored()
+
+    def test_post_receipt_fault_rolls_back_and_removes_stale_receipt(self):
+        before = self._auth_digest()
+        with self.assertRaisesRegex(inst.InstallError, "REDRIX_SYNTHETIC_POST_RECEIPT_FAULT"):
+            inst.install_fixture(
+                self.archive,
+                self.checksum,
+                self.home,
+                self.uid,
+                inst.FORCED_COMMAND,
+                fault_after_receipt=True,
+            )
+        self.assertEqual(self._auth_digest(), before)
+        self.assertFalse((self.home / inst.TRANSACTION_REL).exists())
+        self.assertFalse((self.home / inst.RECEIPT_REL).exists())
+        self._assert_accepted_115_restored()
+
+    def test_explicit_rollback_restores_115_and_removes_receipt(self):
+        before = self._auth_digest()
+        inst.install_fixture(self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND)
+        inst.rollback_fixture(self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND)
+        self.assertEqual(self._auth_digest(), before)
+        self.assertFalse((self.home / inst.TRANSACTION_REL).exists())
+        self.assertFalse((self.home / inst.RECEIPT_REL).exists())
+        self._assert_accepted_115_restored()
+
+    def test_interrupted_rollback_requires_and_completes_recovery(self):
+        before = self._auth_digest()
+        inst.install_fixture(self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND)
+        with self.assertRaisesRegex(inst.InstallError, "REDRIX_SYNTHETIC_ROLLBACK_FAULT"):
+            inst.rollback_fixture(
+                self.archive,
+                self.checksum,
+                self.home,
+                self.uid,
+                inst.FORCED_COMMAND,
+                fault_after=1,
+            )
+        self.assertTrue((self.home / inst.TRANSACTION_REL).is_file())
+        with self.assertRaisesRegex(inst.InstallError, "REDRIX_TRANSACTION_RECOVERY_REQUIRED"):
+            inst.install_fixture(self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND)
+        inst.recover_fixture(self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND)
+        self.assertFalse((self.home / inst.TRANSACTION_REL).exists())
+        self.assertFalse((self.home / inst.RECEIPT_REL).exists())
+        self.assertEqual(self._auth_digest(), before)
+        self._assert_accepted_115_restored()
 
     def test_unknown_transport_baseline_is_refused_before_transaction(self):
         receiver = self.home / inst.RECEIVER_REL
@@ -164,8 +231,16 @@ class RedrixInstallTests(unittest.TestCase):
     def test_existing_transaction_blocks_blind_retry(self):
         transaction = self.home / inst.TRANSACTION_REL
         transaction.parent.mkdir(parents=True, exist_ok=True)
-        transaction.write_text("{}\n", encoding="utf-8")
-        os.chmod(transaction, 0o600)
+        marker = {
+            "schema": 2,
+            "operation": "install",
+            "sourceCommit": inst.SOURCE_COMMIT,
+            "packageSha256": hashlib.sha256(self.archive.read_bytes()).hexdigest(),
+            "authorizedKeysSha256": self._auth_digest(),
+            "baseline": "accepted-115",
+            "preexisting": {rel.as_posix(): rel in {item[2] for item in inst.ROLLBACK} for _, _, rel, _ in inst.CURRENT},
+        }
+        inst._write_transaction(transaction, marker)
         with self.assertRaisesRegex(inst.InstallError, "REDRIX_TRANSACTION_RECOVERY_REQUIRED"):
             inst.install_fixture(
                 self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND
@@ -176,13 +251,13 @@ class RedrixInstallTests(unittest.TestCase):
         archive_digest = hashlib.sha256(self.archive.read_bytes()).hexdigest()
         preexisting = {rel.as_posix(): rel in {item[2] for item in inst.ROLLBACK} for _, _, rel, _ in inst.CURRENT}
         marker = {
-            "schema": 1,
+            "schema": 2,
+            "operation": "install",
             "sourceCommit": inst.SOURCE_COMMIT,
             "packageSha256": archive_digest,
             "authorizedKeysSha256": auth,
             "baseline": "accepted-115",
             "preexisting": preexisting,
-            "phase": "installing",
         }
         transaction = self.home / inst.TRANSACTION_REL
         transaction.parent.mkdir(parents=True, exist_ok=True)
@@ -196,6 +271,18 @@ class RedrixInstallTests(unittest.TestCase):
         self.assertFalse(transaction.exists())
         self.assertEqual(inst._git_blob((self.home / inst.RECEIVER_REL).read_bytes()), inst.ROLLBACK[0][1])
         self.assertEqual(self._auth_digest(), auth)
+
+    def test_rollback_is_refused_when_current_state_was_not_upgraded_from_115(self):
+        # Rebuild the fixture as exact current state before any receipt exists.
+        for _, _, rel, _ in inst.CURRENT:
+            path = self.home / rel
+            if path.exists():
+                path.unlink()
+        self._write_current_baseline()
+        receipt = inst.install_fixture(self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND)
+        self.assertEqual(receipt["rollbackBaseline"], "accepted-133")
+        with self.assertRaisesRegex(inst.InstallError, "REDRIX_ROLLBACK_BASELINE_REFUSED"):
+            inst.rollback_fixture(self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND)
 
     def test_symlinked_parent_is_refused(self):
         app = self.home / ".local/lib/ldw-dragonfly-jit"
