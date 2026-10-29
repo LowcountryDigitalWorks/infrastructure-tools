@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 SUDO = "/usr/bin/sudo"
@@ -21,7 +21,10 @@ SECRET_TOOL = "/usr/bin/secret-tool"
 SYSTEMD_CREDS = "/usr/bin/systemd-creds"
 SHA256SUM = "/usr/bin/sha256sum"
 SYSTEMCTL = "/usr/bin/systemctl"
-INSTALL = "/usr/bin/install"
+TEST = "/usr/bin/test"
+CHMOD = "/usr/bin/chmod"
+CHOWN = "/usr/bin/chown"
+LN = "/usr/bin/ln"
 RM = "/usr/bin/rm"
 MKDIR = "/usr/bin/mkdir"
 
@@ -102,8 +105,8 @@ def encrypted_credential_digest() -> str:
     return _digest_stream(decrypt)
 
 
-def _run_sudo(args: list[str], classification: str) -> None:
-    result = subprocess.run(
+def _sudo_result(args: list[str]) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
         [SUDO, "-n", *args],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
@@ -112,8 +115,17 @@ def _run_sudo(args: list[str], classification: str) -> None:
         timeout=15,
         check=False,
     )
-    if result.returncode != 0:
+
+
+def _run_sudo(args: list[str], classification: str) -> None:
+    if _sudo_result(args).returncode != 0:
         raise MigrationError(classification)
+
+
+def _artifact_present_privileged() -> bool:
+    exists = _sudo_result([TEST, "-e", str(CREDENTIAL_PATH)]).returncode == 0
+    symlink = _sudo_result([TEST, "-L", str(CREDENTIAL_PATH)]).returncode == 0
+    return exists or symlink
 
 
 def _service_is_active_or_enabled() -> bool:
@@ -148,14 +160,13 @@ def _verify_ciphertext_metadata() -> None:
 
 
 def migrate() -> None:
-    if CREDENTIAL_PATH.exists() or CREDENTIAL_PATH.is_symlink():
+    if _artifact_present_privileged():
         raise MigrationError("CREDENTIAL_ARTIFACT_EXISTS")
 
     source_digest = secret_service_digest()
     _run_sudo([MKDIR, "-p", "-m", "0700", str(CREDENTIAL_DIRECTORY)], "CREDENTIAL_DIRECTORY_CREATE_FAILED")
 
-    temp_name = ".bridge-bearer.cred." + next(tempfile._get_candidate_names()) + ".tmp"
-    temp_path = CREDENTIAL_DIRECTORY / temp_name
+    temp_path = CREDENTIAL_DIRECTORY / (".bridge-bearer.cred." + secrets.token_hex(12) + ".tmp")
     lookup = _secret_lookup()
     if lookup.stdout is None:
         raise MigrationError("SECRET_PIPE_UNAVAILABLE")
@@ -182,10 +193,10 @@ def migrate() -> None:
     try:
         if lookup.returncode != 0 or encrypt.returncode != 0:
             raise MigrationError("CREDENTIAL_ENCRYPT_FAILED")
-        _run_sudo(
-            [INSTALL, "-o", "root", "-g", "root", "-m", "0600", str(temp_path), str(CREDENTIAL_PATH)],
-            "CREDENTIAL_ARTIFACT_INSTALL_FAILED",
-        )
+        _run_sudo([CHOWN, "root:root", str(temp_path)], "CREDENTIAL_TEMP_METADATA_FAILED")
+        _run_sudo([CHMOD, "0600", str(temp_path)], "CREDENTIAL_TEMP_METADATA_FAILED")
+        # Atomic exclusive publication: hard-link fails if the final path already exists.
+        _run_sudo([LN, str(temp_path), str(CREDENTIAL_PATH)], "CREDENTIAL_ARTIFACT_EXISTS")
     finally:
         _run_sudo([RM, "-f", str(temp_path)], "CREDENTIAL_TEMP_CLEANUP_FAILED")
 
@@ -206,7 +217,7 @@ def rollback() -> None:
         raise MigrationError("SERVICE_MUST_BE_INACTIVE_AND_DISABLED")
     verify()
     _run_sudo([RM, "-f", str(CREDENTIAL_PATH)], "CREDENTIAL_ARTIFACT_ROLLBACK_FAILED")
-    if CREDENTIAL_PATH.exists() or CREDENTIAL_PATH.is_symlink():
+    if _artifact_present_privileged():
         raise MigrationError("CREDENTIAL_ARTIFACT_ROLLBACK_FAILED")
 
 
