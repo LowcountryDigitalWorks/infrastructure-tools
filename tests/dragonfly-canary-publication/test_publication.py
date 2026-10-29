@@ -4,10 +4,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import importlib.util
-import io
-import os
 from pathlib import Path
-import stat
 import tarfile
 import tempfile
 import unittest
@@ -86,6 +83,17 @@ class DragonflyCanaryPublicationTests(unittest.TestCase):
             self.assertEqual(str(mod._git(ROOT, "rev-parse", f"{mod.ROLLBACK_COMMIT}:{path}")).strip(), blob)
         for commit, path, blob in mod.LDW01_FILES:
             self.assertEqual(str(mod._git(ROOT, "rev-parse", f"{commit}:{path}")).strip(), blob)
+
+    def test_dispatcher_sha256_representation_is_explicit(self):
+        raw = mod._blob(ROOT, mod.DISPATCH_COMMIT, "ci-dispatch/Dispatch.psm1", mod.DISPATCH_BLOB)
+        lf = hashlib.sha256(raw).hexdigest()
+        crlf_bytes = raw.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+        crlf = hashlib.sha256(crlf_bytes).hexdigest()
+        self.assertEqual(
+            mod.DISPATCH_SHA256,
+            lf,
+            f"DISPATCH_SHA256_REPRESENTATION_MISMATCH raw={lf} crlf={crlf}",
+        )
 
     def test_wrong_checksum_is_refused(self):
         with tempfile.TemporaryDirectory() as td:
