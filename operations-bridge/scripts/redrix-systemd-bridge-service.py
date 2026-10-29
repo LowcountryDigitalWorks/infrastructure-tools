@@ -58,20 +58,40 @@ def _run(args: list[str], classification: str, *, sudo: bool = False) -> subproc
     return result
 
 
-def _is_active_or_enabled() -> bool:
-    for verb in ("is-active", "is-enabled"):
-        result = subprocess.run(
-            [SUDO, "-n", SYSTEMCTL, verb, "--quiet", UNIT_NAME],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env={},
-            timeout=10,
-            check=False,
-        )
-        if result.returncode == 0:
-            return True
-    return False
+def _unit_state() -> tuple[str, str, str]:
+    result = _run(
+        [
+            SYSTEMCTL,
+            "show",
+            "--no-pager",
+            "--property=LoadState",
+            "--property=ActiveState",
+            "--property=UnitFileState",
+            UNIT_NAME,
+        ],
+        "SERVICE_STATE_UNAVAILABLE",
+        sudo=True,
+    )
+    values: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        if "=" not in line:
+            raise ServiceError("SERVICE_STATE_AMBIGUOUS")
+        key, value = line.split("=", 1)
+        if key in values or key not in {"LoadState", "ActiveState", "UnitFileState"}:
+            raise ServiceError("SERVICE_STATE_AMBIGUOUS")
+        values[key] = value
+    if set(values) != {"LoadState", "ActiveState", "UnitFileState"}:
+        raise ServiceError("SERVICE_STATE_AMBIGUOUS")
+    return values["LoadState"], values["ActiveState"], values["UnitFileState"]
+
+
+def _assert_safe_inactive_state(*, allow_not_found: bool) -> None:
+    load, active, unit_file = _unit_state()
+    if allow_not_found and load == "not-found" and active == "inactive" and unit_file in {"", "disabled"}:
+        return
+    if load == "loaded" and active == "inactive" and unit_file == "disabled":
+        return
+    raise ServiceError("SERVICE_MUST_BE_INACTIVE_AND_DISABLED")
 
 
 def _verify_source() -> None:
@@ -151,8 +171,7 @@ def preflight() -> None:
     _verify_installed_package()
     _verify_dependency(CONFIG, "BRIDGE_CONFIG_INVALID")
     _verify_credential_metadata()
-    if _is_active_or_enabled():
-        raise ServiceError("SERVICE_MUST_BE_INACTIVE_AND_DISABLED")
+    _assert_safe_inactive_state(allow_not_found=True)
 
 
 def install() -> None:
@@ -163,24 +182,27 @@ def install() -> None:
     _run([INSTALL, "-o", "root", "-g", "root", "-m", "0644", str(UNIT_SOURCE), str(UNIT_DESTINATION)], "SERVICE_UNIT_INSTALL_FAILED", sudo=True)
     _run([SYSTEMCTL, "daemon-reload"], "SERVICE_DAEMON_RELOAD_FAILED", sudo=True)
     _verify_installed_unit()
-    if _is_active_or_enabled():
-        raise ServiceError("SERVICE_UNEXPECTEDLY_ACTIVE_OR_ENABLED")
+    _assert_safe_inactive_state(allow_not_found=False)
 
 
 def verify() -> None:
-    preflight()
+    _verify_source()
+    _verify_installed_package()
+    _verify_dependency(CONFIG, "BRIDGE_CONFIG_INVALID")
+    _verify_credential_metadata()
     _verify_installed_unit()
+    _assert_safe_inactive_state(allow_not_found=False)
     _run([SYSTEMD_ANALYZE, "verify", str(UNIT_DESTINATION)], "SERVICE_UNIT_VERIFY_FAILED", sudo=True)
 
 
 def rollback() -> None:
-    if _is_active_or_enabled():
-        raise ServiceError("SERVICE_MUST_BE_INACTIVE_AND_DISABLED")
+    _assert_safe_inactive_state(allow_not_found=True)
     if not (UNIT_DESTINATION.exists() or UNIT_DESTINATION.is_symlink()):
         return
     _verify_installed_unit()
     _run([RM, "-f", str(UNIT_DESTINATION)], "SERVICE_UNIT_ROLLBACK_FAILED", sudo=True)
     _run([SYSTEMCTL, "daemon-reload"], "SERVICE_DAEMON_RELOAD_FAILED", sudo=True)
+    _assert_safe_inactive_state(allow_not_found=True)
     if UNIT_DESTINATION.exists() or UNIT_DESTINATION.is_symlink():
         raise ServiceError("SERVICE_UNIT_ROLLBACK_FAILED")
 
