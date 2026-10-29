@@ -8,7 +8,7 @@ LDW01 / `#10` remains the only GitHub queue, exact-job re-read, selection, regis
 
 ## Closed canary profile
 
-Repository `LowcountryDigitalWorks/infrastructure-tools`; workflow `.github/workflows/dragonfly-jit-canary.yml`; event `workflow_dispatch`; job `dragonfly-canary`; static labels `self-hosted`, `Linux`, `X64`, `dragonfly`, `jit`, `ldw-ephemeral`, `synthetic-only`; dynamic label `dragonfly-run-<run_id>`; capsule TTL 240 seconds. The workflow has one intended job, no deploy/publish/write action, and no repository/environment/organization secret reference.
+Repository `LowcountryDigitalWorks/infrastructure-tools`; workflow `.github/workflows/dragonfly-jit-canary.yml`; event `workflow_dispatch`; job `dragonfly-canary`; static labels `self-hosted`, `Linux`, `X64`, `dragonfly`, `jit`, `ldw-ephemeral`, `synthetic-only`; dynamic label `dragonfly-run-<run_id>`; capsule TTL 240 seconds. The workflow has one intended job, no deploy/publish/write action, no checkout, and no repository/environment/organization secret reference.
 
 The run-scoped label is required in both the queued job and generated ephemeral runner registration so a runner minted for one run cannot match a different queued canary.
 
@@ -17,6 +17,10 @@ The run-scoped label is required in both the queued job and generated ephemeral 
 `canary_executor.py` runs only after the fixed SSH sentinel, closed handoff validation, TTL/job/head/label revalidation, and durable one-time replay claim. It then requires local `AVAILABLE` state, reuses the pinned Dragonfly base/admission/guest lock, and creates one owned disposable guest. Plaintext host-side `user-data` is deleted immediately after NoCloud seed creation. After guest exit, seed, overlay, pidfile, manifest, and run directory are removed via the accepted owned cleanup path and host state returns to `STOPPED`.
 
 The guest disables SSH, carries no inherited authorized keys, blocks inbound traffic and private/metadata address space, downloads one pinned Actions runner archive by HTTPS, verifies its SHA-256, starts one non-root ephemeral listener, and powers off when that listener exits.
+
+GitHub's runner accepts JIT startup material through the runner `run` command's `--jitconfig` argument. This candidate therefore guarantees that the bootstrap is absent from LDW01/SSH/REDRIX-host argv, environment, durable logs, claim state, and sanitized evidence; the upstream-required argument exists only inside the disposable guest. That bounded exception is accepted only for this secretless/no-checkout canary candidate. It is not authority for private, candidate-code, customer, regulated, or stronger-security workloads.
+
+The REDRIX result `guest_qemu_exit=PASS` means only that the disposable QEMU process exited cleanly; it does not assert that the GitHub workflow succeeded. Provider-positive assignment/start/terminal success remains authoritative only from LDW01/#10 GitHub reads.
 
 ## Failure and rollback
 
