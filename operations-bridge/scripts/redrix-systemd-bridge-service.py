@@ -8,6 +8,7 @@ never enables or starts the service and refuses to mutate an active/enabled unit
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -23,9 +24,13 @@ UNIT_NAME = "ldw-operations-bridge-dragonfly.service"
 UNIT_DESTINATION = Path("/etc/systemd/system") / UNIT_NAME
 UNIT_SOURCE = Path(__file__).resolve().parents[1] / "systemd" / UNIT_NAME
 EXPECTED_UNIT_SHA256 = "9a72afaaaa34bb510e8a693d3377b08ffc55ffcf0880d17d8b3b71ae949fba9a"
-BINARY = Path("/home/eddie/.local/lib/ldw/operations-bridge/dragonfly/payload/LDW.OperationsBridge.Runner")
+PACKAGE_ROOT = Path("/home/eddie/.local/lib/ldw/operations-bridge/dragonfly")
+PACKAGE_MANIFEST = PACKAGE_ROOT / "manifest.json"
+BINARY = PACKAGE_ROOT / "payload/LDW.OperationsBridge.Runner"
 CONFIG = Path("/home/eddie/.config/ldw/operations-bridge/dragonfly/config.json")
 CREDENTIAL = Path("/etc/ldw/operations-bridge/dragonfly/bridge-bearer.cred")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 class ServiceError(RuntimeError):
@@ -85,6 +90,47 @@ def _verify_dependency(path: Path, classification: str, *, executable: bool = Fa
         raise ServiceError(classification)
 
 
+def _verify_installed_package() -> None:
+    _verify_dependency(PACKAGE_MANIFEST, "BRIDGE_PACKAGE_MANIFEST_INVALID")
+    _verify_dependency(BINARY, "BRIDGE_BINARY_INVALID", executable=True)
+    try:
+        manifest = json.loads(PACKAGE_MANIFEST.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ServiceError("BRIDGE_PACKAGE_MANIFEST_INVALID") from exc
+
+    required = {
+        "schemaVersion": 1,
+        "artifact": "ldw-operations-bridge-dragonfly-linux-x64",
+        "runtimeIdentifier": "linux-x64",
+        "targetFramework": "net10.0",
+        "selfContained": True,
+        "requiresSystemDotnet": False,
+        "installRoot": "~/.local/lib/ldw/operations-bridge/dragonfly",
+        "entrypoint": "payload/LDW.OperationsBridge.Runner",
+        "configurationPath": "~/.config/ldw/operations-bridge/dragonfly/config.json",
+        "statePath": "~/.local/state/ldw/operations-bridge/dragonfly/health.json",
+        "containsConfiguration": False,
+        "containsCredential": False,
+    }
+    for key, expected in required.items():
+        if manifest.get(key) != expected:
+            raise ServiceError("BRIDGE_PACKAGE_MANIFEST_INVALID")
+    if GIT_SHA_RE.fullmatch(str(manifest.get("sourceCommit", ""))) is None:
+        raise ServiceError("BRIDGE_PACKAGE_MANIFEST_INVALID")
+
+    records = manifest.get("files")
+    if not isinstance(records, list):
+        raise ServiceError("BRIDGE_PACKAGE_MANIFEST_INVALID")
+    matches = [item for item in records if isinstance(item, dict) and item.get("path") == "LDW.OperationsBridge.Runner"]
+    if len(matches) != 1 or set(matches[0]) != {"path", "sha256", "size"}:
+        raise ServiceError("BRIDGE_PACKAGE_MANIFEST_INVALID")
+    record = matches[0]
+    if SHA256_RE.fullmatch(str(record.get("sha256", ""))) is None or not isinstance(record.get("size"), int) or isinstance(record.get("size"), bool) or record["size"] <= 0:
+        raise ServiceError("BRIDGE_PACKAGE_MANIFEST_INVALID")
+    if BINARY.stat().st_size != record["size"] or _sha256(BINARY) != record["sha256"]:
+        raise ServiceError("BRIDGE_BINARY_PROVENANCE_INVALID")
+
+
 def _verify_credential_metadata() -> None:
     result = _run(["/usr/bin/stat", "-Lc", "%u:%g:%a:%F", str(CREDENTIAL)], "BRIDGE_CREDENTIAL_ARTIFACT_INVALID", sudo=True)
     if result.stdout.strip() != "0:0:600:regular file":
@@ -102,7 +148,7 @@ def _verify_installed_unit() -> None:
 
 def preflight() -> None:
     _verify_source()
-    _verify_dependency(BINARY, "BRIDGE_BINARY_INVALID", executable=True)
+    _verify_installed_package()
     _verify_dependency(CONFIG, "BRIDGE_CONFIG_INVALID")
     _verify_credential_metadata()
     if _is_active_or_enabled():
