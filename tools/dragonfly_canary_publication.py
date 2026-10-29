@@ -28,7 +28,8 @@ ROLLBACK_TREE = "076069fe4437cea2538a9333b45ee47025bc9f2d"
 DISPATCH_COMMIT = "ce2bf253556a69dfb43de7bb8e8a4927c41c9e15"
 DISPATCH_TREE = "57ceb47f2a0a40d3b176cde0818a0ad8c5891dca"
 DISPATCH_BLOB = "c862dd503b98060ec984206e63ef9efa5f957e8f"
-DISPATCH_SHA256 = "0a41b338ca6b8b05ff31a26f30486381c7c836e484985a813b6fce6d07232c72"
+DISPATCH_RAW_SHA256 = "76092a5344746f4385a2b99ee0403c298ffed0458099444ddc82b67fd30f0675"
+DISPATCH_WINDOWS_SHA256 = "0a41b338ca6b8b05ff31a26f30486381c7c836e484985a813b6fce6d07232c72"
 
 REDRIX_PACKAGE = "ldw-dragonfly-canary-source-v1"
 LDW01_PACKAGE = "ldw-dragonfly-canary-adjunct-source-v1"
@@ -48,9 +49,9 @@ REDRIX_ROLLBACK = (
     ("dragonfly-jit/handoff_contract.py", "2f7892275bacd9f56abaa0cdf204f46f79c046c0", "~/.local/lib/ldw-dragonfly-jit/handoff_contract.py", "0600"),
 )
 LDW01_FILES = (
-    (SOURCE_COMMIT, "ci-dispatch/DragonflyCanary.psm1", "893c89ae65bd85464f404fa4a4ff762344915520"),
-    (SOURCE_COMMIT, "ci-dispatch/DragonflyCanaryRuntime.psm1", "7730f473d2588e885fa6a4f3aec1b486b408dbda"),
-    (DISPATCH_COMMIT, "ci-dispatch/Dispatch.psm1", DISPATCH_BLOB),
+    (SOURCE_COMMIT, "ci-dispatch/DragonflyCanary.psm1", "893c89ae65bd85464f404fa4a4ff762344915520", "raw"),
+    (SOURCE_COMMIT, "ci-dispatch/DragonflyCanaryRuntime.psm1", "7730f473d2588e885fa6a4f3aec1b486b408dbda", "raw"),
+    (DISPATCH_COMMIT, "ci-dispatch/Dispatch.psm1", DISPATCH_BLOB, "crlf"),
 )
 
 
@@ -105,6 +106,14 @@ def _canonical(value: object) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
 
 
+def _materialize(data: bytes, representation: str) -> bytes:
+    if representation == "raw":
+        return data
+    if representation == "crlf":
+        return data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+    raise PublicationError("PUBLISH_MATERIALIZATION_INVALID")
+
+
 def _write(root: Path, relative: str, data: bytes, mode: str) -> None:
     pure = PurePosixPath(relative)
     if pure.is_absolute() or ".." in pure.parts or not pure.parts:
@@ -115,13 +124,15 @@ def _write(root: Path, relative: str, data: bytes, mode: str) -> None:
     os.chmod(path, int(mode, 8))
 
 
-def _record(role: str, package_path: str, commit: str, source_path: str, blob: str, data: bytes, mode: str, target: str | None = None) -> dict:
+def _record(role: str, package_path: str, commit: str, source_path: str, blob: str, source: bytes, data: bytes, mode: str, target: str | None = None, materialization: str = "raw") -> dict:
     record = {
         "role": role,
         "packagePath": package_path,
         "sourceCommit": commit,
         "sourcePath": source_path,
         "gitBlob": blob,
+        "sourceSha256": hashlib.sha256(source).hexdigest(),
+        "materialization": materialization,
         "sha256": hashlib.sha256(data).hexdigest(),
         "size": len(data),
         "mode": mode,
@@ -182,15 +193,15 @@ def build_redrix(repo: Path, output: Path) -> tuple[Path, Path]:
     root.mkdir(parents=True)
     records = []
     for source_path, blob, target, mode in REDRIX_CURRENT:
-        data = _blob(repo, SOURCE_COMMIT, source_path, blob)
+        source = _blob(repo, SOURCE_COMMIT, source_path, blob)
         package_path = "payload/" + source_path
-        _write(root, package_path, data, mode)
-        records.append(_record("current", package_path, SOURCE_COMMIT, source_path, blob, data, mode, target))
+        _write(root, package_path, source, mode)
+        records.append(_record("current", package_path, SOURCE_COMMIT, source_path, blob, source, source, mode, target))
     for source_path, blob, target, mode in REDRIX_ROLLBACK:
-        data = _blob(repo, ROLLBACK_COMMIT, source_path, blob)
+        source = _blob(repo, ROLLBACK_COMMIT, source_path, blob)
         package_path = "rollback/" + source_path
-        _write(root, package_path, data, mode)
-        records.append(_record("rollback", package_path, ROLLBACK_COMMIT, source_path, blob, data, mode, target))
+        _write(root, package_path, source, mode)
+        records.append(_record("rollback", package_path, ROLLBACK_COMMIT, source_path, blob, source, source, mode, target))
     manifest = {
         "schemaVersion": 1,
         "artifact": REDRIX_PACKAGE,
@@ -219,19 +230,27 @@ def build_ldw01(repo: Path, output: Path) -> tuple[Path, Path]:
     root = output / LDW01_PACKAGE
     root.mkdir(parents=True)
     records = []
-    for commit, source_path, blob in LDW01_FILES:
-        data = _blob(repo, commit, source_path, blob)
+    for commit, source_path, blob, representation in LDW01_FILES:
+        source = _blob(repo, commit, source_path, blob)
+        data = _materialize(source, representation)
+        if source_path == "ci-dispatch/Dispatch.psm1":
+            if hashlib.sha256(source).hexdigest() != DISPATCH_RAW_SHA256 or hashlib.sha256(data).hexdigest() != DISPATCH_WINDOWS_SHA256:
+                raise PublicationError("PUBLISH_DISPATCH_SHA256_MISMATCH")
         _write(root, source_path, data, "0600")
-        records.append(_record("runtime-source", source_path, commit, source_path, blob, data, "0600"))
-    dispatch = next(item for item in records if item["packagePath"] == "ci-dispatch/Dispatch.psm1")
-    if dispatch["sha256"] != DISPATCH_SHA256:
-        raise PublicationError("PUBLISH_DISPATCH_SHA256_MISMATCH")
+        records.append(_record("runtime-source", source_path, commit, source_path, blob, source, data, "0600", materialization=representation))
     manifest = {
         "schemaVersion": 1,
         "artifact": LDW01_PACKAGE,
         "sourceCommit": SOURCE_COMMIT,
         "sourceTree": SOURCE_TREE,
-        "dispatcherAuthority": {"commit": DISPATCH_COMMIT, "tree": DISPATCH_TREE, "blob": DISPATCH_BLOB, "sha256": DISPATCH_SHA256},
+        "dispatcherAuthority": {
+            "commit": DISPATCH_COMMIT,
+            "tree": DISPATCH_TREE,
+            "blob": DISPATCH_BLOB,
+            "rawSha256": DISPATCH_RAW_SHA256,
+            "windowsSha256": DISPATCH_WINDOWS_SHA256,
+            "materialization": "crlf",
+        },
         "containsCredential": False,
         "containsBootstrap": False,
         "containsPrivateEndpoint": False,
@@ -252,23 +271,27 @@ def _verify_checksum(archive: Path, checksum: Path) -> None:
         raise PublicationError("PACKAGE_CHECKSUM_MISMATCH")
 
 
-def _verify_file(root: Path, record: dict, expected: tuple[str, str, str, str], commit: str, role: str) -> None:
+def _verify_record(repo: Path, root: Path, record: dict, expected: tuple[str, str, str, str], commit: str, role: str, package_mode: int) -> None:
     source_path, blob, target, mode = expected
-    keys = {"role", "packagePath", "sourceCommit", "sourcePath", "gitBlob", "sha256", "size", "mode"}
+    keys = {"role", "packagePath", "sourceCommit", "sourcePath", "gitBlob", "sourceSha256", "materialization", "sha256", "size", "mode"}
     if target:
         keys.add("targetPath")
     if set(record) != keys or record["role"] != role or record["sourceCommit"] != commit or record["sourcePath"] != source_path or record["gitBlob"] != blob or record["mode"] != mode:
         raise PublicationError("PACKAGE_MANIFEST_PROVENANCE_MISMATCH")
     if target and record.get("targetPath") != target:
         raise PublicationError("PACKAGE_MANIFEST_TARGET_MISMATCH")
+    source = _blob(repo, commit, source_path, blob)
+    if hashlib.sha256(source).hexdigest() != record["sourceSha256"]:
+        raise PublicationError("PACKAGE_SOURCE_HASH_MISMATCH")
+    expected_data = _materialize(source, record["materialization"])
     path = root.joinpath(*PurePosixPath(record["packagePath"]).parts)
     if not path.is_file() or path.is_symlink():
         raise PublicationError("PACKAGE_FILE_INVALID")
     data = path.read_bytes()
-    if len(data) != record["size"] or hashlib.sha256(data).hexdigest() != record["sha256"]:
+    if data != expected_data or len(data) != record["size"] or hashlib.sha256(data).hexdigest() != record["sha256"]:
         raise PublicationError("PACKAGE_FILE_HASH_MISMATCH")
-    if hashlib.sha1(f"blob {len(data)}\0".encode("ascii") + data).hexdigest() != blob:
-        raise PublicationError("PACKAGE_FILE_BLOB_MISMATCH")
+    if package_mode != int(mode, 8):
+        raise PublicationError("PACKAGE_FILE_MODE_MISMATCH")
 
 
 def verify_redrix(repo: Path, archive: Path, checksum: Path) -> dict:
@@ -278,18 +301,25 @@ def verify_redrix(repo: Path, archive: Path, checksum: Path) -> dict:
     expected.update({"rollback/" + p: ((p, b, t, m), ROLLBACK_COMMIT, "rollback") for p, b, t, m in REDRIX_ROLLBACK})
     with tempfile.TemporaryDirectory() as td:
         work = Path(td)
+        modes = {}
         with tarfile.open(archive, "r:gz") as tf:
             members = tf.getmembers()
             if not members:
                 raise PublicationError("PACKAGE_ARCHIVE_EMPTY")
             for member in members:
-                _safe_name(member.name, REDRIX_PACKAGE)
+                pure = _safe_name(member.name, REDRIX_PACKAGE)
                 if not (member.isdir() or member.isfile()) or member.issym() or member.islnk():
                     raise PublicationError("PACKAGE_MEMBER_TYPE_REFUSED")
+                if member.isfile():
+                    modes[PurePosixPath(*pure.parts[1:]).as_posix()] = member.mode & 0o777
             tf.extractall(work, filter="data")
         root = work / REDRIX_PACKAGE
-        manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-        if manifest.get("sourceCommit") != SOURCE_COMMIT or manifest.get("sourceTree") != SOURCE_TREE or manifest.get("rollbackCommit") != ROLLBACK_COMMIT or manifest.get("rollbackTree") != ROLLBACK_TREE or manifest.get("owner") != OWNER or manifest.get("containsCredential") is not False or manifest.get("containsBootstrap") is not False or manifest.get("containsPrivateKey") is not False or manifest.get("authorizedKeysMutationAuthorized") is not False:
+        manifest_path = root / "manifest.json"
+        if not manifest_path.is_file() or manifest_path.is_symlink():
+            raise PublicationError("PACKAGE_MANIFEST_MISSING")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        expected_keys = {"schemaVersion", "artifact", "sourceCommit", "sourceTree", "rollbackCommit", "rollbackTree", "sourceDateEpoch", "owner", "containsCredential", "containsBootstrap", "containsPrivateKey", "authorizedKeysMutationAuthorized", "entries"}
+        if set(manifest) != expected_keys or manifest.get("schemaVersion") != 1 or manifest.get("artifact") != REDRIX_PACKAGE or manifest.get("sourceCommit") != SOURCE_COMMIT or manifest.get("sourceTree") != SOURCE_TREE or manifest.get("rollbackCommit") != ROLLBACK_COMMIT or manifest.get("rollbackTree") != ROLLBACK_TREE or manifest.get("owner") != OWNER or manifest.get("containsCredential") is not False or manifest.get("containsBootstrap") is not False or manifest.get("containsPrivateKey") is not False or manifest.get("authorizedKeysMutationAuthorized") is not False:
             raise PublicationError("PACKAGE_MANIFEST_PROVENANCE_MISMATCH")
         records = manifest.get("entries")
         if not isinstance(records, list) or {r.get("packagePath") for r in records} != set(expected) or len(records) != len(expected):
@@ -297,29 +327,39 @@ def verify_redrix(repo: Path, archive: Path, checksum: Path) -> dict:
         actual = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
         if actual != set(expected) | {"manifest.json"}:
             raise PublicationError("PACKAGE_INVENTORY_DRIFT")
+        if modes.get("manifest.json") != 0o600:
+            raise PublicationError("PACKAGE_FILE_MODE_MISMATCH")
         for record in records:
             spec, commit, role = expected[record["packagePath"]]
-            _verify_file(root, record, spec, commit, role)
+            _verify_record(repo, root, record, spec, commit, role, modes.get(record["packagePath"], -1))
         return manifest
 
 
 def verify_ldw01(repo: Path, archive: Path, checksum: Path) -> dict:
     _assert_repo(repo)
     _verify_checksum(archive, checksum)
-    specs = {path: (path, blob, "", "0600", commit) for commit, path, blob in LDW01_FILES}
+    specs = {path: ((path, blob, "", "0600"), commit, materialization) for commit, path, blob, materialization in LDW01_FILES}
     with tempfile.TemporaryDirectory() as td:
         work = Path(td)
+        modes = {}
         with zipfile.ZipFile(archive, "r") as zf:
             for info in zf.infolist():
-                _safe_name(info.filename, LDW01_PACKAGE)
-                mode = (info.external_attr >> 16) & 0o170000
-                if mode not in (0, stat.S_IFREG):
-                    raise PublicationError("PACKAGE_MEMBER_TYPE_REFUSED")
+                pure = _safe_name(info.filename, LDW01_PACKAGE)
+                mode_type = (info.external_attr >> 16) & 0o170000
+                if info.is_dir() or mode_type not in (0, stat.S_IFREG):
+                    if not info.is_dir():
+                        raise PublicationError("PACKAGE_MEMBER_TYPE_REFUSED")
+                else:
+                    modes[PurePosixPath(*pure.parts[1:]).as_posix()] = (info.external_attr >> 16) & 0o777
             zf.extractall(work)
         root = work / LDW01_PACKAGE
-        manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-        authority = {"commit": DISPATCH_COMMIT, "tree": DISPATCH_TREE, "blob": DISPATCH_BLOB, "sha256": DISPATCH_SHA256}
-        if manifest.get("sourceCommit") != SOURCE_COMMIT or manifest.get("sourceTree") != SOURCE_TREE or manifest.get("dispatcherAuthority") != authority or manifest.get("containsCredential") is not False or manifest.get("containsBootstrap") is not False or manifest.get("containsPrivateEndpoint") is not False:
+        manifest_path = root / "manifest.json"
+        if not manifest_path.is_file() or manifest_path.is_symlink():
+            raise PublicationError("PACKAGE_MANIFEST_MISSING")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        expected_keys = {"schemaVersion", "artifact", "sourceCommit", "sourceTree", "dispatcherAuthority", "containsCredential", "containsBootstrap", "containsPrivateEndpoint", "entries"}
+        authority = {"commit": DISPATCH_COMMIT, "tree": DISPATCH_TREE, "blob": DISPATCH_BLOB, "rawSha256": DISPATCH_RAW_SHA256, "windowsSha256": DISPATCH_WINDOWS_SHA256, "materialization": "crlf"}
+        if set(manifest) != expected_keys or manifest.get("schemaVersion") != 1 or manifest.get("artifact") != LDW01_PACKAGE or manifest.get("sourceCommit") != SOURCE_COMMIT or manifest.get("sourceTree") != SOURCE_TREE or manifest.get("dispatcherAuthority") != authority or manifest.get("containsCredential") is not False or manifest.get("containsBootstrap") is not False or manifest.get("containsPrivateEndpoint") is not False:
             raise PublicationError("PACKAGE_MANIFEST_PROVENANCE_MISMATCH")
         records = manifest.get("entries")
         if not isinstance(records, list) or {r.get("packagePath") for r in records} != set(specs) or len(records) != len(specs):
@@ -327,11 +367,15 @@ def verify_ldw01(repo: Path, archive: Path, checksum: Path) -> dict:
         actual = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
         if actual != set(specs) | {"manifest.json"}:
             raise PublicationError("PACKAGE_INVENTORY_DRIFT")
+        if modes.get("manifest.json") != 0o600:
+            raise PublicationError("PACKAGE_FILE_MODE_MISMATCH")
         for record in records:
-            path, blob, target, mode, commit = specs[record["packagePath"]]
-            _verify_file(root, record, (path, blob, target, mode), commit, "runtime-source")
+            spec, commit, representation = specs[record["packagePath"]]
+            if record.get("materialization") != representation:
+                raise PublicationError("PACKAGE_MANIFEST_PROVENANCE_MISMATCH")
+            _verify_record(repo, root, record, spec, commit, "runtime-source", modes.get(record["packagePath"], -1))
         dispatch = next(item for item in records if item["packagePath"] == "ci-dispatch/Dispatch.psm1")
-        if dispatch["sha256"] != DISPATCH_SHA256:
+        if dispatch["sourceSha256"] != DISPATCH_RAW_SHA256 or dispatch["sha256"] != DISPATCH_WINDOWS_SHA256:
             raise PublicationError("PUBLISH_DISPATCH_SHA256_MISMATCH")
         return manifest
 
