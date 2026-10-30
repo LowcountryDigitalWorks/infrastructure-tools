@@ -224,6 +224,13 @@ def _verify_ciphertext_metadata() -> None:
         raise MigrationError("CREDENTIAL_ARTIFACT_METADATA_INVALID")
 
 
+def _remove_published_credential() -> None:
+    try:
+        _run_sudo([RM, "-f", str(CREDENTIAL_PATH)], "CREDENTIAL_ARTIFACT_ROLLBACK_FAILED")
+    except Exception as rollback_error:
+        raise MigrationError("CREDENTIAL_ARTIFACT_ROLLBACK_FAILED") from rollback_error
+
+
 def migrate() -> None:
     _assert_service_safe_for_credential_mutation()
     if _artifact_present_privileged():
@@ -256,6 +263,7 @@ def migrate() -> None:
         env={},
     )
     lookup.stdout.close()
+    published = False
     try:
         try:
             encrypt.wait(timeout=20)
@@ -270,20 +278,23 @@ def migrate() -> None:
         _run_sudo([CHMOD, "0600", str(temp_path)], "CREDENTIAL_TEMP_METADATA_FAILED")
         # Atomic exclusive publication: hard-link fails if the final path already exists.
         _run_sudo([LN, str(temp_path), str(CREDENTIAL_PATH)], "CREDENTIAL_ARTIFACT_EXISTS")
+        published = True
     finally:
         _kill_process(encrypt)
         _kill_process(lookup)
-        _run_sudo([RM, "-f", str(temp_path)], "CREDENTIAL_TEMP_CLEANUP_FAILED")
+        try:
+            _run_sudo([RM, "-f", str(temp_path)], "CREDENTIAL_TEMP_CLEANUP_FAILED")
+        except Exception as temp_cleanup_error:
+            if published:
+                _remove_published_credential()
+            raise temp_cleanup_error
 
     try:
         _verify_ciphertext_metadata()
         if encrypted_credential_digest() != source_digest:
             raise MigrationError("CREDENTIAL_VERIFY_MISMATCH")
     except Exception as verify_error:
-        try:
-            _run_sudo([RM, "-f", str(CREDENTIAL_PATH)], "CREDENTIAL_ARTIFACT_ROLLBACK_FAILED")
-        except Exception as rollback_error:
-            raise MigrationError("CREDENTIAL_ARTIFACT_ROLLBACK_FAILED") from rollback_error
+        _remove_published_credential()
         raise verify_error
 
 
