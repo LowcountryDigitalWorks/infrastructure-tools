@@ -227,11 +227,30 @@ class SystemdBridgeLifecycleTests(unittest.TestCase):
                 with self.assertRaisesRegex(service.ServiceError, "BRIDGE_PACKAGE_PAYLOAD_SET_INVALID"):
                     service._verify_installed_package()
 
+    def test_service_runtime_state_directories_are_owner_controlled(self):
+        service = load_module(SERVICE_HELPER, "service_state_directories")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            bridge_state = root / "bridge-state"
+            controller_state = root / "controller-state"
+            bridge_state.mkdir(mode=0o700)
+            controller_state.mkdir(mode=0o700)
+            with (
+                mock.patch.object(service, "OWNER_UID", os.geteuid()),
+                mock.patch.object(service, "BRIDGE_STATE_ROOT", bridge_state),
+                mock.patch.object(service, "CONTROLLER_STATE_ROOT", controller_state),
+            ):
+                service._verify_runtime_state_directories()
+                controller_state.chmod(0o770)
+                with self.assertRaisesRegex(service.ServiceError, "DRAGONFLY_STATE_DIRECTORY_INVALID"):
+                    service._verify_runtime_state_directories()
+
     def test_service_preflight_binds_complete_payload_to_package_manifest(self):
         text = SERVICE_HELPER.read_text(encoding="utf-8")
         for required in (
             'PACKAGE_MANIFEST = PACKAGE_ROOT / "manifest.json"',
             'PAYLOAD_ROOT = PACKAGE_ROOT / "payload"',
+            'CONTROLLER_STATE_ROOT = Path("/home/eddie/.local/state/ldw-dragonfly-jit")',
             '"artifact": "ldw-operations-bridge-dragonfly-linux-x64"',
             '"entrypoint": "payload/LDW.OperationsBridge.Runner"',
             '"containsCredential": False',
@@ -240,6 +259,7 @@ class SystemdBridgeLifecycleTests(unittest.TestCase):
             '_verify_payload_records(manifest.get("files"))',
             'BRIDGE_PACKAGE_PAYLOAD_PROVENANCE_INVALID',
             'BRIDGE_PACKAGE_PAYLOAD_SET_INVALID',
+            '_verify_runtime_state_directories()',
         ):
             self.assertIn(required, text)
 
@@ -256,6 +276,8 @@ class SystemdBridgeLifecycleTests(unittest.TestCase):
         self.assertEqual(str(service.PAYLOAD_ROOT), "/home/eddie/.local/lib/ldw/operations-bridge/dragonfly/payload")
         self.assertEqual(str(service.PACKAGE_MANIFEST), "/home/eddie/.local/lib/ldw/operations-bridge/dragonfly/manifest.json")
         self.assertEqual(str(service.CONFIG), "/home/eddie/.config/ldw/operations-bridge/dragonfly/config.json")
+        self.assertEqual(str(service.BRIDGE_STATE_ROOT), "/home/eddie/.local/state/ldw/operations-bridge/dragonfly")
+        self.assertEqual(str(service.CONTROLLER_STATE_ROOT), "/home/eddie/.local/state/ldw-dragonfly-jit")
 
     def test_source_has_no_runtime_authority_or_provider_surface(self):
         combined = CREDENTIAL_HELPER.read_text(encoding="utf-8") + SERVICE_HELPER.read_text(encoding="utf-8") + UNIT.read_text(encoding="utf-8")
