@@ -6,6 +6,7 @@ on:
       - 'dragonfly-jit/**'
       - 'tools/dragonfly_canary_publication.py'
       - 'tools/dragonfly_canary_redrix_install.py'
+      - 'tools/dragonfly_gate_a0.py'
       - 'tests/dragonfly-canary-publication/**'
       - 'ci-dispatch/DragonflyCanary.psm1'
       - 'ci-dispatch/DragonflyCanaryRuntime.psm1'
@@ -25,6 +26,7 @@ on:
       - 'dragonfly-jit/**'
       - 'tools/dragonfly_canary_publication.py'
       - 'tools/dragonfly_canary_redrix_install.py'
+      - 'tools/dragonfly_gate_a0.py'
       - 'tests/dragonfly-canary-publication/**'
       - 'ci-dispatch/DragonflyCanary.psm1'
       - 'ci-dispatch/DragonflyCanaryRuntime.psm1'
@@ -83,7 +85,8 @@ jobs:
             dragonfly-jit/ssh_forced_receiver.py \
             dragonfly-jit/canary_executor.py \
             tools/dragonfly_canary_publication.py \
-            tools/dragonfly_canary_redrix_install.py
+            tools/dragonfly_canary_redrix_install.py \
+            tools/dragonfly_gate_a0.py
       - name: Parse bounded LDW01 publication source
         shell: pwsh
         run: |
