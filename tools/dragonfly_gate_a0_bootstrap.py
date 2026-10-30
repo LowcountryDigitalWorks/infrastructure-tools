@@ -26,6 +26,7 @@ ACCEPTED_A0_URL = (
 )
 MAX_SOURCE_BYTES = 65536
 PYTHON = "/usr/bin/python3"
+PYTHON_FLAGS = ("-I", "-B")
 ACCEPTED_ALIASES = {"redrix", "penguin"}
 
 
@@ -103,6 +104,7 @@ def render_command(*, alias: str, host_fingerprint: str, transport_key_sha256: s
     )
     argv = [
         PYTHON,
+        *PYTHON_FLAGS,
         "-c",
         code,
         "--expected-local-alias",
