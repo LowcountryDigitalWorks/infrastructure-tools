@@ -18,6 +18,7 @@ from pathlib import Path
 import re
 import socket
 import stat
+import subprocess
 import sys
 from types import ModuleType
 
@@ -39,8 +40,6 @@ def _load_module(name: str, path: Path) -> ModuleType:
 
 
 def _git(repo: Path, *args: str) -> str:
-    import subprocess
-
     proc = subprocess.run(
         ["git", "-C", str(repo), *args],
         check=False,
@@ -98,38 +97,35 @@ def _lock_available_readonly(path: Path) -> bool:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return False
+        try:
+            return True
         finally:
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            except OSError:
-                pass
-    return True
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def _qemu_process_ids(proc_root: Path = Path("/proc")) -> list[int]:
+def _qemu_process_ids() -> list[int]:
+    proc = subprocess.run(
+        ["ps", "-eo", "pid=,comm=,args="],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise A0Error("A0_PROCESS_ENUMERATION_FAILED")
     matches: list[int] = []
-    try:
-        entries = list(proc_root.iterdir())
-    except OSError as exc:
-        raise A0Error("A0_PROCESS_ENUMERATION_FAILED") from exc
-    for entry in entries:
-        if not entry.name.isdigit() or not entry.is_dir():
+    for raw in proc.stdout.splitlines():
+        parts = raw.strip().split(None, 2)
+        if len(parts) < 2 or not parts[0].isdigit():
             continue
-        cmdline = entry / "cmdline"
-        try:
-            raw = cmdline.read_bytes()
-        except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
-            continue
-        if not raw:
-            continue
-        first = raw.split(b"\0", 1)[0]
-        try:
-            executable = Path(os.fsdecode(first)).name
-        except (UnicodeError, ValueError):
-            continue
-        if executable == "qemu-system-x86_64":
-            matches.append(int(entry.name))
-    return sorted(matches)
+        pid = int(parts[0])
+        comm = parts[1]
+        args = parts[2] if len(parts) > 2 else ""
+        first = args.split(None, 1)[0] if args else ""
+        executable = Path(first).name if first else ""
+        if comm.startswith("qemu-system") or executable == "qemu-system-x86_64":
+            matches.append(pid)
+    return sorted(set(matches))
 
 
 def _canonical(value: object) -> bytes:
