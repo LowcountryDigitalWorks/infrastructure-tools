@@ -4,7 +4,7 @@
 This is a source-only control-plane helper. It does not fetch, execute, connect to
 REDRIX, mutate provider state, or perform Gate A. It renders a shell-safe command
 whose embedded Python bootstrap fetches one immutable public helper blob into
-memory, verifies its exact SHA-256 and size bound, then compile/executes it only
+memory, verifies its exact byte length and SHA-256, then compile/executes it only
 after verification.
 """
 from __future__ import annotations
@@ -33,17 +33,20 @@ class BootstrapInputError(ValueError):
     pass
 
 
-def build_bootstrap_code(*, url: str, sha256: str, max_bytes: int) -> str:
+def build_bootstrap_code(*, url: str, sha256: str, exact_bytes: int, max_bytes: int) -> str:
     if not re.fullmatch(r"https://raw\.githubusercontent\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[0-9a-f]{40}/[A-Za-z0-9_./-]+", url):
         raise BootstrapInputError("A0_BOOTSTRAP_URL_INVALID")
     if re.fullmatch(r"[0-9a-f]{64}", sha256) is None:
         raise BootstrapInputError("A0_BOOTSTRAP_SHA256_INVALID")
-    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0 or max_bytes > 1024 * 1024:
+    if not isinstance(exact_bytes, int) or isinstance(exact_bytes, bool) or exact_bytes <= 0:
+        raise BootstrapInputError("A0_BOOTSTRAP_EXACT_SIZE_INVALID")
+    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0 or max_bytes > 1024 * 1024 or exact_bytes > max_bytes:
         raise BootstrapInputError("A0_BOOTSTRAP_SIZE_LIMIT_INVALID")
 
     return f'''import hashlib,sys,urllib.request
 URL={url!r}
 EXPECTED_SHA256={sha256!r}
+EXPECTED_BYTES={exact_bytes}
 MAX_BYTES={max_bytes}
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self,req,fp,code,msg,headers,newurl):
@@ -54,7 +57,7 @@ def hold(code):
     raise SystemExit(1)
 try:
     request=urllib.request.Request(URL,headers={{"User-Agent":"LDW-Dragonfly-A0/1","Accept":"text/plain"}},method="GET")
-    opener=urllib.request.build_opener(NoRedirect)
+    opener=urllib.request.build_opener(urllib.request.ProxyHandler({{}}),NoRedirect)
     response=opener.open(request,timeout=10)
     try:
         if getattr(response,"status",None)!=200:
@@ -66,6 +69,8 @@ try:
         response.close()
     if len(data)>MAX_BYTES:
         hold("A0_SOURCE_TOO_LARGE")
+    if len(data)!=EXPECTED_BYTES:
+        hold("A0_SOURCE_LENGTH_MISMATCH")
     if hashlib.sha256(data).hexdigest()!=EXPECTED_SHA256:
         hold("A0_SOURCE_SHA256_MISMATCH")
 except SystemExit:
@@ -93,6 +98,7 @@ def render_command(*, alias: str, host_fingerprint: str, transport_key_sha256: s
     code = build_bootstrap_code(
         url=ACCEPTED_A0_URL,
         sha256=ACCEPTED_A0_SHA256,
+        exact_bytes=ACCEPTED_A0_BYTES,
         max_bytes=MAX_SOURCE_BYTES,
     )
     argv = [
