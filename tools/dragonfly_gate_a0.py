@@ -273,13 +273,17 @@ def _kvm_fd_pids(proc_root: Path = PROC_ROOT) -> list[int]:
         fd_root = process / "fd"
         try:
             descriptors = list(fd_root.iterdir())
-        except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+        except (FileNotFoundError, ProcessLookupError):
             continue
+        except (PermissionError, OSError) as exc:
+            raise A0Error("A0_PROCESS_VISIBILITY_UNCERTAIN") from exc
         for descriptor in descriptors:
             try:
                 target = os.readlink(descriptor)
-            except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+            except (FileNotFoundError, ProcessLookupError):
                 continue
+            except (PermissionError, OSError) as exc:
+                raise A0Error("A0_PROCESS_VISIBILITY_UNCERTAIN") from exc
             if target == "/dev/kvm":
                 matches.add(int(process.name))
                 break
