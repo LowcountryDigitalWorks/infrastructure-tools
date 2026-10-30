@@ -113,7 +113,8 @@ function Read-Request {
     if (-not (Test-Path -LiteralPath $requestPath -PathType Leaf)) { throw 'REQUEST_REQUIRED' }
     $bytes = [IO.File]::ReadAllBytes($requestPath)
     if ($bytes.Length -lt 2 -or $bytes.Length -gt 16384) { throw 'REQUEST_REFUSED' }
-    $document = [Text.Json.JsonDocument]::Parse($bytes)
+    [System.ReadOnlyMemory[byte]]$jsonMemory = $bytes
+    $document = [Text.Json.JsonDocument]::Parse($jsonMemory)
     try {
         $root = $document.RootElement
         if ($root.ValueKind -ne [Text.Json.JsonValueKind]::Object) { throw 'REQUEST_REFUSED' }
