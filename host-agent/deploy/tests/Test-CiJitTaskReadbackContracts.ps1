@@ -122,6 +122,7 @@ foreach($field in @('Path','Arguments','WorkingDirectory')){
 }
 $source=Get-Content -LiteralPath $managePath -Raw
 Assert-True ($source.Contains('RegisterTaskDefinition($name,$definition,0x16,$OwnerSid,$null,3,$taskSddl)')) 'registration must suppress automatic principal ACE'
+Assert-True ($source.Contains('$registered.SetSecurityDescriptor($taskSddl,0x10)')) 'install must converge legacy task DACL before readback'
 Write-Host "CI_JIT_TASK_READBACK_CONTRACT=PASS ASSERTIONS=$script:Assertions"
 
 if($HostedTaskSchedulerSemantic){
@@ -143,20 +144,29 @@ if($HostedTaskSchedulerSemantic){
     function Get-ExpectedArguments([string]$Operation,[string]$WorkerSha){'-NoLogo -NoProfile -NonInteractive -Command "exit 0"'}
     $created=$false
     try{
-        # CREATE | DONT_ADD_PRINCIPAL_ACE first: never replace an existing task.
-        $null=$folder.RegisterTaskDefinition($name,$definition,0x12,$OwnerSid,$null,3,($baseSddl+$ownerAce));$created=$true
-        foreach($phase in @('Create','Update')){
-            if($phase -ceq 'Update'){$null=$folder.RegisterTaskDefinition($name,$definition,0x16,$OwnerSid,$null,3,($baseSddl+$ownerAce))}
-            $readback=$folder.GetTask($name)
-            Assert-TaskDefinition $readback $name DISCOVER $workerSha
-            $descriptor=[Security.AccessControl.RawSecurityDescriptor]::new($readback.GetSecurityDescriptor(0xF))
-            $ownerAces=@($descriptor.DiscretionaryAcl|Where-Object{$_.SecurityIdentifier.Value -ceq $OwnerSid})
-            Assert-True ($ownerAces.Count -eq 1) 'DONT_ADD_PRINCIPAL_ACE must retain only one explicit owner ACE'
-        }
+        # Reproduce the legacy residue class directly: unprotected DACL plus an extra
+        # safe owner-read ACE. The strict validator must refuse this pre-convergence state.
+        $legacySddl='O:BAG:BAD:(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x001200A9;;;'+$OwnerSid+')(A;;0x00120089;;;'+$OwnerSid+')'
+        $registered=$folder.RegisterTaskDefinition($name,$definition,0x2,$OwnerSid,$null,3,$legacySddl);$created=$true
+        $legacyReadback=$folder.GetTask($name)
+        Assert-Refused {Assert-TaskDefinition $legacyReadback $name DISCOVER $workerSha} 'TASK_DACL_REFUSED'
+
+        # Update the definition through the production flags, then explicitly replace
+        # the task security descriptor. TASK_DONT_ADD_PRINCIPAL_ACE on update alone does
+        # not remove an old context-principal ACE; SetSecurityDescriptor provides the
+        # reviewed exact ACL convergence step before strict readback validation.
+        $registered=$folder.RegisterTaskDefinition($name,$definition,0x16,$OwnerSid,$null,3,($baseSddl+$ownerAce))
+        $registered.SetSecurityDescriptor(($baseSddl+$ownerAce),0x10)
+        $readback=$folder.GetTask($name)
+        Assert-TaskDefinition $readback $name DISCOVER $workerSha
+        $descriptor=[Security.AccessControl.RawSecurityDescriptor]::new($readback.GetSecurityDescriptor(0xF))
+        Assert-True (($descriptor.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected) -ne 0) 'explicit convergence must restore protected DACL semantics'
+        $ownerAces=@($descriptor.DiscretionaryAcl|Where-Object{$_.SecurityIdentifier.Value -ceq $OwnerSid})
+        Assert-True ($ownerAces.Count -eq 1) 'explicit convergence must replace legacy duplicate owner ACEs'
     }finally{
         if($created){$folder.DeleteTask($name,0)}
     }
     $remaining=@($folder.GetTasks(1)|Where-Object{$_.Name -ceq $name})
     Assert-True ($remaining.Count -eq 0) 'throwaway task must be absent after cleanup'
-    Write-Host 'CI_JIT_TASK_SCHEDULER_SEMANTICS=PASS CREATE_UPDATE_NO_RUN_CLEANUP=PASS'
+    Write-Host 'CI_JIT_TASK_SCHEDULER_SEMANTICS=PASS LEGACY_DACL_CONVERGENCE_NO_RUN_CLEANUP=PASS'
 }
