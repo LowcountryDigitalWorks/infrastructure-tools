@@ -27,13 +27,18 @@ def load(name: str, path: Path):
 
 
 a0 = load("test_gate_a0_module", A0_PATH)
-installer = load("test_gate_a0_installer", INSTALLER_PATH)
+installer = load(
+    "test_gate_a0_installer", ROOT / "tools" / "dragonfly_canary_redrix_install.py"
+)
 
 
-def git_blob(blob: str) -> bytes:
+def git(*args: str, text: bool = True):
     return subprocess.check_output(
-        ["git", "-C", str(ROOT), "cat-file", "blob", blob],
+        ["git", "-C", str(ROOT), *args],
+        text=text,
         stderr=subprocess.DEVNULL,
+    ).strip() if text else subprocess.check_output(
+        ["git", "-C", str(ROOT), *args], stderr=subprocess.DEVNULL
     )
 
 
@@ -101,6 +106,8 @@ class GateA0Tests(unittest.TestCase):
         self.runs = self.state / "runs"
         self.state.mkdir(parents=True, mode=0o700)
         self.runs.mkdir(mode=0o700)
+        self.proc = self.root / "proc"
+        self.proc.mkdir(mode=0o700)
 
         self.transaction = self.home / ".local/state/ldw/dragonfly-canary-publication/install-transaction.json"
         self.receipt = self.home / ".local/state/ldw/dragonfly-canary-publication/install-receipt.json"
@@ -115,17 +122,18 @@ class GateA0Tests(unittest.TestCase):
         )
         self.auth.chmod(0o600)
 
-        for rel, (blob, mode) in a0.REQUIRED_ACCEPTED_115.items():
+        for source_path, blob, rel, mode in installer.ROLLBACK:
+            del source_path
             target = self.home / rel
             target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            target.write_bytes(git_blob(blob))
+            target.write_bytes(git("cat-file", "blob", blob, text=False))
             target.chmod(mode)
 
         optional_rel = Path(".local/lib/ldw-dragonfly-jit/dragonfly_jit.py")
         optional_blob, optional_mode = a0.OPTIONAL_ACCEPTED_CURRENT[optional_rel]
         optional_target = self.home / optional_rel
         optional_target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        optional_target.write_bytes(git_blob(optional_blob))
+        optional_target.write_bytes(git("cat-file", "blob", optional_blob, text=False))
         optional_target.chmod(optional_mode)
 
         self.expected_host_fp = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
@@ -164,6 +172,7 @@ class GateA0Tests(unittest.TestCase):
             "expected_local_alias": "redrix",
             "expected_host_fingerprint": self.expected_host_fp,
             "expected_transport_key_sha256": self.expected_key_sha,
+            "proc_root": self.proc,
         }
         args.update(overrides)
         return a0.collect_a0(**args)
@@ -203,8 +212,11 @@ class GateA0Tests(unittest.TestCase):
             "qemu_pid": qemu_pid,
             "reason": None,
         }
-        a0.STATUS_PATH.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
-        a0.STATUS_PATH.chmod(0o600)
+        (self.state / "status.json").write_text(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        (self.state / "status.json").chmod(0o600)
 
     def test_embedded_transport_constants_match_accepted_installer_contract(self):
         rollback = {rel: (blob, mode) for _source, blob, rel, mode in installer.ROLLBACK}
@@ -253,6 +265,7 @@ class GateA0Tests(unittest.TestCase):
         self.assertEqual(evidence["jitState"], "STOPPED")
         self.assertEqual(evidence["jitStateSource"], "implicit-default")
         self.assertEqual(evidence["qemuProcessCount"], 0)
+        self.assertEqual(evidence["sameUidKvmFdProcessCount"], 0)
         self.assertEqual(evidence["transportBaseline"], "accepted-115")
         self.assertEqual(evidence["transportKeyIdentity"], "expected")
         self.assertTrue(evidence["hostFingerprintInvariant"])
@@ -299,7 +312,8 @@ class GateA0Tests(unittest.TestCase):
 
     def test_non_stopped_and_residue_are_refused(self):
         import uuid
-        self.write_state("RUNNING", str(uuid.uuid4()), 1234)
+
+        self.write_state("RUNNING", str(uuid.uuid4()), 12345)
         with self.assertRaisesRegex(a0.A0Error, "A0_JIT_STATE_NOT_STOPPED"):
             self.collect()
         a0.STATUS_PATH.unlink()
@@ -341,16 +355,19 @@ class GateA0Tests(unittest.TestCase):
     def test_publication_transaction_or_receipt_is_refused(self):
         self.transaction.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.transaction.write_text("{}\n", encoding="utf-8")
+        self.transaction.chmod(0o600)
         with self.assertRaisesRegex(a0.A0Error, "A0_INSTALL_TRANSACTION_PRESENT"):
             self.collect()
         self.transaction.unlink()
         self.receipt.write_text("{}\n", encoding="utf-8")
+        self.receipt.chmod(0o600)
         with self.assertRaisesRegex(a0.A0Error, "A0_INSTALL_RECEIPT_PRESENT"):
             self.collect()
 
     def test_transport_file_tamper_is_refused(self):
-        rel = next(iter(a0.REQUIRED_ACCEPTED_115))
-        (self.home / rel).write_bytes(b"tampered\n")
+        _source, _blob, rel, _mode = installer.ROLLBACK[0]
+        target = self.home / rel
+        target.write_bytes(b"tampered\n")
         with self.assertRaisesRegex(a0.A0Error, "A0_TRANSPORT_BASELINE_UNRECOGNIZED"):
             self.collect()
 
@@ -380,6 +397,7 @@ class GateA0Tests(unittest.TestCase):
                     expected_local_alias="redrix",
                     expected_host_fingerprint=self.expected_host_fp,
                     expected_transport_key_sha256=self.expected_key_sha,
+                    proc_root=self.proc,
                 )
 
     def test_openssh_version_listener_and_host_fingerprint_drift_fail_closed(self):
