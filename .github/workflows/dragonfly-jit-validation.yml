@@ -10,6 +10,7 @@ on:
       - 'ci-dispatch/DragonflyCanary.psm1'
       - 'ci-dispatch/DragonflyCanaryRuntime.psm1'
       - 'ci-dispatch/Invoke-DragonflyCanaryProduction.ps1'
+      - 'ci-dispatch/Invoke-DragonflyGateA1.ps1'
       - 'ci-dispatch/DragonflyCanaryAdjunctPublisher.psm1'
       - 'ci-dispatch/tests/Test-DragonflyCanary.ps1'
       - 'ci-dispatch/tests/Test-DragonflyCanaryRuntime.ps1'
@@ -28,6 +29,7 @@ on:
       - 'ci-dispatch/DragonflyCanary.psm1'
       - 'ci-dispatch/DragonflyCanaryRuntime.psm1'
       - 'ci-dispatch/Invoke-DragonflyCanaryProduction.ps1'
+      - 'ci-dispatch/Invoke-DragonflyGateA1.ps1'
       - 'ci-dispatch/DragonflyCanaryAdjunctPublisher.psm1'
       - 'ci-dispatch/tests/Test-DragonflyCanary.ps1'
       - 'ci-dispatch/tests/Test-DragonflyCanaryRuntime.ps1'
@@ -83,6 +85,7 @@ jobs:
         run: |
           foreach ($path in @(
             './ci-dispatch/Invoke-DragonflyCanaryProduction.ps1',
+            './ci-dispatch/Invoke-DragonflyGateA1.ps1',
             './ci-dispatch/DragonflyCanaryAdjunctPublisher.psm1'
           )) {
             $tokens = $null
@@ -95,6 +98,9 @@ jobs:
             if (@($errors).Count) { throw 'DRAGONFLY_PUBLICATION_POWERSHELL_PARSE_FAILED' }
           }
           'DRAGONFLY_PUBLICATION_POWERSHELL_PARSE=PASS'
+      - name: Validate bounded Gate A1 operator contract
+        shell: pwsh
+        run: ./tests/dragonfly-canary-publication/Test-DragonflyGateA1Operator.ps1
       - name: Run lifecycle, transport, and canary contract tests
         run: python3 -m unittest discover -s dragonfly-jit/tests -p 'test_*.py' -v
       - name: Run publication and install contract tests
