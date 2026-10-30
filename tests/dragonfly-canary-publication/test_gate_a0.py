@@ -139,6 +139,7 @@ class GateA0Tests(unittest.TestCase):
             "TRANSACTION_PATH": a0.TRANSACTION_PATH,
             "RECEIPT_PATH": a0.RECEIPT_PATH,
             "AUTHORIZED_KEYS_PATH": a0.AUTHORIZED_KEYS_PATH,
+            "AUTHORIZED_KEYS2_PATH": a0.AUTHORIZED_KEYS2_PATH,
         }
         a0.STATE_ROOT = self.state
         a0.RUNS_ROOT = self.runs
@@ -148,6 +149,7 @@ class GateA0Tests(unittest.TestCase):
         a0.TRANSACTION_PATH = self.transaction
         a0.RECEIPT_PATH = self.receipt
         a0.AUTHORIZED_KEYS_PATH = self.auth
+        a0.AUTHORIZED_KEYS2_PATH = self.home / ".ssh/authorized_keys2"
 
     def tearDown(self):
         for name, value in self.original_globals.items():
@@ -386,7 +388,7 @@ class GateA0Tests(unittest.TestCase):
             self.collect()
         self.runner = SyntheticRunner(self.expected_host_fp)
         self.runner.responses[("/usr/bin/ss", "-ltnH")] = (0, "LISTEN 0 128 127.0.0.1:2222 0.0.0.0:*")
-        with self.assertRaisesRegex(a0.A0Error, "A0_TCP22_NOT_LISTENING"):
+        with self.assertRaisesRegex(a0.A0Error, "A0_TCP22_NOT_NONLOOPBACK"):
             self.collect()
         self.runner = SyntheticRunner(self.expected_host_fp)
         with self.assertRaisesRegex(a0.A0Error, "A0_HOST_FINGERPRINT_MISMATCH"):
