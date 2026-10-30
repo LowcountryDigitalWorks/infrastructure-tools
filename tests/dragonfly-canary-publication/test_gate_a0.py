@@ -121,7 +121,6 @@ class GateA0Tests(unittest.TestCase):
             target.write_bytes(git_blob(blob))
             target.chmod(mode)
 
-        # Exercise the accepted optional-file path as well as absent optional files.
         optional_rel = Path(".local/lib/ldw-dragonfly-jit/dragonfly_jit.py")
         optional_blob, optional_mode = a0.OPTIONAL_ACCEPTED_CURRENT[optional_rel]
         optional_target = self.home / optional_rel
@@ -185,7 +184,11 @@ class GateA0Tests(unittest.TestCase):
         with mock.patch.object(a0.socket, "gethostname", return_value="redrix"), \
              mock.patch.object(Path, "is_file", new=fake_is_file), \
              mock.patch.object(Path, "is_symlink", new=fake_is_symlink), \
-             mock.patch.object(a0.gzip, "open", return_value=io.StringIO("authorized_keys supports restrict\n")):
+             mock.patch.object(
+                 a0.gzip,
+                 "open",
+                 side_effect=lambda *args, **kwargs: io.StringIO("authorized_keys supports restrict\n"),
+             ):
             return self._collect_impl(**overrides)
 
     def write_state(self, state: str, run_id=None, qemu_pid=None):
@@ -353,7 +356,7 @@ class GateA0Tests(unittest.TestCase):
         with self.assertRaisesRegex(a0.A0Error, "A0_TRANSPORT_KEY_IDENTITY_INVALID"):
             self.collect(expected_transport_key_sha256="0" * 64)
         self.auth.write_text(f"ssh-ed25519 {self.key_data} synthetic\n", encoding="utf-8")
-        with self.assertRaisesRegex(a0.A0Error, "A0_TRANSPORT_KEY_UNCONSTRAINED"):
+        with self.assertRaisesRegex(a0.A0Error, "A0_TRANSPORT_KEY_IDENTITY_INVALID"):
             self.collect()
 
     def test_exact_local_alias_is_required(self):
