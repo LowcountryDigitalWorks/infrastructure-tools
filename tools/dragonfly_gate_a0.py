@@ -261,7 +261,7 @@ def _qemu_process_ids_from_ps(text: str) -> list[int]:
     return sorted(set(matches))
 
 
-def _kvm_fd_pids(proc_root: Path = PROC_ROOT) -> list[int]:
+def _kvm_fd_pids(proc_root: Path = PROC_ROOT, expected_uid: int = PRODUCTION_UID) -> list[int]:
     try:
         processes = list(proc_root.iterdir())
     except OSError as exc:
@@ -269,6 +269,14 @@ def _kvm_fd_pids(proc_root: Path = PROC_ROOT) -> list[int]:
     matches: set[int] = set()
     for process in processes:
         if not process.name.isdigit():
+            continue
+        try:
+            process_info = process.stat()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except (PermissionError, OSError) as exc:
+            raise A0Error("A0_PROCESS_VISIBILITY_UNCERTAIN") from exc
+        if process_info.st_uid != expected_uid:
             continue
         fd_root = process / "fd"
         try:
@@ -555,13 +563,13 @@ def _network_snapshot(runner: CommandRunner, expected_host_fingerprint: str) -> 
     }
 
 
-def _qemu_snapshot(runner: CommandRunner, proc_root: Path = PROC_ROOT) -> dict:
+def _qemu_snapshot(runner: CommandRunner, proc_root: Path = PROC_ROOT, expected_uid: int = PRODUCTION_UID) -> dict:
     output = _run(runner, ("/usr/bin/ps", "-eo", "pid=,comm=,args="), "A0_PROCESS_ENUMERATION_FAILED")
     pids = _qemu_process_ids_from_ps(output)
-    kvm_pids = _kvm_fd_pids(proc_root)
+    kvm_pids = _kvm_fd_pids(proc_root, expected_uid)
     if pids or kvm_pids:
         raise A0Error("A0_QEMU_PROCESS_PRESENT")
-    return {"qemuProcessCount": 0, "kvmFdProcessCount": 0}
+    return {"qemuProcessCount": 0, "sameUidKvmFdProcessCount": 0}
 
 
 def _publication_state(home: Path, uid: int) -> dict:
@@ -595,7 +603,7 @@ def _collect_once(
         "marker": MARKER,
         "localHostAlias": alias,
         **_validate_jit_state(home, uid),
-        **_qemu_snapshot(runner, proc_root),
+        **_qemu_snapshot(runner, proc_root, uid),
         **_publication_state(home, uid),
         **_transport_files(home, uid),
         **_transport_authorized_key(home, uid, expected_transport_key_sha256),
