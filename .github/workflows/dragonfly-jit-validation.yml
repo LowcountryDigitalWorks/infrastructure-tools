@@ -39,7 +39,7 @@ permissions:
 
 jobs:
   redrix-package-modes:
-    name: REDRIX package modes (${{ matrix.os }})
+    name: REDRIX and LDW01 package modes (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -51,8 +51,8 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Verify native and cross-platform REDRIX archive modes
-        run: python -m unittest discover -s tests/dragonfly-canary-publication -p test_redrix_package_modes.py -v
+      - name: Verify native and cross-platform REDRIX and LDW01 archive modes
+        run: python -m unittest discover -s tests/dragonfly-canary-publication -p 'test_*_package_modes.py' -v
 
   source:
     runs-on: ubuntu-latest
