@@ -194,5 +194,37 @@ class DragonflyCanaryPublicationTests(unittest.TestCase):
             self.assertTrue(forbidden.isdisjoint(names))
 
 
+    def _git_repo_fixture(self, root: Path, origin: str) -> Path:
+        root.mkdir()
+        mod._git(root, "init")
+        mod._git(root, "remote", "add", "origin", origin)
+        return root
+
+    def test_assert_repo_refuses_wrong_origin_with_valid_pinned_git_objects(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._git_repo_fixture(Path(td) / "repo", "https://github.com/untrusted/infrastructure-tools.git")
+            for commit in (mod.SOURCE_COMMIT, mod.ROLLBACK_COMMIT, mod.DISPATCH_COMMIT):
+                mod._git(repo, "fetch", "--no-tags", "https://github.com/LowcountryDigitalWorks/infrastructure-tools.git", commit)
+            self.assertEqual(
+                str(mod._git(repo, "rev-parse", f"{mod.SOURCE_COMMIT}^{{tree}}")).strip(),
+                mod.SOURCE_TREE,
+            )
+            with self.assertRaisesRegex(mod.PublicationError, "PUBLISH_REPOSITORY_REFUSED"):
+                mod._assert_repo(repo)
+
+    def test_assert_repo_refuses_pinned_commit_tree_mismatch(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._git_repo_fixture(
+                Path(td) / "repo",
+                "https://github.com/LowcountryDigitalWorks/infrastructure-tools.git",
+            )
+            for commit in (mod.SOURCE_COMMIT, mod.ROLLBACK_COMMIT, mod.DISPATCH_COMMIT):
+                mod._git(repo, "fetch", "--no-tags", "https://github.com/LowcountryDigitalWorks/infrastructure-tools.git", commit)
+            wrong_tree = "0" * 40 if mod.SOURCE_TREE != "0" * 40 else "1" * 40
+            with unittest.mock.patch.object(mod, "SOURCE_TREE", wrong_tree):
+                with self.assertRaisesRegex(mod.PublicationError, "PUBLISH_COMMIT_TREE_MISMATCH"):
+                    mod._assert_repo(repo)
+
+
 if __name__ == "__main__":
     unittest.main()
