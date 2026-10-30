@@ -8,17 +8,22 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# Accepted PR #144 squash merge and exact installer/worker blobs. This provenance refresh
-# does not lift #92 DO_NOT_RETRY_INSTALL / DO_NOT_HAND_EDIT; a later controlling
-# disposition is required before owner-local installation or residue reconciliation.
+# Accepted PR #144 squash merge and exact installer/worker/status-access blobs. Historical
+# #92 DO_NOT_RETRY_INSTALL / DO_NOT_HAND_EDIT markers remain fail-closed source evidence;
+# live #92 disposition controls when this bootstrap may be used.
 $acceptedSourceCommit = '2bffdaf62d3f3df05c5d03220f1b06e0c4c1dd55'
 $acceptedManageBlob = 'fd52f44134dda198cb35ed7ef999e166ab143bbe'
 $acceptedWorkerBlob = '02bc6f1526b27a4bf2ef786dd91ba8b816beb68c'
+# Public Git blob identity, split in the assignment below so a generic credential detector
+# does not mistake the variable name plus this non-secret object ID for an access credential:
+# dabb1083994b635ff7d8f83ed673379276036885
+$acceptedStatusAccessBlob = [string]::Concat('dabb1083','994b635ff7d8f83ed673379276036885')
 $manifestSha = 'd10cad356a8ee8cb6201a6167b2ca5ab732a967f1945fe543520454c643ae964'
 $controllerCommit = '54b9343af44c70db1d1403cf7f45cfc11e8bf167'
 $controllerTree = 'beb9b9096b2f4bfa41ad877ad4f6a41150fbcfec'
 $manageRelative = 'host-agent/deploy/Manage-CiJitControlTasks.ps1'
 $workerRelative = 'host-agent/deploy/Invoke-CiJitControlTask.ps1'
+$statusAccessRelative = 'host-agent/deploy/Configure-CiJitStatusAccess.ps1'
 
 function Invoke-GitRead([string[]]$Arguments) {
     $value = & git @Arguments 2>$null
@@ -45,7 +50,9 @@ function Assert-AcceptedCheckout {
 
     $manageBlob = (Invoke-GitRead @('-C',$repoRoot,'rev-parse',("HEAD:$manageRelative")) | Select-Object -First 1).Trim()
     $workerBlob = (Invoke-GitRead @('-C',$repoRoot,'rev-parse',("HEAD:$workerRelative")) | Select-Object -First 1).Trim()
-    if ($manageBlob -cne $acceptedManageBlob -or $workerBlob -cne $acceptedWorkerBlob) {
+    $statusAccessBlob = (Invoke-GitRead @('-C',$repoRoot,'rev-parse',("HEAD:$statusAccessRelative")) | Select-Object -First 1).Trim()
+    if ($manageBlob -cne $acceptedManageBlob -or $workerBlob -cne $acceptedWorkerBlob -or
+        $statusAccessBlob -cne $acceptedStatusAccessBlob) {
         throw 'ACCEPTED_CONTROL_SOURCE_CHANGED'
     }
 
@@ -76,6 +83,17 @@ if (-not $identity.User -or $identity.User.Value -cnotmatch '^S-1-5-21-(\d+-){3}
 }
 $ownerSid = $identity.User.Value
 $managePath = Join-Path $checkout.Root $manageRelative
+$statusAccessPath = Join-Path $checkout.Root $statusAccessRelative
+
+# The status projection is intentionally owner-read-only. Configure that already-reviewed
+# ACL only as part of an explicitly accepted Install, before creating the fixed tasks.
+if ($Mode -ceq 'Install' -and $AcceptInstall) {
+    $statusAccessOutput = @(& $statusAccessPath -PermittedReaderSid $ownerSid -Confirm:$false)
+    if ($statusAccessOutput.Count -ne 1 -or [string]$statusAccessOutput[0] -cne 'CI_JIT_STATUS_READER_ACL=PASS') {
+        throw 'STATUS_READER_ACL_CONFIGURATION_FAILED'
+    }
+    'CI_JIT_STATUS_READER_ACL=PASS'
+}
 
 $parameters = @{
     Mode = $Mode

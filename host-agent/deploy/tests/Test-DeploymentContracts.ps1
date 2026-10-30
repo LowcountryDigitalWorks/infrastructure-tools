@@ -195,6 +195,7 @@ foreach ($literal in @(
     '2bffdaf62d3f3df05c5d03220f1b06e0c4c1dd55',
     'fd52f44134dda198cb35ed7ef999e166ab143bbe',
     '02bc6f1526b27a4bf2ef786dd91ba8b816beb68c',
+    'dabb1083994b635ff7d8f83ed673379276036885',
     'd10cad356a8ee8cb6201a6167b2ca5ab732a967f1945fe543520454c643ae964',
     '54b9343af44c70db1d1403cf7f45cfc11e8bf167',
     'beb9b9096b2f4bfa41ad877ad4f6a41150fbcfec'
@@ -206,24 +207,31 @@ Assert-True ($bootstrapSource.Contains('$branch -cne ''main''', [StringCompariso
 Assert-True ($bootstrapSource.Contains("status','--porcelain", [StringComparison]::Ordinal)) 'CI/JIT bootstrap must require a clean worktree'
 Assert-True ($bootstrapSource.Contains('refs/remotes/origin/main', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must bind local HEAD to fetched origin/main'
 Assert-True ($bootstrapSource.Contains('merge-base --is-ancestor', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must require accepted source ancestry'
-Assert-True ($bootstrapSource.Contains('ACCEPTED_CONTROL_SOURCE_CHANGED', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must reject accepted installer/worker drift'
+Assert-True ($bootstrapSource.Contains('ACCEPTED_CONTROL_SOURCE_CHANGED', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must reject accepted installer/worker/status-access drift'
 Assert-True ($bootstrapSource.Contains('WindowsIdentity]::GetCurrent()', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must derive owner SID locally'
 Assert-True ($bootstrapSource.Contains('OWNER_SID=LOCAL_DERIVED', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must redact owner SID in output'
 Assert-True ($bootstrapSource.Contains('$Mode -ne ''Uninstall''', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must preserve rollback when bundle evidence is unavailable'
 Assert-True ($bootstrapSource.Contains('$parameters.AcceptInstall = $true', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must forward explicit install acceptance only when supplied'
 Assert-True ($bootstrapSource.Contains('$parameters.AcceptUninstall = $true', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must forward explicit uninstall acceptance only when supplied'
 Assert-True ($bootstrapSource.Contains('& $managePath @parameters', [StringComparison]::Ordinal)) 'CI/JIT bootstrap must delegate to the reviewed installer instead of reimplementing task creation'
+$statusCall = '& $statusAccessPath -PermittedReaderSid $ownerSid -Confirm:$false'
+Assert-True ($bootstrapSource.Contains('$Mode -ceq ''Install'' -and $AcceptInstall', [StringComparison]::Ordinal)) 'status reader ACL must require explicit Install plus AcceptInstall'
+Assert-True ($bootstrapSource.Contains($statusCall, [StringComparison]::Ordinal)) 'status reader ACL must receive the locally derived owner SID'
+Assert-True ($bootstrapSource.IndexOf($statusCall, [StringComparison]::Ordinal) -lt $bootstrapSource.IndexOf('& $managePath @parameters', [StringComparison]::Ordinal)) 'status reader ACL must fail closed before task installation'
+Assert-True ($bootstrapSource.Contains('$statusAccessOutput.Count -ne 1', [StringComparison]::Ordinal) -and
+    $bootstrapSource.Contains("[string]`$statusAccessOutput[0] -cne 'CI_JIT_STATUS_READER_ACL=PASS'", [StringComparison]::Ordinal)) 'status reader ACL output must require the single safe PASS marker'
+Assert-True ($bootstrapSource.Contains('STATUS_READER_ACL_CONFIGURATION_FAILED', [StringComparison]::Ordinal)) 'status reader ACL unexpected output must fail closed'
 foreach ($forbidden in @('Invoke-WebRequest','Invoke-RestMethod','curl.exe','Start-BitsTransfer','gh api','Register-ScheduledTask','New-ScheduledTask')) {
     Assert-True (-not $bootstrapSource.Contains($forbidden, [StringComparison]::OrdinalIgnoreCase)) "CI/JIT bootstrap must not add network or task-definition primitive $forbidden"
 }
 
 # Verify the bootstrap pins the accepted merged PR #144 source and rejects any
-# installer/worker drift. The transitional parser-candidate allowance is gone.
+# installer/worker/status-access drift.
 $bootstrapTokens=$null;$bootstrapErrors=$null
 $bootstrapAst=[Management.Automation.Language.Parser]::ParseInput($bootstrapSource,[ref]$bootstrapTokens,[ref]$bootstrapErrors)
 Assert-True ($bootstrapErrors.Count -eq 0) 'bootstrap must parse'
 & {
-    foreach($name in @('acceptedSourceCommit','acceptedManageBlob','acceptedWorkerBlob','manageRelative','workerRelative')){
+    foreach($name in @('acceptedSourceCommit','acceptedManageBlob','acceptedWorkerBlob','acceptedStatusAccessBlob','manageRelative','workerRelative','statusAccessRelative')){
         $assignment=$bootstrapAst.Find({param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -ceq ('$'+$name)},$false)
         . ([scriptblock]::Create($assignment.Extent.Text))
     }
@@ -231,13 +239,17 @@ Assert-True ($bootstrapErrors.Count -eq 0) 'bootstrap must parse'
     Assert-True ($LASTEXITCODE -eq 0 -and $acceptedManage -ceq $acceptedManageBlob) 'bootstrap manager pin must match accepted PR #144 merge'
     $acceptedWorker=(& git -C $deployRoot rev-parse ($acceptedSourceCommit+':'+$workerRelative)).Trim()
     Assert-True ($LASTEXITCODE -eq 0 -and $acceptedWorker -ceq $acceptedWorkerBlob) 'bootstrap worker pin must match accepted PR #144 merge'
+    $acceptedStatusAccess=(& git -C $deployRoot rev-parse ($acceptedSourceCommit+':'+$statusAccessRelative)).Trim()
+    Assert-True ($LASTEXITCODE -eq 0 -and $acceptedStatusAccess -ceq $acceptedStatusAccessBlob) 'bootstrap status-access pin must match accepted source bytes'
     $currentManage=(& git -C $deployRoot rev-parse ('HEAD:'+$manageRelative)).Trim()
     Assert-True ($LASTEXITCODE -eq 0 -and $currentManage -ceq $acceptedManageBlob) 'candidate manager must match accepted merged manager bytes'
     $currentWorker=(& git -C $deployRoot rev-parse ('HEAD:'+$workerRelative)).Trim()
     Assert-True ($LASTEXITCODE -eq 0 -and $currentWorker -ceq $acceptedWorkerBlob) 'current worker must match accepted PR #144 merged bytes'
+    $currentStatusAccess=(& git -C $deployRoot rev-parse ('HEAD:'+$statusAccessRelative)).Trim()
+    Assert-True ($LASTEXITCODE -eq 0 -and $currentStatusAccess -ceq $acceptedStatusAccessBlob) 'current status-access helper must match accepted bytes'
     $guard=$bootstrapAst.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-AcceptedCheckout'},$false)
     . ([scriptblock]::Create($guard.Extent.Text))
-    $fixture=[ordered]@{Branch='main';Dirty=$false;Head=$acceptedSourceCommit;Origin=$acceptedSourceCommit;Ancestor=$true;Manage=$acceptedManageBlob;Worker=$acceptedWorkerBlob}
+    $fixture=[ordered]@{Branch='main';Dirty=$false;Head=$acceptedSourceCommit;Origin=$acceptedSourceCommit;Ancestor=$true;Manage=$acceptedManageBlob;Worker=$acceptedWorkerBlob;StatusAccess=$acceptedStatusAccessBlob}
     function Invoke-GitRead([string[]]$Arguments){
         switch($Arguments[2]){
             'branch' {$fixture.Branch;return}
@@ -249,6 +261,7 @@ Assert-True ($bootstrapErrors.Count -eq 0) 'bootstrap must parse'
                     'refs/remotes/origin/main' {$fixture.Origin;return}
                     ('HEAD:'+$manageRelative) {$fixture.Manage;return}
                     ('HEAD:'+$workerRelative) {$fixture.Worker;return}
+                    ('HEAD:'+$statusAccessRelative) {$fixture.StatusAccess;return}
                 }
             }
         }
@@ -265,6 +278,7 @@ Assert-True ($bootstrapErrors.Count -eq 0) 'bootstrap must parse'
         @{Field='Manage';Value=('f'*40);Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
         @{Field='Worker';Value='1877c993dabe7e9d1e2a712a317a0d935ab74dfd';Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
         @{Field='Worker';Value=('f'*40);Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
+        @{Field='StatusAccess';Value=('f'*40);Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
         @{Field='Branch';Value='feature/synthetic';Code='SOURCE_MAIN_REQUIRED'},
         @{Field='Branch';Value='';Code='SOURCE_MAIN_REQUIRED'},
         @{Field='Dirty';Value=$true;Code='SOURCE_WORKTREE_DIRTY'},
@@ -277,6 +291,22 @@ Assert-True ($bootstrapErrors.Count -eq 0) 'bootstrap must parse'
     }
 }
 Assert-True ($bootstrapSource.Contains('DO_NOT_RETRY_INSTALL') -and $bootstrapSource.Contains('DO_NOT_HAND_EDIT')) 'pin refresh must preserve owner-local operational holds'
+
+$statusAccessSource = Get-Content -LiteralPath (Join-Path $deployRoot 'Configure-CiJitStatusAccess.ps1') -Raw
+Assert-True ($statusAccessSource.Contains('Set-Ci10StatusReaderAcl -ReaderSid $PermittedReaderSid', [StringComparison]::Ordinal)) 'status access helper must delegate to accepted status reader ACL primitive'
+Assert-True ($statusAccessSource.Contains('CI_JIT_STATUS_READER_ACL=PASS', [StringComparison]::Ordinal)) 'status access helper must emit only the bounded PASS marker on success'
+$statusProjectionPath = Join-Path (Split-Path (Split-Path $deployRoot -Parent) -Parent) 'ci-dispatch/StatusProjection.psm1'
+$statusProjectionSource = Get-Content -LiteralPath $statusProjectionPath -Raw
+$statusProjectionTokens=$null;$statusProjectionErrors=$null
+$statusProjectionAst=[Management.Automation.Language.Parser]::ParseInput($statusProjectionSource,[ref]$statusProjectionTokens,[ref]$statusProjectionErrors)
+Assert-True ($statusProjectionErrors.Count -eq 0) 'status projection module must parse'
+$statusReaderAclAst=$statusProjectionAst.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Set-Ci10StatusReaderAcl'},$false)
+Assert-True ($null -ne $statusReaderAclAst) 'accepted status reader ACL primitive must be discoverable'
+$statusReaderAclSource=$statusReaderAclAst.Extent.Text
+Assert-True ($statusReaderAclSource.Contains('ReadAndExecute', [StringComparison]::Ordinal) -and $statusReaderAclSource.Contains('Synchronize', [StringComparison]::Ordinal)) 'owner status projection ACL must remain read/execute plus synchronize only'
+foreach($forbiddenRight in @('Modify','Write','FullControl','ChangePermissions','TakeOwnership')){
+    Assert-True (-not $statusReaderAclSource.Contains($forbiddenRight, [StringComparison]::Ordinal)) "owner status projection ACL must not grant $forbiddenRight"
+}
 
 $deployFiles = @(Get-ChildItem -LiteralPath $deployRoot -File | Where-Object { $_.Extension -in @('.ps1', '.psm1') })
 $allDeploySource = ($deployFiles | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }) -join "`n"
