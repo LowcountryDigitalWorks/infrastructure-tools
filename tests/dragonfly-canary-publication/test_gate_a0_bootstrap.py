@@ -108,6 +108,8 @@ class GateA0BootstrapTests(unittest.TestCase):
             "https://raw.githubusercontent.com/LowcountryDigitalWorks/infrastructure-tools/5815e4e4e5ea4719c9d694b1ccefa1808c927ac7/tools/dragonfly_gate_a0.py",
         )
         self.assertEqual(bootstrap.MAX_SOURCE_BYTES, 65536)
+        self.assertEqual(bootstrap.PYTHON, "/usr/bin/python3")
+        self.assertEqual(bootstrap.PYTHON_FLAGS, ("-I", "-B"))
 
         data = ACCEPTED_HELPER.read_bytes()
         self.assertEqual(len(data), bootstrap.ACCEPTED_A0_BYTES)
@@ -115,18 +117,17 @@ class GateA0BootstrapTests(unittest.TestCase):
         git_blob = hashlib.sha1(f"blob {len(data)}\0".encode("ascii") + data).hexdigest()
         self.assertEqual(git_blob, bootstrap.ACCEPTED_A0_BLOB)
 
-    def test_renderer_is_shell_safe_and_contains_only_public_identity_inputs(self):
+    def test_renderer_is_shell_safe_isolated_and_contains_only_public_identity_inputs(self):
         fingerprint = "SHA256:" + ("A" * 43)
         key_sha = "b" * 64
         rendered = bootstrap.render_command(alias="redrix", host_fingerprint=fingerprint, transport_key_sha256=key_sha)
         argv = shlex.split(rendered)
-        self.assertEqual(argv[0], "/usr/bin/python3")
-        self.assertEqual(argv[1], "-c")
-        self.assertIn(bootstrap.ACCEPTED_A0_URL, argv[2])
-        self.assertIn(bootstrap.ACCEPTED_A0_SHA256, argv[2])
-        self.assertIn("EXPECTED_BYTES=25719", argv[2])
+        self.assertEqual(argv[:4], ["/usr/bin/python3", "-I", "-B", "-c"])
+        self.assertIn(bootstrap.ACCEPTED_A0_URL, argv[4])
+        self.assertIn(bootstrap.ACCEPTED_A0_SHA256, argv[4])
+        self.assertIn("EXPECTED_BYTES=25719", argv[4])
         self.assertEqual(
-            argv[3:],
+            argv[5:],
             [
                 "--expected-local-alias", "redrix",
                 "--expected-host-fingerprint", fingerprint,
