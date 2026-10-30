@@ -104,7 +104,7 @@ class GateA0HardeningTests(unittest.TestCase):
         fd = proc / '123' / 'fd'
         fd.mkdir(parents=True)
         (fd / '7').symlink_to('/dev/kvm')
-        self.assertEqual(a0._kvm_fd_pids(proc), [123])
+        self.assertEqual(a0._kvm_fd_pids(proc, self.uid), [123])
 
     def test_kvm_fd_scan_holds_on_fd_directory_permission_denial(self):
         proc = Path(self.temp.name) / 'proc'
@@ -118,7 +118,7 @@ class GateA0HardeningTests(unittest.TestCase):
             return original_iterdir(path)
 
         with mock.patch.object(Path, 'iterdir', new=denied):
-            self.assertHold('A0_PROCESS_VISIBILITY_UNCERTAIN', lambda: a0._kvm_fd_pids(proc))
+            self.assertHold('A0_PROCESS_VISIBILITY_UNCERTAIN', lambda: a0._kvm_fd_pids(proc, self.uid))
 
     def test_kvm_fd_scan_holds_on_readlink_permission_denial(self):
         proc = Path(self.temp.name) / 'proc'
@@ -134,7 +134,31 @@ class GateA0HardeningTests(unittest.TestCase):
             return original_readlink(path)
 
         with mock.patch.object(os, 'readlink', side_effect=denied):
-            self.assertHold('A0_PROCESS_VISIBILITY_UNCERTAIN', lambda: a0._kvm_fd_pids(proc))
+            self.assertHold('A0_PROCESS_VISIBILITY_UNCERTAIN', lambda: a0._kvm_fd_pids(proc, self.uid))
+
+    def test_kvm_fd_scan_skips_foreign_uid_before_fd_walk(self):
+        proc = Path(self.temp.name) / 'proc'
+        process = proc / '123'
+        fd = process / 'fd'
+        fd.mkdir(parents=True)
+        original_stat = Path.stat
+        original_iterdir = Path.iterdir
+
+        class ForeignInfo:
+            st_uid = self.uid + 1
+
+        def fake_stat(path: Path, *args, **kwargs):
+            if path == process:
+                return ForeignInfo()
+            return original_stat(path, *args, **kwargs)
+
+        def fail_if_fd_walked(path: Path):
+            if path == fd:
+                raise AssertionError('foreign fd tree must not be walked')
+            return original_iterdir(path)
+
+        with mock.patch.object(Path, 'stat', new=fake_stat), mock.patch.object(Path, 'iterdir', new=fail_if_fd_walked):
+            self.assertEqual(a0._kvm_fd_pids(proc, self.uid), [])
 
     def test_qemu_snapshot_refuses_kvm_fd_without_qemu_name(self):
         proc = Path(self.temp.name) / 'proc'
@@ -144,7 +168,7 @@ class GateA0HardeningTests(unittest.TestCase):
         def runner(argv):
             self.assertEqual(argv, ('/usr/bin/ps', '-eo', 'pid=,comm=,args='))
             return 0, '321 myvm /opt/bin/myvm --guest synthetic'
-        self.assertHold('A0_QEMU_PROCESS_PRESENT', lambda: a0._qemu_snapshot(runner, proc))
+        self.assertHold('A0_QEMU_PROCESS_PRESENT', lambda: a0._qemu_snapshot(runner, proc, self.uid))
 
 
 if __name__ == '__main__':
