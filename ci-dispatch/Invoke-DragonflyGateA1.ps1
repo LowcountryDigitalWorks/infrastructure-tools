@@ -1,10 +1,10 @@
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
-
 param(
     [Parameter(Mandatory)]
     [string]$RepositoryRoot
 )
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 
 function Write-LdwGateA1Pass {
     param([Parameter(Mandatory)][string]$Name)
