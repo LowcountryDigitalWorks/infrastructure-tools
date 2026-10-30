@@ -122,7 +122,8 @@ function Read-Request {
             @(Compare-Object @('schema','operationId','operation','runId') $names -CaseSensitive).Count) { throw 'REQUEST_REFUSED' }
         if ($root.GetProperty('schema').GetInt32() -ne 1) { throw 'REQUEST_REFUSED' }
         $id = $root.GetProperty('operationId').GetString()
-        if (-not [Guid]::TryParseExact($id,'D',[ref]([Guid]$null))) { throw 'REQUEST_REFUSED' }
+        [Guid]$parsedId = [Guid]::Empty
+        if (-not [Guid]::TryParseExact($id,'D',[ref]$parsedId)) { throw 'REQUEST_REFUSED' }
         if ($root.GetProperty('operation').GetString() -cne $Operation) { throw 'REQUEST_OPERATION_MISMATCH' }
         $runElement = $root.GetProperty('runId')
         $runId = if ($runElement.ValueKind -eq [Text.Json.JsonValueKind]::Null) { $null } else { $runElement.GetInt64() }
