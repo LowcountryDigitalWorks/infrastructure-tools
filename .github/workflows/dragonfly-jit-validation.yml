@@ -53,6 +53,9 @@ jobs:
           fetch-depth: 0
       - name: Verify native and cross-platform REDRIX and LDW01 archive modes
         run: python -m unittest discover -s tests/dragonfly-canary-publication -p 'test_*_package_modes.py' -v
+      - name: Verify byte-exact adjunct blob materialization
+        shell: pwsh
+        run: ./tests/dragonfly-canary-publication/Test-DragonflyAdjunctMaterialization.ps1
 
   source:
     runs-on: ubuntu-latest

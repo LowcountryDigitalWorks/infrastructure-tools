@@ -115,14 +115,27 @@ function Export-LdwAdjunctPinnedFile {
     )
     $actualBlob = & git -C $RepositoryRoot rev-parse ($Source.commit + ':' + $Source.path) 2>$null
     if ($LASTEXITCODE -ne 0 -or ([string]$actualBlob).Trim() -cne $Source.blob) { throw 'ADJUNCT_SOURCE_BLOB_MISMATCH' }
-    $archive = Join-Path $StageRoot ('source-' + $Source.blob + '.zip')
-    & git -C $RepositoryRoot archive --format=zip ('--output=' + $archive) $Source.commit -- $Source.path 2>$null
-    if ($LASTEXITCODE -ne 0) { throw 'ADJUNCT_SOURCE_EXPORT_FAILED' }
-    $extract = Join-Path $StageRoot ('extract-' + $Source.blob)
-    $null = New-Item -ItemType Directory -Path $extract
-    [IO.Compression.ZipFile]::ExtractToDirectory($archive,$extract)
-    $sourcePath = Join-Path $extract $Source.path
-    if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) { throw 'ADJUNCT_SOURCE_EXPORT_FAILED' }
+    # Archive/checkout can apply working-tree EOL/attribute conversions. Read the
+    # verified object directly and keep stdout binary (no PowerShell text pipeline).
+    $sourcePath = Join-Path $StageRoot ('source-' + $Source.blob)
+    $psi = [Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+    foreach ($arg in @('-C',$RepositoryRoot,'cat-file','blob',$Source.blob)) { [void]$psi.ArgumentList.Add([string]$arg) }
+    $process = [Diagnostics.Process]::new(); $process.StartInfo = $psi
+    try {
+        $output = [IO.File]::Create($sourcePath)
+        try {
+            if (-not $process.Start()) { throw 'ADJUNCT_SOURCE_EXPORT_FAILED' }
+            $stderrTask = $process.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
+            $process.StandardOutput.BaseStream.CopyTo($output)
+            $process.WaitForExit()
+            [void]$stderrTask.GetAwaiter().GetResult()
+            if ($process.ExitCode -ne 0) { throw 'ADJUNCT_SOURCE_EXPORT_FAILED' }
+        } finally { $output.Dispose() }
+    } catch { throw 'ADJUNCT_SOURCE_EXPORT_FAILED' }
+    finally { $process.Dispose() }
     $rawBlob = Get-LdwAdjunctGitBlobSha1 $sourcePath
     if ($rawBlob -cne $Source.blob) { throw 'ADJUNCT_SOURCE_BLOB_MISMATCH' }
     $null = New-Item -ItemType Directory -Path (Split-Path $Destination -Parent) -Force
