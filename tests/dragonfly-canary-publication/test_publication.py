@@ -10,6 +10,7 @@ import stat
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -221,7 +222,7 @@ class DragonflyCanaryPublicationTests(unittest.TestCase):
             for commit in (mod.SOURCE_COMMIT, mod.ROLLBACK_COMMIT, mod.DISPATCH_COMMIT):
                 mod._git(repo, "fetch", "--no-tags", "https://github.com/LowcountryDigitalWorks/infrastructure-tools.git", commit)
             wrong_tree = "0" * 40 if mod.SOURCE_TREE != "0" * 40 else "1" * 40
-            with unittest.mock.patch.object(mod, "SOURCE_TREE", wrong_tree):
+            with mock.patch.object(mod, "SOURCE_TREE", wrong_tree):
                 with self.assertRaisesRegex(mod.PublicationError, "PUBLISH_COMMIT_TREE_MISMATCH"):
                     mod._assert_repo(repo)
 
