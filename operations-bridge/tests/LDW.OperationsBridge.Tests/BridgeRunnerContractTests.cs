@@ -9,6 +9,7 @@ internal static class BridgeRunnerContractTests
         DragonflyBridgeContractTests.RunAsync().GetAwaiter().GetResult();
         DragonflyBridgeRunnerConfigurationTests.Run();
         DragonflySecretServiceReaderTests.Run();
+        DragonflySystemdCredentialReaderTests.Run();
         DragonflyPythonProcessAdapterTests.Run();
         TerminalWireNoStartTests.Run();
         DragonflyLinuxRuntimeTests.Run();
