@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """Standalone read-only REDRIX Gate A0 evidence for issue #139.
 
-This module intentionally has no Git checkout/import dependency and no mutation path.
-It reads the accepted REDRIX JIT/#115 transport/network posture directly and emits
-sanitized point-in-time evidence only. Production source provenance is supplied by
-the caller (for example, an exact-commit in-memory loader) rather than by creating a
-local checkout before A0.
+The helper performs point-in-time local readback only. It creates no local
+checkout/task directory and exposes no provider, runner, transport-client,
+service-mutation, install, recovery, or VM-launch path.
 """
 from __future__ import annotations
 
@@ -14,6 +12,7 @@ import datetime as dt
 import fcntl
 import gzip
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -35,15 +34,14 @@ GUEST_LOCK_PATH = STATE_ROOT / "guest.lock"
 TRANSACTION_PATH = PRODUCTION_HOME / ".local/state/ldw/dragonfly-canary-publication/install-transaction.json"
 RECEIPT_PATH = PRODUCTION_HOME / ".local/state/ldw/dragonfly-canary-publication/install-receipt.json"
 AUTHORIZED_KEYS_PATH = PRODUCTION_HOME / ".ssh/authorized_keys"
+AUTHORIZED_KEYS2_PATH = PRODUCTION_HOME / ".ssh/authorized_keys2"
 FORCED_COMMAND = "/home/eddie/.local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py"
 EXPECTED_OPENSSH_PREFIX = "OpenSSH_10.0p2 Debian-7+deb13u4"
 EXPECTED_TAILSCALE_VERSION = "1.104.4"
 ACCEPTED_LOCAL_ALIASES = {"redrix", "penguin"}
 QEMU_NAMES = {"qemu-kvm", "kvm"}
+PROC_ROOT = Path("/proc")
 
-# Exact accepted #115 rollback transport plus optional already-present canary files.
-# Values are Git blob IDs and required modes. These are source identities, not host
-# identifiers or credentials.
 REQUIRED_ACCEPTED_115 = {
     Path(".local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py"): ("bb7401de594623aa3f879150a92b20f0f6bbf607", 0o700),
     Path(".local/lib/ldw-dragonfly-jit/handoff_contract.py"): ("2f7892275bacd9f56abaa0cdf204f46f79c046c0", 0o600),
@@ -110,17 +108,20 @@ def _assert_path_chain(home: Path, target: Path, uid: int) -> None:
                 raise A0Error("A0_TARGET_PARENT_INVALID")
 
 
-def _read_owned_regular(home: Path, path: Path, uid: int, mode: int | None = None) -> bytes:
-    _assert_path_chain(home, path, uid)
+def _assert_exact_directory(home: Path, path: Path, uid: int, mode: int, classification: str) -> Path:
+    _assert_path_chain(home, path / ".sentinel", uid)
     try:
         info = path.lstat()
     except FileNotFoundError as exc:
-        raise A0Error("A0_REQUIRED_FILE_MISSING") from exc
-    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != uid:
-        raise A0Error("A0_FILE_OWNERSHIP_INVALID")
-    if mode is not None and stat.S_IMODE(info.st_mode) != mode:
-        raise A0Error("A0_FILE_MODE_INVALID")
-    return path.read_bytes()
+        raise A0Error(classification) from exc
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != uid
+        or stat.S_IMODE(info.st_mode) != mode
+    ):
+        raise A0Error(classification)
+    return path
 
 
 def _assert_owned_directory(home: Path, path: Path, uid: int, label: str) -> Path:
@@ -137,6 +138,19 @@ def _assert_owned_directory(home: Path, path: Path, uid: int, label: str) -> Pat
     ):
         raise A0Error(label + "_INVALID")
     return path
+
+
+def _read_owned_regular(home: Path, path: Path, uid: int, mode: int | None = None) -> bytes:
+    _assert_path_chain(home, path, uid)
+    try:
+        info = path.lstat()
+    except FileNotFoundError as exc:
+        raise A0Error("A0_REQUIRED_FILE_MISSING") from exc
+    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != uid:
+        raise A0Error("A0_FILE_OWNERSHIP_INVALID")
+    if mode is not None and stat.S_IMODE(info.st_mode) != mode:
+        raise A0Error("A0_FILE_MODE_INVALID")
+    return path.read_bytes()
 
 
 def _lock_available_readonly(home: Path, path: Path, uid: int) -> tuple[bool, bool]:
@@ -159,7 +173,7 @@ def _lock_available_readonly(home: Path, path: Path, uid: int) -> tuple[bool, bo
 
 
 def _validate_jit_state(home: Path, uid: int) -> dict:
-    state_root = _assert_owned_directory(home, STATE_ROOT, uid, "A0_STATE_ROOT")
+    _assert_owned_directory(home, STATE_ROOT, uid, "A0_STATE_ROOT")
     runs_root = _assert_owned_directory(home, RUNS_ROOT, uid, "A0_RUNS_ROOT")
     _assert_path_chain(home, STATUS_PATH, uid)
     if STATUS_PATH.is_symlink():
@@ -241,10 +255,35 @@ def _qemu_process_ids_from_ps(text: str) -> list[int]:
         args = parts[2] if len(parts) > 2 else ""
         tokens = [comm]
         if args:
-            tokens.extend(args.replace("\"", " ").replace("'", " ").split())
+            tokens.extend(args.replace('"', " ").replace("'", " ").split())
         if any(_looks_like_qemu(token) for token in tokens):
             matches.append(pid)
     return sorted(set(matches))
+
+
+def _kvm_fd_pids(proc_root: Path = PROC_ROOT) -> list[int]:
+    try:
+        processes = list(proc_root.iterdir())
+    except OSError as exc:
+        raise A0Error("A0_PROCESS_ENUMERATION_FAILED") from exc
+    matches: set[int] = set()
+    for process in processes:
+        if not process.name.isdigit():
+            continue
+        fd_root = process / "fd"
+        try:
+            descriptors = list(fd_root.iterdir())
+        except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+            continue
+        for descriptor in descriptors:
+            try:
+                target = os.readlink(descriptor)
+            except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+                continue
+            if target == "/dev/kvm":
+                matches.add(int(process.name))
+                break
+    return sorted(matches)
 
 
 def _default_runner(argv: tuple[str, ...]) -> tuple[int, str]:
@@ -294,6 +333,10 @@ def _transport_files(home: Path, uid: int) -> dict:
 def _transport_authorized_key(home: Path, uid: int, expected_key_sha256: str) -> dict:
     if re.fullmatch(r"[a-f0-9]{64}", expected_key_sha256) is None:
         raise A0Error("A0_EXPECTED_TRANSPORT_KEY_SHA256_INVALID")
+    _assert_exact_directory(home, home / ".ssh", uid, 0o700, "A0_SSH_DIR_INVALID")
+    _assert_path_chain(home, AUTHORIZED_KEYS2_PATH, uid)
+    if AUTHORIZED_KEYS2_PATH.exists() or AUTHORIZED_KEYS2_PATH.is_symlink():
+        raise A0Error("A0_AUTHORIZED_KEYS_ALTERNATE_PRESENT")
     data = _read_owned_regular(home, AUTHORIZED_KEYS_PATH, uid, 0o600)
     if len(data) > 1024 * 1024 or b"\x00" in data:
         raise A0Error("A0_AUTHORIZED_KEYS_INVALID")
@@ -302,32 +345,29 @@ def _transport_authorized_key(home: Path, uid: int, expected_key_sha256: str) ->
     except UnicodeDecodeError as exc:
         raise A0Error("A0_AUTHORIZED_KEYS_INVALID") from exc
 
-    expected_key_matches = 0
-    forced_command_matches = 0
-    command_option = f'command="{FORCED_COMMAND}"'
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        match = re.fullmatch(r"([^ ]+) (ssh-ed25519) ([A-Za-z0-9+/]+={0,3})(?: [^\r\n]*)?", line)
-        if match is None:
-            continue
-        options, key_type, key_data = match.groups()
-        key_hash = hashlib.sha256(f"{key_type} {key_data}".encode("ascii")).hexdigest()
-        option_set = set(options.split(","))
-        constrained = option_set == {"restrict", command_option} and len(options.split(",")) == 2
-        if command_option in option_set:
-            if not constrained:
-                raise A0Error("A0_FORCED_KEY_RESTRICTION_INVALID")
-            forced_command_matches += 1
-        if key_hash == expected_key_sha256:
-            if not constrained:
-                raise A0Error("A0_TRANSPORT_KEY_UNCONSTRAINED")
-            expected_key_matches += 1
-    if forced_command_matches != 1 or expected_key_matches != 1:
+    active = [
+        raw.strip()
+        for raw in text.splitlines()
+        if raw.strip() and not raw.strip().startswith("#")
+    ]
+    if len(active) != 1:
+        raise A0Error("A0_AUTHORIZED_KEYS_NOT_UNIQUE")
+
+    command = re.escape(FORCED_COMMAND)
+    match = re.fullmatch(
+        rf'restrict,command="{command}" (ssh-ed25519) ([A-Za-z0-9+/]+={{0,3}})(?: [^\r\n]*)?',
+        active[0],
+    )
+    if match is None:
+        raise A0Error("A0_TRANSPORT_KEY_IDENTITY_INVALID")
+    key_type, key_data = match.groups()
+    key_hash = hashlib.sha256(f"{key_type} {key_data}".encode("ascii")).hexdigest()
+    if key_hash != expected_key_sha256:
         raise A0Error("A0_TRANSPORT_KEY_IDENTITY_INVALID")
     return {
         "authorizedKeysInvariant": True,
+        "authorizedKeysActiveEntries": 1,
+        "sshDirectoryMode": "0700",
         "transportKeyIdentity": "expected",
     }
 
@@ -351,7 +391,11 @@ def _parse_tailscale_status(text: str) -> dict:
     health = value.get("Health")
     if health not in (None, []):
         raise A0Error("A0_TAILSCALE_HEALTH_WARNING")
-    return {"tailscaleBackend": "Running", "tailscaleSelfOnline": True, "tailscaleHealthWarnings": 0}
+    return {
+        "tailscaleBackend": "Running",
+        "tailscaleSelfOnline": True,
+        "tailscaleHealthWarnings": 0,
+    }
 
 
 def _parse_tailscale_prefs(text: str) -> dict:
@@ -402,6 +446,36 @@ def _json_config_empty(text: str) -> bool:
     return empty(value)
 
 
+def _listener_host(local: str) -> tuple[str, int] | None:
+    if ":" not in local:
+        return None
+    host, port_text = local.rsplit(":", 1)
+    if port_text != "22":
+        return None
+    host = host.strip("[]")
+    return host, 22
+
+
+def _has_nonloopback_tcp22(text: str) -> bool:
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        parsed = _listener_host(parts[3])
+        if parsed is None:
+            continue
+        host, _port = parsed
+        if host in {"*", "0.0.0.0", "::"}:
+            return True
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            continue
+        if not address.is_loopback:
+            return True
+    return False
+
+
 def _network_snapshot(runner: CommandRunner, expected_host_fingerprint: str) -> dict:
     if not re.fullmatch(r"SHA256:[A-Za-z0-9+/]+={0,2}", expected_host_fingerprint):
         raise A0Error("A0_EXPECTED_HOST_FINGERPRINT_INVALID")
@@ -414,14 +488,8 @@ def _network_snapshot(runner: CommandRunner, expected_host_fingerprint: str) -> 
     if _run(runner, ("/usr/bin/systemctl", "is-enabled", "ssh.service"), "A0_SSH_SERVICE_NOT_ENABLED") != "enabled":
         raise A0Error("A0_SSH_SERVICE_NOT_ENABLED")
     listeners = _run(runner, ("/usr/bin/ss", "-ltnH"), "A0_TCP_LISTENER_READBACK_FAILED")
-    listening = False
-    for line in listeners.splitlines():
-        parts = line.split()
-        if len(parts) >= 4 and parts[3].endswith(":22"):
-            listening = True
-            break
-    if not listening:
-        raise A0Error("A0_TCP22_NOT_LISTENING")
+    if not _has_nonloopback_tcp22(listeners):
+        raise A0Error("A0_TCP22_NOT_NONLOOPBACK")
 
     manpage = Path("/usr/share/man/man5/authorized_keys.5.gz")
     try:
@@ -471,6 +539,7 @@ def _network_snapshot(runner: CommandRunner, expected_host_fingerprint: str) -> 
         "sshServiceActive": True,
         "sshServiceEnabled": True,
         "tcp22Listening": True,
+        "tcp22NonLoopbackListening": True,
         "authorizedKeysRestrictSemantics": True,
         "hostFingerprintInvariant": True,
         "tailscaleVersion": EXPECTED_TAILSCALE_VERSION,
@@ -482,12 +551,13 @@ def _network_snapshot(runner: CommandRunner, expected_host_fingerprint: str) -> 
     }
 
 
-def _qemu_snapshot(runner: CommandRunner) -> dict:
+def _qemu_snapshot(runner: CommandRunner, proc_root: Path = PROC_ROOT) -> dict:
     output = _run(runner, ("/usr/bin/ps", "-eo", "pid=,comm=,args="), "A0_PROCESS_ENUMERATION_FAILED")
     pids = _qemu_process_ids_from_ps(output)
-    if pids:
+    kvm_pids = _kvm_fd_pids(proc_root)
+    if pids or kvm_pids:
         raise A0Error("A0_QEMU_PROCESS_PRESENT")
-    return {"qemuProcessCount": 0}
+    return {"qemuProcessCount": 0, "kvmFdProcessCount": 0}
 
 
 def _publication_state(home: Path, uid: int) -> dict:
@@ -509,6 +579,7 @@ def _collect_once(
     expected_local_alias: str,
     expected_host_fingerprint: str,
     expected_transport_key_sha256: str,
+    proc_root: Path = PROC_ROOT,
 ) -> dict:
     alias = socket.gethostname().split(".", 1)[0].lower()
     if expected_local_alias not in ACCEPTED_LOCAL_ALIASES:
@@ -520,7 +591,7 @@ def _collect_once(
         "marker": MARKER,
         "localHostAlias": alias,
         **_validate_jit_state(home, uid),
-        **_qemu_snapshot(runner),
+        **_qemu_snapshot(runner, proc_root),
         **_publication_state(home, uid),
         **_transport_files(home, uid),
         **_transport_authorized_key(home, uid, expected_transport_key_sha256),
@@ -536,6 +607,7 @@ def collect_a0(
     expected_local_alias: str,
     expected_host_fingerprint: str,
     expected_transport_key_sha256: str,
+    proc_root: Path = PROC_ROOT,
 ) -> dict:
     home = _assert_home(home, uid)
     first = _collect_once(
@@ -545,6 +617,7 @@ def collect_a0(
         expected_local_alias=expected_local_alias,
         expected_host_fingerprint=expected_host_fingerprint,
         expected_transport_key_sha256=expected_transport_key_sha256,
+        proc_root=proc_root,
     )
     second = _collect_once(
         home=home,
@@ -553,6 +626,7 @@ def collect_a0(
         expected_local_alias=expected_local_alias,
         expected_host_fingerprint=expected_host_fingerprint,
         expected_transport_key_sha256=expected_transport_key_sha256,
+        proc_root=proc_root,
     )
     if first != second:
         raise A0Error("A0_SNAPSHOT_CHANGED_DURING_READBACK")
@@ -563,7 +637,12 @@ def collect_a0(
         .isoformat()
         .replace("+00:00", "Z")
     )
-    return {**second, "stabilityPasses": 2, "snapshotSha256": snapshot_sha, "generatedAt": generated_at}
+    return {
+        **second,
+        "stabilityPasses": 2,
+        "snapshotSha256": snapshot_sha,
+        "generatedAt": generated_at,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
