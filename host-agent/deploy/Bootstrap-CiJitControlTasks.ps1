@@ -8,8 +8,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# Accepted PR #144 squash merge and exact installer/worker/status-access blobs. This
-# provenance boundary does not lift #92 DO_NOT_HAND_EDIT or authorize queue/JIT work.
+# Accepted PR #144 squash merge and exact installer/worker/status-access blobs. Historical
+# #92 DO_NOT_RETRY_INSTALL / DO_NOT_HAND_EDIT markers remain fail-closed source evidence;
+# live #92 disposition controls when this bootstrap may be used.
 $acceptedSourceCommit = '2bffdaf62d3f3df05c5d03220f1b06e0c4c1dd55'
 $acceptedManageBlob = 'fd52f44134dda198cb35ed7ef999e166ab143bbe'
 $acceptedWorkerBlob = '02bc6f1526b27a4bf2ef786dd91ba8b816beb68c'
