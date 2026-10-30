@@ -172,9 +172,12 @@ function Install-Tasks {
         $definition.Settings.MultipleInstances=2;$definition.Settings.ExecutionTimeLimit='PT35M'
         $action=$definition.Actions.Create(0);$action.Path=$pwsh;$action.Arguments=Get-ExpectedArguments $entry.Value $workerSha
         $name=$entry.Key.TrimStart('\')
-        # CREATE_OR_UPDATE | DONT_ADD_PRINCIPAL_ACE: keep only the explicit reviewed SDDL.
-        # https://learn.microsoft.com/en-us/windows/win32/api/taskschd/ne-taskschd-task_creation
-        $null=$folder.RegisterTaskDefinition($name,$definition,0x16,$OwnerSid,$null,3,$taskSddl)
+        # CREATE_OR_UPDATE | DONT_ADD_PRINCIPAL_ACE avoids adding a new context-principal ACE,
+        # but Windows explicitly preserves an old context-principal ACE when updating a legacy task.
+        # Reset the registered task DACL to the exact reviewed SDDL before strict readback validation
+        # so CREATE_OR_UPDATE can safely converge pre-existing partial-install residue.
+        $registered=$folder.RegisterTaskDefinition($name,$definition,0x16,$OwnerSid,$null,3,$taskSddl)
+        $registered.SetSecurityDescriptor($taskSddl,0x10)
         Assert-TaskDefinition ($folder.GetTask($entry.Key)) $entry.Key $entry.Value $workerSha
     }
     'CI_JIT_CONTROL_TASK_INSTALL=PASS'
