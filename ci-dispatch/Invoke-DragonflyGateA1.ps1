@@ -1,6 +1,12 @@
 param(
     [Parameter(Mandatory)]
-    [string]$RepositoryRoot
+    [string]$RepositoryRoot,
+
+    [Parameter(Mandatory)]
+    [ValidatePattern('^[0-9a-f]{40}$')]
+    [string]$ExpectedControllerHeadSha,
+
+    [switch]$A0Confirmed
 )
 
 Set-StrictMode -Version Latest
@@ -11,11 +17,23 @@ function Write-LdwGateA1Pass {
     Write-Output ($Name + '=PASS')
 }
 
+function Get-LdwGateA1RelativePath {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Path
+    )
+    $rootFull = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar)
+    $pathFull = [IO.Path]::GetFullPath($Path)
+    $prefix = $rootFull + [IO.Path]::DirectorySeparatorChar
+    if (-not $pathFull.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)) { throw 'GATE_A1_TREE_PATH_OUTSIDE_ROOT' }
+    $pathFull.Substring($prefix.Length).Replace('\','/')
+}
+
 function Get-LdwGateA1TreeDigest {
     param([Parameter(Mandatory)][string]$Root)
     if (-not (Test-Path -LiteralPath $Root -PathType Container)) { throw 'GATE_A1_TREE_ROOT_MISSING' }
     $records = foreach ($file in Get-ChildItem -LiteralPath $Root -File -Recurse -Force | Sort-Object FullName) {
-        $relative = [IO.Path]::GetRelativePath($Root,$file.FullName).Replace('\','/')
+        $relative = Get-LdwGateA1RelativePath -Root $Root -Path $file.FullName
         $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
         "$relative`0$hash"
     }
@@ -26,7 +44,10 @@ function Get-LdwGateA1TreeDigest {
 }
 
 function Assert-LdwGateA1Repository {
-    param([Parameter(Mandatory)][string]$Root)
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedHead
+    )
     $rootPath = [IO.Path]::GetFullPath($Root)
     if (-not (Test-Path -LiteralPath $rootPath -PathType Container)) { throw 'GATE_A1_REPOSITORY_MISSING' }
     $origin = & git -C $rootPath remote get-url origin 2>$null
@@ -37,6 +58,7 @@ function Assert-LdwGateA1Repository {
     if ($LASTEXITCODE -ne 0 -or $status) { throw 'GATE_A1_SOURCE_WORKTREE_DIRTY' }
     $head = (& git -C $rootPath rev-parse HEAD 2>$null).Trim()
     if ($LASTEXITCODE -ne 0 -or $head -cnotmatch '^[0-9a-f]{40}$') { throw 'GATE_A1_SOURCE_HEAD_INVALID' }
+    if ($head -cne $ExpectedHead) { throw 'GATE_A1_CONTROLLER_HEAD_MISMATCH' }
     [pscustomobject]@{ Root=$rootPath; Head=$head }
 }
 
@@ -48,17 +70,14 @@ function Assert-LdwGateA1Elevation {
     }
 }
 
-function Get-LdwGateA1TailscaleStatus {
-    $service = Get-Service -Name Tailscale -ErrorAction Stop
-    if ($service.Status -ne 'Running') { throw 'GATE_A1_TAILSCALE_SERVICE_NOT_RUNNING' }
-    $tailscale = (Get-Command tailscale.exe -ErrorAction Stop).Source
-    $raw = & $tailscale status --json 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'GATE_A1_TAILSCALE_STATUS_FAILED' }
-    try { $status = $raw | ConvertFrom-Json }
-    catch { throw 'GATE_A1_TAILSCALE_STATUS_INVALID' }
-    if ($status.BackendState -cne 'Running' -or -not [bool]$status.Self.Online) { throw 'GATE_A1_TAILSCALE_LOCAL_NOT_READY' }
+function Assert-LdwGateA1TailscaleStatusObject {
+    param([Parameter(Mandatory)][object]$Status)
+    if ($Status.BackendState -cne 'Running' -or $null -eq $Status.Self -or -not [bool]$Status.Self.Online) {
+        throw 'GATE_A1_TAILSCALE_LOCAL_NOT_READY'
+    }
+    if ($null -eq $Status.Peer) { throw 'GATE_A1_REDRIX_TAILSCALE_PEER_NOT_UNIQUE' }
     $matches = @()
-    foreach ($prop in $status.Peer.PSObject.Properties) {
+    foreach ($prop in $Status.Peer.PSObject.Properties) {
         $peer = $prop.Value
         $hostName = [string]$peer.HostName
         $dnsName = [string]$peer.DNSName
@@ -78,25 +97,44 @@ function Get-LdwGateA1TailscaleStatus {
         $parsed.GetAddressBytes()[1] -le 127
     })
     if ($ipv4.Count -ne 1) { throw 'GATE_A1_REDRIX_PRIVATE_TAILSCALE_IPV4_NOT_UNIQUE' }
-    [pscustomobject]@{ PeerOnline=$true; PrivateIPv4Present=$true }
+    [pscustomobject]@{ PeerDiscovered=$true; PrivateIPv4Present=$true }
 }
 
-try {
-    Write-Output '=== LDW Dragonfly Gate A1 operator ==='
+function Get-LdwGateA1TailscaleStatus {
+    $service = Get-Service -Name Tailscale -ErrorAction Stop
+    if ($service.Status -ne 'Running') { throw 'GATE_A1_TAILSCALE_SERVICE_NOT_RUNNING' }
+    $tailscale = (Get-Command tailscale.exe -ErrorAction Stop).Source
+    $raw = & $tailscale status --json 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'GATE_A1_TAILSCALE_STATUS_FAILED' }
+    try { $status = $raw | ConvertFrom-Json }
+    catch { throw 'GATE_A1_TAILSCALE_STATUS_INVALID' }
+    Assert-LdwGateA1TailscaleStatusObject -Status $status
+}
+
+function Invoke-LdwDragonflyGateA1 {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedHead,
+        [Parameter(Mandatory)][bool]$A0IsConfirmed
+    )
+
+    if (-not $A0IsConfirmed) { throw 'GATE_A1_A0_CONFIRMATION_REQUIRED' }
+    Write-Output 'A0_REDRIX_RUNTIME_BASELINE_CONFIRMED_BY_ORCHESTRATOR=yes'
 
     Assert-LdwGateA1Elevation
     Write-LdwGateA1Pass 'ADMINISTRATOR_SHELL'
 
-    $git = (Get-Command git.exe -ErrorAction Stop).Source
+    $null = Get-Command git.exe -ErrorAction Stop
     $pythonCommand = Get-Command python.exe -ErrorAction SilentlyContinue
     if (-not $pythonCommand) { $pythonCommand = Get-Command python3.exe -ErrorAction Stop }
     $python = $pythonCommand.Source
     Write-LdwGateA1Pass 'GIT_PRESENT'
     Write-LdwGateA1Pass 'PYTHON_PRESENT'
 
-    $repo = Assert-LdwGateA1Repository -Root $RepositoryRoot
+    $repo = Assert-LdwGateA1Repository -Root $Root -ExpectedHead $ExpectedHead
     Write-LdwGateA1Pass 'SOURCE_ORIGIN'
     Write-LdwGateA1Pass 'SOURCE_WORKTREE_CLEAN'
+    Write-LdwGateA1Pass 'CONTROLLER_HEAD_PINNED'
     Write-Output ('GATE_A1_CONTROLLER_HEAD=' + $repo.Head)
 
     $dispatcherRoot = Join-Path $env:ProgramData 'LDW\CiRunnerDispatch'
@@ -125,7 +163,7 @@ try {
 
     $null = Get-LdwGateA1TailscaleStatus
     Write-LdwGateA1Pass 'TAILSCALE_LOCAL_READY'
-    Write-LdwGateA1Pass 'REDRIX_TAILSCALE_PEER_ONLINE'
+    Write-LdwGateA1Pass 'REDRIX_TAILSCALE_PEER_DISCOVERED'
     Write-LdwGateA1Pass 'REDRIX_PRIVATE_TAILSCALE_IPV4_PRESENT'
 
     $taskRoot = Join-Path $env:TEMP ('ldw-dragonfly-gatea1-' + [Guid]::NewGuid().ToString('N'))
@@ -185,15 +223,23 @@ try {
     if (Test-Path -LiteralPath $uncertainty) { throw 'GATE_A1_DRAGONFLY_UNCERTAINTY_CREATED' }
     Write-LdwGateA1Pass 'DRAGONFLY_CANARY_UNCERTAINTY_ABSENT_AFTER'
 
-    Write-Output 'REAL_JIT_CONFIG_GENERATED=no'
-    Write-Output 'RUNNER_REGISTERED=no'
-    Write-Output 'WORKFLOW_DISPATCHED=no'
-    Write-Output 'QEMU_LAUNCHED=no'
-    Write-Output 'REDRIX_MUTATED=no'
+    Write-Output 'GITHUB_PROVIDER_ACTIONS_INVOKED_BY_HARNESS=no'
+    Write-Output 'WORKFLOW_DISPATCH_INVOKED_BY_HARNESS=no'
+    Write-Output 'SSH_TRANSPORT_INVOKED_BY_HARNESS=no'
+    Write-Output 'REDRIX_INSTALL_INVOKED_BY_HARNESS=no'
+    Write-Output 'QEMU_INVOKED_BY_HARNESS=no'
+    Write-Output 'GATE_B_ACTIONS_INVOKED_BY_HARNESS=no'
     Write-Output 'GATE_A1_LDW01=PASS'
 }
-catch {
-    Write-Output ('HOLD:' + $_.Exception.Message)
-    Write-Output 'GATE_A1_LDW01=HOLD'
-    exit 1
+
+if ($MyInvocation.InvocationName -ne '.') {
+    try {
+        Write-Output '=== LDW Dragonfly Gate A1 operator ==='
+        Invoke-LdwDragonflyGateA1 -Root $RepositoryRoot -ExpectedHead $ExpectedControllerHeadSha -A0IsConfirmed ([bool]$A0Confirmed)
+    }
+    catch {
+        Write-Output ('HOLD:' + $_.Exception.Message)
+        Write-Output 'GATE_A1_LDW01=HOLD'
+        exit 1
+    }
 }
