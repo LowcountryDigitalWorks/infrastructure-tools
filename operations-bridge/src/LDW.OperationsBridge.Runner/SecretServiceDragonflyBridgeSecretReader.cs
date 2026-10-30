@@ -19,6 +19,10 @@ public sealed class SecretServiceDragonflyBridgeSecretReader : IDragonflyBridgeS
         if (!OperatingSystem.IsLinux())
             throw Unavailable();
 
+        var credentialSource = Environment.GetEnvironmentVariable(SystemdCredentialDragonflyBridgeSecretReader.CredentialSourceEnvironment);
+        if (credentialSource is not null)
+            return new SystemdCredentialDragonflyBridgeSecretReader().ReadToken();
+
         try
         {
             VerifySecretTool();

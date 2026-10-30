@@ -39,6 +39,10 @@ jobs:
           dotnet build operations-bridge/LDW.OperationsBridge.sln -c Release
           dotnet run --no-build --project operations-bridge/tests/LDW.OperationsBridge.Tests/LDW.OperationsBridge.Tests.csproj -c Release
           node --test operations-bridge/relay-cloudflare/tests/*.test.mjs
+          python3 -m py_compile \
+            operations-bridge/scripts/redrix-systemd-bridge-credential.py \
+            operations-bridge/scripts/redrix-systemd-bridge-service.py
+          python3 -m unittest discover -s operations-bridge/scripts/tests -p 'test_*.py' -v
 
       - name: Build package twice and prove reproducibility
         id: package
