@@ -275,10 +275,16 @@ def migrate() -> None:
         _kill_process(lookup)
         _run_sudo([RM, "-f", str(temp_path)], "CREDENTIAL_TEMP_CLEANUP_FAILED")
 
-    _verify_ciphertext_metadata()
-    if encrypted_credential_digest() != source_digest:
-        _run_sudo([RM, "-f", str(CREDENTIAL_PATH)], "CREDENTIAL_ARTIFACT_ROLLBACK_FAILED")
-        raise MigrationError("CREDENTIAL_VERIFY_MISMATCH")
+    try:
+        _verify_ciphertext_metadata()
+        if encrypted_credential_digest() != source_digest:
+            raise MigrationError("CREDENTIAL_VERIFY_MISMATCH")
+    except Exception as verify_error:
+        try:
+            _run_sudo([RM, "-f", str(CREDENTIAL_PATH)], "CREDENTIAL_ARTIFACT_ROLLBACK_FAILED")
+        except Exception as rollback_error:
+            raise MigrationError("CREDENTIAL_ARTIFACT_ROLLBACK_FAILED") from rollback_error
+        raise verify_error
 
 
 def verify() -> None:
