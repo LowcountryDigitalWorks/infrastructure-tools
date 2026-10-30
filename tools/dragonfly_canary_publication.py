@@ -149,7 +149,7 @@ def _safe_name(name: str, package: str) -> PurePosixPath:
     return pure
 
 
-def _tar(root: Path, archive: Path, epoch: int) -> None:
+def _tar(root: Path, archive: Path, epoch: int, file_modes: dict[str, int]) -> None:
     with archive.open("wb") as raw:
         with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz:
             with tarfile.open(fileobj=gz, mode="w", format=tarfile.GNU_FORMAT) as tf:
@@ -163,19 +163,30 @@ def _tar(root: Path, archive: Path, epoch: int) -> None:
                         info.mode = 0o755
                         tf.addfile(info)
                     elif info.isfile():
+                        # Windows chmod/stat cannot represent POSIX package modes.
+                        # Serialize the pinned inventory contract, not host metadata.
+                        relative = path.relative_to(root).as_posix()
+                        if relative not in file_modes:
+                            raise PublicationError("PACKAGE_INVENTORY_DRIFT")
+                        info.mode = file_modes[relative]
                         with path.open("rb") as handle:
                             tf.addfile(info, handle)
                     else:
                         raise PublicationError("PACKAGE_MEMBER_TYPE_REFUSED")
 
 
-def _zip(root: Path, archive: Path) -> None:
+def _zip(root: Path, archive: Path, file_modes: dict[str, int]) -> None:
     fixed = (2026, 1, 1, 0, 0, 0)
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
         for path in sorted((p for p in root.rglob("*") if p.is_file()), key=lambda p: p.relative_to(root.parent).as_posix()):
+            # As with TAR, serialize the pinned inventory, not host stat modes.
+            relative = path.relative_to(root).as_posix()
+            if relative not in file_modes:
+                raise PublicationError("PACKAGE_INVENTORY_DRIFT")
             info = zipfile.ZipInfo(path.relative_to(root.parent).as_posix(), fixed)
             info.compress_type = zipfile.ZIP_DEFLATED
-            info.external_attr = (stat.S_IFREG | (path.stat().st_mode & 0o777)) << 16
+            info.create_system = 3  # Unix mode encoding on every build host.
+            info.external_attr = (stat.S_IFREG | file_modes[relative]) << 16
             zf.writestr(info, path.read_bytes())
 
 
@@ -219,7 +230,9 @@ def build_redrix(repo: Path, output: Path) -> tuple[Path, Path]:
     }
     _write(root, "manifest.json", _canonical(manifest), "0600")
     archive = output / f"{REDRIX_PACKAGE}.tar.gz"
-    _tar(root, archive, manifest["sourceDateEpoch"])
+    file_modes = {record["packagePath"]: int(record["mode"], 8) for record in records}
+    file_modes["manifest.json"] = 0o600
+    _tar(root, archive, manifest["sourceDateEpoch"], file_modes)
     return archive, _checksum(archive)
 
 
@@ -258,7 +271,9 @@ def build_ldw01(repo: Path, output: Path) -> tuple[Path, Path]:
     }
     _write(root, "manifest.json", _canonical(manifest), "0600")
     archive = output / f"{LDW01_PACKAGE}.zip"
-    _zip(root, archive)
+    file_modes = {record["packagePath"]: int(record["mode"], 8) for record in records}
+    file_modes["manifest.json"] = 0o600
+    _zip(root, archive, file_modes)
     return archive, _checksum(archive)
 
 
