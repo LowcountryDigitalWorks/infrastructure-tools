@@ -13,7 +13,7 @@ import os
 import re
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 SUDO = "/usr/bin/sudo"
 SYSTEMCTL = "/usr/bin/systemctl"
@@ -23,10 +23,11 @@ RM = "/usr/bin/rm"
 UNIT_NAME = "ldw-operations-bridge-dragonfly.service"
 UNIT_DESTINATION = Path("/etc/systemd/system") / UNIT_NAME
 UNIT_SOURCE = Path(__file__).resolve().parents[1] / "systemd" / UNIT_NAME
-EXPECTED_UNIT_SHA256 = "9a72afaaaa34bb510e8a693d3377b08ffc55ffcf0880d17d8b3b71ae949fba9a"
+EXPECTED_UNIT_SHA256 = "2ac20b0169355616da1afdc57a77b0d610d202b2b117a1d21eb9b032c8ddf613"
 PACKAGE_ROOT = Path("/home/eddie/.local/lib/ldw/operations-bridge/dragonfly")
+PAYLOAD_ROOT = PACKAGE_ROOT / "payload"
 PACKAGE_MANIFEST = PACKAGE_ROOT / "manifest.json"
-BINARY = PACKAGE_ROOT / "payload/LDW.OperationsBridge.Runner"
+BINARY = PAYLOAD_ROOT / "LDW.OperationsBridge.Runner"
 CONFIG = Path("/home/eddie/.config/ldw/operations-bridge/dragonfly/config.json")
 CREDENTIAL = Path("/etc/ldw/operations-bridge/dragonfly/bridge-bearer.cred")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -110,9 +111,49 @@ def _verify_dependency(path: Path, classification: str, *, executable: bool = Fa
         raise ServiceError(classification)
 
 
+def _verify_payload_records(records: object) -> dict[str, dict]:
+    if not isinstance(records, list) or not records:
+        raise ServiceError("BRIDGE_PACKAGE_MANIFEST_INVALID")
+    if not PAYLOAD_ROOT.is_dir() or PAYLOAD_ROOT.is_symlink():
+        raise ServiceError("BRIDGE_PACKAGE_PAYLOAD_INVALID")
+
+    expected: dict[str, dict] = {}
+    for item in records:
+        if not isinstance(item, dict) or set(item) != {"path", "sha256", "size"}:
+            raise ServiceError("BRIDGE_PACKAGE_MANIFEST_INVALID")
+        relative = item.get("path")
+        digest = item.get("sha256")
+        size = item.get("size")
+        if not isinstance(relative, str) or not relative or "\\" in relative:
+            raise ServiceError("BRIDGE_PACKAGE_MANIFEST_INVALID")
+        pure = PurePosixPath(relative)
+        if pure.is_absolute() or not pure.parts or any(part in {"", ".", ".."} for part in pure.parts):
+            raise ServiceError("BRIDGE_PACKAGE_MANIFEST_INVALID")
+        if relative in expected:
+            raise ServiceError("BRIDGE_PACKAGE_MANIFEST_INVALID")
+        if SHA256_RE.fullmatch(str(digest or "")) is None or not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            raise ServiceError("BRIDGE_PACKAGE_MANIFEST_INVALID")
+        candidate = PAYLOAD_ROOT.joinpath(*pure.parts)
+        _verify_dependency(candidate, "BRIDGE_PACKAGE_PAYLOAD_INVALID")
+        if candidate.stat().st_size != size or _sha256(candidate) != digest:
+            raise ServiceError("BRIDGE_PACKAGE_PAYLOAD_PROVENANCE_INVALID")
+        expected[relative] = item
+
+    actual: set[str] = set()
+    for path in PAYLOAD_ROOT.rglob("*"):
+        if path.is_symlink():
+            raise ServiceError("BRIDGE_PACKAGE_PAYLOAD_INVALID")
+        if path.is_file():
+            actual.add(path.relative_to(PAYLOAD_ROOT).as_posix())
+        elif not path.is_dir():
+            raise ServiceError("BRIDGE_PACKAGE_PAYLOAD_INVALID")
+    if actual != set(expected):
+        raise ServiceError("BRIDGE_PACKAGE_PAYLOAD_SET_INVALID")
+    return expected
+
+
 def _verify_installed_package() -> None:
     _verify_dependency(PACKAGE_MANIFEST, "BRIDGE_PACKAGE_MANIFEST_INVALID")
-    _verify_dependency(BINARY, "BRIDGE_BINARY_INVALID", executable=True)
     try:
         manifest = json.loads(PACKAGE_MANIFEST.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -138,17 +179,11 @@ def _verify_installed_package() -> None:
     if GIT_SHA_RE.fullmatch(str(manifest.get("sourceCommit", ""))) is None:
         raise ServiceError("BRIDGE_PACKAGE_MANIFEST_INVALID")
 
-    records = manifest.get("files")
-    if not isinstance(records, list):
+    records = _verify_payload_records(manifest.get("files"))
+    entrypoint_record = records.get("LDW.OperationsBridge.Runner")
+    if entrypoint_record is None:
         raise ServiceError("BRIDGE_PACKAGE_MANIFEST_INVALID")
-    matches = [item for item in records if isinstance(item, dict) and item.get("path") == "LDW.OperationsBridge.Runner"]
-    if len(matches) != 1 or set(matches[0]) != {"path", "sha256", "size"}:
-        raise ServiceError("BRIDGE_PACKAGE_MANIFEST_INVALID")
-    record = matches[0]
-    if SHA256_RE.fullmatch(str(record.get("sha256", ""))) is None or not isinstance(record.get("size"), int) or isinstance(record.get("size"), bool) or record["size"] <= 0:
-        raise ServiceError("BRIDGE_PACKAGE_MANIFEST_INVALID")
-    if BINARY.stat().st_size != record["size"] or _sha256(BINARY) != record["sha256"]:
-        raise ServiceError("BRIDGE_BINARY_PROVENANCE_INVALID")
+    _verify_dependency(BINARY, "BRIDGE_BINARY_INVALID", executable=True)
 
 
 def _verify_credential_metadata() -> None:
