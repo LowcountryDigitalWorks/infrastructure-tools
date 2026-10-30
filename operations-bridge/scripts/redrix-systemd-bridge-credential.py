@@ -9,9 +9,12 @@ fixed Secret Service lookup and digest/systemd-creds processes.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import os
 import re
 import secrets
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -34,6 +37,7 @@ CREDENTIAL_NAME = "bridge-bearer"
 CREDENTIAL_DIRECTORY = Path("/etc/ldw/operations-bridge/dragonfly")
 CREDENTIAL_PATH = CREDENTIAL_DIRECTORY / "bridge-bearer.cred"
 UNIT_NAME = "ldw-operations-bridge-dragonfly.service"
+LOCK_PATH = Path("/run/user/1000/ldw-operations-bridge-dragonfly-credential.lock")
 XDG_RUNTIME_DIR = "/run/user/1000"
 DBUS_SESSION_BUS_ADDRESS = "unix:path=/run/user/1000/bus"
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -129,15 +133,16 @@ def encrypted_credential_digest() -> str:
     return _digest_stream(decrypt)
 
 
-def _sudo_result(args: list[str]) -> subprocess.CompletedProcess[bytes]:
+def _sudo_result(args: list[str], *, capture: bool = False) -> subprocess.CompletedProcess:
     return subprocess.run(
         [SUDO, "-n", *args],
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
+        stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         env={},
         timeout=15,
         check=False,
+        text=capture,
     )
 
 
@@ -152,6 +157,69 @@ def _artifact_present_privileged() -> bool:
     if exists_result.returncode not in {0, 1} or link_result.returncode not in {0, 1}:
         raise MigrationError("CREDENTIAL_ARTIFACT_STATE_UNAVAILABLE")
     return exists_result.returncode == 0 or link_result.returncode == 0
+
+
+def _artifact_identity_privileged(path: Path) -> str:
+    result = _sudo_result([STAT, "-c", "%d:%i:%u:%g:%a:%F", str(path)], capture=True)
+    if result.returncode != 0 or not isinstance(result.stdout, str):
+        raise MigrationError("CREDENTIAL_ARTIFACT_IDENTITY_UNAVAILABLE")
+    parts = result.stdout.strip().split(":", 5)
+    if len(parts) != 6:
+        raise MigrationError("CREDENTIAL_ARTIFACT_IDENTITY_INVALID")
+    device, inode, uid, gid, mode, file_type = parts
+    if (
+        not device.isdigit()
+        or not inode.isdigit()
+        or uid != "0"
+        or gid != "0"
+        or mode != "600"
+        or file_type != "regular file"
+    ):
+        raise MigrationError("CREDENTIAL_ARTIFACT_IDENTITY_INVALID")
+    return device + ":" + inode
+
+
+def _assert_published_identity(expected_identity: str) -> None:
+    if _artifact_identity_privileged(CREDENTIAL_PATH) != expected_identity:
+        raise MigrationError("CREDENTIAL_ARTIFACT_IDENTITY_CHANGED")
+
+
+@contextlib.contextmanager
+def _operation_lock():
+    try:
+        parent_info = LOCK_PATH.parent.lstat()
+    except OSError as exc:
+        raise MigrationError("CREDENTIAL_OPERATION_LOCK_FAILED") from exc
+    if (
+        not stat.S_ISDIR(parent_info.st_mode)
+        or stat.S_ISLNK(parent_info.st_mode)
+        or parent_info.st_uid != os.geteuid()
+        or stat.S_IMODE(parent_info.st_mode) & 0o077
+    ):
+        raise MigrationError("CREDENTIAL_OPERATION_LOCK_FAILED")
+
+    flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(LOCK_PATH, flags, 0o600)
+    except OSError as exc:
+        raise MigrationError("CREDENTIAL_OPERATION_LOCK_FAILED") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600:
+            raise MigrationError("CREDENTIAL_OPERATION_LOCK_FAILED")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise MigrationError("CREDENTIAL_OPERATION_BUSY") from exc
+        try:
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def _assert_service_safe_for_credential_mutation() -> None:
@@ -224,14 +292,16 @@ def _verify_ciphertext_metadata() -> None:
         raise MigrationError("CREDENTIAL_ARTIFACT_METADATA_INVALID")
 
 
-def _remove_published_credential() -> None:
-    try:
-        _run_sudo([RM, "-f", str(CREDENTIAL_PATH)], "CREDENTIAL_ARTIFACT_ROLLBACK_FAILED")
-    except Exception as rollback_error:
-        raise MigrationError("CREDENTIAL_ARTIFACT_ROLLBACK_FAILED") from rollback_error
+def _remove_published_credential(expected_identity: str) -> None:
+    if not _artifact_present_privileged():
+        return
+    _assert_published_identity(expected_identity)
+    _run_sudo([RM, "-f", str(CREDENTIAL_PATH)], "CREDENTIAL_ARTIFACT_ROLLBACK_FAILED")
+    if _artifact_present_privileged():
+        raise MigrationError("CREDENTIAL_ARTIFACT_ROLLBACK_FAILED")
 
 
-def migrate() -> None:
+def _migrate_locked() -> None:
     _assert_service_safe_for_credential_mutation()
     if _artifact_present_privileged():
         raise MigrationError("CREDENTIAL_ARTIFACT_EXISTS")
@@ -263,7 +333,7 @@ def migrate() -> None:
         env={},
     )
     lookup.stdout.close()
-    published = False
+    published_identity: str | None = None
     try:
         try:
             encrypt.wait(timeout=20)
@@ -276,40 +346,58 @@ def migrate() -> None:
             raise MigrationError("CREDENTIAL_ENCRYPT_FAILED")
         _run_sudo([CHOWN, "root:root", str(temp_path)], "CREDENTIAL_TEMP_METADATA_FAILED")
         _run_sudo([CHMOD, "0600", str(temp_path)], "CREDENTIAL_TEMP_METADATA_FAILED")
+        temp_identity = _artifact_identity_privileged(temp_path)
         # Atomic exclusive publication: hard-link fails if the final path already exists.
         _run_sudo([LN, str(temp_path), str(CREDENTIAL_PATH)], "CREDENTIAL_ARTIFACT_EXISTS")
-        published = True
+        published_identity = temp_identity
     finally:
         _kill_process(encrypt)
         _kill_process(lookup)
         try:
             _run_sudo([RM, "-f", str(temp_path)], "CREDENTIAL_TEMP_CLEANUP_FAILED")
         except Exception as temp_cleanup_error:
-            if published:
-                _remove_published_credential()
+            if published_identity is not None:
+                _remove_published_credential(published_identity)
             raise temp_cleanup_error
 
+    if published_identity is None:
+        raise MigrationError("CREDENTIAL_PUBLICATION_IDENTITY_MISSING")
     try:
+        _assert_published_identity(published_identity)
         _verify_ciphertext_metadata()
         if encrypted_credential_digest() != source_digest:
             raise MigrationError("CREDENTIAL_VERIFY_MISMATCH")
+        _assert_published_identity(published_identity)
     except Exception as verify_error:
-        _remove_published_credential()
+        _remove_published_credential(published_identity)
         raise verify_error
 
 
-def verify() -> None:
+def migrate() -> None:
+    with _operation_lock():
+        _migrate_locked()
+
+
+def _verify_locked(expected_identity: str) -> None:
+    _assert_published_identity(expected_identity)
     _verify_ciphertext_metadata()
     if encrypted_credential_digest() != secret_service_digest():
         raise MigrationError("CREDENTIAL_VERIFY_MISMATCH")
+    _assert_published_identity(expected_identity)
+
+
+def verify() -> None:
+    with _operation_lock():
+        expected_identity = _artifact_identity_privileged(CREDENTIAL_PATH)
+        _verify_locked(expected_identity)
 
 
 def rollback() -> None:
-    _assert_service_safe_for_credential_mutation()
-    verify()
-    _run_sudo([RM, "-f", str(CREDENTIAL_PATH)], "CREDENTIAL_ARTIFACT_ROLLBACK_FAILED")
-    if _artifact_present_privileged():
-        raise MigrationError("CREDENTIAL_ARTIFACT_ROLLBACK_FAILED")
+    with _operation_lock():
+        _assert_service_safe_for_credential_mutation()
+        expected_identity = _artifact_identity_privileged(CREDENTIAL_PATH)
+        _verify_locked(expected_identity)
+        _remove_published_credential(expected_identity)
 
 
 def main() -> int:
