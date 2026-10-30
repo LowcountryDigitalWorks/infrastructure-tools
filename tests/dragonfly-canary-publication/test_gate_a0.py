@@ -12,6 +12,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+A0_PATH = ROOT / "tools" / "dragonfly_gate_a0.py"
 
 
 def load(name: str, path: Path):
@@ -22,7 +23,7 @@ def load(name: str, path: Path):
     return module
 
 
-a0 = load("test_gate_a0_module", ROOT / "tools" / "dragonfly_gate_a0.py")
+a0 = load("test_gate_a0_module", A0_PATH)
 installer = load(
     "test_gate_a0_installer", ROOT / "tools" / "dragonfly_canary_redrix_install.py"
 )
@@ -98,6 +99,32 @@ class GateA0Tests(unittest.TestCase):
         args.update(overrides)
         return a0.collect_a0(**args)
 
+    def test_source_surface_is_read_only_and_has_no_remote_or_runtime_action(self):
+        text = A0_PATH.read_text(encoding="utf-8")
+        forbidden = (
+            "install_fixture(",
+            "recover_fixture(",
+            "rollback_fixture(",
+            ".write_state(",
+            ".start(",
+            ".drain(",
+            ".smoke(",
+            ".recover(",
+            "subprocess.Popen",
+            "os.remove(",
+            ".unlink(",
+            ".mkdir(",
+            "os.chmod(",
+            "gh api",
+            "generate-jitconfig",
+            "ssh ",
+            "ssh.exe",
+        )
+        for value in forbidden:
+            self.assertNotIn(value, text, value)
+        self.assertIn("DRAGONFLY_GATE_A0=PASS", text)
+        self.assertIn("EVIDENCE_JSON=", text)
+
     def test_clean_accepted_115_state_emits_sanitized_evidence_without_mutation(self):
         before = snapshot(self.root)
         evidence = self.collect()
@@ -114,6 +141,9 @@ class GateA0Tests(unittest.TestCase):
         self.assertTrue(evidence["authorizedKeysInvariant"])
         self.assertFalse(evidence["installTransactionPending"])
         self.assertFalse(evidence["installReceiptPresent"])
+        self.assertEqual(evidence["localHostIdentity"], "accepted-redrix-alias")
+        self.assertNotIn("authorizedKeysSha256", evidence)
+        self.assertNotIn("tailscaleIp", evidence)
         digest = evidence.pop("evidenceSha256")
         self.assertEqual(digest, hashlib.sha256(a0._canonical(evidence)).hexdigest())
 
