@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / 'tools' / 'dragonfly_gate_a0.py'
@@ -104,6 +105,36 @@ class GateA0HardeningTests(unittest.TestCase):
         fd.mkdir(parents=True)
         (fd / '7').symlink_to('/dev/kvm')
         self.assertEqual(a0._kvm_fd_pids(proc), [123])
+
+    def test_kvm_fd_scan_holds_on_fd_directory_permission_denial(self):
+        proc = Path(self.temp.name) / 'proc'
+        fd = proc / '123' / 'fd'
+        fd.mkdir(parents=True)
+        original_iterdir = Path.iterdir
+
+        def denied(path: Path):
+            if path == fd:
+                raise PermissionError('synthetic denial')
+            return original_iterdir(path)
+
+        with mock.patch.object(Path, 'iterdir', new=denied):
+            self.assertHold('A0_PROCESS_VISIBILITY_UNCERTAIN', lambda: a0._kvm_fd_pids(proc))
+
+    def test_kvm_fd_scan_holds_on_readlink_permission_denial(self):
+        proc = Path(self.temp.name) / 'proc'
+        fd = proc / '123' / 'fd'
+        fd.mkdir(parents=True)
+        descriptor = fd / '7'
+        descriptor.symlink_to('/dev/kvm')
+        original_readlink = os.readlink
+
+        def denied(path):
+            if Path(path) == descriptor:
+                raise PermissionError('synthetic denial')
+            return original_readlink(path)
+
+        with mock.patch.object(os, 'readlink', side_effect=denied):
+            self.assertHold('A0_PROCESS_VISIBILITY_UNCERTAIN', lambda: a0._kvm_fd_pids(proc))
 
     def test_qemu_snapshot_refuses_kvm_fd_without_qemu_name(self):
         proc = Path(self.temp.name) / 'proc'
