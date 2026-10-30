@@ -8,11 +8,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# Accepted PR #135 squash merge and exact installer blob. This provenance refresh
+# Accepted PR #141 squash merge and exact installer blob. This provenance refresh
 # does not lift #92 DO_NOT_RETRY_INSTALL / DO_NOT_HAND_EDIT; a later controlling
 # disposition is required before owner-local installation or residue reconciliation.
-$acceptedSourceCommit = '7755a1f490b2568d228717bd22f8fccd80c529ea'
-$acceptedManageBlob = '58b23af25b7e4fe7da17809d9749704fc7366f56'
+$acceptedSourceCommit = 'ea07e154b2b4b2023804f03c8c62374f0866b5f9'
+$acceptedManageBlob = 'fd52f44134dda198cb35ed7ef999e166ab143bbe'
 $acceptedWorkerBlob = '1877c993dabe7e9d1e2a712a317a0d935ab74dfd'
 $manifestSha = 'd10cad356a8ee8cb6201a6167b2ca5ab732a967f1945fe543520454c643ae964'
 $controllerCommit = '54b9343af44c70db1d1403cf7f45cfc11e8bf167'

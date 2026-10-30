@@ -149,10 +149,9 @@ foreach ($scriptName in @('Disable-HyperVObserver.ps1', 'Enable-HyperVObserver.p
 }
 
 $bootstrapSource = Get-Content -LiteralPath (Join-Path $deployRoot 'Bootstrap-CiJitControlTasks.ps1') -Raw
-$candidateManageBlob = 'fd52f44134dda198cb35ed7ef999e166ab143bbe'
 foreach ($literal in @(
-    '7755a1f490b2568d228717bd22f8fccd80c529ea',
-    '58b23af25b7e4fe7da17809d9749704fc7366f56',
+    'ea07e154b2b4b2023804f03c8c62374f0866b5f9',
+    'fd52f44134dda198cb35ed7ef999e166ab143bbe',
     '1877c993dabe7e9d1e2a712a317a0d935ab74dfd',
     'd10cad356a8ee8cb6201a6167b2ca5ab732a967f1945fe543520454c643ae964',
     '54b9343af44c70db1d1403cf7f45cfc11e8bf167',
@@ -176,9 +175,8 @@ foreach ($forbidden in @('Invoke-WebRequest','Invoke-RestMethod','curl.exe','Sta
     Assert-True (-not $bootstrapSource.Contains($forbidden, [StringComparison]::OrdinalIgnoreCase)) "CI/JIT bootstrap must not add network or task-definition primitive $forbidden"
 }
 
-# Verify the bootstrap still pins the last accepted source, while allowing only the
-# exact #141 manager correction blob as a transitional source candidate. The
-# bootstrap itself must remain fail-closed until a post-merge provenance refresh.
+# Verify the bootstrap pins the accepted merged source and requires the current
+# manager and worker bytes to match those pins exactly.
 $bootstrapTokens=$null;$bootstrapErrors=$null
 $bootstrapAst=[Management.Automation.Language.Parser]::ParseInput($bootstrapSource,[ref]$bootstrapTokens,[ref]$bootstrapErrors)
 Assert-True ($bootstrapErrors.Count -eq 0) 'bootstrap must parse'
@@ -188,11 +186,11 @@ Assert-True ($bootstrapErrors.Count -eq 0) 'bootstrap must parse'
         . ([scriptblock]::Create($assignment.Extent.Text))
     }
     $acceptedManage=(& git -C $deployRoot rev-parse ($acceptedSourceCommit+':'+$manageRelative)).Trim()
-    Assert-True ($LASTEXITCODE -eq 0 -and $acceptedManage -ceq $acceptedManageBlob) 'bootstrap manager pin must still match accepted PR #135 merge'
+    Assert-True ($LASTEXITCODE -eq 0 -and $acceptedManage -ceq $acceptedManageBlob) 'bootstrap manager pin must match accepted PR #141 merge'
     $acceptedWorker=(& git -C $deployRoot rev-parse ($acceptedSourceCommit+':'+$workerRelative)).Trim()
-    Assert-True ($LASTEXITCODE -eq 0 -and $acceptedWorker -ceq $acceptedWorkerBlob) 'bootstrap worker pin must still match accepted PR #135 merge'
+    Assert-True ($LASTEXITCODE -eq 0 -and $acceptedWorker -ceq $acceptedWorkerBlob) 'bootstrap worker pin must match accepted PR #141 merge'
     $currentManage=(& git -C $deployRoot rev-parse ('HEAD:'+$manageRelative)).Trim()
-    Assert-True ($LASTEXITCODE -eq 0 -and $currentManage -in @($acceptedManageBlob,$candidateManageBlob)) 'candidate manager must be accepted #135 bytes or exact #141 correction bytes'
+    Assert-True ($LASTEXITCODE -eq 0 -and $currentManage -ceq $acceptedManageBlob) 'candidate manager must match accepted merged manager bytes'
     $currentWorker=(& git -C $deployRoot rev-parse ('HEAD:'+$workerRelative)).Trim()
     Assert-True ($LASTEXITCODE -eq 0 -and $currentWorker -ceq $acceptedWorkerBlob) 'candidate must preserve accepted worker bytes'
     $guard=$bootstrapAst.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-AcceptedCheckout'},$false)
@@ -219,7 +217,7 @@ Assert-True ($bootstrapErrors.Count -eq 0) 'bootstrap must parse'
         $script:LASTEXITCODE=if($fixture.Ancestor){0}else{1}
     }
     $context=Assert-AcceptedCheckout
-    Assert-True ($context.Head -ceq $acceptedSourceCommit) 'accepted PR #135 checkout must pass guard'
+    Assert-True ($context.Head -ceq $acceptedSourceCommit) 'accepted PR #141 checkout must pass guard'
     foreach($case in @(
         @{Field='Manage';Value='622ded670d2805bf163699a77c076454e92f90bc';Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
         @{Field='Manage';Value=('f'*40);Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
