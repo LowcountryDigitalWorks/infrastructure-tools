@@ -113,7 +113,8 @@ function Read-Request {
     if (-not (Test-Path -LiteralPath $requestPath -PathType Leaf)) { throw 'REQUEST_REQUIRED' }
     $bytes = [IO.File]::ReadAllBytes($requestPath)
     if ($bytes.Length -lt 2 -or $bytes.Length -gt 16384) { throw 'REQUEST_REFUSED' }
-    $document = [Text.Json.JsonDocument]::Parse($bytes)
+    [System.ReadOnlyMemory[byte]]$jsonMemory = $bytes
+    $document = [Text.Json.JsonDocument]::Parse($jsonMemory)
     try {
         $root = $document.RootElement
         if ($root.ValueKind -ne [Text.Json.JsonValueKind]::Object) { throw 'REQUEST_REFUSED' }
@@ -122,7 +123,8 @@ function Read-Request {
             @(Compare-Object @('schema','operationId','operation','runId') $names -CaseSensitive).Count) { throw 'REQUEST_REFUSED' }
         if ($root.GetProperty('schema').GetInt32() -ne 1) { throw 'REQUEST_REFUSED' }
         $id = $root.GetProperty('operationId').GetString()
-        if (-not [Guid]::TryParseExact($id,'D',[ref]([Guid]$null))) { throw 'REQUEST_REFUSED' }
+        [Guid]$parsedId = [Guid]::Empty
+        if (-not [Guid]::TryParseExact($id,'D',[ref]$parsedId)) { throw 'REQUEST_REFUSED' }
         if ($root.GetProperty('operation').GetString() -cne $Operation) { throw 'REQUEST_OPERATION_MISMATCH' }
         $runElement = $root.GetProperty('runId')
         $runId = if ($runElement.ValueKind -eq [Text.Json.JsonValueKind]::Null) { $null } else { $runElement.GetInt64() }
