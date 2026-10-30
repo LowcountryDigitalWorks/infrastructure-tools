@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 UNIT = ROOT / "systemd" / "ldw-operations-bridge-dragonfly.service"
 CREDENTIAL_HELPER = ROOT / "scripts" / "redrix-systemd-bridge-credential.py"
 SERVICE_HELPER = ROOT / "scripts" / "redrix-systemd-bridge-service.py"
-EXPECTED_UNIT_SHA256 = "2ac20b0169355616da1afdc57a77b0d610d202b2b117a1d21eb9b032c8ddf613"
+EXPECTED_UNIT_SHA256 = "fa0ac866d74d233eeea200d2468767677ac5d2e826c7511ab6f40678be41b604"
 
 
 def load_module(path: Path, name: str):
@@ -48,13 +48,14 @@ class SystemdBridgeLifecycleTests(unittest.TestCase):
             "NoNewPrivileges=yes",
             "ProtectSystem=strict",
             "ProtectHome=read-only",
-            "ReadWritePaths=/home/eddie/.local/state/ldw/operations-bridge/dragonfly /home/eddie/.local/state/ldw-dragonfly-jit /run/user/1000",
+            "ReadWritePaths=/home/eddie/.local/state/ldw/operations-bridge/dragonfly /home/eddie/.local/state/ldw-dragonfly-jit",
             "CapabilityBoundingSet=",
             "AmbientCapabilities=",
             "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
         )
         for value in required:
             self.assertIn(value, text)
+        self.assertNotIn("/run/user/1000", text)
         for forbidden in (
             "Environment=BRIDGE_CLIENT_TOKEN=",
             "EnvironmentFile=",
