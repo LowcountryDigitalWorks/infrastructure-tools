@@ -191,7 +191,7 @@ finally {
 }
 
 $bootstrapSource = Get-Content -LiteralPath (Join-Path $deployRoot 'Bootstrap-CiJitControlTasks.ps1') -Raw
-$candidateWorkerBlob = '5d422c78d0c5e0735be61adc8f1f6d6eec237350'
+$candidateWorkerBlob = '02bc6f1526b27a4bf2ef786dd91ba8b816beb68c'
 foreach ($literal in @(
     'ea07e154b2b4b2023804f03c8c62374f0866b5f9',
     'fd52f44134dda198cb35ed7ef999e166ab143bbe',
