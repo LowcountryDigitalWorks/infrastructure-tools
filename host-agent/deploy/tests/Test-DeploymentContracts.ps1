@@ -191,11 +191,10 @@ finally {
 }
 
 $bootstrapSource = Get-Content -LiteralPath (Join-Path $deployRoot 'Bootstrap-CiJitControlTasks.ps1') -Raw
-$candidateWorkerBlob = '02bc6f1526b27a4bf2ef786dd91ba8b816beb68c'
 foreach ($literal in @(
-    'ea07e154b2b4b2023804f03c8c62374f0866b5f9',
+    '2bffdaf62d3f3df05c5d03220f1b06e0c4c1dd55',
     'fd52f44134dda198cb35ed7ef999e166ab143bbe',
-    '1877c993dabe7e9d1e2a712a317a0d935ab74dfd',
+    '02bc6f1526b27a4bf2ef786dd91ba8b816beb68c',
     'd10cad356a8ee8cb6201a6167b2ca5ab732a967f1945fe543520454c643ae964',
     '54b9343af44c70db1d1403cf7f45cfc11e8bf167',
     'beb9b9096b2f4bfa41ad877ad4f6a41150fbcfec'
@@ -218,10 +217,8 @@ foreach ($forbidden in @('Invoke-WebRequest','Invoke-RestMethod','curl.exe','Sta
     Assert-True (-not $bootstrapSource.Contains($forbidden, [StringComparison]::OrdinalIgnoreCase)) "CI/JIT bootstrap must not add network or task-definition primitive $forbidden"
 }
 
-# Verify the bootstrap pins the accepted merged source. During this source-only
-# correction review, the checkout may contain only the exact candidate worker blob;
-# the bootstrap guard itself must continue to reject that candidate until a later
-# post-merge provenance refresh.
+# Verify the bootstrap pins the accepted merged PR #144 source and rejects any
+# installer/worker drift. The transitional parser-candidate allowance is gone.
 $bootstrapTokens=$null;$bootstrapErrors=$null
 $bootstrapAst=[Management.Automation.Language.Parser]::ParseInput($bootstrapSource,[ref]$bootstrapTokens,[ref]$bootstrapErrors)
 Assert-True ($bootstrapErrors.Count -eq 0) 'bootstrap must parse'
@@ -231,13 +228,13 @@ Assert-True ($bootstrapErrors.Count -eq 0) 'bootstrap must parse'
         . ([scriptblock]::Create($assignment.Extent.Text))
     }
     $acceptedManage=(& git -C $deployRoot rev-parse ($acceptedSourceCommit+':'+$manageRelative)).Trim()
-    Assert-True ($LASTEXITCODE -eq 0 -and $acceptedManage -ceq $acceptedManageBlob) 'bootstrap manager pin must match accepted PR #141 merge'
+    Assert-True ($LASTEXITCODE -eq 0 -and $acceptedManage -ceq $acceptedManageBlob) 'bootstrap manager pin must match accepted PR #144 merge'
     $acceptedWorker=(& git -C $deployRoot rev-parse ($acceptedSourceCommit+':'+$workerRelative)).Trim()
-    Assert-True ($LASTEXITCODE -eq 0 -and $acceptedWorker -ceq $acceptedWorkerBlob) 'bootstrap worker pin must match accepted PR #141 merge'
+    Assert-True ($LASTEXITCODE -eq 0 -and $acceptedWorker -ceq $acceptedWorkerBlob) 'bootstrap worker pin must match accepted PR #144 merge'
     $currentManage=(& git -C $deployRoot rev-parse ('HEAD:'+$manageRelative)).Trim()
     Assert-True ($LASTEXITCODE -eq 0 -and $currentManage -ceq $acceptedManageBlob) 'candidate manager must match accepted merged manager bytes'
     $currentWorker=(& git -C $deployRoot rev-parse ('HEAD:'+$workerRelative)).Trim()
-    Assert-True ($LASTEXITCODE -eq 0 -and $currentWorker -in @($acceptedWorkerBlob,$candidateWorkerBlob)) 'candidate worker must be accepted PR #141 bytes or exact #92 parser-correction bytes'
+    Assert-True ($LASTEXITCODE -eq 0 -and $currentWorker -ceq $acceptedWorkerBlob) 'current worker must match accepted PR #144 merged bytes'
     $guard=$bootstrapAst.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-AcceptedCheckout'},$false)
     . ([scriptblock]::Create($guard.Extent.Text))
     $fixture=[ordered]@{Branch='main';Dirty=$false;Head=$acceptedSourceCommit;Origin=$acceptedSourceCommit;Ancestor=$true;Manage=$acceptedManageBlob;Worker=$acceptedWorkerBlob}
@@ -262,11 +259,11 @@ Assert-True ($bootstrapErrors.Count -eq 0) 'bootstrap must parse'
         $script:LASTEXITCODE=if($fixture.Ancestor){0}else{1}
     }
     $context=Assert-AcceptedCheckout
-    Assert-True ($context.Head -ceq $acceptedSourceCommit) 'accepted PR #141 checkout must pass guard'
+    Assert-True ($context.Head -ceq $acceptedSourceCommit) 'accepted PR #144 checkout must pass guard'
     foreach($case in @(
         @{Field='Manage';Value='622ded670d2805bf163699a77c076454e92f90bc';Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
         @{Field='Manage';Value=('f'*40);Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
-        @{Field='Worker';Value=$candidateWorkerBlob;Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
+        @{Field='Worker';Value='1877c993dabe7e9d1e2a712a317a0d935ab74dfd';Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
         @{Field='Worker';Value=('f'*40);Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
         @{Field='Branch';Value='feature/synthetic';Code='SOURCE_MAIN_REQUIRED'},
         @{Field='Branch';Value='';Code='SOURCE_MAIN_REQUIRED'},
