@@ -149,7 +149,7 @@ def _safe_name(name: str, package: str) -> PurePosixPath:
     return pure
 
 
-def _tar(root: Path, archive: Path, epoch: int) -> None:
+def _tar(root: Path, archive: Path, epoch: int, file_modes: dict[str, int]) -> None:
     with archive.open("wb") as raw:
         with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz:
             with tarfile.open(fileobj=gz, mode="w", format=tarfile.GNU_FORMAT) as tf:
@@ -163,6 +163,12 @@ def _tar(root: Path, archive: Path, epoch: int) -> None:
                         info.mode = 0o755
                         tf.addfile(info)
                     elif info.isfile():
+                        # Windows chmod/stat cannot represent POSIX package modes.
+                        # Serialize the pinned inventory contract, not host metadata.
+                        relative = path.relative_to(root).as_posix()
+                        if relative not in file_modes:
+                            raise PublicationError("PACKAGE_INVENTORY_DRIFT")
+                        info.mode = file_modes[relative]
                         with path.open("rb") as handle:
                             tf.addfile(info, handle)
                     else:
@@ -219,7 +225,9 @@ def build_redrix(repo: Path, output: Path) -> tuple[Path, Path]:
     }
     _write(root, "manifest.json", _canonical(manifest), "0600")
     archive = output / f"{REDRIX_PACKAGE}.tar.gz"
-    _tar(root, archive, manifest["sourceDateEpoch"])
+    file_modes = {record["packagePath"]: int(record["mode"], 8) for record in records}
+    file_modes["manifest.json"] = 0o600
+    _tar(root, archive, manifest["sourceDateEpoch"], file_modes)
     return archive, _checksum(archive)
 
 
