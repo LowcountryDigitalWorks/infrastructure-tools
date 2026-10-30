@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
@@ -24,11 +25,14 @@ UNIT_NAME = "ldw-operations-bridge-dragonfly.service"
 UNIT_DESTINATION = Path("/etc/systemd/system") / UNIT_NAME
 UNIT_SOURCE = Path(__file__).resolve().parents[1] / "systemd" / UNIT_NAME
 EXPECTED_UNIT_SHA256 = "2ac20b0169355616da1afdc57a77b0d610d202b2b117a1d21eb9b032c8ddf613"
+OWNER_UID = 1000
 PACKAGE_ROOT = Path("/home/eddie/.local/lib/ldw/operations-bridge/dragonfly")
 PAYLOAD_ROOT = PACKAGE_ROOT / "payload"
 PACKAGE_MANIFEST = PACKAGE_ROOT / "manifest.json"
 BINARY = PAYLOAD_ROOT / "LDW.OperationsBridge.Runner"
 CONFIG = Path("/home/eddie/.config/ldw/operations-bridge/dragonfly/config.json")
+BRIDGE_STATE_ROOT = Path("/home/eddie/.local/state/ldw/operations-bridge/dragonfly")
+CONTROLLER_STATE_ROOT = Path("/home/eddie/.local/state/ldw-dragonfly-jit")
 CREDENTIAL = Path("/etc/ldw/operations-bridge/dragonfly/bridge-bearer.cred")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -111,6 +115,20 @@ def _verify_dependency(path: Path, classification: str, *, executable: bool = Fa
         raise ServiceError(classification)
 
 
+def _verify_owner_directory(path: Path, classification: str) -> None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError as exc:
+        raise ServiceError(classification) from exc
+    if (
+        path.is_symlink()
+        or not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != OWNER_UID
+        or stat.S_IMODE(info.st_mode) & 0o022
+    ):
+        raise ServiceError(classification)
+
+
 def _verify_payload_records(records: object) -> dict[str, dict]:
     if not isinstance(records, list) or not records:
         raise ServiceError("BRIDGE_PACKAGE_MANIFEST_INVALID")
@@ -186,6 +204,11 @@ def _verify_installed_package() -> None:
     _verify_dependency(BINARY, "BRIDGE_BINARY_INVALID", executable=True)
 
 
+def _verify_runtime_state_directories() -> None:
+    _verify_owner_directory(BRIDGE_STATE_ROOT, "BRIDGE_STATE_DIRECTORY_INVALID")
+    _verify_owner_directory(CONTROLLER_STATE_ROOT, "DRAGONFLY_STATE_DIRECTORY_INVALID")
+
+
 def _verify_credential_metadata() -> None:
     result = _run(["/usr/bin/stat", "-Lc", "%u:%g:%a:%F", str(CREDENTIAL)], "BRIDGE_CREDENTIAL_ARTIFACT_INVALID", sudo=True)
     if result.stdout.strip() != "0:0:600:regular file":
@@ -205,6 +228,7 @@ def preflight() -> None:
     _verify_source()
     _verify_installed_package()
     _verify_dependency(CONFIG, "BRIDGE_CONFIG_INVALID")
+    _verify_runtime_state_directories()
     _verify_credential_metadata()
     _assert_safe_inactive_state(allow_not_found=True)
 
@@ -224,6 +248,7 @@ def verify() -> None:
     _verify_source()
     _verify_installed_package()
     _verify_dependency(CONFIG, "BRIDGE_CONFIG_INVALID")
+    _verify_runtime_state_directories()
     _verify_credential_metadata()
     _verify_installed_unit()
     _assert_safe_inactive_state(allow_not_found=False)
