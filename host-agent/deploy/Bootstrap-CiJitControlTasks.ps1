@@ -9,8 +9,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # Accepted PR #144 squash merge and exact installer/worker blobs. This provenance
-# refresh does not itself authorize owner-local installation or observation; the
-# owning #92 disposition still controls the next host action.
+# refresh does not lift #92 host-action gating / DO_NOT_HAND_EDIT; a later controlling
+# disposition is required before owner-local installation or observation.
 $acceptedSourceCommit = '2bffdaf62d3f3df05c5d03220f1b06e0c4c1dd55'
 $acceptedManageBlob = 'fd52f44134dda198cb35ed7ef999e166ab143bbe'
 $acceptedWorkerBlob = '02bc6f1526b27a4bf2ef786dd91ba8b816beb68c'
