@@ -26,7 +26,7 @@ The normal foreground Bridge path remains unchanged: when `LDW_DRAGONFLY_CREDENT
 - Dragonfly controller state: `/home/eddie/.local/state/ldw-dragonfly-jit`
 - Credential lifecycle serialization lock: `/run/user/1000/ldw-operations-bridge-dragonfly-credential.lock`
 
-The system unit keeps the home directory read-only except for the fixed Bridge state, fixed Dragonfly controller state, and uid-1000 runtime directory required by the accepted owner-control path.
+The system unit keeps the home directory read-only except for the fixed Bridge state and fixed Dragonfly controller state. The owner-local credential lifecycle lock under `/run/user/1000` is used only by the separately gated migration helper and is not a service writable-path exception.
 
 ## Source helpers
 
