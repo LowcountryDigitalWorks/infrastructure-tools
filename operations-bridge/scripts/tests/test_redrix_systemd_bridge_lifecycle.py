@@ -79,6 +79,17 @@ class SystemdBridgeLifecycleTests(unittest.TestCase):
         self.assertIn('CREDENTIAL_DIGEST_TIMEOUT', text)
         self.assertNotIn('tempfile._get_candidate_names', text)
 
+    def test_post_publish_verification_failure_removes_published_artifact(self):
+        text = CREDENTIAL_HELPER.read_text(encoding="utf-8")
+        publication = text.index('[LN, str(temp_path), str(CREDENTIAL_PATH)]')
+        verification = text.index('_verify_ciphertext_metadata()', publication)
+        rollback = text.index('[RM, "-f", str(CREDENTIAL_PATH)]', verification)
+        self.assertGreater(verification, publication)
+        self.assertGreater(rollback, verification)
+        self.assertIn('except Exception as verify_error:', text[verification:rollback])
+        self.assertIn('"CREDENTIAL_ARTIFACT_ROLLBACK_FAILED"', text[rollback:])
+        self.assertNotIn('if encrypted_credential_digest() != source_digest:\n        _run_sudo([RM', text)
+
     def test_service_state_is_exact_and_ambiguous_states_fail_closed(self):
         combined = CREDENTIAL_HELPER.read_text(encoding="utf-8") + SERVICE_HELPER.read_text(encoding="utf-8")
         for value in (
