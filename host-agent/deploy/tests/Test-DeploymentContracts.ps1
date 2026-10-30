@@ -27,6 +27,7 @@ $highTaskResult = Convert-HyperVObserverTaskResult -Value ([uint32]3762504530)
 Assert-True ($highTaskResult -is [uint32] -and $highTaskResult -eq [uint32]3762504530) 'task result conversion must preserve high-bit UInt32 values without signed overflow'
 Assert-Throws { Convert-HyperVObserverTaskResult -Value ([int64]4294967296) | Out-Null } 'task result conversion must reject values above UInt32 max'
 Assert-True ($constants.TaskName -eq 'HyperVObserver') 'task name must be deterministic'
+Assert-True ($constants.TaskPath -eq '\LowcountryDigitalWorks\HostAgent\') 'task name must be deterministic'
 Assert-True ($constants.TaskPath -eq '\LowcountryDigitalWorks\HostAgent\') 'task path must be deterministic and namespaced'
 Assert-True ($constants.InstallRoot.StartsWith($env:ProgramFiles, [StringComparison]::OrdinalIgnoreCase)) 'install root must be under Program Files'
 Assert-True ($constants.ConfigRoot.StartsWith($env:ProgramData, [StringComparison]::OrdinalIgnoreCase)) 'config root must be under ProgramData'
@@ -148,7 +149,50 @@ foreach ($scriptName in @('Disable-HyperVObserver.ps1', 'Enable-HyperVObserver.p
     }
 }
 
+$workerSource = Get-Content -LiteralPath (Join-Path $deployRoot 'Invoke-CiJitControlTask.ps1') -Raw
+$workerTokens=$null;$workerErrors=$null
+$workerAst=[Management.Automation.Language.Parser]::ParseInput($workerSource,[ref]$workerTokens,[ref]$workerErrors)
+Assert-True ($workerErrors.Count -eq 0) 'CI/JIT control worker must parse'
+$assertNoReparseAst=$workerAst.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-NoReparse'},$false)
+$readRequestAst=$workerAst.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Read-Request'},$false)
+Assert-True ($null -ne $assertNoReparseAst -and $null -ne $readRequestAst) 'CI/JIT request parser functions must be discoverable'
+$requestFixtureRoot = Join-Path $tempParent ('ldw-ci-jit-request-contract-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $requestFixtureRoot | Out-Null
+try {
+    & {
+        param([string]$AssertNoReparseSource,[string]$ReadRequestSource,[string]$FixtureRoot)
+        . ([scriptblock]::Create($AssertNoReparseSource))
+        . ([scriptblock]::Create($ReadRequestSource))
+        $requestRoot=$FixtureRoot
+        $requestPath=Join-Path $requestRoot 'discover.json'
+        $Operation='DISCOVER'
+        function Write-RequestFixture([object]$Payload) {
+            $json=$Payload | ConvertTo-Json -Compress -Depth 4
+            [IO.File]::WriteAllText($requestPath,$json,[Text.UTF8Encoding]::new($false))
+        }
+
+        $validId='11111111-1111-1111-1111-111111111111'
+        Write-RequestFixture ([ordered]@{schema=1;operationId=$validId;operation='DISCOVER';runId=$null})
+        $parsed=Read-Request
+        Assert-True ($parsed.OperationId -ceq $validId -and $null -eq $parsed.RunId) 'CI/JIT request parser must accept a canonical DISCOVER request'
+
+        Write-RequestFixture ([ordered]@{schema=1;operationId='not-a-guid';operation='DISCOVER';runId=$null})
+        $refusal=$null
+        try{$null=Read-Request}catch{$refusal=$_.Exception.Message}
+        Assert-True ($refusal -ceq 'REQUEST_REFUSED') 'CI/JIT request parser must refuse malformed operationId'
+
+        Write-RequestFixture ([ordered]@{schema=1;operationId=$validId;operation='DISCOVER';runId=$null;extra='refuse'})
+        $refusal=$null
+        try{$null=Read-Request}catch{$refusal=$_.Exception.Message}
+        Assert-True ($refusal -ceq 'REQUEST_REFUSED') 'CI/JIT request parser must preserve exact request shape'
+    } $assertNoReparseAst.Extent.Text $readRequestAst.Extent.Text $requestFixtureRoot
+}
+finally {
+    if (Test-Path -LiteralPath $requestFixtureRoot) { Remove-Item -LiteralPath $requestFixtureRoot -Recurse -Force }
+}
+
 $bootstrapSource = Get-Content -LiteralPath (Join-Path $deployRoot 'Bootstrap-CiJitControlTasks.ps1') -Raw
+$candidateWorkerBlob = '5d422c78d0c5e0735be61adc8f1f6d6eec237350'
 foreach ($literal in @(
     'ea07e154b2b4b2023804f03c8c62374f0866b5f9',
     'fd52f44134dda198cb35ed7ef999e166ab143bbe',
@@ -175,8 +219,10 @@ foreach ($forbidden in @('Invoke-WebRequest','Invoke-RestMethod','curl.exe','Sta
     Assert-True (-not $bootstrapSource.Contains($forbidden, [StringComparison]::OrdinalIgnoreCase)) "CI/JIT bootstrap must not add network or task-definition primitive $forbidden"
 }
 
-# Verify the bootstrap pins the accepted merged source and requires the current
-# manager and worker bytes to match those pins exactly.
+# Verify the bootstrap pins the accepted merged source. During this source-only
+# correction review, the checkout may contain only the exact candidate worker blob;
+# the bootstrap guard itself must continue to reject that candidate until a later
+# post-merge provenance refresh.
 $bootstrapTokens=$null;$bootstrapErrors=$null
 $bootstrapAst=[Management.Automation.Language.Parser]::ParseInput($bootstrapSource,[ref]$bootstrapTokens,[ref]$bootstrapErrors)
 Assert-True ($bootstrapErrors.Count -eq 0) 'bootstrap must parse'
@@ -192,7 +238,7 @@ Assert-True ($bootstrapErrors.Count -eq 0) 'bootstrap must parse'
     $currentManage=(& git -C $deployRoot rev-parse ('HEAD:'+$manageRelative)).Trim()
     Assert-True ($LASTEXITCODE -eq 0 -and $currentManage -ceq $acceptedManageBlob) 'candidate manager must match accepted merged manager bytes'
     $currentWorker=(& git -C $deployRoot rev-parse ('HEAD:'+$workerRelative)).Trim()
-    Assert-True ($LASTEXITCODE -eq 0 -and $currentWorker -ceq $acceptedWorkerBlob) 'candidate must preserve accepted worker bytes'
+    Assert-True ($LASTEXITCODE -eq 0 -and $currentWorker -in @($acceptedWorkerBlob,$candidateWorkerBlob)) 'candidate worker must be accepted PR #141 bytes or exact #92 parser-correction bytes'
     $guard=$bootstrapAst.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-AcceptedCheckout'},$false)
     . ([scriptblock]::Create($guard.Extent.Text))
     $fixture=[ordered]@{Branch='main';Dirty=$false;Head=$acceptedSourceCommit;Origin=$acceptedSourceCommit;Ancestor=$true;Manage=$acceptedManageBlob;Worker=$acceptedWorkerBlob}
@@ -221,6 +267,7 @@ Assert-True ($bootstrapErrors.Count -eq 0) 'bootstrap must parse'
     foreach($case in @(
         @{Field='Manage';Value='622ded670d2805bf163699a77c076454e92f90bc';Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
         @{Field='Manage';Value=('f'*40);Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
+        @{Field='Worker';Value=$candidateWorkerBlob;Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
         @{Field='Worker';Value=('f'*40);Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
         @{Field='Branch';Value='feature/synthetic';Code='SOURCE_MAIN_REQUIRED'},
         @{Field='Branch';Value='';Code='SOURCE_MAIN_REQUIRED'},
