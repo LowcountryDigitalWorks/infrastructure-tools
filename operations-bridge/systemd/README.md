@@ -28,6 +28,8 @@ The normal foreground Bridge path remains unchanged: when `LDW_DRAGONFLY_CREDENT
 
 The system unit keeps the home directory read-only except for the fixed Bridge state and fixed Dragonfly controller state. The owner-local credential lifecycle lock under `/run/user/1000` is used only by the separately gated migration helper and is not a service writable-path exception.
 
+The controller-state write exception is an explicit residual-risk boundary. The accepted Bridge operations `dragonfly.runner.start` and `dragonfly.runner.drain` invoke the already-reviewed Dragonfly controller as the same uid 1000, and those controller operations require atomic writes to locks, status, and run metadata under `~/.local/state/ldw-dragonfly-jit`. A compromised Bridge process could therefore corrupt that local controller state and force fail-closed `HOLD`/denial-of-service behavior. It does not gain GitHub/provider credentials, JIT-config minting authority, or arbitrary command execution from that filesystem access. Enforcing method-level isolation inside the same uid would require a new separately trusted helper/service boundary and is intentionally outside this accepted source architecture.
+
 ## Source helpers
 
 `operations-bridge/scripts/redrix-systemd-bridge-credential.py`
@@ -73,5 +75,6 @@ Only after those artifacts are accepted should a later gate enable/start the exa
 - Unit source/hash/metadata mismatch: HOLD.
 - Credential directory/file metadata mismatch: HOLD.
 - Encryption/decryption/digest/process timeout: HOLD.
+- Same-uid controller-state writability is accepted only for the typed `status/start/drain` path; local state corruption is bounded to fail-closed integrity/availability impact and does not grant provider/JIT authority.
 - Secret Service is never cleared or rewritten by these helpers.
 - No helper calls `systemctl enable`, `start`, `restart`, or `--now`.
