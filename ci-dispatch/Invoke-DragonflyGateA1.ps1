@@ -119,12 +119,7 @@ function Get-LdwGateA1TransportPublicIdentitySha256 {
     )
     $helper = Join-Path $RepositoryRoot 'tools\dragonfly_gate_a1_transport_identity.py'
     if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) { throw 'GATE_A1_TRANSPORT_IDENTITY_HELPER_MISSING' }
-    $sshKeygen = (Get-Command ssh-keygen.exe -ErrorAction Stop).Source
-    $publicLine = & $sshKeygen -y -f $PrivateKeyPath 2>$null
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($publicLine)) {
-        throw 'GATE_A1_TRANSPORT_PUBLIC_IDENTITY_DERIVATION_FAILED'
-    }
-    $digest = ($publicLine | & $Python $helper derive-from-ssh-keygen-y 2>$null).Trim()
+    $digest = (& $Python $helper derive-bound --private-key $PrivateKeyPath 2>$null).Trim()
     if ($LASTEXITCODE -ne 0 -or $digest -cnotmatch '^[0-9a-f]{64}$') { throw 'GATE_A1_TRANSPORT_PUBLIC_IDENTITY_INVALID' }
     return $digest.ToLowerInvariant()
 }
@@ -242,7 +237,7 @@ function Invoke-LdwDragonflyGateA1 {
     Write-Output ('TRANSPORT_PUBLIC_IDENTITY_SHA256=' + $transportIdentitySha256)
     Write-Output 'TRANSPORT_KEY_PROVENANCE=gate-a1-ldw01-transport-private-key-unchanged-contract'
     $identityRecord = Join-Path $taskRoot 'gate-a1-transport-identity.record'
-    $null = & $python (Join-Path $repo.Root 'tools\dragonfly_gate_a1_transport_identity.py') write-record --digest $transportIdentitySha256 --output $identityRecord 2>$null
+    $null = & $python (Join-Path $repo.Root 'tools\dragonfly_gate_a1_transport_identity.py') write-bound-record --private-key $privateKey --output $identityRecord 2>$null
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $identityRecord -PathType Leaf)) {
         throw 'GATE_A1_TRANSPORT_IDENTITY_RECORD_FAILED'
     }

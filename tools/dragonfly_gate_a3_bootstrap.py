@@ -6,7 +6,8 @@ state. It renders a shell-safe command whose embedded Python bootstrap fetches t
 immutable public helpers (preflight + pinned installer) into memory, verifies exact
 byte length and SHA-256 for each, injects verified installer bytes into the preflight
 exec namespace, compile/executes preflight only after verification, and passes the
-expected transport-key identity digest taken only from a Gate A1 transport identity record.
+expected transport-key identity digest derived from the Gate A1 protected private key (record
+optional audit match only).
 """
 from __future__ import annotations
 
@@ -22,6 +23,8 @@ if str(_TOOLS_DIR) not in sys.path:
 
 from dragonfly_gate_a1_transport_identity import (  # noqa: E402
     PROVENANCE as TRANSPORT_KEY_PROVENANCE,
+    TransportIdentityError,
+    derive_bound_transport_public_identity,
     parse_record as parse_gate_a1_transport_identity_record,
 )
 
@@ -36,9 +39,9 @@ ACCEPTED_A3_URL = (
     + "/"
     + ACCEPTED_A3_PATH
 )
-ACCEPTED_INSTALLER_COMMIT = ACCEPTED_A3_COMMIT
-ACCEPTED_INSTALLER_SHA256 = "1c5f603560b851a13f71aa0cf3e7d499400d3259a3246f0ab5d00b94254adac7"
-ACCEPTED_INSTALLER_BYTES = 35944
+ACCEPTED_INSTALLER_COMMIT = "909e89589adcc26d386e3c8ec39880426e06afa9"
+ACCEPTED_INSTALLER_SHA256 = "a846a65fe6d189910143bba2068f8f4bdf7df10999290fd8f2a675234929fd42"
+ACCEPTED_INSTALLER_BYTES = 37106
 ACCEPTED_INSTALLER_PATH = "tools/dragonfly_canary_redrix_install.py"
 ACCEPTED_INSTALLER_URL = (
     "https://raw.githubusercontent.com/LowcountryDigitalWorks/infrastructure-tools/"
@@ -156,10 +159,20 @@ except Exception:
 '''
 
 
-def render_command(*, gate_a1_transport_identity_record: Path) -> str:
+def render_command(
+    *,
+    gate_a1_transport_private_key: Path,
+    gate_a1_transport_identity_record: Path | None = None,
+) -> str:
     try:
-        record_text = gate_a1_transport_identity_record.read_text(encoding="utf-8")
-        transport_key_sha256 = parse_gate_a1_transport_identity_record(record_text)
+        transport_key_sha256 = derive_bound_transport_public_identity(gate_a1_transport_private_key)
+        if gate_a1_transport_identity_record is not None:
+            record_text = gate_a1_transport_identity_record.read_text(encoding="utf-8")
+            record_digest = parse_gate_a1_transport_identity_record(record_text)
+            if record_digest != transport_key_sha256:
+                raise BootstrapInputError("GATE_A1_TRANSPORT_IDENTITY_RECORD_MISMATCH")
+    except TransportIdentityError as exc:
+        raise BootstrapInputError(str(exc)) from exc
     except ValueError as exc:
         raise BootstrapInputError(str(exc)) from exc
 
@@ -180,14 +193,24 @@ def render_command(*, gate_a1_transport_identity_record: Path) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Render immutable in-memory REDRIX Gate A3 preflight command")
     parser.add_argument(
-        "--gate-a1-transport-identity-record",
+        "--gate-a1-transport-private-key",
         type=Path,
         required=True,
-        help="Gate A1 operator record file (derived public identity digest + provenance)",
+        help="Gate A1 protected LDW01 transport private key (bound derivation source)",
+    )
+    parser.add_argument(
+        "--gate-a1-transport-identity-record",
+        type=Path,
+        required=False,
+        default=None,
+        help="Optional Gate A1 audit record; must match bound derivation when present",
     )
     args = parser.parse_args()
     try:
-        command = render_command(gate_a1_transport_identity_record=args.gate_a1_transport_identity_record)
+        command = render_command(
+            gate_a1_transport_private_key=args.gate_a1_transport_private_key,
+            gate_a1_transport_identity_record=args.gate_a1_transport_identity_record,
+        )
     except BootstrapInputError as exc:
         print("DRAGONFLY_GATE_A3_BOOTSTRAP_RENDER=HOLD")
         print("CLASSIFICATION=" + str(exc))

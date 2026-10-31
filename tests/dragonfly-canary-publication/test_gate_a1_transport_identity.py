@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "tools" / "dragonfly_gate_a1_transport_identity.py"
@@ -53,15 +54,73 @@ class GateA1TransportIdentityTests(unittest.TestCase):
         )
         self.assertEqual(len(proc.stdout.strip()), 64)
 
-    def test_end_to_end_record_feeds_a3_bootstrap_render(self):
+    def test_write_record_digest_cli_removed(self):
+        proc = subprocess.run(
+            [sys.executable, str(SOURCE), "write-record", "--help"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+
+    def test_derive_bound_requires_windows(self):
+        if sys.platform == "win32":
+            self.skipTest("bound derive integration requires synthetic key on Windows")
+        with tempfile.NamedTemporaryFile("w", delete=False) as handle:
+            handle.write("not-a-key")
+            path = Path(handle.name)
+        try:
+            with self.assertRaisesRegex(identity.TransportIdentityError, "WINDOWS_REQUIRED"):
+                identity.derive_bound_transport_public_identity(path)
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_bootstrap_record_replacement_rejected(self):
         digest = identity.digest_from_ssh_keygen_y(
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture\n"
         )
         with tempfile.TemporaryDirectory() as td:
+            key_path = Path(td) / "id_ed25519"
+            key_path.write_text("fixture-private-key-bytes", encoding="utf-8")
             record = Path(td) / "gate-a1-transport-identity.record"
-            record.write_text(identity.build_record(digest), encoding="utf-8")
-            command = bootstrap.render_command(gate_a1_transport_identity_record=record)
+            record.write_text(identity.build_record("b" * 64), encoding="utf-8")
+            with mock.patch.object(
+                bootstrap,
+                "derive_bound_transport_public_identity",
+                return_value=digest,
+            ):
+                with self.assertRaisesRegex(
+                    bootstrap.BootstrapInputError,
+                    "GATE_A1_TRANSPORT_IDENTITY_RECORD_MISMATCH",
+                ):
+                    bootstrap.render_command(
+                        gate_a1_transport_private_key=key_path,
+                        gate_a1_transport_identity_record=record,
+                    )
+
+    def test_bootstrap_bound_digest_in_render(self):
+        digest = identity.digest_from_ssh_keygen_y(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture\n"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            key_path = Path(td) / "id_ed25519"
+            key_path.write_text("fixture-private-key-bytes", encoding="utf-8")
+            with mock.patch.object(
+                bootstrap,
+                "derive_bound_transport_public_identity",
+                return_value=digest,
+            ):
+                command = bootstrap.render_command(gate_a1_transport_private_key=key_path)
             self.assertIn(digest, command)
+
+    def test_path_substitution_uses_trusted_ssh_keygen_only(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        self.assertIn("System32", source)
+        self.assertIn("OpenSSH", source)
+        self.assertNotIn("Get-Command", source)
+        self.assertNotIn("shutil.which", source)
+        operator = (ROOT / "ci-dispatch/Invoke-DragonflyGateA1.ps1").read_text(encoding="utf-8")
+        self.assertIn("derive-bound", operator)
+        self.assertNotIn("Get-Command ssh-keygen", operator)
 
 
 class GateA3BootstrapRecordTests(unittest.TestCase):
@@ -97,15 +156,17 @@ class GateA3BootstrapRecordTests(unittest.TestCase):
         self.assertIn(bootstrap.ACCEPTED_INSTALLER_SHA256, code)
         self.assertIn("__LDW_VERIFIED_INSTALLER_BYTES__", code)
         self.assertIn("fetch_pinned", code)
+        self.assertIn("ProxyHandler({})", code)
+        self.assertIn("A3_SOURCE_REDIRECT_REFUSED", code)
 
-    def test_bare_digest_cli_is_not_accepted(self):
+    def test_render_cli_requires_private_key(self):
         proc = subprocess.run(
             [sys.executable, str(ROOT / "tools/dragonfly_gate_a3_bootstrap.py"), "--help"],
             capture_output=True,
             text=True,
         )
         self.assertEqual(proc.returncode, 0)
-        self.assertIn("--gate-a1-transport-identity-record", proc.stdout)
+        self.assertIn("--gate-a1-transport-private-key", proc.stdout)
         self.assertNotIn("--expected-transport-key-sha256", proc.stdout)
         proc = subprocess.run(
             [sys.executable, str(ROOT / "tools/dragonfly_gate_a3_bootstrap.py")],
@@ -114,8 +175,10 @@ class GateA3BootstrapRecordTests(unittest.TestCase):
         )
         self.assertNotEqual(proc.returncode, 0)
 
-    def test_wrong_record_rejects_render(self):
+    def test_wrong_record_provenance_rejects_render(self):
         with tempfile.TemporaryDirectory() as td:
+            key_path = Path(td) / "id_ed25519"
+            key_path.write_text("fixture", encoding="utf-8")
             record = Path(td) / "bad.record"
             record.write_text(
                 "GATE_A1_TRANSPORT_IDENTITY_V1\nPROVENANCE=wrong\nTRANSPORT_PUBLIC_IDENTITY_SHA256="
@@ -123,8 +186,17 @@ class GateA3BootstrapRecordTests(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
-            with self.assertRaises(bootstrap.BootstrapInputError):
-                bootstrap.render_command(gate_a1_transport_identity_record=record)
+            digest = "d" * 64
+            with mock.patch.object(
+                bootstrap,
+                "derive_bound_transport_public_identity",
+                return_value=digest,
+            ):
+                with self.assertRaises(bootstrap.BootstrapInputError):
+                    bootstrap.render_command(
+                        gate_a1_transport_private_key=key_path,
+                        gate_a1_transport_identity_record=record,
+                    )
 
 
 if __name__ == "__main__":

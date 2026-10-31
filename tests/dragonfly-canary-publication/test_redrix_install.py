@@ -225,6 +225,36 @@ class RedrixInstallTests(unittest.TestCase):
         with self.assertRaisesRegex(inst.InstallError, "REDRIX_AUTHORIZED_KEYS_CHANGED"):
             inst.readback_fixture(self.home, self.uid, inst.FORCED_COMMAND)
 
+    def test_readback_refuses_authorized_keys2(self):
+        self._install()
+        alternate = self.home / ".ssh" / "authorized_keys2"
+        alternate.write_text("ssh-ed25519 AAA\n", encoding="utf-8")
+        os.chmod(alternate, 0o600)
+        with self.assertRaisesRegex(inst.InstallError, "REDRIX_AUTHORIZED_KEYS2_PRESENT"):
+            inst.readback_fixture(self.home, self.uid, inst.FORCED_COMMAND)
+
+    def test_recover_refuses_loosened_ssh_directory_mode(self):
+        auth = self._auth_digest()
+        archive_digest = hashlib.sha256(self.archive.read_bytes()).hexdigest()
+        preexisting = {rel.as_posix(): rel in {item[2] for item in inst.ROLLBACK} for _, _, rel, _ in inst.CURRENT}
+        marker = {
+            "schema": 2,
+            "operation": "install",
+            "sourceCommit": inst.SOURCE_COMMIT,
+            "packageSha256": archive_digest,
+            "authorizedKeysSha256": auth,
+            "baseline": "accepted-115",
+            "preexisting": preexisting,
+        }
+        transaction = self.home / inst.TRANSACTION_REL
+        transaction.parent.mkdir(parents=True, exist_ok=True)
+        inst._write_transaction(transaction, marker)
+        os.chmod(self.home / ".ssh", 0o755)
+        with self.assertRaisesRegex(inst.InstallError, "REDRIX_SSH_DIR_INVALID"):
+            inst.recover_fixture(
+                self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND
+            )
+
     def test_existing_transaction_blocks_blind_retry(self):
         transaction = self.home / inst.TRANSACTION_REL
         transaction.parent.mkdir(parents=True, exist_ok=True)
