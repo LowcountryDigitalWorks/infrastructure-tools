@@ -159,6 +159,21 @@ internal static class LocalCiJitControlAdapterRegressionTests
             && dispatcherBody.Contains("$code -ceq 'CAPACITY'", StringComparison.Ordinal)
             && dispatcherBody.Contains("else{'NO_ELIGIBLE_JOB'}", StringComparison.Ordinal),
             "dispatcher ambiguity/capacity/idle outcomes stay bounded and fail closed");
+        foreach (var subreason in new[]
+        {
+            "CAPACITY_RAM_RESERVE_4GIB_REQUIRED",
+            "CAPACITY_CPU_RESERVE_REQUIRED",
+            "CAPACITY_CPU_LOAD_TOO_HIGH",
+            "CAPACITY_DISK_RESERVE_40GIB_REQUIRED",
+            "DEFAULT_NAT_SWITCH_REQUIRED"
+        })
+        {
+            Assert(CiJitControlContract.IsReasonCode(subreason), "broker result preserves capacity subreason " + subreason);
+            Assert(!CiJitControlContract.IsReasonCode(subreason + " extra"), "broker result rejects unbounded capacity text " + subreason);
+            Assert(worker.Contains("'" + subreason + "'", StringComparison.Ordinal), "control task preserves capacity subreason " + subreason);
+        }
+        Assert(CiJitControlContract.IsReasonCode("CAPACITY"), "coarse capacity classification remains a result reason");
+        Assert(!CiJitControlContract.IsReasonCode("FreePhysicalMemory=1024"), "raw capacity payload is not a result reason");
 
         var staleReasonBody = Slice(worker, "function Get-PrStaleReason", "function Get-ProvenStaleEntries");
         Assert(staleReasonBody.Contains("if ($pr.merged_at) { return 'PR_MERGED' }", StringComparison.Ordinal)

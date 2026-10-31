@@ -8,19 +8,20 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# Accepted PR #144 squash merge and exact installer/worker/status-access blobs. Historical
-# #92 DO_NOT_RETRY_INSTALL / DO_NOT_HAND_EDIT markers remain fail-closed source evidence;
+# Accepted control-source identity. Manager and status-access blobs remain the prior
+# accepted pins. The worker blob is the capacity-diagnostic source commit below.
+# Historical #92 DO_NOT_RETRY_INSTALL / DO_NOT_HAND_EDIT markers remain fail-closed;
 # live #92 disposition controls when this bootstrap may be used.
-$acceptedSourceCommit = '0bd049c879936966a497822541862ec7fa70f6be'
+$acceptedSourceCommit = '6a51968c07e235f4257031ccb127fd4ea5c1e00e'
 $acceptedManageBlob = 'fd52f44134dda198cb35ed7ef999e166ab143bbe'
-$acceptedWorkerBlob = '02bc6f1526b27a4bf2ef786dd91ba8b816beb68c'
+$acceptedWorkerBlob = 'a0a79f92d31859dd4a930b358b10c7b4cf11db48'
 # Public Git blob identity, split in the assignment below so a generic credential detector
 # does not mistake the variable name plus this non-secret object ID for an access credential:
 # dabb1083994b635ff7d8f83ed673379276036885
 $acceptedStatusAccessBlob = [string]::Concat('dabb1083','994b635ff7d8f83ed673379276036885')
-$manifestSha = '53c0777a8a721c11e04b4afa1ad02bb8b5f9eb9ea59f8e74502d5cb5443ac436'
-$controllerCommit = '4efeb043162ee773f7115d99fbc8ff1688e0f00c'
-$controllerTree = '0ba833fa376b8be385cecddef447c1f81db61300'
+$manifestSha = 'e56412548f58ceed7ae701be1d55526302a7baf9be3bb44b4ed02d45825a8193'
+$controllerCommit = '6a51968c07e235f4257031ccb127fd4ea5c1e00e'
+$controllerTree = '30f4cf0fce3d6f6acb4f81dcbc712da148073b9c'
 $manageRelative = 'host-agent/deploy/Manage-CiJitControlTasks.ps1'
 $workerRelative = 'host-agent/deploy/Invoke-CiJitControlTask.ps1'
 $statusAccessRelative = 'host-agent/deploy/Configure-CiJitStatusAccess.ps1'

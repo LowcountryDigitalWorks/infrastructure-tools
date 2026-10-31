@@ -26,6 +26,7 @@ $slotNames = @{
 }
 $requestPath = Join-Path $requestRoot $slotNames[$Operation]
 $operationId = $null
+$script:CapacitySubreasonPattern = 'CAPACITY_RAM_RESERVE_4GIB_REQUIRED|CAPACITY_CPU_RESERVE_REQUIRED|CAPACITY_CPU_LOAD_TOO_HIGH|CAPACITY_DISK_RESERVE_40GIB_REQUIRED|DEFAULT_NAT_SWITCH_REQUIRED'
 
 function Assert-ElevatedOwnerTask {
     if ($env:OS -ne 'Windows_NT') { throw 'WINDOWS_REQUIRED' }
@@ -138,7 +139,7 @@ function Read-Request {
 function Write-Result([bool]$Success,[string]$State,[string]$Reason,[string]$ProfileId=$null,[long]$RunId=0,[long]$JobId=0,[string]$StaleItems=$null) {
     if ($operationId -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { return }
     if ($State -cnotin @('QUEUED','STARTED','PASS','BLOCKED','FAILED','STALE','AMBIGUOUS')) { $State='FAILED' }
-    if ($Reason -cnotin @('NONE','ADAPTER_UNAVAILABLE','INVALID_ADAPTER_RESULT','TARGET_REFUSED','QUEUE_UNAVAILABLE','QUEUE_STALE','NO_ELIGIBLE_JOB','BUSY','CAPACITY','POLICY_HOLD','PROVENANCE_MISMATCH','LOCK_OR_RESIDUE_UNCERTAIN','IDENTITY_MISMATCH','NO_ACTIVE_JOB','CURRENT_CANDIDATE','NOT_STALE','PR_CLOSED','PR_MERGED','PR_HEAD_MOVED','SUPERSEDED','PROFILE_MISMATCH','OPERATION_NOT_FOUND','FAILED')) { $Reason='FAILED' }
+    if ($Reason -cnotin @('NONE','ADAPTER_UNAVAILABLE','INVALID_ADAPTER_RESULT','TARGET_REFUSED','QUEUE_UNAVAILABLE','QUEUE_STALE','NO_ELIGIBLE_JOB','BUSY','CAPACITY','CAPACITY_RAM_RESERVE_4GIB_REQUIRED','CAPACITY_CPU_RESERVE_REQUIRED','CAPACITY_CPU_LOAD_TOO_HIGH','CAPACITY_DISK_RESERVE_40GIB_REQUIRED','DEFAULT_NAT_SWITCH_REQUIRED','POLICY_HOLD','PROVENANCE_MISMATCH','LOCK_OR_RESIDUE_UNCERTAIN','IDENTITY_MISMATCH','NO_ACTIVE_JOB','CURRENT_CANDIDATE','NOT_STALE','PR_CLOSED','PR_MERGED','PR_HEAD_MOVED','SUPERSEDED','PROFILE_MISMATCH','OPERATION_NOT_FOUND','FAILED')) { $Reason='FAILED' }
     if ($ProfileId -and $ProfileId -cnotmatch '^[a-z0-9._-]{1,64}$') { $ProfileId=$null }
     $payload = [ordered]@{
         schema=1; operationId=$operationId; success=$Success; resultState=$State; reasonCode=$Reason;
@@ -166,7 +167,8 @@ function Invoke-Child([string]$Path,[string[]]$Arguments) {
     $safe = [Collections.Generic.List[string]]::new()
     while (-not $process.StandardOutput.EndOfStream) {
         $line = $process.StandardOutput.ReadLine()
-        if ($line -cmatch '^(DISPATCHER_RESULT|DISCOVERED_RUN_ID|DISCOVERED_JOB_ID|INTERRUPTED_CLEANUP|CLEANUP_IDEMPOTENT)=([A-Z_]+|[0-9]+|PASS)$') { $safe.Add($line) }
+        if ($line -cmatch '^(DISPATCHER_RESULT|DISCOVERED_RUN_ID|DISCOVERED_JOB_ID|INTERRUPTED_CLEANUP|CLEANUP_IDEMPOTENT)=([A-Z_]+|[0-9]+|PASS)$' -or
+            $line -cmatch ('^CAPACITY_SUBREASON=(' + $script:CapacitySubreasonPattern + ')$')) { $safe.Add($line) }
     }
     $process.WaitForExit()
     $code=$process.ExitCode; $process.Dispose()
@@ -185,7 +187,11 @@ function Invoke-DispatcherMode([ValidateSet('Discover','Once','Recover')][string
     $code = Get-OutputValue $result.Lines 'DISPATCHER_RESULT'
     if ($result.ExitCode -ne 0 -or $code -ceq 'FAIL' -or -not $code) { return [pscustomobject]@{Success=$false;State='FAILED';Reason='FAILED';RunId=0;JobId=0;ProfileId=$null} }
     if ($code -ceq 'BUSY') { return [pscustomobject]@{Success=$false;State='BLOCKED';Reason='BUSY';RunId=0;JobId=0;ProfileId=$null} }
-    if ($code -ceq 'CAPACITY') { return [pscustomobject]@{Success=$false;State='BLOCKED';Reason='CAPACITY';RunId=0;JobId=0;ProfileId=$null} }
+    if ($code -ceq 'CAPACITY') {
+        $sub = Get-OutputValue $result.Lines 'CAPACITY_SUBREASON'
+        $reason = if ($sub -cin @('CAPACITY_RAM_RESERVE_4GIB_REQUIRED','CAPACITY_CPU_RESERVE_REQUIRED','CAPACITY_CPU_LOAD_TOO_HIGH','CAPACITY_DISK_RESERVE_40GIB_REQUIRED','DEFAULT_NAT_SWITCH_REQUIRED')) { $sub } else { 'CAPACITY' }
+        return [pscustomobject]@{Success=$false;State='BLOCKED';Reason=$reason;RunId=0;JobId=0;ProfileId=$null}
+    }
     if ($code -ceq 'IDLE') { return [pscustomobject]@{Success=($Mode -ceq 'Discover');State=$(if($Mode -ceq 'Discover'){'PASS'}else{'BLOCKED'});Reason=$(if($Mode -ceq 'Discover'){'NONE'}else{'NO_ELIGIBLE_JOB'});RunId=0;JobId=0;ProfileId=$null} }
     if ($code -notin @('DISCOVERED','PASS','RECOVERED')) { return [pscustomobject]@{Success=$false;State='FAILED';Reason='FAILED';RunId=0;JobId=0;ProfileId=$null} }
     $run = Get-OutputValue $result.Lines 'DISCOVERED_RUN_ID'; $job = Get-OutputValue $result.Lines 'DISCOVERED_JOB_ID'
