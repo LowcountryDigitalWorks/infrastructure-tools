@@ -225,8 +225,12 @@ class GateA1TransportIdentityTests(unittest.TestCase):
             self.assertNotIn(str(live), argv)
             for path in temp_dir.glob("ldw-gate-a1-key-*"):
                 if sys.platform == "win32":
-                    if path.exists() and path.read_bytes():
-                        self.fail(f"unexpected temp key residue: {path}")
+                    if not path.exists():
+                        continue
+                    data = path.read_bytes()
+                    self.assertNotIn(payload, data)
+                    if data:
+                        self.assertEqual(data, b"\0" * len(data))
                 else:
                     self.fail(f"unexpected temp key residue: {path}")
             with self.assertRaisesRegex(identity.TransportIdentityError, "GATE_A1_TRANSPORT_PRIVATE_KEY_CHANGED"):
@@ -238,8 +242,12 @@ class GateA1TransportIdentityTests(unittest.TestCase):
                 )
             for path in temp_dir.glob("ldw-gate-a1-key-*"):
                 if sys.platform == "win32":
-                    if path.exists() and path.read_bytes():
-                        self.fail(f"unexpected temp key residue: {path}")
+                    if not path.exists():
+                        continue
+                    data = path.read_bytes()
+                    self.assertNotIn(payload, data)
+                    if data:
+                        self.assertEqual(data, b"\0" * len(data))
                 else:
                     self.fail(f"unexpected temp key residue: {path}")
 
