@@ -121,57 +121,6 @@ def assert_transport_key_identity(
     return _sha256(data)
 
 
-def _authorized_keys_invariant_digest(
-    home: Path,
-    uid: int,
-    forced_command: str,
-    *,
-    error_cls: type[Exception] = InstallError,
-) -> str:
-    return assert_transport_key_identity(
-        home,
-        uid,
-        forced_command,
-        None,
-        error_cls=error_cls,
-        invalid_hash_code="REDRIX_TRANSPORT_KEY_SHA256_INVALID",
-        invalid_key_code="REDRIX_TRANSPORT_KEY_INVALID",
-        alternate_present_code="REDRIX_AUTHORIZED_KEYS2_PRESENT",
-        keys_invalid_code="REDRIX_AUTHORIZED_KEYS_INVALID",
-        keys_not_unique_code="REDRIX_FORCED_KEY_NOT_UNIQUE",
-    )
-
-
-def assert_authorized_keys_marker_matches(
-    home: Path,
-    uid: int,
-    forced_command: str,
-    expected_raw_digest: str,
-    *,
-    expected_transport_key_sha256: str | None = None,
-    error_cls: type[Exception] = InstallError,
-) -> None:
-    if re.fullmatch(r"[0-9a-f]{64}", expected_raw_digest) is None:
-        raise error_cls("REDRIX_AUTHORIZED_KEYS_CHANGED")
-    if expected_transport_key_sha256 is not None:
-        digest = assert_transport_key_identity(
-            home,
-            uid,
-            forced_command,
-            expected_transport_key_sha256,
-            error_cls=error_cls,
-            invalid_hash_code="REDRIX_TRANSPORT_KEY_SHA256_INVALID",
-            invalid_key_code="REDRIX_TRANSPORT_KEY_INVALID",
-            alternate_present_code="REDRIX_AUTHORIZED_KEYS2_PRESENT",
-            keys_invalid_code="REDRIX_AUTHORIZED_KEYS_INVALID",
-            keys_not_unique_code="REDRIX_FORCED_KEY_NOT_UNIQUE",
-        )
-    else:
-        digest = _authorized_keys_invariant_digest(home, uid, forced_command, error_cls=error_cls)
-    if digest != expected_raw_digest:
-        raise error_cls("REDRIX_AUTHORIZED_KEYS_CHANGED")
-
-
 def assert_gate_a3_pre_install_state(
     home: Path,
     uid: int,
@@ -230,6 +179,57 @@ def assert_gate_a3_pre_install_state(
 
 class InstallError(RuntimeError):
     pass
+
+
+def _authorized_keys_invariant_digest(
+    home: Path,
+    uid: int,
+    forced_command: str,
+    *,
+    error_cls: type[Exception] = InstallError,
+) -> str:
+    return assert_transport_key_identity(
+        home,
+        uid,
+        forced_command,
+        None,
+        error_cls=error_cls,
+        invalid_hash_code="REDRIX_TRANSPORT_KEY_SHA256_INVALID",
+        invalid_key_code="REDRIX_TRANSPORT_KEY_INVALID",
+        alternate_present_code="REDRIX_AUTHORIZED_KEYS2_PRESENT",
+        keys_invalid_code="REDRIX_AUTHORIZED_KEYS_INVALID",
+        keys_not_unique_code="REDRIX_FORCED_KEY_NOT_UNIQUE",
+    )
+
+
+def assert_authorized_keys_marker_matches(
+    home: Path,
+    uid: int,
+    forced_command: str,
+    expected_raw_digest: str,
+    *,
+    expected_transport_key_sha256: str | None = None,
+    error_cls: type[Exception] = InstallError,
+) -> None:
+    if re.fullmatch(r"[0-9a-f]{64}", expected_raw_digest) is None:
+        raise error_cls("REDRIX_AUTHORIZED_KEYS_CHANGED")
+    if expected_transport_key_sha256 is not None:
+        digest = assert_transport_key_identity(
+            home,
+            uid,
+            forced_command,
+            expected_transport_key_sha256,
+            error_cls=error_cls,
+            invalid_hash_code="REDRIX_TRANSPORT_KEY_SHA256_INVALID",
+            invalid_key_code="REDRIX_TRANSPORT_KEY_INVALID",
+            alternate_present_code="REDRIX_AUTHORIZED_KEYS2_PRESENT",
+            keys_invalid_code="REDRIX_AUTHORIZED_KEYS_INVALID",
+            keys_not_unique_code="REDRIX_FORCED_KEY_NOT_UNIQUE",
+        )
+    else:
+        digest = _authorized_keys_invariant_digest(home, uid, forced_command, error_cls=error_cls)
+    if digest != expected_raw_digest:
+        raise error_cls("REDRIX_AUTHORIZED_KEYS_CHANGED")
 
 
 def _sha256(data: bytes) -> str:
