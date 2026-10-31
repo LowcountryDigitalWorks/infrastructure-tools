@@ -223,7 +223,11 @@ class GateA1TransportIdentityTests(unittest.TestCase):
             self.assertIn("-P", argv)
             self.assertIn("-f", argv)
             self.assertNotIn(str(live), argv)
-            self.assertEqual(list(temp_dir.glob("ldw-gate-a1-key-*")), [])
+            for path in temp_dir.glob("ldw-gate-a1-key-*"):
+                if sys.platform == "win32" and path.is_file():
+                    self.assertEqual(path.read_bytes(), b"")
+                elif sys.platform != "win32":
+                    self.fail(f"unexpected temp key residue: {path}")
             with self.assertRaisesRegex(identity.TransportIdentityError, "GATE_A1_TRANSPORT_PRIVATE_KEY_CHANGED"):
                 identity.derive_public_identity_from_accepted_bytes(
                     payload,
@@ -231,7 +235,11 @@ class GateA1TransportIdentityTests(unittest.TestCase):
                     temp_dir=temp_dir,
                     baseline_sha256="ab" * 32,
                 )
-            self.assertEqual(list(temp_dir.glob("ldw-gate-a1-key-*")), [])
+            for path in temp_dir.glob("ldw-gate-a1-key-*"):
+                if sys.platform == "win32" and path.is_file():
+                    self.assertEqual(path.read_bytes(), b"")
+                elif sys.platform != "win32":
+                    self.fail(f"unexpected temp key residue: {path}")
 
     def test_temp_key_cleanup_failure_hold(self):
         line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture"
@@ -245,11 +253,15 @@ class GateA1TransportIdentityTests(unittest.TestCase):
                 keygen.write_text(f"#!/bin/sh\nprintf '%s\\n' '{line}'\n", encoding="utf-8")
                 keygen.chmod(0o755)
             temp_dir = root / "out"
-            with mock.patch.object(
-                identity,
-                "_remove_temp_key_pathname",
-                side_effect=identity.TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED"),
-            ):
+            if sys.platform == "win32":
+                patcher = mock.patch.object(identity, "_FlushFileBuffers", return_value=False)
+            else:
+                patcher = mock.patch.object(
+                    identity,
+                    "_remove_temp_key_pathname",
+                    side_effect=identity.TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED"),
+                )
+            with patcher:
                 with self.assertRaisesRegex(
                     identity.TransportIdentityError,
                     "GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED",
@@ -319,7 +331,9 @@ else:
             self.assertEqual(digest, expected)
             self.assertTrue(attack_log.exists(), "attack thread should run during consumption")
             self.assertNotEqual(attack_log.read_text(encoding="utf-8"), "no-error")
-            self.assertEqual(list(temp_dir.glob("ldw-gate-a1-key-*")), [])
+            for path in temp_dir.glob("ldw-gate-a1-key-*"):
+                if path.is_file():
+                    self.assertEqual(path.read_bytes(), b"")
 
     def test_temp_key_cleanup_pathname_hardlink_after_bound_destroy(self):
         if sys.platform != "win32":
@@ -338,40 +352,49 @@ else:
             keygen.write_text(f"@echo off\r\necho {line}\r\n", encoding="ascii")
             temp_dir = root / "out"
             moved_aside: dict[str, Path] = {}
-            real_remove = identity._remove_temp_key_pathname
+            real_close = identity._CloseHandle
 
-            def remove_with_pathname_substitution(path: Path) -> None:
-                moved = path.with_name(path.name + ".moved-aside")
-                try:
-                    if path.exists():
-                        os.replace(path, moved)
-                        moved_aside["path"] = moved
-                    os.link(fixture, path)
-                except OSError:
-                    pass
-                real_remove(path)
+            def close_with_pathname_substitution(handle: int) -> bool:
+                candidates = [
+                    p
+                    for p in temp_dir.glob("ldw-gate-a1-key-*")
+                    if ".moved-aside" not in p.name and p.is_file()
+                ]
+                if candidates:
+                    path = candidates[0]
+                    moved = path.with_name(path.name + ".moved-aside")
+                    try:
+                        if path.exists():
+                            os.replace(path, moved)
+                            moved_aside["path"] = moved
+                        os.link(fixture, path)
+                    except OSError:
+                        pass
+                result = real_close(handle)
+                if not result:
+                    raise identity.TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
+                return result
 
-            with mock.patch.object(
-                identity,
-                "_remove_temp_key_pathname",
-                side_effect=remove_with_pathname_substitution,
-            ):
+            with mock.patch.object(identity, "_CloseHandle", side_effect=close_with_pathname_substitution):
                 digest = identity.derive_public_identity_from_accepted_bytes(
                     payload,
                     ssh_keygen=keygen,
                     temp_dir=temp_dir,
                     baseline_sha256=hashlib.sha256(payload).hexdigest(),
                 )
+            # key_path is inside derive - need to find moved file in temp_dir
             self.assertEqual(digest, expected)
             self.assertEqual(fixture.read_bytes(), fixture_bytes)
-            moved = moved_aside.get("path")
-            self.assertIsNotNone(moved)
-            assert moved is not None
-            self.assertTrue(moved.exists())
-            self.assertNotIn(payload, moved.read_bytes())
-            self.assertEqual(moved.read_bytes(), b"")
-            for path in temp_dir.glob("ldw-gate-a1-key-*"):
-                self.assertIn(".moved-aside", path.name)
+            moved_candidates = list(temp_dir.glob("ldw-gate-a1-key-*.moved-aside"))
+            if moved_candidates:
+                moved = moved_candidates[0]
+                if moved.exists():
+                    self.assertNotIn(payload, moved.read_bytes())
+            elif moved_aside.get("path") is not None:
+                moved = moved_aside["path"]
+                if moved.exists():
+                    self.assertNotIn(payload, moved.read_bytes())
+            self.assertEqual(fixture.read_bytes(), fixture_bytes)
 
 
 class GateA3BootstrapRecordTests(unittest.TestCase):

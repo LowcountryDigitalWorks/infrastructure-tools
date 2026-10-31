@@ -316,7 +316,7 @@ def _set_file_pointer(handle: int, offset: int) -> None:
 
 
 def _destroy_bound_temp_key_handle(handle: int) -> None:
-    """Zero the bound file object via the open handle, then close. Never reopens by pathname."""
+    """Zero the bound file object via handle APIs, then close. Never reopens by pathname."""
     _require_windows_64()
     try:
         size = _file_size_from_handle(handle)
@@ -335,9 +335,11 @@ def _destroy_bound_temp_key_handle(handle: int) -> None:
                 raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
             if _file_size_from_handle(handle) != 0:
                 raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
-    finally:
-        if not _CloseHandle(handle):
-            raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
+    except TransportIdentityError:
+        _CloseHandle(handle)
+        raise
+    if not _CloseHandle(handle):
+        raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
 
 
 def _destroy_posix_temp_key_fd(fd: int) -> None:
@@ -461,7 +463,7 @@ def derive_public_identity_from_accepted_bytes(
         if posix_fd >= 0:
             _destroy_posix_temp_key_fd(posix_fd)
             posix_fd = -1
-        _remove_temp_key_pathname(key_path)
+            _remove_temp_key_pathname(key_path)
 
 
 def derive_bound_transport_public_identity(
