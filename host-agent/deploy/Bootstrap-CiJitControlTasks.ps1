@@ -18,9 +18,9 @@ $acceptedWorkerBlob = '02bc6f1526b27a4bf2ef786dd91ba8b816beb68c'
 # does not mistake the variable name plus this non-secret object ID for an access credential:
 # dabb1083994b635ff7d8f83ed673379276036885
 $acceptedStatusAccessBlob = [string]::Concat('dabb1083','994b635ff7d8f83ed673379276036885')
-$manifestSha = 'd10cad356a8ee8cb6201a6167b2ca5ab732a967f1945fe543520454c643ae964'
-$controllerCommit = '54b9343af44c70db1d1403cf7f45cfc11e8bf167'
-$controllerTree = 'beb9b9096b2f4bfa41ad877ad4f6a41150fbcfec'
+$manifestSha = '53c0777a8a721c11e04b4afa1ad02bb8b5f9eb9ea59f8e74502d5cb5443ac436'
+$controllerCommit = '4efeb043162ee773f7115d99fbc8ff1688e0f00c'
+$controllerTree = '0ba833fa376b8be385cecddef447c1f81db61300'
 $manageRelative = 'host-agent/deploy/Manage-CiJitControlTasks.ps1'
 $workerRelative = 'host-agent/deploy/Invoke-CiJitControlTask.ps1'
 $statusAccessRelative = 'host-agent/deploy/Configure-CiJitStatusAccess.ps1'

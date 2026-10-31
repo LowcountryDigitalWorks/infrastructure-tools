@@ -196,9 +196,9 @@ foreach ($literal in @(
     'fd52f44134dda198cb35ed7ef999e166ab143bbe',
     '02bc6f1526b27a4bf2ef786dd91ba8b816beb68c',
     'dabb1083994b635ff7d8f83ed673379276036885',
-    'd10cad356a8ee8cb6201a6167b2ca5ab732a967f1945fe543520454c643ae964',
-    '54b9343af44c70db1d1403cf7f45cfc11e8bf167',
-    'beb9b9096b2f4bfa41ad877ad4f6a41150fbcfec'
+    '53c0777a8a721c11e04b4afa1ad02bb8b5f9eb9ea59f8e74502d5cb5443ac436',
+    '4efeb043162ee773f7115d99fbc8ff1688e0f00c',
+    '0ba833fa376b8be385cecddef447c1f81db61300'
 )) {
     Assert-True ($bootstrapSource.Contains($literal, [StringComparison]::Ordinal)) "CI/JIT bootstrap must pin accepted identity $literal"
 }
