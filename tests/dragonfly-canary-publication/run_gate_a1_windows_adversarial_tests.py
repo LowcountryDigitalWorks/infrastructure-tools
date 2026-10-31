@@ -16,6 +16,7 @@ ADVERSARIAL = (
     "test_temp_key_cleanup_parent_directory_substitution_holds",
     "test_temp_key_cleanup_failure_hold",
     "test_blind_pathname_unlink_would_destroy_substitute_fixture",
+    "test_windows_derive_bound_temp_dir_none_purges_created_directory",
     "test_windows_system_ssh_keygen_ephemeral_ed25519_derive_and_cleanup",
 )
 

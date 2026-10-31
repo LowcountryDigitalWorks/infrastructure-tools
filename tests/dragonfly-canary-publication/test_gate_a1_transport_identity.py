@@ -538,6 +538,40 @@ else:
                     if path.exists():
                         self.assertNotIn(payload, path.read_bytes())
 
+    def test_windows_derive_bound_temp_dir_none_purges_created_directory(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows production derive_bound temp_dir=None purge path")
+        line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture"
+        expected = identity.digest_from_ssh_keygen_y(line + "\n")
+        payload = b"synthetic-private-key-bytes"
+        created_dirs: list[Path] = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def tracking_mkdtemp(*args, **kwargs):
+            name = real_mkdtemp(*args, **kwargs)
+            created_dirs.append(Path(name))
+            return name
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            keygen = root / "ssh-keygen.cmd"
+            keygen.write_text(f"@echo off\r\necho {line}\r\n", encoding="ascii")
+            with mock.patch.object(tempfile, "mkdtemp", side_effect=tracking_mkdtemp):
+                digest = identity.derive_bound_transport_public_identity(
+                    root / "unused-id-ed25519",
+                    accepted_bytes=payload,
+                    baseline_sha256=hashlib.sha256(payload).hexdigest(),
+                    ssh_keygen=keygen,
+                    temp_dir=None,
+                )
+            self.assertEqual(digest, expected)
+            self.assertTrue(created_dirs, "derive_bound should create a temp directory")
+            for directory in created_dirs:
+                self.assertFalse(
+                    directory.exists(),
+                    f"production temp directory must be removed after success: {directory}",
+                )
+
     def test_windows_system_ssh_keygen_ephemeral_ed25519_derive_and_cleanup(self):
         """Hosted Windows: real System32 ssh-keygen against bound temp handle (FILE_SHARE_READ only)."""
         if sys.platform != "win32":
@@ -594,21 +628,29 @@ else:
             private_key_path.unlink(missing_ok=True)
             pub_path.unlink(missing_ok=True)
             self.assertFalse(private_key_path.exists())
-            temp_dir = root / "derive-out"
-            digest = identity.derive_public_identity_from_accepted_bytes(
-                private_bytes,
-                ssh_keygen=system_keygen,
-                temp_dir=temp_dir,
-                baseline_sha256=baseline,
-            )
+            created_dirs: list[Path] = []
+            real_mkdtemp = tempfile.mkdtemp
+
+            def tracking_mkdtemp(*args, **kwargs):
+                name = real_mkdtemp(*args, **kwargs)
+                created_dirs.append(Path(name))
+                return name
+
+            with mock.patch.object(tempfile, "mkdtemp", side_effect=tracking_mkdtemp):
+                digest = identity.derive_bound_transport_public_identity(
+                    root / "unused-id-ed25519",
+                    accepted_bytes=private_bytes,
+                    baseline_sha256=baseline,
+                    ssh_keygen=system_keygen,
+                    temp_dir=None,
+                )
             self.assertEqual(digest, expected_digest)
-            for path in temp_dir.glob("ldw-gate-a1-key-*"):
-                if path.exists():
-                    residue = path.read_bytes()
-                    self.assertNotIn(private_bytes, residue)
-                    if residue:
-                        self.assertEqual(residue, b"\0" * len(residue))
-                    self.fail(f"unexpected temp key pathname after cleanup: {path}")
+            self.assertTrue(created_dirs)
+            for directory in created_dirs:
+                self.assertFalse(
+                    directory.exists(),
+                    f"production temp directory must be removed after System32 derive: {directory}",
+                )
 
     def test_accepted_preflight_pin_matches_git_blob(self):
         data = subprocess.check_output(
