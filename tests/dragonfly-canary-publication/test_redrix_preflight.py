@@ -161,7 +161,7 @@ class RedrixPreflightTests(unittest.TestCase):
     def test_multiple_active_authorized_keys_are_refused(self):
         self.authorized.write_text(self.line + self.line, encoding="utf-8")
         self.authorized.chmod(0o600)
-        with self.assertRaisesRegex(inst.InstallError, "REDRIX_FORCED_KEY_RESTRICTION_INVALID"):
+        with self.assertRaisesRegex(pre.PreflightError, "REDRIX_PREFLIGHT_AUTHORIZED_KEYS_NOT_UNIQUE"):
             self.collect()
 
     def test_authorized_keys2_is_refused(self):
