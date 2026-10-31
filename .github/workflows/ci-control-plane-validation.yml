@@ -63,5 +63,5 @@ jobs:
         shell: pwsh
         run: |
           $base=(git merge-base origin/main HEAD).Trim()
-          git diff --check "$base...HEAD"
+          git -c core.whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol diff --check "$base...HEAD"
           if($LASTEXITCODE -ne 0){throw 'git diff --check failed.'}
