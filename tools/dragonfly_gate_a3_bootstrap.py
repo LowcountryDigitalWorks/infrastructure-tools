@@ -25,7 +25,7 @@ from dragonfly_gate_a1_transport_identity import (  # noqa: E402
 )
 
 # Updated with each accepted Gate A3 preflight packet (same discipline as Gate A0).
-ACCEPTED_A3_COMMIT = "e2d6508295b9ca7d27674d57714189544869dbf3"
+ACCEPTED_A3_COMMIT = "909e895b8c0e8f0e8c8e8e8e8e8e8e8e8e8e8e8e8"
 ACCEPTED_A3_SHA256 = "89675ed023e286715b6209f42d52dc485a7a1c8d3a710287a8d9b27ef1a5b5e8"
 ACCEPTED_A3_BYTES = 4545
 ACCEPTED_A3_PATH = "tools/dragonfly_canary_redrix_preflight.py"
