@@ -114,13 +114,64 @@ class GateA1TransportIdentityTests(unittest.TestCase):
 
     def test_path_substitution_uses_trusted_ssh_keygen_only(self):
         source = SOURCE.read_text(encoding="utf-8")
-        self.assertIn("System32", source)
-        self.assertIn("OpenSSH", source)
+        self.assertIn("GetSystemDirectoryW", source)
+        self.assertIn('system_directory / "OpenSSH" / "ssh-keygen.exe"', source)
         self.assertNotIn("Get-Command", source)
         self.assertNotIn("shutil.which", source)
         operator = (ROOT / "ci-dispatch/Invoke-DragonflyGateA1.ps1").read_text(encoding="utf-8")
         self.assertIn("derive-bound", operator)
         self.assertNotIn("Get-Command ssh-keygen", operator)
+        self.assertNotIn("WINDIR", SOURCE.read_text(encoding="utf-8"))
+        self.assertIn("GetSystemDirectoryW", SOURCE.read_text(encoding="utf-8"))
+        self.assertIn("[Environment]::SystemDirectory", operator)
+
+    def test_ssh_keygen_consumes_accepted_byte_snapshot_not_live_path(self):
+        line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture"
+        expected = identity.digest_from_ssh_keygen_y(line + "\n")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            live = root / "id_ed25519"
+            payload = b"synthetic-private-key-bytes"
+            live.write_bytes(payload)
+            marker = root / "argv.txt"
+            if sys.platform == "win32":
+                keygen = root / "ssh-keygen.cmd"
+                keygen.write_text(
+                    "@echo off\r\n"
+                    f'echo %* > "{marker}"\r\n'
+                    f"echo {line}\r\n",
+                    encoding="ascii",
+                )
+            else:
+                keygen = root / "ssh-keygen"
+                keygen.write_text(
+                    "#!/bin/sh\n"
+                    f"printf '%s\\n' \"$@\" > '{marker}'\n"
+                    f"printf '%s\\n' '{line}'\n",
+                    encoding="utf-8",
+                )
+                keygen.chmod(0o755)
+            temp_dir = root / "out"
+            digest = identity.derive_public_identity_from_accepted_bytes(
+                payload,
+                ssh_keygen=keygen,
+                temp_dir=temp_dir,
+                baseline_sha256=hashlib.sha256(payload).hexdigest(),
+            )
+            argv = marker.read_text(encoding="utf-8", errors="replace")
+            self.assertEqual(digest, expected)
+            self.assertIn("-P", argv)
+            self.assertIn("-f", argv)
+            self.assertNotIn(str(live), argv)
+            self.assertEqual(list(temp_dir.glob("ldw-gate-a1-key-*")), [])
+            with self.assertRaisesRegex(identity.TransportIdentityError, "GATE_A1_TRANSPORT_PRIVATE_KEY_CHANGED"):
+                identity.derive_public_identity_from_accepted_bytes(
+                    payload,
+                    ssh_keygen=keygen,
+                    temp_dir=temp_dir,
+                    baseline_sha256="ab" * 32,
+                )
+            self.assertEqual(list(temp_dir.glob("ldw-gate-a1-key-*")), [])
 
 
 class GateA3BootstrapRecordTests(unittest.TestCase):

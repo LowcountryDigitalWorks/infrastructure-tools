@@ -206,6 +206,45 @@ class GateA3BootstrapNetworkTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 1)
         self.assertIn("A3_SOURCE_TOO_LARGE", stdout.getvalue())
 
+    def test_redirect_and_proxy_handler_are_enforced(self):
+        import urllib.request
 
-if __name__ == "__main__":
-    unittest.main()
+        preflight = b"print('MUST_NOT_EXECUTE')\n"
+        installer = b"installer"
+        code = bootstrap.build_bootstrap_code(
+            url=bootstrap.ACCEPTED_A3_URL,
+            sha256=hashlib.sha256(preflight).hexdigest(),
+            exact_bytes=len(preflight),
+            max_bytes=bootstrap.MAX_SOURCE_BYTES,
+            installer_url=bootstrap.ACCEPTED_INSTALLER_URL,
+            installer_sha256=hashlib.sha256(installer).hexdigest(),
+            installer_exact_bytes=len(installer),
+            transport_key_sha256="d" * 64,
+        )
+        seen: dict = {}
+
+        class FakeOpener:
+            def open(self, request, timeout=None):
+                raise RuntimeError("secret-redirect-body")
+
+        def build_opener(*handlers):
+            seen["handlers"] = handlers
+            return FakeOpener()
+
+        stdout = io.StringIO()
+        with mock.patch("urllib.request.build_opener", side_effect=build_opener):
+            with mock.patch("sys.stdout", stdout):
+                with self.assertRaises(SystemExit) as ctx:
+                    exec(compile(code, "<bootstrap>", "exec"), {})
+        self.assertEqual(ctx.exception.code, 1)
+        text = stdout.getvalue()
+        self.assertIn("CLASSIFICATION=A3_SOURCE_FETCH_FAILED", text)
+        self.assertNotIn("secret-redirect-body", text)
+        self.assertNotIn("MUST_NOT_EXECUTE", text)
+        handlers = seen["handlers"]
+        self.assertEqual(type(handlers[0]).__name__, "ProxyHandler")
+        self.assertEqual(handlers[0].proxies, {})
+        redirect = handlers[1]() if isinstance(handlers[1], type) else handlers[1]
+        with self.assertRaisesRegex(RuntimeError, "A3_SOURCE_REDIRECT_REFUSED"):
+            redirect.redirect_request(None, None, 302, "secret-redirect-body", None, "https://evil.example/redirect")
+        self.assertTrue(urllib.request.ProxyHandler)
