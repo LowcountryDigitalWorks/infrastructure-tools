@@ -21,6 +21,11 @@ ADVERSARIAL = (
     "test_blind_pathname_unlink_would_destroy_substitute_fixture",
     "test_windows_derive_bound_temp_dir_none_purges_created_directory",
     "test_trusted_icacls_ignores_path_substitution",
+    "test_windows_temp_key_setup_exception_path_never_blind_unlinks",
+    "test_temp_key_acl_hardening_failure_erases_and_removes_secret",
+    "test_temp_key_acl_failure_post_close_substitution_cannot_preserve_secret_or_delete_victim",
+    "test_temp_key_partial_write_failure_erases_secret",
+    "test_temp_key_setup_failure_cleanup_error_holds",
     "test_windows_system_ssh_keygen_ephemeral_ed25519_derive_and_cleanup",
 )
 

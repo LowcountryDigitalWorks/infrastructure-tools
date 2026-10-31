@@ -621,13 +621,12 @@ def _create_bound_temp_key_handle(path: Path, key_bytes: bytes) -> int:
     try:
         _write_file_handle(opened, key_bytes)
         _harden_openssh_private_key_acl(path)
-    except TransportIdentityError:
-        _CloseHandle(opened)
+    except TransportIdentityError as setup_error:
         try:
-            path.unlink(missing_ok=True)
-        except OSError as exc:
-            raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED") from exc
-        raise
+            _finalize_bound_temp_key_cleanup(opened, path)
+        except TransportIdentityError:
+            raise
+        raise setup_error
     return opened
 
 

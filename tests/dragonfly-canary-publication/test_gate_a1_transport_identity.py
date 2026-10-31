@@ -233,6 +233,175 @@ class GateA1TransportIdentityTests(unittest.TestCase):
                 "PATH-resolved decoy icacls must not run when trusted System32 path is used",
             )
 
+    def _assert_no_payload_under(self, root: Path, payload: bytes) -> None:
+        for path in root.rglob("*"):
+            if path.is_file():
+                data = path.read_bytes()
+                self.assertNotIn(payload, data)
+
+    def test_windows_temp_key_setup_exception_path_never_blind_unlinks(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows bound temp-key setup failure path")
+        source = SOURCE.read_text(encoding="utf-8")
+        start = source.index("def _create_bound_temp_key_handle")
+        end = source.index("\ndef _purge_temp_directory", start)
+        body = source[start:end]
+        self.assertNotIn("unlink", body)
+
+    def test_temp_key_acl_hardening_failure_erases_and_removes_secret(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows ACL setup failure secret erasure")
+        line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture"
+        payload = b"synthetic-private-key-bytes"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            keygen = root / "ssh-keygen.cmd"
+            keygen.write_text(f"@echo off\r\necho {line}\r\n", encoding="ascii")
+            temp_dir = root / "out"
+            with mock.patch.object(
+                identity,
+                "_harden_openssh_private_key_acl",
+                side_effect=identity.TransportIdentityError(
+                    "GATE_A1_TRANSPORT_TEMP_BIND_FAILED"
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    identity.TransportIdentityError,
+                    "GATE_A1_TRANSPORT_TEMP_BIND_FAILED",
+                ):
+                    identity.derive_public_identity_from_accepted_bytes(
+                        payload,
+                        ssh_keygen=keygen,
+                        temp_dir=temp_dir,
+                        baseline_sha256=hashlib.sha256(payload).hexdigest(),
+                    )
+            for path in temp_dir.glob("ldw-gate-a1-key-*"):
+                self.assertFalse(path.exists(), f"unexpected temp key path: {path}")
+            self._assert_no_payload_under(root, payload)
+
+    def test_temp_key_acl_failure_post_close_substitution_cannot_preserve_secret_or_delete_victim(
+        self,
+    ):
+        if sys.platform != "win32":
+            self.skipTest("Windows ACL setup failure verified-delete substitution")
+        import os
+
+        line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture"
+        payload = b"synthetic-private-key-bytes"
+        victim_bytes = b"UNRELATED-VICTIM-SINGLE-LINK-INTACT"
+        moved_aside: dict[str, Path] = {}
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fixture = root / "victim.bin"
+            fixture.write_bytes(victim_bytes)
+            keygen = root / "ssh-keygen.cmd"
+            keygen.write_text(f"@echo off\r\necho {line}\r\n", encoding="ascii")
+            temp_dir = root / "out"
+            real_delete = identity._delete_temp_key_path_if_same_object
+
+            def delete_with_substitution_during_setup_cleanup(
+                path: Path,
+                expected_identity: tuple[int, int, int],
+            ) -> None:
+                if path.exists():
+                    moved = path.with_name(path.name + ".moved-aside")
+                    os.replace(path, moved)
+                    moved_aside["path"] = moved
+                    os.link(fixture, path)
+                real_delete(path, expected_identity)
+
+            with mock.patch.object(
+                identity,
+                "_harden_openssh_private_key_acl",
+                side_effect=identity.TransportIdentityError(
+                    "GATE_A1_TRANSPORT_TEMP_BIND_FAILED"
+                ),
+            ), mock.patch.object(
+                identity,
+                "_delete_temp_key_path_if_same_object",
+                side_effect=delete_with_substitution_during_setup_cleanup,
+            ):
+                with self.assertRaisesRegex(
+                    identity.TransportIdentityError,
+                    "GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED",
+                ):
+                    identity.derive_public_identity_from_accepted_bytes(
+                        payload,
+                        ssh_keygen=keygen,
+                        temp_dir=temp_dir,
+                        baseline_sha256=hashlib.sha256(payload).hexdigest(),
+                    )
+            self.assertEqual(fixture.read_bytes(), victim_bytes)
+            moved = moved_aside.get("path")
+            if moved is not None and moved.exists():
+                self.assertNotIn(payload, moved.read_bytes())
+                self.assertEqual(moved.stat().st_size, 0)
+
+    def test_temp_key_partial_write_failure_erases_secret(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows partial temp-key write failure erasure")
+        line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture"
+        payload = b"synthetic-private-key-bytes-longer-than-half"
+        real_write = identity._write_file_handle
+        write_calls = {"count": 0}
+
+        def partial_write_then_fail(handle: int, data: bytes) -> None:
+            write_calls["count"] += 1
+            if write_calls["count"] == 1:
+                real_write(handle, data[: len(data) // 2])
+                raise identity.TransportIdentityError("GATE_A1_TRANSPORT_TEMP_BIND_FAILED")
+            real_write(handle, data)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            keygen = root / "ssh-keygen.cmd"
+            keygen.write_text(f"@echo off\r\necho {line}\r\n", encoding="ascii")
+            temp_dir = root / "out"
+            with mock.patch.object(
+                identity, "_write_file_handle", side_effect=partial_write_then_fail
+            ):
+                with self.assertRaisesRegex(
+                    identity.TransportIdentityError,
+                    "GATE_A1_TRANSPORT_TEMP_BIND_FAILED",
+                ):
+                    identity.derive_public_identity_from_accepted_bytes(
+                        payload,
+                        ssh_keygen=keygen,
+                        temp_dir=temp_dir,
+                        baseline_sha256=hashlib.sha256(payload).hexdigest(),
+                    )
+            self._assert_no_payload_under(root, payload)
+            for path in temp_dir.glob("ldw-gate-a1-key-*"):
+                self.assertFalse(path.exists(), f"unexpected temp key path: {path}")
+
+    def test_temp_key_setup_failure_cleanup_error_holds(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows setup failure cleanup HOLD dominates")
+        line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture"
+        payload = b"synthetic-private-key-bytes"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            keygen = root / "ssh-keygen.cmd"
+            keygen.write_text(f"@echo off\r\necho {line}\r\n", encoding="ascii")
+            temp_dir = root / "out"
+            with mock.patch.object(
+                identity,
+                "_harden_openssh_private_key_acl",
+                side_effect=identity.TransportIdentityError(
+                    "GATE_A1_TRANSPORT_TEMP_BIND_FAILED"
+                ),
+            ), mock.patch.object(identity, "_FlushFileBuffers", return_value=False):
+                with self.assertRaisesRegex(
+                    identity.TransportIdentityError,
+                    "GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED",
+                ):
+                    identity.derive_public_identity_from_accepted_bytes(
+                        payload,
+                        ssh_keygen=keygen,
+                        temp_dir=temp_dir,
+                        baseline_sha256=hashlib.sha256(payload).hexdigest(),
+                    )
+
     def test_ssh_keygen_consumes_accepted_byte_snapshot_not_live_path(self):
         line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture"
         expected = identity.digest_from_ssh_keygen_y(line + "\n")
