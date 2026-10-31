@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath
 import pwd
 import re
 import stat
+import sys
 import tarfile
 import tempfile
 from typing import Any
@@ -30,6 +31,7 @@ PRODUCTION_UID = 1000
 TRANSACTION_REL = Path(".local/state/ldw/dragonfly-canary-publication/install-transaction.json")
 RECEIPT_REL = Path(".local/state/ldw/dragonfly-canary-publication/install-receipt.json")
 AUTHORIZED_KEYS_REL = Path(".ssh/authorized_keys")
+AUTHORIZED_KEYS2_REL = Path(".ssh/authorized_keys2")
 RECEIVER_REL = Path(".local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py")
 FORCED_COMMAND = "/home/eddie/.local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py"
 
@@ -49,8 +51,185 @@ ROLLBACK = (
 PREEXISTING_KEYS = {rel.as_posix() for _, _, rel, _ in CURRENT}
 
 
+def _assert_exact_ssh_directory(home: Path, uid: int, error_cls: type[Exception]) -> None:
+    ssh = home / ".ssh"
+    _assert_path_chain(home, ssh / ".sentinel", uid)
+    try:
+        info = ssh.lstat()
+    except FileNotFoundError as exc:
+        raise error_cls("REDRIX_SSH_DIR_INVALID") from exc
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != uid
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise error_cls("REDRIX_SSH_DIR_INVALID")
+
+
+def assert_transport_key_identity(
+    home: Path,
+    uid: int,
+    forced_command: str,
+    expected_key_sha256: str | None,
+    *,
+    error_cls: type[Exception],
+    invalid_hash_code: str,
+    invalid_key_code: str,
+    alternate_present_code: str,
+    keys_invalid_code: str,
+    keys_not_unique_code: str,
+) -> str:
+    _assert_exact_ssh_directory(home, uid, error_cls)
+    alternate = home / AUTHORIZED_KEYS2_REL
+    _assert_path_chain(home, alternate, uid)
+    if alternate.exists() or alternate.is_symlink():
+        raise error_cls(alternate_present_code)
+
+    path = home / AUTHORIZED_KEYS_REL
+    _assert_path_chain(home, path, uid)
+    data = _assert_owned_regular(path, uid, 0o600)
+    if len(data) > 1024 * 1024 or b"\x00" in data:
+        raise error_cls(keys_invalid_code)
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise error_cls(keys_invalid_code) from exc
+
+    active = [
+        raw.strip()
+        for raw in text.splitlines()
+        if raw.strip() and not raw.strip().startswith("#")
+    ]
+    if len(active) != 1:
+        raise error_cls(keys_not_unique_code)
+
+    command = re.escape(forced_command)
+    match = re.fullmatch(
+        rf'restrict,command="{command}" (ssh-ed25519) ([A-Za-z0-9+/]+={{0,3}})(?: [^\r\n]*)?',
+        active[0],
+    )
+    if match is None:
+        raise error_cls(invalid_key_code)
+    key_type, key_data = match.groups()
+    key_hash = hashlib.sha256(f"{key_type} {key_data}".encode("ascii")).hexdigest()
+    if expected_key_sha256 is not None:
+        if re.fullmatch(r"[0-9a-f]{64}", expected_key_sha256) is None:
+            raise error_cls(invalid_hash_code)
+        if key_hash != expected_key_sha256:
+            raise error_cls(invalid_key_code)
+    return _sha256(data)
+
+
+def assert_gate_a3_pre_install_state(
+    home: Path,
+    uid: int,
+    forced_command: str,
+    expected_transport_key_sha256: str,
+    *,
+    error_cls: type[Exception],
+    require_accepted_115: bool,
+    require_no_transaction: bool,
+    require_no_receipt: bool,
+    transport_error_codes: dict[str, str],
+) -> dict[str, object]:
+    home = _assert_home(home, uid)
+
+    transaction = home / TRANSACTION_REL
+    _assert_path_chain(home, transaction, uid)
+    if require_no_transaction and (transaction.exists() or transaction.is_symlink()):
+        raise error_cls("REDRIX_TRANSACTION_RECOVERY_REQUIRED")
+
+    receipt = home / RECEIPT_REL
+    _assert_path_chain(home, receipt, uid)
+    if require_no_receipt and (receipt.exists() or receipt.is_symlink()):
+        raise error_cls("REDRIX_PREFLIGHT_RECEIPT_PRESENT")
+
+    baseline, preexisting = _recognize_baseline(home, uid)
+    if require_accepted_115 and baseline != "accepted-115":
+        raise error_cls("REDRIX_PREFLIGHT_BASELINE_NOT_ACCEPTED_115")
+
+    if require_accepted_115:
+        rollback_targets = {rel.as_posix() for _, _, rel, _ in ROLLBACK}
+        expected_preexisting = {
+            rel.as_posix(): rel.as_posix() in rollback_targets
+            for _, _, rel, _ in CURRENT
+        }
+        if preexisting != expected_preexisting:
+            raise error_cls("REDRIX_PREFLIGHT_RESIDUE_PRESENT")
+    else:
+        if baseline != "accepted-133":
+            raise error_cls("REDRIX_RECEIPT_STATE_INVALID")
+        _verify_current_files(home, uid)
+
+    authorized_keys_sha256 = assert_transport_key_identity(
+        home,
+        uid,
+        forced_command,
+        expected_transport_key_sha256,
+        error_cls=error_cls,
+        **transport_error_codes,
+    )
+    return {
+        "baseline": baseline,
+        "preexisting": preexisting,
+        "authorizedKeysSha256": authorized_keys_sha256,
+    }
+
+
 class InstallError(RuntimeError):
     pass
+
+
+def _authorized_keys_invariant_digest(
+    home: Path,
+    uid: int,
+    forced_command: str,
+    *,
+    error_cls: type[Exception] = InstallError,
+) -> str:
+    return assert_transport_key_identity(
+        home,
+        uid,
+        forced_command,
+        None,
+        error_cls=error_cls,
+        invalid_hash_code="REDRIX_TRANSPORT_KEY_SHA256_INVALID",
+        invalid_key_code="REDRIX_TRANSPORT_KEY_INVALID",
+        alternate_present_code="REDRIX_AUTHORIZED_KEYS2_PRESENT",
+        keys_invalid_code="REDRIX_AUTHORIZED_KEYS_INVALID",
+        keys_not_unique_code="REDRIX_FORCED_KEY_NOT_UNIQUE",
+    )
+
+
+def assert_authorized_keys_marker_matches(
+    home: Path,
+    uid: int,
+    forced_command: str,
+    expected_raw_digest: str,
+    *,
+    expected_transport_key_sha256: str | None = None,
+    error_cls: type[Exception] = InstallError,
+) -> None:
+    if re.fullmatch(r"[0-9a-f]{64}", expected_raw_digest) is None:
+        raise error_cls("REDRIX_AUTHORIZED_KEYS_CHANGED")
+    if expected_transport_key_sha256 is not None:
+        digest = assert_transport_key_identity(
+            home,
+            uid,
+            forced_command,
+            expected_transport_key_sha256,
+            error_cls=error_cls,
+            invalid_hash_code="REDRIX_TRANSPORT_KEY_SHA256_INVALID",
+            invalid_key_code="REDRIX_TRANSPORT_KEY_INVALID",
+            alternate_present_code="REDRIX_AUTHORIZED_KEYS2_PRESENT",
+            keys_invalid_code="REDRIX_AUTHORIZED_KEYS_INVALID",
+            keys_not_unique_code="REDRIX_FORCED_KEY_NOT_UNIQUE",
+        )
+    else:
+        digest = _authorized_keys_invariant_digest(home, uid, forced_command, error_cls=error_cls)
+    if digest != expected_raw_digest:
+        raise error_cls("REDRIX_AUTHORIZED_KEYS_CHANGED")
 
 
 def _sha256(data: bytes) -> str:
@@ -145,33 +324,6 @@ def _assert_path_chain(home: Path, target: Path, uid: int) -> None:
                 raise InstallError("REDRIX_TARGET_PARENT_INVALID")
 
 
-def _authorized_keys_digest(home: Path, uid: int, forced_command: str) -> str:
-    path = home / AUTHORIZED_KEYS_REL
-    _assert_path_chain(home, path, uid)
-    data = _assert_owned_regular(path, uid, 0o600)
-    if len(data) > 1024 * 1024 or b"\x00" in data:
-        raise InstallError("REDRIX_AUTHORIZED_KEYS_INVALID")
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise InstallError("REDRIX_AUTHORIZED_KEYS_INVALID") from exc
-    matches = 0
-    command_option = f'command="{forced_command}"'
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        match = re.fullmatch(r"([^ ]+) (ssh-ed25519) ([A-Za-z0-9+/]+={0,3})(?: [^\r\n]*)?", line)
-        if match is None:
-            continue
-        options = match.group(1).split(",")
-        if set(options) == {"restrict", command_option} and len(options) == 2:
-            matches += 1
-    if matches != 1:
-        raise InstallError("REDRIX_FORCED_KEY_RESTRICTION_INVALID")
-    return _sha256(data)
-
-
 def _expected_map(specs) -> dict[Path, tuple[str, int]]:
     return {rel: (blob, mode) for _, blob, rel, mode in specs}
 
@@ -187,7 +339,7 @@ def _recognize_baseline(home: Path, uid: int) -> tuple[str, dict[str, bool]]:
     rollback = _expected_map(ROLLBACK)
     transport_states: list[str] = []
     preexisting: dict[str, bool] = {}
-    for _, _, rel, _ in CURRENT:
+    for _, _, rel, expected_mode in CURRENT:
         path = home / rel
         _assert_path_chain(home, path, uid)
         if not path.exists() and not path.is_symlink():
@@ -195,7 +347,8 @@ def _recognize_baseline(home: Path, uid: int) -> tuple[str, dict[str, bool]]:
             if rel in rollback:
                 transport_states.append("absent")
             continue
-        data = _assert_owned_regular(path, uid)
+        mode = rollback[rel][1] if rel in rollback else current[rel][1]
+        data = _assert_owned_regular(path, uid, mode)
         preexisting[rel.as_posix()] = True
         blob = _git_blob(data)
         if rel in rollback:
@@ -419,12 +572,45 @@ def _verify_current_files(home: Path, uid: int) -> None:
             raise InstallError("REDRIX_INSTALL_READBACK_INVALID")
 
 
+def _gate_a3_transport_error_codes() -> dict[str, str]:
+    return {
+        "invalid_hash_code": "REDRIX_EXPECTED_TRANSPORT_KEY_SHA256_INVALID",
+        "invalid_key_code": "REDRIX_TRANSPORT_KEY_IDENTITY_INVALID",
+        "alternate_present_code": "REDRIX_AUTHORIZED_KEYS_ALTERNATE_PRESENT",
+        "keys_invalid_code": "REDRIX_AUTHORIZED_KEYS_INVALID",
+        "keys_not_unique_code": "REDRIX_AUTHORIZED_KEYS_NOT_UNIQUE",
+    }
+
+
+def _revalidate_gate_a3_before_transaction(
+    home: Path,
+    uid: int,
+    forced_command: str,
+    expected_transport_key_sha256: str,
+    *,
+    require_accepted_115: bool,
+    require_no_receipt: bool,
+) -> dict[str, object]:
+    return assert_gate_a3_pre_install_state(
+        home,
+        uid,
+        forced_command,
+        expected_transport_key_sha256,
+        error_cls=InstallError,
+        require_accepted_115=require_accepted_115,
+        require_no_transaction=True,
+        require_no_receipt=require_no_receipt,
+        transport_error_codes=_gate_a3_transport_error_codes(),
+    )
+
+
 def install_fixture(
     archive: Path,
     checksum: Path,
     home: Path,
     uid: int,
     forced_command: str,
+    expected_transport_key_sha256: str,
     fault_after: int | None = None,
     fault_after_receipt: bool = False,
 ) -> dict[str, Any]:
@@ -434,7 +620,6 @@ def install_fixture(
     _assert_path_chain(home, transaction, uid)
     if transaction.exists() or transaction.is_symlink():
         raise InstallError("REDRIX_TRANSACTION_RECOVERY_REQUIRED")
-    auth_before = _authorized_keys_digest(home, uid, forced_command)
     baseline, preexisting = _recognize_baseline(home, uid)
     if baseline == "accepted-115" and (receipt.exists() or receipt.is_symlink()):
         raise InstallError("REDRIX_RECEIPT_STATE_INVALID")
@@ -444,10 +629,29 @@ def install_fixture(
         package_root, _, archive_digest = _extract_verified_package(archive, checksum, Path(td))
         if baseline == "accepted-133" and (receipt.exists() or receipt.is_symlink()):
             existing = _read_receipt(home, uid)
+            gate_state = _revalidate_gate_a3_before_transaction(
+                home,
+                uid,
+                forced_command,
+                expected_transport_key_sha256,
+                require_accepted_115=False,
+                require_no_receipt=False,
+            )
+            auth_before = str(gate_state["authorizedKeysSha256"])
             if existing["packageSha256"] != archive_digest or existing["authorizedKeysSha256"] != auth_before:
                 raise InstallError("REDRIX_RECEIPT_STATE_INVALID")
-            _verify_current_files(home, uid)
             return existing
+        gate_state = _revalidate_gate_a3_before_transaction(
+            home,
+            uid,
+            forced_command,
+            expected_transport_key_sha256,
+            require_accepted_115=(baseline == "accepted-115"),
+            require_no_receipt=True,
+        )
+        auth_before = str(gate_state["authorizedKeysSha256"])
+        baseline = str(gate_state["baseline"])
+        preexisting = dict(gate_state["preexisting"])
         record = _validate_transaction({
             "schema": 2,
             "operation": "install",
@@ -469,7 +673,19 @@ def install_fixture(
                 count += 1
                 if fault_after is not None and count == fault_after:
                     raise InstallError("REDRIX_SYNTHETIC_INSTALL_FAULT")
-            if _authorized_keys_digest(home, uid, forced_command) != auth_before:
+            auth_after = assert_transport_key_identity(
+                home,
+                uid,
+                forced_command,
+                expected_transport_key_sha256,
+                error_cls=InstallError,
+                invalid_hash_code="REDRIX_TRANSPORT_KEY_SHA256_INVALID",
+                invalid_key_code="REDRIX_TRANSPORT_KEY_INVALID",
+                alternate_present_code="REDRIX_AUTHORIZED_KEYS2_PRESENT",
+                keys_invalid_code="REDRIX_AUTHORIZED_KEYS_INVALID",
+                keys_not_unique_code="REDRIX_FORCED_KEY_NOT_UNIQUE",
+            )
+            if auth_after != auth_before:
                 raise InstallError("REDRIX_AUTHORIZED_KEYS_CHANGED")
             _assert_path_chain(home, receipt, uid)
             receipt_record = _validate_receipt_data({
@@ -490,8 +706,13 @@ def install_fixture(
         except Exception as original:
             try:
                 _restore(home, package_root, record, uid)
-                if _authorized_keys_digest(home, uid, forced_command) != auth_before:
-                    raise InstallError("REDRIX_AUTHORIZED_KEYS_CHANGED")
+                assert_authorized_keys_marker_matches(
+                    home,
+                    uid,
+                    forced_command,
+                    auth_before,
+                    expected_transport_key_sha256=expected_transport_key_sha256,
+                )
                 if baseline == "accepted-115":
                     _remove_matching_receipt(home, uid, archive_digest, auth_before)
                 transaction.unlink()
@@ -512,15 +733,13 @@ def recover_fixture(archive: Path, checksum: Path, home: Path, uid: int, forced_
         record = _validate_transaction(json.loads(marker_data.decode("utf-8")))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise InstallError("REDRIX_TRANSACTION_MARKER_INVALID") from exc
-    if _authorized_keys_digest(home, uid, forced_command) != record["authorizedKeysSha256"]:
-        raise InstallError("REDRIX_AUTHORIZED_KEYS_CHANGED")
+    assert_authorized_keys_marker_matches(home, uid, forced_command, record["authorizedKeysSha256"])
     with tempfile.TemporaryDirectory(dir=transaction.parent, prefix="recover-") as td:
         package_root, _, archive_digest = _extract_verified_package(archive, checksum, Path(td))
         if archive_digest != record["packageSha256"]:
             raise InstallError("REDRIX_RECOVERY_PACKAGE_MISMATCH")
         _restore(home, package_root, record, uid)
-        if _authorized_keys_digest(home, uid, forced_command) != record["authorizedKeysSha256"]:
-            raise InstallError("REDRIX_AUTHORIZED_KEYS_CHANGED")
+        assert_authorized_keys_marker_matches(home, uid, forced_command, record["authorizedKeysSha256"])
         if record["baseline"] == "accepted-115":
             _remove_matching_receipt(home, uid, archive_digest, record["authorizedKeysSha256"])
     transaction.unlink()
@@ -536,9 +755,8 @@ def rollback_fixture(archive: Path, checksum: Path, home: Path, uid: int, forced
     receipt = _read_receipt(home, uid)
     if receipt["rollbackBaseline"] != "accepted-115":
         raise InstallError("REDRIX_ROLLBACK_BASELINE_REFUSED")
-    auth = _authorized_keys_digest(home, uid, forced_command)
-    if auth != receipt["authorizedKeysSha256"]:
-        raise InstallError("REDRIX_AUTHORIZED_KEYS_CHANGED")
+    assert_authorized_keys_marker_matches(home, uid, forced_command, receipt["authorizedKeysSha256"])
+    auth = receipt["authorizedKeysSha256"]
     _verify_current_files(home, uid)
     transaction.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     _assert_path_chain(home, transaction, uid)
@@ -561,8 +779,7 @@ def rollback_fixture(archive: Path, checksum: Path, home: Path, uid: int, forced
         _restore(home, package_root, record, uid)
         if fault_after == 1:
             raise InstallError("REDRIX_SYNTHETIC_ROLLBACK_FAULT")
-        if _authorized_keys_digest(home, uid, forced_command) != auth:
-            raise InstallError("REDRIX_AUTHORIZED_KEYS_CHANGED")
+        assert_authorized_keys_marker_matches(home, uid, forced_command, auth)
         _remove_matching_receipt(home, uid, archive_digest, auth)
         transaction.unlink()
         _fsync_dir(transaction.parent)
@@ -575,8 +792,7 @@ def readback_fixture(home: Path, uid: int, forced_command: str) -> dict[str, Any
     if transaction.exists() or transaction.is_symlink():
         raise InstallError("REDRIX_TRANSACTION_RECOVERY_REQUIRED")
     receipt_data = _read_receipt(home, uid)
-    if _authorized_keys_digest(home, uid, forced_command) != receipt_data["authorizedKeysSha256"]:
-        raise InstallError("REDRIX_AUTHORIZED_KEYS_CHANGED")
+    assert_authorized_keys_marker_matches(home, uid, forced_command, receipt_data["authorizedKeysSha256"])
     _verify_current_files(home, uid)
     return {
         "sourceCommit": SOURCE_COMMIT,
@@ -601,7 +817,11 @@ def _assert_production_identity() -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("install", "recover", "rollback"):
+    install_parser = sub.add_parser("install")
+    install_parser.add_argument("archive", type=Path)
+    install_parser.add_argument("checksum", type=Path)
+    install_parser.add_argument("--expected-transport-key-sha256", required=True)
+    for name in ("recover", "rollback"):
         child = sub.add_parser(name)
         child.add_argument("archive", type=Path)
         child.add_argument("checksum", type=Path)
@@ -610,7 +830,14 @@ def main() -> int:
     try:
         _assert_production_identity()
         if args.command == "install":
-            result = install_fixture(args.archive, args.checksum, PRODUCTION_HOME, PRODUCTION_UID, FORCED_COMMAND)
+            result = install_fixture(
+                args.archive,
+                args.checksum,
+                PRODUCTION_HOME,
+                PRODUCTION_UID,
+                FORCED_COMMAND,
+                args.expected_transport_key_sha256,
+            )
             print("REDRIX_CANARY_INSTALL=PASS")
             print("SOURCE_COMMIT=" + result["sourceCommit"])
         elif args.command == "recover":

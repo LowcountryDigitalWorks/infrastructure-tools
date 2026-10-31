@@ -58,6 +58,14 @@ $required = @(
     'CI10_PROTECTED_BUNDLE_UNCHANGED',
     'TRANSPORT_PRIVATE_KEY_UNCHANGED',
     'TRANSPORT_KNOWN_HOSTS_UNCHANGED',
+    'TRANSPORT_PUBLIC_IDENTITY_SHA256=',
+    'TRANSPORT_KEY_PROVENANCE=gate-a1-ldw01-transport-private-key-unchanged-contract',
+    'TRANSPORT_PUBLIC_IDENTITY_DERIVED',
+    'GATE_A1_TRANSPORT_IDENTITY_RECORD=',
+    'dragonfly_gate_a1_transport_identity.py',
+    'derive-bound',
+    '--baseline-sha256',
+    '[Environment]::SystemDirectory',
     'GITHUB_PROVIDER_ACTIONS_INVOKED_BY_HARNESS=no',
     'WORKFLOW_DISPATCH_INVOKED_BY_HARNESS=no',
     'SSH_TRANSPORT_INVOKED_BY_HARNESS=no',
@@ -175,6 +183,24 @@ try {
         BackendState='Running'; Self=[pscustomobject]@{Online=$true}; Peer=[pscustomobject]@{ one=[pscustomobject]@{HostName='redrix';DNSName='';Online=$false;TailscaleIPs=@('100.64.1.2')} }
     }
     Assert-ThrowsMessage { Assert-LdwGateA1TailscaleStatusObject -Status $offlineStatus } 'GATE_A1_REDRIX_TAILSCALE_PEER_NOT_UNIQUE'
+
+    if ($env:OS -eq 'Windows_NT') {
+        $savedPath = $env:PATH
+        $decoyRoot = Join-Path ([IO.Path]::GetTempPath()) ('ldw-gatea1-decoy-' + [Guid]::NewGuid().ToString('N'))
+        try {
+            $null = New-Item -ItemType Directory -Path $decoyRoot
+            $marker = Join-Path $decoyRoot 'marker.txt'
+            Set-Content -LiteralPath (Join-Path $decoyRoot 'ssh-keygen.cmd') -Value ("@echo off`r`necho DECOY>" + $marker) -Encoding Ascii
+            $env:PATH = $decoyRoot + ';' + $savedPath
+            $resolvedKeygen = Get-LdwGateA1FixedSshKeygen
+            $expectedKeygen = [IO.Path]::GetFullPath((Join-Path ([Environment]::SystemDirectory) 'OpenSSH\ssh-keygen.exe'))
+            Assert-True ($resolvedKeygen -ceq $expectedKeygen) 'GATE_A1_SSH_KEYGEN_PATH_SUBSTITUTED'
+            Assert-True (-not (Test-Path -LiteralPath $marker)) 'GATE_A1_SSH_KEYGEN_DECOY_EXECUTED'
+        } finally {
+            $env:PATH = $savedPath
+            if (Test-Path -LiteralPath $decoyRoot) { Remove-Item -LiteralPath $decoyRoot -Recurse -Force }
+        }
+    }
 
     'GATE_A1_OPERATOR_CONTRACT=PASS'
 }

@@ -146,6 +146,10 @@ try {
         }
         if ($gate -in @('BUSY','CAPACITY')) {
             Write-Ci10Log $dispatchRoot $gate.ToLowerInvariant()
+            if ($gate -ceq 'CAPACITY') {
+                $capacityDiagnostic = Get-Ci10CapacityDiagnostic @($gates | Where-Object Value -ceq 'CAPACITY')
+                if ($capacityDiagnostic) { 'CAPACITY_SUBREASON=' + $capacityDiagnostic }
+            }
             'DISPATCHER_RESULT=' + $gate
         } elseif ($gate -ceq 'READY') {
             $selected = @(Find-Ci10QueuedJob $profiles)
@@ -169,6 +173,12 @@ try {
                     # Re-read immediately after the final provenance and capacity checks.
                     $null = Assert-Ci10Bundle $bundle $ManifestSha $Commit $Tree
                     $gate = Get-Ci10ControllerGate $controllerRoot $candidate.Profile
+                    $finalGate = Resolve-Ci10FinalLaunchGate $gate (Get-Ci10CapacitySubreason $candidate.Profile.id)
+                    if ($finalGate.Result -ceq 'CAPACITY') {
+                        if ($finalGate.Subreason) { 'CAPACITY_SUBREASON=' + $finalGate.Subreason }
+                        'DISPATCHER_RESULT=CAPACITY'
+                        break
+                    }
                     if ($gate -cne 'READY') { throw 'CONTROLLER_GATE_CHANGED' }
                     $candidate = Confirm-Ci10Candidate $candidate
                     Write-Ci10Log $dispatchRoot controller-start -ProfileId $candidate.Profile.id -RunId $candidate.RunId

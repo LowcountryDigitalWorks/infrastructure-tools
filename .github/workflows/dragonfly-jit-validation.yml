@@ -6,6 +6,9 @@ on:
       - 'dragonfly-jit/**'
       - 'tools/dragonfly_canary_publication.py'
       - 'tools/dragonfly_canary_redrix_install.py'
+      - 'tools/dragonfly_canary_redrix_preflight.py'
+      - 'tools/dragonfly_gate_a3_bootstrap.py'
+      - 'tools/dragonfly_gate_a1_transport_identity.py'
       - 'tools/dragonfly_gate_a0.py'
       - 'tools/dragonfly_gate_a0_bootstrap.py'
       - 'tests/dragonfly-canary-publication/**'
@@ -27,6 +30,9 @@ on:
       - 'dragonfly-jit/**'
       - 'tools/dragonfly_canary_publication.py'
       - 'tools/dragonfly_canary_redrix_install.py'
+      - 'tools/dragonfly_canary_redrix_preflight.py'
+      - 'tools/dragonfly_gate_a3_bootstrap.py'
+      - 'tools/dragonfly_gate_a1_transport_identity.py'
       - 'tools/dragonfly_gate_a0.py'
       - 'tools/dragonfly_gate_a0_bootstrap.py'
       - 'tests/dragonfly-canary-publication/**'
@@ -66,6 +72,9 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: powershell
         run: ./tests/dragonfly-canary-publication/Test-DragonflyGateA1Operator.ps1
+      - name: Verify Gate A1 transport identity adversarial regressions (Windows)
+        if: matrix.os == 'windows-latest'
+        run: python tests/dragonfly-canary-publication/run_gate_a1_windows_adversarial_tests.py
 
   source:
     runs-on: ubuntu-latest
@@ -88,6 +97,9 @@ jobs:
             dragonfly-jit/canary_executor.py \
             tools/dragonfly_canary_publication.py \
             tools/dragonfly_canary_redrix_install.py \
+            tools/dragonfly_canary_redrix_preflight.py \
+            tools/dragonfly_gate_a3_bootstrap.py \
+            tools/dragonfly_gate_a1_transport_identity.py \
             tools/dragonfly_gate_a0.py \
             tools/dragonfly_gate_a0_bootstrap.py
       - name: Parse bounded LDW01 publication source

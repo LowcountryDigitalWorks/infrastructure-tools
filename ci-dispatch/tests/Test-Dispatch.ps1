@@ -23,17 +23,36 @@ function New-ControllerFixture([string]$Commit,[string]$Destination){
     [IO.Compression.ZipFile]::ExtractToDirectory($zip,$Destination)
     Remove-Item -LiteralPath $zip -Force
 }
-function Copy-AcceptedDispatcherFixture([string]$Destination){
-    $commit='ce2bf253556a69dfb43de7bb8e8a4927c41c9e15'
-    $stage=Join-Path $fixture ('accepted-dispatcher-'+[guid]::NewGuid().ToString('N'))
-    $zip=$stage+'.zip'
-    $null=New-Item -ItemType Directory -Path $stage
-    & git -C $repo archive --format=zip ('--output='+$zip) $commit -- 'ci-dispatch/Dispatch.psm1' 2>$null
-    if($LASTEXITCODE -ne 0){throw 'TEST_DISPATCHER_ARCHIVE_FAILED'}
-    [IO.Compression.ZipFile]::ExtractToDirectory($zip,$stage)
-    $acceptedPath=Join-Path $stage 'ci-dispatch/Dispatch.psm1'
-    $source=[IO.File]::ReadAllText($acceptedPath)
-    [IO.File]::WriteAllText($Destination,$source.Replace("`r`n","`n").Replace("`n","`r`n"),[Text.UTF8Encoding]::new($false))
+function Read-Ci10VerifierProvenanceRecord([string]$RecordPath) {
+    if (-not (Test-Path -LiteralPath $RecordPath -PathType Leaf)) { throw 'TEST_VERIFIER_RECORD_MISSING' }
+    try { $record = Get-Content -LiteralPath $RecordPath -Raw | ConvertFrom-Json }
+    catch { throw 'TEST_VERIFIER_RECORD_INVALID' }
+    if ($record.schema -ne 1 -or
+        $record.commit -cnotmatch '^[a-f0-9]{40}$' -or
+        $record.tree -cnotmatch '^[a-f0-9]{40}$' -or
+        $record.blob -cnotmatch '^[a-f0-9]{40}$' -or
+        $record.sha256 -cnotmatch '^[a-f0-9]{64}$') { throw 'TEST_VERIFIER_RECORD_SCHEMA_REFUSED' }
+    $actualTree = (& git -C $repo rev-parse ($record.commit + '^{tree}') 2>$null).Trim()
+    if ($LASTEXITCODE -ne 0 -or $actualTree -cne $record.tree) { throw 'TEST_VERIFIER_RECORD_TREE_REFUSED' }
+    $record
+}
+function Copy-AcceptedDispatcherFixture([string]$Destination, [string]$VerifierRecordPath) {
+    $record = Read-Ci10VerifierProvenanceRecord $VerifierRecordPath
+    $actualBlob = (& git -C $repo rev-parse ($record.commit + ':ci-dispatch/Dispatch.psm1') 2>$null).Trim()
+    if ($LASTEXITCODE -ne 0 -or $actualBlob -cne $record.blob) { throw 'TEST_DISPATCHER_BLOB_REFUSED' }
+    $stage = Join-Path $fixture ('accepted-dispatcher-' + [guid]::NewGuid().ToString('N'))
+    $zip = $stage + '.zip'
+    $null = New-Item -ItemType Directory -Path $stage -Force
+    & git -C $repo archive --format=zip ('--output=' + $zip) $record.commit -- 'ci-dispatch/Dispatch.psm1' 2>$null
+    if ($LASTEXITCODE -ne 0) { throw 'TEST_DISPATCHER_ARCHIVE_FAILED' }
+    [IO.Compression.ZipFile]::ExtractToDirectory($zip, $stage)
+    $acceptedPath = Join-Path $stage 'ci-dispatch/Dispatch.psm1'
+    if (-not (Test-Path -LiteralPath $acceptedPath -PathType Leaf)) { throw 'TEST_DISPATCHER_ARCHIVE_FAILED' }
+    $actualSha = (Get-FileHash -LiteralPath $acceptedPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualSha -cne $record.sha256) { throw 'TEST_DISPATCHER_SHA256_REFUSED' }
+    $destDir = Split-Path $Destination -Parent
+    $null = New-Item -ItemType Directory -Path $destDir -Force
+    Copy-Item -LiteralPath $acceptedPath -Destination $Destination -Force
     Remove-Item -LiteralPath $stage -Recurse -Force
     Remove-Item -LiteralPath $zip -Force
 }
@@ -342,7 +361,102 @@ $bad.event='push'
     Check 'capacity unavailable leaves queue untouched' {
         & $module {$script:CapacityBlocked=$true}
         Assert ((Get-Ci10ControllerGate $controllerRoot $profile) -ceq 'CAPACITY')
+        Assert ((Get-Ci10CapacitySubreason $profile.id) -ceq 'CAPACITY_RAM_RESERVE_4GIB_REQUIRED')
         & $module {$script:CapacityBlocked=$false}
+        Assert ((Get-Ci10ControllerGate $controllerRoot $profile) -ceq 'READY')
+        Assert ($null -eq (Get-Ci10CapacitySubreason $profile.id))
+    }
+    Check 'each accepted capacity predicate stays a bounded sanitized subreason' {
+        $codes=@(
+            'CAPACITY_RAM_RESERVE_4GIB_REQUIRED',
+            'CAPACITY_CPU_RESERVE_REQUIRED',
+            'CAPACITY_CPU_LOAD_TOO_HIGH',
+            'CAPACITY_DISK_RESERVE_40GIB_REQUIRED',
+            'DEFAULT_NAT_SWITCH_REQUIRED'
+        )
+        foreach($code in $codes){
+            & $module ([scriptblock]::Create("function script:Assert-Ci7Capacity { throw '$code' }"))
+            Assert ((Get-Ci10ControllerGate $controllerRoot $profile) -ceq 'CAPACITY')
+            Assert ((Get-Ci10CapacitySubreason $profile.id) -ceq $code)
+            Assert ((ConvertTo-Ci10CapacityResultReason 'CAPACITY' $code) -ceq $code)
+            Assert ((Get-Ci10CapacityDiagnostic @([pscustomobject]@{Profile=$profile})) -ceq $code)
+            Assert (Test-Ci10SanitizedCapacitySubreasonLine "CAPACITY_SUBREASON=$code")
+            Assert (-not (Test-Ci10SanitizedCapacitySubreasonLine "CAPACITY_SUBREASON=$code extra"))
+            Assert (-not (Test-Ci10SanitizedCapacitySubreasonLine "DISPATCHER_RESULT=$code"))
+        }
+        & $module { function script:Assert-Ci7Capacity { throw 'CAPACITY_RAW_FREE_PHYSICAL_MEMORY' } }
+        Assert ((Get-Ci10ControllerGate $controllerRoot $profile) -ceq 'CAPACITY')
+        Assert ($null -eq (Get-Ci10CapacitySubreason $profile.id))
+        Assert ((ConvertTo-Ci10CapacityResultReason 'CAPACITY' 'FreePhysicalMemory=1024') -ceq 'CAPACITY')
+        Assert ((ConvertTo-Ci10CapacityResultReason 'CAPACITY' $null) -ceq 'CAPACITY')
+        Assert ($null -eq (ConvertTo-Ci10CapacityResultReason 'READY' 'CAPACITY_CPU_LOAD_TOO_HIGH'))
+        Assert (-not (Test-Ci10SanitizedCapacitySubreasonLine 'CAPACITY_SUBREASON=FreePhysicalMemory=1024'))
+        & $module {
+            $script:Ci10CapacitySubreasonByProfile['left']='CAPACITY_CPU_RESERVE_REQUIRED'
+            $script:Ci10CapacitySubreasonByProfile['right']='DEFAULT_NAT_SWITCH_REQUIRED'
+        }
+        Assert ($null -eq (Get-Ci10CapacityDiagnostic @(
+            [pscustomobject]@{Profile=[pscustomobject]@{id='left'}},
+            [pscustomobject]@{Profile=[pscustomobject]@{id='right'}}
+        )))
+        $runner=Get-Content -LiteralPath (Join-Path $repo 'ci-runner/CiRunner.psm1') -Raw
+        foreach($predicate in @(
+            'if ($os.FreePhysicalMemory * 1024 -lt ($Configuration.MemoryMiB * 1MB + 4GB)) { throw ''CAPACITY_RAM_RESERVE_4GIB_REQUIRED'' }',
+            'if (($cpu | Measure-Object NumberOfLogicalProcessors -Sum).Sum -lt $Configuration.CpuCount + 2) { throw ''CAPACITY_CPU_RESERVE_REQUIRED'' }',
+            'if (($cpu | Measure-Object LoadPercentage -Average).Average -gt 70) { throw ''CAPACITY_CPU_LOAD_TOO_HIGH'' }',
+            'if ($drive.AvailableFreeSpace -lt 40GB) { throw ''CAPACITY_DISK_RESERVE_40GIB_REQUIRED'' }',
+            'if ($switch.Count -ne 1) { throw ''DEFAULT_NAT_SWITCH_REQUIRED'' }'
+        )) { Assert ($runner.Contains($predicate)) }
+        $dispatcher=Get-Content -LiteralPath (Join-Path $repo 'ci-dispatch/Invoke-Dispatcher.ps1') -Raw
+        Assert ($dispatcher.Contains("if (`$gate -cne 'READY') { throw 'CONTROLLER_GATE_CHANGED' }"))
+        $finalStart=$dispatcher.IndexOf('$finalGate = Resolve-Ci10FinalLaunchGate')
+        $launchStart=$dispatcher.IndexOf('Start-Ci10Controller $bundle $controllerRoot $candidate')
+        Assert ($finalStart -ge 0 -and $launchStart -gt $finalStart)
+        $finalBranch=$dispatcher.Substring($finalStart, $launchStart - $finalStart)
+        Assert ($finalBranch.Contains("'DISPATCHER_RESULT=CAPACITY'"))
+        Assert ($finalBranch.Contains('break'))
+        Assert (-not $finalBranch.Contains('Start-Ci10Controller'))
+        foreach($code in $codes){
+            $decision=Resolve-Ci10FinalLaunchGate 'CAPACITY' $code
+            Assert (-not $decision.Launch)
+            Assert ($decision.Result -ceq 'CAPACITY')
+            Assert ($decision.Subreason -ceq $code)
+        }
+        $rawFinal=Resolve-Ci10FinalLaunchGate 'CAPACITY' 'FreePhysicalMemory=1024'
+        Assert (-not $rawFinal.Launch -and $rawFinal.Result -ceq 'CAPACITY' -and $null -eq $rawFinal.Subreason)
+        foreach($blocked in @('BUSY','STALE','CONTROLLER_GATE_UNCERTAIN','')){
+            $decision=Resolve-Ci10FinalLaunchGate $blocked $codes[0]
+            Assert (-not $decision.Launch)
+            Assert ($decision.Result -ceq 'CONTROLLER_GATE_CHANGED')
+            Assert ($null -eq $decision.Subreason)
+        }
+        $readyFinal=Resolve-Ci10FinalLaunchGate 'READY' $codes[0]
+        Assert ($readyFinal.Launch -and $readyFinal.Result -ceq 'READY' -and $null -eq $readyFinal.Subreason)
+        Assert ($dispatcher.Contains("`$gate -in @('BUSY','CAPACITY')"))
+        Assert ($dispatcher.Contains("elseif (@(`$gates | Where-Object Value -ceq 'CAPACITY').Count) { 'CAPACITY' }"))
+        Assert ($dispatcher.Contains("if (`$gate -notin @('READY','CAPACITY')) { throw 'RECOVERY_BUSY_OR_UNCERTAIN' }"))
+        $capacityBranch=$dispatcher.Substring($dispatcher.IndexOf("if (`$gate -in @('BUSY','CAPACITY'))"), $dispatcher.IndexOf("elseif (`$gate -ceq 'READY')") - $dispatcher.IndexOf("if (`$gate -in @('BUSY','CAPACITY'))"))
+        Assert (-not $capacityBranch.Contains('Start-Ci10Controller'))
+        $worker=Get-Content -LiteralPath (Join-Path $repo 'host-agent/deploy/Invoke-CiJitControlTask.ps1') -Raw
+        Assert ($worker.Contains("`'RUN_ONCE' { `$r=Invoke-DispatcherMode Once"))
+        Assert ($worker.Contains("`$code -ceq 'CAPACITY'"))
+        Assert ($worker.Contains(($codes -join '|')))
+        $general='^(DISPATCHER_RESULT|DISCOVERED_RUN_ID|DISCOVERED_JOB_ID|INTERRUPTED_CLEANUP|CLEANUP_IDEMPOTENT)=([A-Z_]+|[0-9]+|PASS)$'
+        Assert ($worker.Contains($general))
+        Assert ('DISPATCHER_RESULT=CAPACITY' -cmatch $general)
+        Assert (-not ('DISPATCHER_RESULT=CAPACITY_RAM_RESERVE_4GIB_REQUIRED' -cmatch $general))
+        $client=Get-Content -LiteralPath (Join-Path $repo 'host-agent/deploy/Invoke-CiJitLocalTaskClient.ps1') -Raw
+        $contract=Get-Content -LiteralPath (Join-Path $repo 'host-agent/src/LDW.AdminBroker/CiJitControlContract.cs') -Raw
+        $status=Get-Content -LiteralPath (Join-Path $repo 'ci-dispatch/StatusProjection.psm1') -Raw
+        $statusCore=Get-Content -LiteralPath (Join-Path $repo 'host-agent/src/LDW.HostAgent.Core/CiJitStatus.cs') -Raw
+        foreach($code in $codes){
+            Assert (([regex]::Matches($worker, [regex]::Escape("'$code'"))).Count -ge 2)
+            Assert ($client.Contains("'$code'"))
+            Assert ($contract.Contains('"'+$code+'"'))
+            Assert (-not $status.Contains($code))
+            Assert (-not $statusCore.Contains($code))
+        }
+        & $module { function script:Assert-Ci7Capacity { if($script:CapacityBlocked){ throw 'CAPACITY_RAM_RESERVE_4GIB_REQUIRED' } } }
     }
     Check 'unrelated ci7-looking VM refused, no deletion' {
         & $module {$script:VMFixture=@([pscustomobject]@{Name='ci7-unrelated';VMId='unrelated'})}
@@ -390,8 +504,9 @@ $bad.event='push'
     foreach($path in @(Get-Ci10RuntimeFiles|Where-Object{$_.StartsWith('ci-runner/')})){
         Copy-Item -LiteralPath (Join-Path $royalController $path) -Destination (Join-Path $bundle $path) -Force
     }
-    Copy-AcceptedDispatcherFixture (Join-Path $bundle 'ci-dispatch/Dispatch.psm1')
-    $dispatcherProvenance=Get-Content -LiteralPath (Join-Path $bundle 'ci-dispatch/verifier-provenance.json') -Raw|ConvertFrom-Json
+    $verifierRecordPath=Join-Path $bundle 'ci-dispatch/verifier-provenance.json'
+    Copy-AcceptedDispatcherFixture (Join-Path $bundle 'ci-dispatch/Dispatch.psm1') $verifierRecordPath
+    $dispatcherProvenance=Get-Content -LiteralPath $verifierRecordPath -Raw|ConvertFrom-Json
     $manifest=[ordered]@{schema=1;commit=('a'*40);tree=('b'*40);dispatcher=$dispatcherProvenance;controllerCommit='54b9343af44c70db1d1403cf7f45cfc11e8bf167';
         controllerTree='beb9b9096b2f4bfa41ad877ad4f6a41150fbcfec';files=@(Get-Ci10RuntimeFiles|ForEach-Object{
             [ordered]@{path=$_;sha256=(Get-FileHash -LiteralPath (Join-Path $bundle $_) -Algorithm SHA256).Hash.ToLowerInvariant()}
@@ -408,6 +523,36 @@ $bad.event='push'
         $null=Assert-Ci10Bundle $bundle $manifestSha ('a'*40) ('b'*40)
         Assert ($manifest.controllerCommit -ceq '54b9343af44c70db1d1403cf7f45cfc11e8bf167' -and
             $manifest.controllerTree -ceq 'beb9b9096b2f4bfa41ad877ad4f6a41150fbcfec')
+        Assert ($manifest.dispatcher.blob -ceq $dispatcherProvenance.blob -and
+            $manifest.dispatcher.sha256 -ceq $dispatcherProvenance.sha256)
+    }
+    Check 'mixed pre-#71 dispatcher bytes with current verifier record refused' {
+        $legacyStage=Join-Path $fixture ('legacy-dispatch-'+[guid]::NewGuid().ToString('N'))
+        $legacyZip=$legacyStage+'.zip'
+        $null=New-Item -ItemType Directory -Path $legacyStage -Force
+        & git -C $repo archive --format=zip ('--output='+$legacyZip) ce2bf253556a69dfb43de7bb8e8a4927c41c9e15 -- 'ci-dispatch/Dispatch.psm1' 2>$null
+        if($LASTEXITCODE -ne 0){throw 'TEST_LEGACY_DISPATCHER_ARCHIVE_FAILED'}
+        [IO.Compression.ZipFile]::ExtractToDirectory($legacyZip,$legacyStage)
+        Copy-Item -LiteralPath (Join-Path $legacyStage 'ci-dispatch/Dispatch.psm1') -Destination (Join-Path $bundle 'ci-dispatch/Dispatch.psm1') -Force
+        Remove-Item -LiteralPath $legacyStage -Recurse -Force
+        Remove-Item -LiteralPath $legacyZip -Force
+        $badManifest=[ordered]@{schema=1;commit=('a'*40);tree=('b'*40);dispatcher=$dispatcherProvenance;controllerCommit=$manifest.controllerCommit;
+            controllerTree=$manifest.controllerTree;files=$manifest.files}
+        $badManifestFile=Join-Path $fixture 'mixed-provenance-manifest.json'
+        $badManifest|ConvertTo-Json -Depth 6|Set-Content -LiteralPath $badManifestFile -Encoding utf8NoBOM
+        $badSha=(Get-FileHash -LiteralPath $badManifestFile -Algorithm SHA256).Hash.ToLowerInvariant()
+        try {
+            $code=$null
+            try { $null=Assert-Ci10Bundle $bundle $badSha ('a'*40) ('b'*40) } catch { $code=$_.Exception.Message }
+            Assert ($code -in @('BUNDLE_VERIFIER_PROVENANCE_MISMATCH','BUNDLE_VERIFIER_HASH_DRIFT'))
+        } finally {
+            Copy-AcceptedDispatcherFixture (Join-Path $bundle 'ci-dispatch/Dispatch.psm1') $verifierRecordPath
+            $manifest.files=@(Get-Ci10RuntimeFiles|ForEach-Object{
+                [ordered]@{path=$_;sha256=(Get-FileHash -LiteralPath (Join-Path $bundle $_) -Algorithm SHA256).Hash.ToLowerInvariant()}
+            })
+            $manifest|ConvertTo-Json -Depth 6|Set-Content -LiteralPath $manifestFile -Encoding utf8NoBOM
+            $script:manifestSha=(Get-FileHash -LiteralPath $manifestFile -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
     }
     if ($env:OS -eq 'Windows_NT') {
         Check 'protected exact bundle verifies' {$null=Assert-Ci10Bundle $bundle $manifestSha ('a'*40) ('b'*40)}
