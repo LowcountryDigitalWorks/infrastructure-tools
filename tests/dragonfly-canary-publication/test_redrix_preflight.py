@@ -163,10 +163,43 @@ class RedrixPreflightTests(unittest.TestCase):
             self.collect()
 
     def test_authorized_keys2_is_refused(self):
-        alternate = self.home / pre.AUTHORIZED_KEYS2_REL
+        alternate = self.home / ".ssh" / "authorized_keys2"
         alternate.write_text("synthetic\n", encoding="utf-8")
         alternate.chmod(0o600)
         with self.assertRaisesRegex(pre.PreflightError, "REDRIX_PREFLIGHT_AUTHORIZED_KEYS_ALTERNATE_PRESENT"):
+            self.collect()
+
+    def test_load_installer_does_not_mutate_tools_tree(self):
+        tools = ROOT / "tools"
+        before = snapshot(tools)
+        pre._load_installer()
+        after = snapshot(tools)
+        self.assertEqual(before, after)
+        cache = list(tools.rglob("__pycache__"))
+        self.assertEqual(cache, [])
+
+    def test_installer_exec_uses_verified_bytes_not_later_path_mutation(self):
+        data = pre.INSTALLER_PATH.read_bytes()
+        module = pre._load_installer()
+        self.assertEqual(module.SOURCE_COMMIT, inst.SOURCE_COMMIT)
+        pre.INSTALLER_PATH.write_text("# mutated on disk\n", encoding="utf-8")
+        try:
+            self.assertEqual(module.SOURCE_COMMIT, inst.SOURCE_COMMIT)
+            with self.assertRaisesRegex(pre.PreflightError, "REDRIX_PREFLIGHT_INSTALLER_IDENTITY_MISMATCH"):
+                pre._load_installer()
+        finally:
+            pre.INSTALLER_PATH.write_bytes(data)
+
+    def test_rollback_receiver_mode_drift_is_refused(self):
+        receiver = self.home / inst.RECEIVER_REL
+        receiver.chmod(0o644)
+        with self.assertRaisesRegex(inst.InstallError, "REDRIX_FILE_MODE_INVALID"):
+            self.collect()
+
+    def test_handoff_contract_mode_drift_is_refused(self):
+        handoff = self.home / inst.ROLLBACK[1][2]
+        handoff.chmod(0o644)
+        with self.assertRaisesRegex(inst.InstallError, "REDRIX_FILE_MODE_INVALID"):
             self.collect()
 
 

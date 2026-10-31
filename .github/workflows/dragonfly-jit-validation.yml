@@ -7,6 +7,8 @@ on:
       - 'tools/dragonfly_canary_publication.py'
       - 'tools/dragonfly_canary_redrix_install.py'
       - 'tools/dragonfly_canary_redrix_preflight.py'
+      - 'tools/dragonfly_canary_redrix_a3.py'
+      - 'tools/dragonfly_gate_a3_bootstrap.py'
       - 'tools/dragonfly_gate_a0.py'
       - 'tools/dragonfly_gate_a0_bootstrap.py'
       - 'tests/dragonfly-canary-publication/**'
@@ -29,6 +31,8 @@ on:
       - 'tools/dragonfly_canary_publication.py'
       - 'tools/dragonfly_canary_redrix_install.py'
       - 'tools/dragonfly_canary_redrix_preflight.py'
+      - 'tools/dragonfly_canary_redrix_a3.py'
+      - 'tools/dragonfly_gate_a3_bootstrap.py'
       - 'tools/dragonfly_gate_a0.py'
       - 'tools/dragonfly_gate_a0_bootstrap.py'
       - 'tests/dragonfly-canary-publication/**'
@@ -91,6 +95,8 @@ jobs:
             tools/dragonfly_canary_publication.py \
             tools/dragonfly_canary_redrix_install.py \
             tools/dragonfly_canary_redrix_preflight.py \
+            tools/dragonfly_canary_redrix_a3.py \
+            tools/dragonfly_gate_a3_bootstrap.py \
             tools/dragonfly_gate_a0.py \
             tools/dragonfly_gate_a0_bootstrap.py
       - name: Parse bounded LDW01 publication source
