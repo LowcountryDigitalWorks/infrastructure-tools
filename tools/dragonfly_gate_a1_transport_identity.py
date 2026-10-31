@@ -315,26 +315,43 @@ def _set_file_pointer(handle: int, offset: int) -> None:
         raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
 
 
+def _verify_handle_region_is_zero(handle: int, size: int) -> None:
+    if size == 0:
+        return
+    _set_file_pointer(handle, 0)
+    remaining = size
+    while remaining > 0:
+        chunk = min(remaining, 65536)
+        buffer = ctypes.create_string_buffer(chunk)
+        read = wintypes.DWORD(0)
+        ok = _kernel32.ReadFile(handle, buffer, chunk, ctypes.byref(read), None)
+        if not ok:
+            raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
+        if int(read.value) == 0:
+            raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
+        if buffer.raw[: int(read.value)] != b"\0" * int(read.value):
+            raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
+        remaining -= int(read.value)
+
+
 def _destroy_bound_temp_key_handle(handle: int) -> None:
-    """Zero the bound file object via handle APIs, then close. Never reopens by pathname."""
+    """Zero the bound file object via the open handle, verify, flush, then close (no pathname reopen)."""
     _require_windows_64()
     try:
-        size = _file_size_from_handle(handle)
-        if size:
+        original_size = _file_size_from_handle(handle)
+        if original_size:
             _set_file_pointer(handle, 0)
-            remaining = size
+            remaining = original_size
             zero_block = b"\0" * 65536
             while remaining > 0:
                 chunk_len = min(remaining, len(zero_block))
                 _write_file_handle(handle, zero_block[:chunk_len])
                 remaining -= chunk_len
-            _set_file_pointer(handle, 0)
-            if not _SetEndOfFile(handle):
+            if remaining != 0:
                 raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
             if not _FlushFileBuffers(handle):
                 raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
-            if _file_size_from_handle(handle) != 0:
-                raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
+            _verify_handle_region_is_zero(handle, original_size)
     except TransportIdentityError:
         _CloseHandle(handle)
         raise

@@ -224,9 +224,10 @@ class GateA1TransportIdentityTests(unittest.TestCase):
             self.assertIn("-f", argv)
             self.assertNotIn(str(live), argv)
             for path in temp_dir.glob("ldw-gate-a1-key-*"):
-                if sys.platform == "win32" and path.is_file():
-                    self.assertEqual(path.read_bytes(), b"")
-                elif sys.platform != "win32":
+                if sys.platform == "win32":
+                    if path.exists() and path.read_bytes():
+                        self.fail(f"unexpected temp key residue: {path}")
+                else:
                     self.fail(f"unexpected temp key residue: {path}")
             with self.assertRaisesRegex(identity.TransportIdentityError, "GATE_A1_TRANSPORT_PRIVATE_KEY_CHANGED"):
                 identity.derive_public_identity_from_accepted_bytes(
@@ -236,9 +237,10 @@ class GateA1TransportIdentityTests(unittest.TestCase):
                     baseline_sha256="ab" * 32,
                 )
             for path in temp_dir.glob("ldw-gate-a1-key-*"):
-                if sys.platform == "win32" and path.is_file():
-                    self.assertEqual(path.read_bytes(), b"")
-                elif sys.platform != "win32":
+                if sys.platform == "win32":
+                    if path.exists() and path.read_bytes():
+                        self.fail(f"unexpected temp key residue: {path}")
+                else:
                     self.fail(f"unexpected temp key residue: {path}")
 
     def test_temp_key_cleanup_failure_hold(self):
@@ -332,8 +334,12 @@ else:
             self.assertTrue(attack_log.exists(), "attack thread should run during consumption")
             self.assertNotEqual(attack_log.read_text(encoding="utf-8"), "no-error")
             for path in temp_dir.glob("ldw-gate-a1-key-*"):
-                if path.is_file():
-                    self.assertEqual(path.read_bytes(), b"")
+                if not path.exists():
+                    continue
+                data = path.read_bytes()
+                self.assertNotIn(payload, data)
+                if data:
+                    self.assertEqual(data, b"\0" * len(data))
 
     def test_temp_key_cleanup_pathname_hardlink_after_bound_destroy(self):
         if sys.platform != "win32":
@@ -358,7 +364,7 @@ else:
                 candidates = [
                     p
                     for p in temp_dir.glob("ldw-gate-a1-key-*")
-                    if ".moved-aside" not in p.name and p.is_file()
+                    if ".moved-aside" not in p.name and p.exists()
                 ]
                 if candidates:
                     path = candidates[0]
@@ -382,19 +388,18 @@ else:
                     temp_dir=temp_dir,
                     baseline_sha256=hashlib.sha256(payload).hexdigest(),
                 )
-            # key_path is inside derive - need to find moved file in temp_dir
             self.assertEqual(digest, expected)
             self.assertEqual(fixture.read_bytes(), fixture_bytes)
-            moved_candidates = list(temp_dir.glob("ldw-gate-a1-key-*.moved-aside"))
-            if moved_candidates:
-                moved = moved_candidates[0]
-                if moved.exists():
-                    self.assertNotIn(payload, moved.read_bytes())
-            elif moved_aside.get("path") is not None:
-                moved = moved_aside["path"]
-                if moved.exists():
-                    self.assertNotIn(payload, moved.read_bytes())
-            self.assertEqual(fixture.read_bytes(), fixture_bytes)
+            moved = moved_aside.get("path")
+            if moved is not None and moved.exists():
+                self.assertNotIn(payload, moved.read_bytes())
+            for path in temp_dir.glob("ldw-gate-a1-key-*"):
+                if not path.exists():
+                    continue
+                data = path.read_bytes()
+                self.assertNotIn(payload, data)
+                if data:
+                    self.assertEqual(data, b"\0" * len(data))
 
 
 class GateA3BootstrapRecordTests(unittest.TestCase):
