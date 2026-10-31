@@ -5,18 +5,24 @@ Source-only control-plane helper. It does not connect to REDRIX or mutate host
 state. It renders a shell-safe command whose embedded Python bootstrap fetches one
 immutable public preflight helper into memory, verifies exact byte length and
 SHA-256, compile/executes it only after verification, and passes the expected
-transport-key identity digest bound at render time.
-
-The transport-key SHA-256 must be the Gate A1 operator-verified dedicated transport
-public identity (LDW01 ``TRANSPORT_PRIVATE_KEY_UNCHANGED`` contract output). The
-orchestrator supplies that digest to this renderer; REDRIX must not accept an
-ad-hoc operator-typed CLI value without passing through this pinned fetch path.
+transport-key identity digest taken only from a Gate A1 transport identity record.
 """
 from __future__ import annotations
 
 import argparse
 import re
 import shlex
+import sys
+from pathlib import Path
+
+_TOOLS_DIR = Path(__file__).resolve().parent
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
+from dragonfly_gate_a1_transport_identity import (  # noqa: E402
+    PROVENANCE as TRANSPORT_KEY_PROVENANCE,
+    parse_record as parse_gate_a1_transport_identity_record,
+)
 
 # Updated with each accepted Gate A3 preflight packet (same discipline as Gate A0).
 ACCEPTED_A3_COMMIT = "874431c55c60e9f3d7f1a002bf49e92888fc33a5"
@@ -32,7 +38,6 @@ ACCEPTED_A3_URL = (
 MAX_SOURCE_BYTES = 65536
 PYTHON = "/usr/bin/python3"
 PYTHON_FLAGS = ("-I", "-B")
-TRANSPORT_KEY_PROVENANCE = "gate-a1-ldw01-transport-private-key-unchanged-contract"
 
 
 class BootstrapInputError(ValueError):
@@ -112,9 +117,12 @@ except Exception:
 '''
 
 
-def render_command(*, transport_key_sha256: str) -> str:
-    if re.fullmatch(r"[0-9a-f]{64}", transport_key_sha256) is None:
-        raise BootstrapInputError("A3_EXPECTED_TRANSPORT_KEY_SHA256_INVALID")
+def render_command(*, gate_a1_transport_identity_record: Path) -> str:
+    try:
+        record_text = gate_a1_transport_identity_record.read_text(encoding="utf-8")
+        transport_key_sha256 = parse_gate_a1_transport_identity_record(record_text)
+    except ValueError as exc:
+        raise BootstrapInputError(str(exc)) from exc
 
     code = build_bootstrap_code(
         url=ACCEPTED_A3_URL,
@@ -129,17 +137,21 @@ def render_command(*, transport_key_sha256: str) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Render immutable in-memory REDRIX Gate A3 preflight command")
-    parser.add_argument("--expected-transport-key-sha256", required=True)
-    parser.add_argument("--provenance", default=TRANSPORT_KEY_PROVENANCE, choices=[TRANSPORT_KEY_PROVENANCE])
+    parser.add_argument(
+        "--gate-a1-transport-identity-record",
+        type=Path,
+        required=True,
+        help="Gate A1 operator record file (derived public identity digest + provenance)",
+    )
     args = parser.parse_args()
     try:
-        command = render_command(transport_key_sha256=args.expected_transport_key_sha256)
+        command = render_command(gate_a1_transport_identity_record=args.gate_a1_transport_identity_record)
     except BootstrapInputError as exc:
         print("DRAGONFLY_GATE_A3_BOOTSTRAP_RENDER=HOLD")
         print("CLASSIFICATION=" + str(exc))
         return 1
     print("DRAGONFLY_GATE_A3_BOOTSTRAP_RENDER=PASS")
-    print("TRANSPORT_KEY_PROVENANCE=" + args.provenance)
+    print("TRANSPORT_KEY_PROVENANCE=" + TRANSPORT_KEY_PROVENANCE)
     print(command)
     return 0
 

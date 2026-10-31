@@ -111,6 +111,24 @@ function Get-LdwGateA1TailscaleStatus {
     Assert-LdwGateA1TailscaleStatusObject -Status $status
 }
 
+function Get-LdwGateA1TransportPublicIdentitySha256 {
+    param(
+        [Parameter(Mandatory)][string]$RepositoryRoot,
+        [Parameter(Mandatory)][string]$Python,
+        [Parameter(Mandatory)][string]$PrivateKeyPath
+    )
+    $helper = Join-Path $RepositoryRoot 'tools\dragonfly_gate_a1_transport_identity.py'
+    if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) { throw 'GATE_A1_TRANSPORT_IDENTITY_HELPER_MISSING' }
+    $sshKeygen = (Get-Command ssh-keygen.exe -ErrorAction Stop).Source
+    $publicLine = & $sshKeygen -y -f $PrivateKeyPath 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($publicLine)) {
+        throw 'GATE_A1_TRANSPORT_PUBLIC_IDENTITY_DERIVATION_FAILED'
+    }
+    $digest = ($publicLine | & $Python $helper derive-from-ssh-keygen-y 2>$null).Trim()
+    if ($LASTEXITCODE -ne 0 -or $digest -cnotmatch '^[0-9a-f]{64}$') { throw 'GATE_A1_TRANSPORT_PUBLIC_IDENTITY_INVALID' }
+    return $digest.ToLowerInvariant()
+}
+
 function Invoke-LdwDragonflyGateA1 {
     param(
         [Parameter(Mandatory)][string]$Root,
@@ -219,6 +237,17 @@ function Invoke-LdwDragonflyGateA1 {
     if ($knownHostsAfter -cne $knownHostsBefore) { throw 'GATE_A1_TRANSPORT_KNOWN_HOSTS_CHANGED' }
     Write-LdwGateA1Pass 'TRANSPORT_PRIVATE_KEY_UNCHANGED'
     Write-LdwGateA1Pass 'TRANSPORT_KNOWN_HOSTS_UNCHANGED'
+
+    $transportIdentitySha256 = Get-LdwGateA1TransportPublicIdentitySha256 -RepositoryRoot $repo.Root -Python $python -PrivateKeyPath $privateKey
+    Write-Output ('TRANSPORT_PUBLIC_IDENTITY_SHA256=' + $transportIdentitySha256)
+    Write-Output 'TRANSPORT_KEY_PROVENANCE=gate-a1-ldw01-transport-private-key-unchanged-contract'
+    $identityRecord = Join-Path $taskRoot 'gate-a1-transport-identity.record'
+    $null = & $python (Join-Path $repo.Root 'tools\dragonfly_gate_a1_transport_identity.py') write-record --digest $transportIdentitySha256 --output $identityRecord 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $identityRecord -PathType Leaf)) {
+        throw 'GATE_A1_TRANSPORT_IDENTITY_RECORD_FAILED'
+    }
+    Write-LdwGateA1Pass 'TRANSPORT_PUBLIC_IDENTITY_DERIVED'
+    Write-Output ('GATE_A1_TRANSPORT_IDENTITY_RECORD=' + $identityRecord)
 
     if (Test-Path -LiteralPath $uncertainty) { throw 'GATE_A1_DRAGONFLY_UNCERTAINTY_CREATED' }
     Write-LdwGateA1Pass 'DRAGONFLY_CANARY_UNCERTAINTY_ABSENT_AFTER'
