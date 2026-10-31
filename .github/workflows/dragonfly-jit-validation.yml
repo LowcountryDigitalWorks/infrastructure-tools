@@ -7,7 +7,6 @@ on:
       - 'tools/dragonfly_canary_publication.py'
       - 'tools/dragonfly_canary_redrix_install.py'
       - 'tools/dragonfly_canary_redrix_preflight.py'
-      - 'tools/dragonfly_canary_redrix_a3.py'
       - 'tools/dragonfly_gate_a3_bootstrap.py'
       - 'tools/dragonfly_gate_a1_transport_identity.py'
       - 'tools/dragonfly_gate_a0.py'
@@ -32,7 +31,6 @@ on:
       - 'tools/dragonfly_canary_publication.py'
       - 'tools/dragonfly_canary_redrix_install.py'
       - 'tools/dragonfly_canary_redrix_preflight.py'
-      - 'tools/dragonfly_canary_redrix_a3.py'
       - 'tools/dragonfly_gate_a3_bootstrap.py'
       - 'tools/dragonfly_gate_a1_transport_identity.py'
       - 'tools/dragonfly_gate_a0.py'
@@ -97,7 +95,6 @@ jobs:
             tools/dragonfly_canary_publication.py \
             tools/dragonfly_canary_redrix_install.py \
             tools/dragonfly_canary_redrix_preflight.py \
-            tools/dragonfly_canary_redrix_a3.py \
             tools/dragonfly_gate_a3_bootstrap.py \
             tools/dragonfly_gate_a1_transport_identity.py \
             tools/dragonfly_gate_a0.py \

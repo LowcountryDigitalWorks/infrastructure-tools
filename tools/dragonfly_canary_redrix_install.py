@@ -20,12 +20,6 @@ import tarfile
 import tempfile
 from typing import Any
 
-_TOOLS_DIR = Path(__file__).resolve().parent
-if str(_TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(_TOOLS_DIR))
-
-from dragonfly_canary_redrix_a3 import assert_gate_a3_pre_install_state
-
 SOURCE_COMMIT = "78a3a23b1a9dac59698a09cec2dd6c9a81e4a3ca"
 SOURCE_TREE = "5f54ee5b76f49250db1358f058745cb30b6587ef"
 ROLLBACK_COMMIT = "4fed47d8d81833b2978f4ea03ffd0f5b86126008"
@@ -37,6 +31,7 @@ PRODUCTION_UID = 1000
 TRANSACTION_REL = Path(".local/state/ldw/dragonfly-canary-publication/install-transaction.json")
 RECEIPT_REL = Path(".local/state/ldw/dragonfly-canary-publication/install-receipt.json")
 AUTHORIZED_KEYS_REL = Path(".ssh/authorized_keys")
+AUTHORIZED_KEYS2_REL = Path(".ssh/authorized_keys2")
 RECEIVER_REL = Path(".local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py")
 FORCED_COMMAND = "/home/eddie/.local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py"
 
@@ -54,6 +49,132 @@ ROLLBACK = (
     ("dragonfly-jit/handoff_contract.py", "2f7892275bacd9f56abaa0cdf204f46f79c046c0", Path(".local/lib/ldw-dragonfly-jit/handoff_contract.py"), 0o600),
 )
 PREEXISTING_KEYS = {rel.as_posix() for _, _, rel, _ in CURRENT}
+
+
+def _assert_exact_ssh_directory(home: Path, uid: int, error_cls: type[Exception]) -> None:
+    ssh = home / ".ssh"
+    _assert_path_chain(home, ssh / ".sentinel", uid)
+    try:
+        info = ssh.lstat()
+    except FileNotFoundError as exc:
+        raise error_cls("REDRIX_SSH_DIR_INVALID") from exc
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != uid
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise error_cls("REDRIX_SSH_DIR_INVALID")
+
+
+def assert_transport_key_identity(
+    home: Path,
+    uid: int,
+    forced_command: str,
+    expected_key_sha256: str,
+    *,
+    error_cls: type[Exception],
+    invalid_hash_code: str,
+    invalid_key_code: str,
+    alternate_present_code: str,
+    keys_invalid_code: str,
+    keys_not_unique_code: str,
+) -> str:
+    if re.fullmatch(r"[0-9a-f]{64}", expected_key_sha256) is None:
+        raise error_cls(invalid_hash_code)
+
+    _assert_exact_ssh_directory(home, uid, error_cls)
+    alternate = home / AUTHORIZED_KEYS2_REL
+    _assert_path_chain(home, alternate, uid)
+    if alternate.exists() or alternate.is_symlink():
+        raise error_cls(alternate_present_code)
+
+    path = home / AUTHORIZED_KEYS_REL
+    _assert_path_chain(home, path, uid)
+    data = _assert_owned_regular(path, uid, 0o600)
+    if len(data) > 1024 * 1024 or b"\x00" in data:
+        raise error_cls(keys_invalid_code)
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise error_cls(keys_invalid_code) from exc
+
+    active = [
+        raw.strip()
+        for raw in text.splitlines()
+        if raw.strip() and not raw.strip().startswith("#")
+    ]
+    if len(active) != 1:
+        raise error_cls(keys_not_unique_code)
+
+    command = re.escape(forced_command)
+    match = re.fullmatch(
+        rf'restrict,command="{command}" (ssh-ed25519) ([A-Za-z0-9+/]+={{0,3}})(?: [^\r\n]*)?',
+        active[0],
+    )
+    if match is None:
+        raise error_cls(invalid_key_code)
+    key_type, key_data = match.groups()
+    key_hash = hashlib.sha256(f"{key_type} {key_data}".encode("ascii")).hexdigest()
+    if key_hash != expected_key_sha256:
+        raise error_cls(invalid_key_code)
+    return _sha256(data)
+
+
+def assert_gate_a3_pre_install_state(
+    home: Path,
+    uid: int,
+    forced_command: str,
+    expected_transport_key_sha256: str,
+    *,
+    error_cls: type[Exception],
+    require_accepted_115: bool,
+    require_no_transaction: bool,
+    require_no_receipt: bool,
+    transport_error_codes: dict[str, str],
+) -> dict[str, object]:
+    home = _assert_home(home, uid)
+
+    transaction = home / TRANSACTION_REL
+    _assert_path_chain(home, transaction, uid)
+    if require_no_transaction and (transaction.exists() or transaction.is_symlink()):
+        raise error_cls("REDRIX_TRANSACTION_RECOVERY_REQUIRED")
+
+    receipt = home / RECEIPT_REL
+    _assert_path_chain(home, receipt, uid)
+    if require_no_receipt and (receipt.exists() or receipt.is_symlink()):
+        raise error_cls("REDRIX_PREFLIGHT_RECEIPT_PRESENT")
+
+    baseline, preexisting = _recognize_baseline(home, uid)
+    if require_accepted_115 and baseline != "accepted-115":
+        raise error_cls("REDRIX_PREFLIGHT_BASELINE_NOT_ACCEPTED_115")
+
+    if require_accepted_115:
+        rollback_targets = {rel.as_posix() for _, _, rel, _ in ROLLBACK}
+        expected_preexisting = {
+            rel.as_posix(): rel.as_posix() in rollback_targets
+            for _, _, rel, _ in CURRENT
+        }
+        if preexisting != expected_preexisting:
+            raise error_cls("REDRIX_PREFLIGHT_RESIDUE_PRESENT")
+    else:
+        if baseline != "accepted-133":
+            raise error_cls("REDRIX_RECEIPT_STATE_INVALID")
+        _verify_current_files(home, uid)
+
+    authorized_keys_sha256 = assert_transport_key_identity(
+        home,
+        uid,
+        forced_command,
+        expected_transport_key_sha256,
+        error_cls=error_cls,
+        **transport_error_codes,
+    )
+    return {
+        "baseline": baseline,
+        "preexisting": preexisting,
+        "authorizedKeysSha256": authorized_keys_sha256,
+    }
 
 
 class InstallError(RuntimeError):
@@ -446,13 +567,9 @@ def _revalidate_gate_a3_before_transaction(
     require_accepted_115: bool,
     require_no_receipt: bool,
 ) -> dict[str, object]:
-    installer = sys.modules.get(__name__)
-    if installer is None:
-        raise InstallError("REDRIX_INSTALL_MODULE_CONTEXT_INVALID")
     return assert_gate_a3_pre_install_state(
         home,
         uid,
-        installer,
         forced_command,
         expected_transport_key_sha256,
         error_cls=InstallError,

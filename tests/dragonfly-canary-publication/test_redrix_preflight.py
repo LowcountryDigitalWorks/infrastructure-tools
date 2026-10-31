@@ -194,6 +194,14 @@ class RedrixPreflightTests(unittest.TestCase):
         finally:
             pre.INSTALLER_PATH.write_bytes(data)
 
+    def test_ambient_a3_helper_substitution_does_not_affect_verified_preflight(self):
+        decoy = ROOT / "tools" / "dragonfly_canary_redrix_a3.py"
+        decoy.write_text("raise RuntimeError('DECOY_A3_LOADED')\n", encoding="utf-8")
+        try:
+            self.collect()
+        finally:
+            decoy.unlink(missing_ok=True)
+
     def test_rollback_receiver_mode_drift_is_refused(self):
         receiver = self.home / inst.RECEIVER_REL
         receiver.chmod(0o644)

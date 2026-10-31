@@ -9,19 +9,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import os
 from pathlib import Path
 import pwd
 import re
 import sys
 from types import ModuleType
-
-_TOOLS_DIR = Path(__file__).resolve().parent
-if str(_TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(_TOOLS_DIR))
-
-from dragonfly_canary_redrix_a3 import assert_gate_a3_pre_install_state, exec_verified_module
 
 INSTALLER_BLOB = "9c30c100156186fdde5c59a3ec173c6ed8d9b892"
 INSTALLER_PATH = Path(__file__).resolve().with_name("dragonfly_canary_redrix_install.py")
@@ -38,6 +31,14 @@ def _git_blob(data: bytes) -> str:
     return hashlib.sha1(f"blob {len(data)}\0".encode("ascii") + data).hexdigest()
 
 
+def _exec_verified_module(data: bytes, module_name: str) -> ModuleType:
+    code = compile(data, f"<{module_name}>", "exec", dont_inherit=True)
+    module = ModuleType(module_name)
+    module.__file__ = f"<{module_name}>"
+    exec(code, module.__dict__)
+    return module
+
+
 def _load_installer(path: Path = INSTALLER_PATH) -> ModuleType:
     try:
         data = path.read_bytes()
@@ -45,7 +46,7 @@ def _load_installer(path: Path = INSTALLER_PATH) -> ModuleType:
         raise PreflightError("REDRIX_PREFLIGHT_INSTALLER_UNAVAILABLE") from exc
     if _git_blob(data) != INSTALLER_BLOB:
         raise PreflightError("REDRIX_PREFLIGHT_INSTALLER_IDENTITY_MISMATCH")
-    return exec_verified_module(data, "ldw_redrix_gate_a3_installer")
+    return _exec_verified_module(data, "ldw_redrix_gate_a3_installer")
 
 
 def _gate_a3_transport_error_codes() -> dict[str, str]:
@@ -64,10 +65,9 @@ def preflight_fixture(
     installer: ModuleType,
     expected_key_sha256: str,
 ) -> dict:
-    result = assert_gate_a3_pre_install_state(
+    result = installer.assert_gate_a3_pre_install_state(
         home,
         uid,
-        installer,
         installer.FORCED_COMMAND,
         expected_key_sha256,
         error_cls=PreflightError,
