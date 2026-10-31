@@ -247,6 +247,133 @@ class GateA1TransportIdentityTests(unittest.TestCase):
         end = source.index("\ndef _purge_temp_directory", start)
         body = source[start:end]
         self.assertNotIn("unlink", body)
+        self.assertIn("setup_complete", body)
+        self.assertIn("finally:", body)
+        self.assertNotIn("except TransportIdentityError as setup_error", body)
+
+    def test_temp_key_acl_timeout_still_erases_secret(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows icacls timeout setup failure erasure")
+        import subprocess as subprocess_module
+
+        line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture"
+        payload = b"synthetic-private-key-bytes"
+        real_run = subprocess_module.run
+
+        def icacls_timeout(*args, **kwargs):
+            argv = args[0] if args else []
+            if argv and str(argv[0]).lower().endswith("icacls.exe"):
+                raise subprocess_module.TimeoutExpired(cmd=argv, timeout=30)
+            return real_run(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            keygen = root / "ssh-keygen.cmd"
+            keygen.write_text(f"@echo off\r\necho {line}\r\n", encoding="ascii")
+            temp_dir = root / "out"
+            with mock.patch.object(identity.subprocess, "run", side_effect=icacls_timeout):
+                with self.assertRaisesRegex(
+                    identity.TransportIdentityError,
+                    "GATE_A1_TRANSPORT_TEMP_BIND_FAILED",
+                ):
+                    identity.derive_public_identity_from_accepted_bytes(
+                        payload,
+                        ssh_keygen=keygen,
+                        temp_dir=temp_dir,
+                        baseline_sha256=hashlib.sha256(payload).hexdigest(),
+                    )
+            for path in temp_dir.glob("ldw-gate-a1-key-*"):
+                self.assertFalse(path.exists(), f"unexpected temp key path: {path}")
+            self._assert_no_payload_under(root, payload)
+
+    def test_temp_key_acl_oserror_still_erases_secret(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows icacls OSError setup failure erasure")
+        real_run = identity.subprocess.run
+
+        def icacls_oserror(*args, **kwargs):
+            argv = args[0] if args else []
+            if argv and str(argv[0]).lower().endswith("icacls.exe"):
+                raise OSError("injected icacls launch failure")
+            return real_run(*args, **kwargs)
+
+        line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture"
+        payload = b"synthetic-private-key-bytes"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            keygen = root / "ssh-keygen.cmd"
+            keygen.write_text(f"@echo off\r\necho {line}\r\n", encoding="ascii")
+            temp_dir = root / "out"
+            with mock.patch.object(identity.subprocess, "run", side_effect=icacls_oserror):
+                with self.assertRaisesRegex(
+                    identity.TransportIdentityError,
+                    "GATE_A1_TRANSPORT_TEMP_BIND_FAILED",
+                ):
+                    identity.derive_public_identity_from_accepted_bytes(
+                        payload,
+                        ssh_keygen=keygen,
+                        temp_dir=temp_dir,
+                        baseline_sha256=hashlib.sha256(payload).hexdigest(),
+                    )
+            self._assert_no_payload_under(root, payload)
+
+    def test_temp_key_setup_unexpected_exception_finally_erases_secret(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows setup unexpected exception finally erasure")
+        line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture"
+        payload = b"synthetic-private-key-bytes"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            keygen = root / "ssh-keygen.cmd"
+            keygen.write_text(f"@echo off\r\necho {line}\r\n", encoding="ascii")
+            temp_dir = root / "out"
+            with mock.patch.object(
+                identity,
+                "_harden_openssh_private_key_acl",
+                side_effect=RuntimeError("unexpected hardener failure"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "unexpected hardener failure"):
+                    identity.derive_public_identity_from_accepted_bytes(
+                        payload,
+                        ssh_keygen=keygen,
+                        temp_dir=temp_dir,
+                        baseline_sha256=hashlib.sha256(payload).hexdigest(),
+                    )
+            self._assert_no_payload_under(root, payload)
+
+    def test_temp_key_acl_subprocess_failure_cleanup_error_holds(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows subprocess setup failure cleanup HOLD dominates")
+        import subprocess as subprocess_module
+
+        real_run = subprocess_module.run
+
+        def icacls_timeout(*args, **kwargs):
+            argv = args[0] if args else []
+            if argv and str(argv[0]).lower().endswith("icacls.exe"):
+                raise subprocess_module.TimeoutExpired(cmd=argv, timeout=30)
+            return real_run(*args, **kwargs)
+
+        line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture"
+        payload = b"synthetic-private-key-bytes"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            keygen = root / "ssh-keygen.cmd"
+            keygen.write_text(f"@echo off\r\necho {line}\r\n", encoding="ascii")
+            temp_dir = root / "out"
+            with mock.patch.object(
+                identity.subprocess, "run", side_effect=icacls_timeout
+            ), mock.patch.object(identity, "_FlushFileBuffers", return_value=False):
+                with self.assertRaisesRegex(
+                    identity.TransportIdentityError,
+                    "GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED",
+                ):
+                    identity.derive_public_identity_from_accepted_bytes(
+                        payload,
+                        ssh_keygen=keygen,
+                        temp_dir=temp_dir,
+                        baseline_sha256=hashlib.sha256(payload).hexdigest(),
+                    )
 
     def test_temp_key_acl_hardening_failure_erases_and_removes_secret(self):
         if sys.platform != "win32":

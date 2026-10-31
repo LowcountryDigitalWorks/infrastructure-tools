@@ -584,21 +584,24 @@ def _harden_openssh_private_key_acl(path: Path) -> None:
     _require_windows_64()
     icacls = resolve_trusted_icacls_path()
     principal_sid = _current_process_user_sid_string()
-    proc = subprocess.run(
-        [
-            str(icacls),
-            str(path),
-            "/inheritance:r",
-            "/grant:r",
-            f"*{principal_sid}:(F)",
-            "/remove",
-            "Owner Rights",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            [
+                str(icacls),
+                str(path),
+                "/inheritance:r",
+                "/grant:r",
+                f"*{principal_sid}:(F)",
+                "/remove",
+                "Owner Rights",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_BIND_FAILED") from None
     if proc.returncode != 0:
         raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_BIND_FAILED")
 
@@ -618,16 +621,15 @@ def _create_bound_temp_key_handle(path: Path, key_bytes: bytes) -> int:
     if _invalid_handle(int(handle)):
         raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_BIND_FAILED")
     opened = int(handle)
+    setup_complete = False
     try:
         _write_file_handle(opened, key_bytes)
         _harden_openssh_private_key_acl(path)
-    except TransportIdentityError as setup_error:
-        try:
+        setup_complete = True
+        return opened
+    finally:
+        if not setup_complete:
             _finalize_bound_temp_key_cleanup(opened, path)
-        except TransportIdentityError:
-            raise
-        raise setup_error
-    return opened
 
 
 def _purge_temp_directory(directory: Path) -> None:

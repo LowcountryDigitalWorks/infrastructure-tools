@@ -26,6 +26,10 @@ ADVERSARIAL = (
     "test_temp_key_acl_failure_post_close_substitution_cannot_preserve_secret_or_delete_victim",
     "test_temp_key_partial_write_failure_erases_secret",
     "test_temp_key_setup_failure_cleanup_error_holds",
+    "test_temp_key_acl_timeout_still_erases_secret",
+    "test_temp_key_acl_oserror_still_erases_secret",
+    "test_temp_key_setup_unexpected_exception_finally_erases_secret",
+    "test_temp_key_acl_subprocess_failure_cleanup_error_holds",
     "test_windows_system_ssh_keygen_ephemeral_ed25519_derive_and_cleanup",
 )
 
