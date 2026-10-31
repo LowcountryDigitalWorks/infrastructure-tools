@@ -2,8 +2,8 @@
 param(
     [ValidateSet('STATUS','DISCOVER','RUN_ONCE','RECOVER','ABORT_ACTIVE','LIST_STALE','RETIRE_STALE','GET_OPERATION_RESULT')]
     [string]$Operation,
-    [long]$RunId,
-    [guid]$OperationId
+    [long]$RunId = 0,
+    [guid]$OperationId = [guid]::Empty
 )
 
 Set-StrictMode -Version Latest
@@ -383,8 +383,8 @@ function Invoke-CiJitTaskOperation([string]$RequestedOperation,[long]$RequestedR
 function Invoke-CiJitLocalTaskClient {
     param(
         [Parameter(Mandatory)][ValidateSet('STATUS','DISCOVER','RUN_ONCE','RECOVER','ABORT_ACTIVE','LIST_STALE','RETIRE_STALE','GET_OPERATION_RESULT')][string]$RequestedOperation,
-        [long]$RequestedRunId,
-        [guid]$RequestedOperationId
+        [long]$RequestedRunId = 0,
+        [guid]$RequestedOperationId = [guid]::Empty
     )
     Assert-CiJitLocalTaskClientNormalUser
     if ($RequestedOperation -ceq 'STATUS') {

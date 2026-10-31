@@ -9,6 +9,10 @@ if (@($errors).Count) { throw ('LOCAL_CLIENT_PARSE_FAILED: ' + ($errors[0].Messa
 
 foreach ($required in @(
     "ValidateSet('STATUS','DISCOVER','RUN_ONCE','RECOVER','ABORT_ACTIVE','LIST_STALE','RETIRE_STALE','GET_OPERATION_RESULT')",
+    '[long]$RunId = 0',
+    '[guid]$OperationId = [guid]::Empty',
+    '[long]$RequestedRunId = 0',
+    '[guid]$RequestedOperationId = [guid]::Empty',
     "Join-Path `$env:ProgramData 'LDW/CiJitControl'",
     "Join-Path `$env:ProgramData 'LDW/CiJitStatus/status.json'",
     "DISCOVER='\LDW-CI-JIT-DISCOVER'",
@@ -87,5 +91,27 @@ $projection.extra='refuse'
 $threw=$false
 try { $null=ConvertFrom-CiJitStatusProjection ($projection | ConvertTo-Json -Compress) $now $boot } catch { $threw=$true }
 if (-not $threw) { throw 'LOCAL_CLIENT_STATUS_EXTRA_FIELD_NOT_REFUSED' }
+
+function Invoke-LocalClientCli([string[]]$Arguments) {
+    $exe = (Get-Command pwsh -ErrorAction Stop).Source
+    $psi = [Diagnostics.ProcessStartInfo]::new($exe, (@('-NoLogo','-NoProfile','-NonInteractive','-File',$client) + $Arguments))
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::Start($psi)
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+    return [pscustomobject]@{ ExitCode = $process.ExitCode; Out = $stdout; Err = $stderr; Combined = ($stdout + $stderr) }
+}
+
+foreach ($case in @(
+    @{ Name = 'STATUS'; Args = @('-Operation','STATUS'); Forbidden = 'Cannot convert null to type "System.Guid"'; ExpectRefusal = $false },
+    @{ Name = 'GET_OPERATION_RESULT'; Args = @('-Operation','GET_OPERATION_RESULT'); Forbidden = 'Cannot convert null to type "System.Guid"'; ExpectRefusal = $true }
+)) {
+    $cli = Invoke-LocalClientCli $case.Args
+    if ($cli.Combined -match [regex]::Escape($case.Forbidden)) { throw ('LOCAL_CLIENT_CLI_DEFAULT_BINDING_FAILED: ' + $case.Name) }
+    if ($case['ExpectRefusal'] -eq $true -and $cli.Combined -notmatch 'LOCAL_CLIENT_ARGUMENT_REFUSED') { throw ('LOCAL_CLIENT_CLI_ARGUMENT_REFUSAL_EXPECTED: ' + $case.Name) }
+}
 
 'CI_JIT_LOCAL_TASK_CLIENT_CONTRACT=PASS'
