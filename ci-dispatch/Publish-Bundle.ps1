@@ -11,7 +11,7 @@ $script:AcceptedDispatcherSource = [pscustomobject]@{
 }
 $script:AcceptedVerifierRecordSource = [pscustomobject]@{
     path='ci-dispatch/verifier-provenance.json'
-    blob='6ed6339eed313bfc6a2710ead2d6c56df1551500'; sha256='b7ab4e288b5476e29b2effbd1dca95da67e08bcc26c7ed864d350584f22ac0cd'
+    blob='f3552ac7a957a5438d4a93544d98b5d1fe715717'; sha256='ce597d64127e0ac49b6a115fa923819f5b9b3d46a79ae25980d370e3edd0894c'
 }
 $root = Join-Path $env:ProgramData 'LDW/CiRunnerDispatch'
 $staging = $null

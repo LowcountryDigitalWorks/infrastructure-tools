@@ -15,38 +15,74 @@ function Refuses([scriptblock]$Action,[string]$Expected){
 }
 function New-ControllerFixture([string]$Commit,[string]$Destination){
     $paths=@(Get-Ci10RuntimeFiles|Where-Object{$_.StartsWith('ci-runner/')})
+    if(Test-Path -LiteralPath $Destination){Remove-Item -LiteralPath $Destination -Recurse -Force}
+    $null=New-Item -ItemType Directory -Path $Destination -Force
     $zip=$Destination+'.zip'
+    if(Test-Path -LiteralPath $zip){Remove-Item -LiteralPath $zip -Force}
     & git -C $repo archive --format=zip ('--output='+$zip) $Commit -- @paths 2>$null
     if($LASTEXITCODE -ne 0){throw 'TEST_SNAPSHOT_ARCHIVE_FAILED'}
     [IO.Compression.ZipFile]::ExtractToDirectory($zip,$Destination)
     Remove-Item -LiteralPath $zip -Force
 }
 function Copy-AcceptedVerifierFixture([string]$DestinationRoot){
-    $commit='6a1edeabc3b021e6c5f436be121432d3dfb55393'
-    $stage=Join-Path $root ('accepted-verifier-'+[guid]::NewGuid().ToString('N'))
-    $zip=$stage+'.zip'
-    $null=New-Item -ItemType Directory -Path $stage
-    & git -C $repo archive --format=zip ('--output='+$zip) $commit -- `
-        'ci-dispatch/Dispatch.psm1' 'ci-dispatch/verifier-provenance.json' 2>$null
-    if($LASTEXITCODE -ne 0){throw 'TEST_VERIFIER_ARCHIVE_FAILED'}
-    [IO.Compression.ZipFile]::ExtractToDirectory($zip,$stage)
     foreach($path in @('ci-dispatch/Dispatch.psm1','ci-dispatch/verifier-provenance.json')){
         $destination=Join-Path $DestinationRoot $path
         $null=New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force
-        Copy-Item -LiteralPath (Join-Path $stage $path) -Destination $destination -Force
+        Copy-Item -LiteralPath (Join-Path $repo $path) -Destination $destination -Force
     }
-    Remove-Item -LiteralPath $stage -Recurse -Force
-    Remove-Item -LiteralPath $zip -Force
+}
+function Get-Ci10PublisherPinSources {
+    $publishSource=Get-Content -LiteralPath (Join-Path $PSScriptRoot '../Publish-Bundle.ps1') -Raw
+    $dispatcher=[regex]::Match($publishSource,"AcceptedDispatcherSource = \[pscustomobject\]@\{\s*path='ci-dispatch/Dispatch\.psm1'\s*blob='([a-f0-9]{40})';\s*sha256='([a-f0-9]{64})'")
+    $verifier=[regex]::Match($publishSource,"AcceptedVerifierRecordSource = \[pscustomobject\]@\{\s*path='ci-dispatch/verifier-provenance\.json'\s*blob='([a-f0-9]{40})';\s*sha256='([a-f0-9]{64})'")
+    if(-not $dispatcher.Success -or -not $verifier.Success){throw 'TEST_PUBLISHER_PIN_PARSE_FAILED'}
+    [pscustomobject]@{
+        Dispatcher=[pscustomobject]@{path='ci-dispatch/Dispatch.psm1';blob=$dispatcher.Groups[1].Value;sha256=$dispatcher.Groups[2].Value}
+        VerifierRecord=[pscustomobject]@{path='ci-dispatch/verifier-provenance.json';blob=$verifier.Groups[1].Value;sha256=$verifier.Groups[2].Value}
+    }
 }
 try {
+    $publisherPins=Get-Ci10PublisherPinSources
+    $acceptedVerifierRecord=Get-Content -LiteralPath (Join-Path $repo 'ci-dispatch/verifier-provenance.json') -Raw|ConvertFrom-Json
     $snapshots=@(Get-Ci10AcceptedControllerSnapshots)
-    Check 'registry contains only the two accepted protected-main controller snapshots' {
-        Assert ($snapshots.Count -eq 2)
+    Check 'registry contains three accepted controller snapshots including independent #114 state' {
+        Assert ($snapshots.Count -eq 3)
         Assert ($snapshots[0].commit -ceq '49f39f5d3a66251ed18c2e776d843feb25f65fe1')
         Assert ($snapshots[0].tree -ceq '4d241fe9bc0fbf190daf2e36be0e9c52966c5a7b')
         Assert ($snapshots[1].commit -ceq '54b9343af44c70db1d1403cf7f45cfc11e8bf167')
         Assert ($snapshots[1].tree -ceq 'beb9b9096b2f4bfa41ad877ad4f6a41150fbcfec')
+        $status114=@($snapshots|Where-Object commit -CEQ '4efeb043162ee773f7115d99fbc8ff1688e0f00c')
+        Assert ($status114.Count -eq 1 -and $status114[0].tree -ceq '0ba833fa376b8be385cecddef447c1f81db61300')
         Assert (@($snapshots | Where-Object commit -CEQ '68a535fd3df17bae59fdb86386fac85e024b1650').Count -eq 0)
+    }
+    Check 'pinned dispatcher runtime file contract includes status projection module' {
+        Assert (@(Get-Ci10RuntimeFiles) -contains 'ci-dispatch/StatusProjection.psm1')
+        Assert (@(Get-Ci10RuntimeFiles) -contains 'ci-dispatch/Invoke-Dispatcher.ps1')
+        Assert ($publisherPins.Dispatcher.blob -ceq $acceptedVerifierRecord.blob)
+        Assert ($publisherPins.Dispatcher.sha256 -ceq $acceptedVerifierRecord.sha256)
+        Assert ($publisherPins.Dispatcher.blob -cne 'c862dd503b98060ec984206e63ef9efa5f957e8f')
+    }
+    Check 'pre-#71 reviewed dispatcher runtime contract excludes status projection module' {
+        $legacyStage=Join-Path $root ('legacy-dispatch-'+[guid]::NewGuid().ToString('N'))
+        $legacyZip=$legacyStage+'.zip'
+        $null=New-Item -ItemType Directory -Path $legacyStage
+        & git -C $repo archive --format=zip ('--output='+$legacyZip) ce2bf253556a69dfb43de7bb8e8a4927c41c9e15 -- ci-dispatch/Dispatch.psm1 2>$null
+        if($LASTEXITCODE -ne 0){throw 'TEST_LEGACY_DISPATCH_ARCHIVE_FAILED'}
+        [IO.Compression.ZipFile]::ExtractToDirectory($legacyZip,$legacyStage)
+        $legacySource=Get-Content -LiteralPath (Join-Path $legacyStage 'ci-dispatch/Dispatch.psm1') -Raw
+        Assert (-not ($legacySource.Contains("'ci-dispatch/StatusProjection.psm1'")))
+        Remove-Item -LiteralPath $legacyStage -Recurse -Force
+        Remove-Item -LiteralPath $legacyZip -Force
+    }
+    Check 'current protected-main controller bytes match accepted #114 snapshot only' {
+        $candidate=Join-Path $root 'candidate-head'
+        $stage=Join-Path $root 'stage-head'
+        $null=New-Item -ItemType Directory -Path $candidate,$stage
+        New-ControllerFixture 'HEAD' $candidate
+        $matched=Get-Ci10MatchedControllerSnapshot -RepositoryRoot $repo -ControllerRoot $candidate `
+            -ControllerFiles @(Get-Ci10RuntimeFiles|Where-Object{$_.StartsWith('ci-runner/')}) -StagingRoot $stage
+        Assert ($matched.commit -ceq '4efeb043162ee773f7115d99fbc8ff1688e0f00c' -and
+            $matched.tree -ceq '0ba833fa376b8be385cecddef447c1f81db61300')
     }
     foreach($snapshot in $snapshots){
         Check ('all runtime controller files match '+$snapshot.commit.Substring(0,7)) {
@@ -94,7 +130,7 @@ try {
         )}
         Refuses {Get-Ci10ManifestControllerSnapshot $mixedManifest} 'BUNDLE_CONTROLLER_SNAPSHOT_MISMATCH'
     }
-    Check 'accepted verifier provenance pairs with exact Royal controller target' {
+    Check 'accepted verifier provenance pairs with exact #114 controller target' {
         $verifierBundle=Join-Path $root 'verifier-bundle'
         Copy-AcceptedVerifierFixture $verifierBundle
         $recordPath=Join-Path $verifierBundle 'ci-dispatch/verifier-provenance.json'
@@ -103,14 +139,27 @@ try {
             [pscustomobject]@{path='ci-dispatch/Dispatch.psm1';sha256=$accepted.sha256}
         )}
         $provenance=Get-Ci10ManifestDispatcherProvenance -BundleRoot $verifierBundle -Manifest $verifierManifest
-        Assert ($provenance.blob -ceq 'c862dd503b98060ec984206e63ef9efa5f957e8f')
-        $royal=Join-Path $root ('candidate-'+$snapshots[1].commit)
-        $stage=Join-Path $root 'stage-verifier-royal'
-        $null=New-Item -ItemType Directory -Path $stage -Force
-        $matched=Get-Ci10MatchedControllerSnapshot -RepositoryRoot $repo -ControllerRoot $royal `
+        Assert ($provenance.blob -ceq $publisherPins.Dispatcher.blob)
+        $headController=Join-Path $root 'candidate-head-verifier'
+        $stage=Join-Path $root 'stage-verifier-head'
+        $null=New-Item -ItemType Directory -Path $headController,$stage -Force
+        New-ControllerFixture 'HEAD' $headController
+        $matched=Get-Ci10MatchedControllerSnapshot -RepositoryRoot $repo -ControllerRoot $headController `
+            -ControllerFiles @(Get-Ci10RuntimeFiles|Where-Object{$_.StartsWith('ci-runner/')}) -StagingRoot $stage
+        Assert ($matched.commit -ceq '4efeb043162ee773f7115d99fbc8ff1688e0f00c' -and
+            $matched.tree -ceq '0ba833fa376b8be385cecddef447c1f81db61300')
+    }
+    Check 'legacy 54b934 installed controller bytes remain accepted historically but do not match #114 snapshot' {
+        $legacy=Join-Path $root 'candidate-legacy-installed'
+        $stage=Join-Path $root 'stage-legacy-114'
+        if(Test-Path -LiteralPath $legacy){Remove-Item -LiteralPath $legacy -Recurse -Force}
+        $null=New-Item -ItemType Directory -Path $legacy,$stage -Force
+        New-ControllerFixture $snapshots[1].commit $legacy
+        $matched=Get-Ci10MatchedControllerSnapshot -RepositoryRoot $repo -ControllerRoot $legacy `
             -ControllerFiles @(Get-Ci10RuntimeFiles|Where-Object{$_.StartsWith('ci-runner/')}) -StagingRoot $stage
         Assert ($matched.commit -ceq '54b9343af44c70db1d1403cf7f45cfc11e8bf167' -and
             $matched.tree -ceq 'beb9b9096b2f4bfa41ad877ad4f6a41150fbcfec')
+        Assert ($matched.commit -cne '4efeb043162ee773f7115d99fbc8ff1688e0f00c')
     }
     Check 'publisher parent boundary rejects replaceable staging ancestors' {
         $publisherPath=Join-Path $PSScriptRoot '../Publish-Bundle.ps1'
@@ -173,8 +222,8 @@ try {
         Invoke-Expression $function[0].Extent.Text
         Invoke-Expression $guard[0].Extent.Text
         Invoke-Expression $materializer[0].Extent.Text
-        $script:AcceptedDispatcherSource=[pscustomobject]@{path='ci-dispatch/Dispatch.psm1';blob='c862dd503b98060ec984206e63ef9efa5f957e8f';sha256='0a41b338ca6b8b05ff31a26f30486381c7c836e484985a813b6fce6d07232c72'}
-        $script:AcceptedVerifierRecordSource=[pscustomobject]@{path='ci-dispatch/verifier-provenance.json';blob='6ed6339eed313bfc6a2710ead2d6c56df1551500';sha256='b7ab4e288b5476e29b2effbd1dca95da67e08bcc26c7ed864d350584f22ac0cd'}
+        $script:AcceptedDispatcherSource=$publisherPins.Dispatcher
+        $script:AcceptedVerifierRecordSource=$publisherPins.VerifierRecord
         $mainOnly=Join-Path $root 'squash-equivalent-main-only'
         $null=New-Item -ItemType Directory -Path (Join-Path $mainOnly 'ci-dispatch') -Force
         & git init $mainOnly 2>$null
@@ -251,8 +300,8 @@ try {
         Assert ($function.Count -eq 1 -and $guard.Count -eq 1)
         Invoke-Expression $function[0].Extent.Text
         Invoke-Expression $guard[0].Extent.Text
-        $script:AcceptedDispatcherSource=[pscustomobject]@{path='ci-dispatch/Dispatch.psm1';blob='c862dd503b98060ec984206e63ef9efa5f957e8f';sha256='0a41b338ca6b8b05ff31a26f30486381c7c836e484985a813b6fce6d07232c72'}
-        $script:AcceptedVerifierRecordSource=[pscustomobject]@{path='ci-dispatch/verifier-provenance.json';blob='6ed6339eed313bfc6a2710ead2d6c56df1551500';sha256='b7ab4e288b5476e29b2effbd1dca95da67e08bcc26c7ed864d350584f22ac0cd'}
+        $script:AcceptedDispatcherSource=$publisherPins.Dispatcher
+        $script:AcceptedVerifierRecordSource=$publisherPins.VerifierRecord
         $unaccepted=Join-Path $root 'unaccepted-repository'
         $null=New-Item -ItemType Directory -Path (Join-Path $unaccepted 'ci-dispatch') -Force
         & git init $unaccepted 2>$null
@@ -319,8 +368,7 @@ try {
         & git -C $untrusted add --all
         & git -C $untrusted commit -m 'Create clean unaccepted controller module' 2>$null
         if($LASTEXITCODE -ne 0 -or (& git -C $untrusted status --porcelain)){throw 'TEST_UNTRUSTED_CONTROLLER_SETUP_FAILED'}
-        Assert ((git -C $untrusted rev-parse 'HEAD:ci-dispatch/Dispatch.psm1').Trim() -ceq
-            'c862dd503b98060ec984206e63ef9efa5f957e8f')
+        Assert ((git -C $untrusted rev-parse 'HEAD:ci-dispatch/Dispatch.psm1').Trim() -ceq $publisherPins.Dispatcher.blob)
         [IO.File]::WriteAllText((Join-Path $untrusted 'ci-dispatch/Dispatch.psm1'),
             "[IO.File]::WriteAllText('$dispatcherMarker','executed'); throw 'HIDDEN_DISPATCHER_EXECUTED'")
         & git -C $untrusted update-index --skip-worktree ci-dispatch/Dispatch.psm1
@@ -343,8 +391,8 @@ try {
         $parameters=([regex]::Match($source,'(?s)^.*?param\((.*?)\)')).Groups[1].Value
         Assert (-not ($parameters -match 'AcceptedController|ControllerCommit|ControllerTree|Snapshot'))
         Assert ($source.Contains('Get-Ci10MatchedControllerSnapshot'))
-        Assert ($source.Contains('c862dd503b98060ec984206e63ef9efa5f957e8f'))
-        Assert ($source.Contains('6ed6339eed313bfc6a2710ead2d6c56df1551500'))
+        Assert ($source.Contains($publisherPins.Dispatcher.blob))
+        Assert ($source.Contains($publisherPins.VerifierRecord.blob))
         Assert ($source.Contains("path='ci-dispatch/Dispatch.psm1'"))
         Assert ($source.Contains("path='ci-dispatch/verifier-provenance.json'"))
         Assert (-not ($source.Contains('805b71f36232412e072b0c860c1f4d665511d347')))
