@@ -13,6 +13,20 @@ ADVERSARIAL = (
     "test_temp_key_replacement_during_ssh_keygen_blocked",
     "test_temp_key_cleanup_pathname_hardlink_after_bound_destroy",
     "test_temp_key_cleanup_failure_hold",
+    "test_explicit_temp_dir_cleanup_removes_key_file",
+    "test_derive_bound_internal_temp_no_residue",
+    "test_single_link_victim_swap_holds",
+    "test_parent_directory_substitution_holds",
+    "test_reparse_identity_mismatch_does_not_delete",
+    "test_cleanup_disposition_fault_hold",
+    "test_cleanup_reopen_fault_hold",
+    "test_cleanup_identity_fault_hold",
+    "test_cleanup_truncate_fault_hold",
+    "test_cleanup_close_fault_hold",
+    "test_cleanup_pathname_still_present_holds",
+    "test_derivation_failure_preserved_when_cleanup_completes",
+    "test_cleanup_failure_dominates_derivation_failure",
+    "test_trusted_ssh_keygen_reads_synthetic_file_while_handle_held",
 )
 
 

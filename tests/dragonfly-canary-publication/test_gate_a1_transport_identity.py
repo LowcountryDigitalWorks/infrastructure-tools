@@ -223,12 +223,7 @@ class GateA1TransportIdentityTests(unittest.TestCase):
             self.assertIn("-P", argv)
             self.assertIn("-f", argv)
             self.assertNotIn(str(live), argv)
-            for path in temp_dir.glob("ldw-gate-a1-key-*"):
-                if sys.platform == "win32":
-                    if path.exists() and path.read_bytes():
-                        self.fail(f"unexpected temp key residue: {path}")
-                else:
-                    self.fail(f"unexpected temp key residue: {path}")
+            self.assertEqual(list(temp_dir.glob("ldw-gate-a1-key-*")), [])
             with self.assertRaisesRegex(identity.TransportIdentityError, "GATE_A1_TRANSPORT_PRIVATE_KEY_CHANGED"):
                 identity.derive_public_identity_from_accepted_bytes(
                     payload,
@@ -236,12 +231,7 @@ class GateA1TransportIdentityTests(unittest.TestCase):
                     temp_dir=temp_dir,
                     baseline_sha256="ab" * 32,
                 )
-            for path in temp_dir.glob("ldw-gate-a1-key-*"):
-                if sys.platform == "win32":
-                    if path.exists() and path.read_bytes():
-                        self.fail(f"unexpected temp key residue: {path}")
-                else:
-                    self.fail(f"unexpected temp key residue: {path}")
+            self.assertEqual(list(temp_dir.glob("ldw-gate-a1-key-*")), [])
 
     def test_temp_key_cleanup_failure_hold(self):
         line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture"
@@ -308,6 +298,11 @@ def attack() -> None:
         key_path.unlink()
     except OSError as exc:
         errors.append("unlink:" + str(exc))
+    try:
+        renamed = key_path.parent.with_name(key_path.parent.name + "-attack-rename")
+        key_path.parent.rename(renamed)
+    except OSError as exc:
+        errors.append("rename:" + str(exc))
     attack_log.write_text("\\n".join(errors) if errors else "no-error", encoding="utf-8")
 
 threading.Thread(target=attack, daemon=True).start()
@@ -332,14 +327,12 @@ else:
             )
             self.assertEqual(digest, expected)
             self.assertTrue(attack_log.exists(), "attack thread should run during consumption")
-            self.assertNotEqual(attack_log.read_text(encoding="utf-8"), "no-error")
-            for path in temp_dir.glob("ldw-gate-a1-key-*"):
-                if not path.exists():
-                    continue
-                data = path.read_bytes()
-                self.assertNotIn(payload, data)
-                if data:
-                    self.assertEqual(data, b"\0" * len(data))
+            attack_text = attack_log.read_text(encoding="utf-8")
+            self.assertNotEqual(attack_text, "no-error")
+            self.assertIn("write:", attack_text)
+            self.assertIn("unlink:", attack_text)
+            self.assertIn("rename:", attack_text)
+            self.assertEqual(list(temp_dir.glob("ldw-gate-a1-key-*")), [])
 
     def test_temp_key_cleanup_pathname_hardlink_after_bound_destroy(self):
         if sys.platform != "win32":
@@ -347,7 +340,6 @@ else:
         import os
 
         line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture"
-        expected = identity.digest_from_ssh_keygen_y(line + "\n")
         payload = b"synthetic-private-key-bytes"
         fixture_bytes = b"UNRELATED-FIXTURE-BYTES-KEEP-INTACT"
         with tempfile.TemporaryDirectory() as td:
@@ -359,47 +351,500 @@ else:
             temp_dir = root / "out"
             moved_aside: dict[str, Path] = {}
             real_close = identity._CloseHandle
+            state = {"done": False}
 
-            def close_with_pathname_substitution(handle: int) -> bool:
-                candidates = [
-                    p
-                    for p in temp_dir.glob("ldw-gate-a1-key-*")
-                    if ".moved-aside" not in p.name and p.exists()
-                ]
-                if candidates:
+            def close_then_hardlink_swap(handle: int) -> bool:
+                result = real_close(handle)
+                if result and not state["done"]:
+                    state["done"] = True
+                    candidates = [
+                        p
+                        for p in temp_dir.glob("ldw-gate-a1-key-*")
+                        if ".moved-aside" not in p.name and p.is_file()
+                    ]
+                    self.assertEqual(len(candidates), 1)
                     path = candidates[0]
                     moved = path.with_name(path.name + ".moved-aside")
-                    try:
-                        if path.exists():
-                            os.replace(path, moved)
-                            moved_aside["path"] = moved
-                        os.link(fixture, path)
-                    except OSError:
-                        pass
-                result = real_close(handle)
-                if not result:
-                    raise identity.TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
-                return result
+                    os.replace(path, moved)
+                    moved_aside["path"] = moved
+                    os.link(fixture, path)
+                return bool(result)
 
-            with mock.patch.object(identity, "_CloseHandle", side_effect=close_with_pathname_substitution):
-                digest = identity.derive_public_identity_from_accepted_bytes(
+            disposition = mock.Mock(wraps=identity._SetFileInformationByHandle)
+            with mock.patch.object(identity, "_CloseHandle", side_effect=close_then_hardlink_swap):
+                with mock.patch.object(identity, "_SetFileInformationByHandle", disposition):
+                    with self.assertRaisesRegex(
+                        identity.TransportIdentityError,
+                        "GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED",
+                    ):
+                        identity.derive_public_identity_from_accepted_bytes(
+                            payload,
+                            ssh_keygen=keygen,
+                            temp_dir=temp_dir,
+                            baseline_sha256=hashlib.sha256(payload).hexdigest(),
+                        )
+            self.assertFalse(disposition.called)
+            self.assertEqual(fixture.read_bytes(), fixture_bytes)
+            moved = moved_aside["path"]
+            self.assertTrue(moved.is_file())
+            self.assertEqual(moved.read_bytes(), b"")
+            self.assertNotIn(payload, moved.read_bytes())
+            linked = [
+                p for p in temp_dir.glob("ldw-gate-a1-key-*") if ".moved-aside" not in p.name
+            ]
+            self.assertEqual(len(linked), 1)
+            self.assertEqual(linked[0].read_bytes(), fixture_bytes)
+
+
+    def test_explicit_temp_dir_cleanup_removes_key_file(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows identity-bound temp cleanup")
+        line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture"
+        expected = identity.digest_from_ssh_keygen_y(line + "\n")
+        payload = b"synthetic-private-key-bytes"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            keygen = root / "ssh-keygen.cmd"
+            keygen.write_text(f"@echo off\r\necho {line}\r\n", encoding="ascii")
+            temp_dir = root / "out"
+            digest = identity.derive_public_identity_from_accepted_bytes(
+                payload,
+                ssh_keygen=keygen,
+                temp_dir=temp_dir,
+                baseline_sha256=hashlib.sha256(payload).hexdigest(),
+            )
+            self.assertEqual(digest, expected)
+            self.assertEqual(list(temp_dir.glob("ldw-gate-a1-key-*")), [])
+
+    def test_derive_bound_internal_temp_no_residue(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows identity-bound temp cleanup")
+        line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture"
+        expected = identity.digest_from_ssh_keygen_y(line + "\n")
+        payload = b"synthetic-private-key-bytes"
+        with tempfile.TemporaryDirectory(prefix="ldw-gate-a1-parent-") as parent_name:
+            parent = Path(parent_name)
+            created: list[Path] = []
+            real_mkdtemp = identity.tempfile.mkdtemp
+
+            def capture_mkdtemp(*args, **kwargs):
+                kwargs["dir"] = str(parent)
+                path = real_mkdtemp(*args, **kwargs)
+                created.append(Path(path))
+                return path
+
+            keygen = parent / "ssh-keygen.cmd"
+            keygen.write_text(f"@echo off\r\necho {line}\r\n", encoding="ascii")
+            with mock.patch.object(identity.tempfile, "mkdtemp", side_effect=capture_mkdtemp):
+                digest = identity.derive_bound_transport_public_identity(
+                    Path("unused"),
+                    accepted_bytes=payload,
+                    ssh_keygen=keygen,
+                    temp_dir=None,
+                    baseline_sha256=hashlib.sha256(payload).hexdigest(),
+                )
+            self.assertEqual(digest, expected)
+            self.assertEqual(len(created), 1)
+            self.assertFalse(created[0].exists())
+            self.assertEqual(list(parent.glob("ldw-gate-a1-*")), [])
+
+    def test_single_link_victim_swap_holds(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows identity-bound temp cleanup")
+        import os
+
+        line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture"
+        payload = b"synthetic-private-key-bytes"
+        victim_bytes = b"UNRELATED-SINGLE-LINK-VICTIM"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            keygen = root / "ssh-keygen.cmd"
+            keygen.write_text(f"@echo off\r\necho {line}\r\n", encoding="ascii")
+            temp_dir = root / "out"
+            moved_aside: dict[str, Path] = {}
+            real_close = identity._CloseHandle
+            state = {"done": False}
+
+            def close_then_swap(handle: int) -> bool:
+                result = real_close(handle)
+                if result and not state["done"]:
+                    state["done"] = True
+                    candidates = [
+                        p
+                        for p in temp_dir.glob("ldw-gate-a1-key-*")
+                        if ".moved-aside" not in p.name and p.is_file()
+                    ]
+                    self.assertEqual(len(candidates), 1)
+                    path = candidates[0]
+                    moved = path.with_name(path.name + ".moved-aside")
+                    os.replace(path, moved)
+                    moved_aside["path"] = moved
+                    path.write_bytes(victim_bytes)
+                return bool(result)
+
+            with mock.patch.object(identity, "_CloseHandle", side_effect=close_then_swap):
+                with self.assertRaisesRegex(
+                    identity.TransportIdentityError,
+                    "GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED",
+                ):
+                    identity.derive_public_identity_from_accepted_bytes(
+                        payload,
+                        ssh_keygen=keygen,
+                        temp_dir=temp_dir,
+                        baseline_sha256=hashlib.sha256(payload).hexdigest(),
+                    )
+            victim = moved_aside["path"].with_name(moved_aside["path"].name.removesuffix(".moved-aside"))
+            self.assertEqual(victim.read_bytes(), victim_bytes)
+            moved = moved_aside["path"]
+            self.assertEqual(moved.stat().st_size, 0)
+            self.assertEqual(moved.read_bytes(), b"")
+            self.assertNotIn(payload, moved.read_bytes())
+
+    def test_parent_directory_substitution_holds(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows identity-bound temp cleanup")
+        import os
+
+        line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture"
+        payload = b"synthetic-private-key-bytes"
+        victim_bytes = b"UNRELATED-PARENT-DIR-VICTIM"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            keygen = root / "ssh-keygen.cmd"
+            keygen.write_text(f"@echo off\r\necho {line}\r\n", encoding="ascii")
+            temp_dir = root / "out"
+            real_close = identity._CloseHandle
+            state = {"done": False, "moved": None, "victim": None}
+
+            def close_then_replace_parent(handle: int) -> bool:
+                result = real_close(handle)
+                if result and not state["done"]:
+                    state["done"] = True
+                    keys = [p for p in temp_dir.glob("ldw-gate-a1-key-*") if p.is_file()]
+                    self.assertEqual(len(keys), 1)
+                    moved_dir = temp_dir.with_name(temp_dir.name + "-original")
+                    os.replace(temp_dir, moved_dir)
+                    temp_dir.mkdir()
+                    state["moved"] = moved_dir / keys[0].name
+                    victim = temp_dir / keys[0].name
+                    victim.write_bytes(victim_bytes)
+                    state["victim"] = victim
+                return bool(result)
+
+            with mock.patch.object(identity, "_CloseHandle", side_effect=close_then_replace_parent):
+                with self.assertRaisesRegex(
+                    identity.TransportIdentityError,
+                    "GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED",
+                ):
+                    identity.derive_public_identity_from_accepted_bytes(
+                        payload,
+                        ssh_keygen=keygen,
+                        temp_dir=temp_dir,
+                        baseline_sha256=hashlib.sha256(payload).hexdigest(),
+                    )
+            victim = state["victim"]
+            self.assertIsNotNone(victim)
+            self.assertEqual(victim.read_bytes(), victim_bytes)
+            moved = state["moved"]
+            self.assertEqual(moved.stat().st_size, 0)
+            self.assertEqual(moved.read_bytes(), b"")
+            self.assertNotIn(payload, moved.read_bytes())
+
+    def test_reparse_identity_mismatch_does_not_delete(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows identity-bound temp cleanup")
+        import os
+
+        line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture"
+        payload = b"synthetic-private-key-bytes"
+        fixture_bytes = b"UNRELATED-REPARSE-TARGET"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            target = root / "reparse-target"
+            target.mkdir()
+            kept = target / "keep.bin"
+            kept.write_bytes(fixture_bytes)
+            keygen = root / "ssh-keygen.cmd"
+            keygen.write_text(f"@echo off\r\necho {line}\r\n", encoding="ascii")
+            temp_dir = root / "out"
+            real_close = identity._CloseHandle
+            state = {"done": False, "link": None, "moved": None}
+
+            def close_then_reparse(handle: int) -> bool:
+                result = real_close(handle)
+                if result and not state["done"]:
+                    state["done"] = True
+                    keys = [p for p in temp_dir.glob("ldw-gate-a1-key-*") if p.is_file()]
+                    self.assertEqual(len(keys), 1)
+                    path = keys[0]
+                    moved = path.with_name(path.name + ".moved-aside")
+                    os.replace(path, moved)
+                    state["moved"] = moved
+                    subprocess.check_call(
+                        ["cmd", "/c", "mklink", "/J", str(path), str(target)],
+                        stdout=subprocess.DEVNULL,
+                    )
+                    state["link"] = path
+                return bool(result)
+
+            disposition = mock.Mock(wraps=identity._SetFileInformationByHandle)
+            with mock.patch.object(identity, "_CloseHandle", side_effect=close_then_reparse):
+                with mock.patch.object(identity, "_SetFileInformationByHandle", disposition):
+                    with self.assertRaisesRegex(
+                        identity.TransportIdentityError,
+                        "GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED",
+                    ):
+                        identity.derive_public_identity_from_accepted_bytes(
+                            payload,
+                            ssh_keygen=keygen,
+                            temp_dir=temp_dir,
+                            baseline_sha256=hashlib.sha256(payload).hexdigest(),
+                        )
+            self.assertFalse(disposition.called)
+            self.assertEqual(kept.read_bytes(), fixture_bytes)
+            self.assertTrue(state["link"].is_dir())
+            self.assertEqual(state["moved"].read_bytes(), b"")
+            self.assertNotIn(payload, state["moved"].read_bytes())
+
+        real_metadata = identity._by_handle_metadata
+        calls = {"n": 0}
+
+        def report_reparse(handle: int, *, failure: str):
+            calls["n"] += 1
+            metadata = real_metadata(handle, failure=failure)
+            if calls["n"] == 3:
+                metadata.reparse = True
+            return metadata
+
+        flag_disposition = mock.Mock(wraps=identity._SetFileInformationByHandle)
+        with mock.patch.object(identity, "_by_handle_metadata", side_effect=report_reparse):
+            with mock.patch.object(identity, "_SetFileInformationByHandle", flag_disposition):
+                self._assert_cleanup_fault_leaves_truncated_original(None)
+        self.assertGreaterEqual(calls["n"], 3)
+        self.assertFalse(flag_disposition.called)
+
+    def test_cleanup_disposition_fault_hold(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows identity-bound temp cleanup")
+        self._assert_cleanup_fault_leaves_truncated_original(
+            mock.patch.object(identity, "_SetFileInformationByHandle", return_value=False)
+        )
+
+    def test_cleanup_reopen_fault_hold(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows identity-bound temp cleanup")
+        import ctypes
+
+        real_create = identity._CreateFileW
+
+        def fail_cleanup_open(*args, **kwargs):
+            access = args[1] if len(args) > 1 else kwargs.get("dwDesiredAccess")
+            if int(access) & identity._DELETE_ACCESS:
+                return ctypes.c_void_p(-1).value
+            return real_create(*args, **kwargs)
+
+        self._assert_cleanup_fault_leaves_truncated_original(
+            mock.patch.object(identity, "_CreateFileW", side_effect=fail_cleanup_open)
+        )
+
+    def test_cleanup_identity_fault_hold(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows identity-bound temp cleanup")
+        real_metadata = identity._by_handle_metadata
+        calls = {"n": 0}
+
+        def mismatch_on_cleanup_handle(handle: int, *, failure: str):
+            calls["n"] += 1
+            metadata = real_metadata(handle, failure=failure)
+            if calls["n"] == 3:
+                metadata.file_index ^= 1
+            return metadata
+
+        disposition = mock.Mock(wraps=identity._SetFileInformationByHandle)
+        with mock.patch.object(identity, "_by_handle_metadata", side_effect=mismatch_on_cleanup_handle):
+            with mock.patch.object(identity, "_SetFileInformationByHandle", disposition):
+                self._assert_cleanup_fault_leaves_truncated_original(None)
+        self.assertGreaterEqual(calls["n"], 3)
+        self.assertFalse(disposition.called)
+
+    def test_cleanup_truncate_fault_hold(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows identity-bound temp cleanup")
+        payload = b"synthetic-private-key-bytes"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            keygen = self._echo_keygen(root)
+            temp_dir = root / "out"
+            with mock.patch.object(identity, "_SetEndOfFile", return_value=False):
+                with self.assertRaisesRegex(
+                    identity.TransportIdentityError,
+                    "GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED",
+                ):
+                    identity.derive_public_identity_from_accepted_bytes(
+                        payload,
+                        ssh_keygen=keygen,
+                        temp_dir=temp_dir,
+                        baseline_sha256=hashlib.sha256(payload).hexdigest(),
+                    )
+            residue = list(temp_dir.glob("ldw-gate-a1-key-*"))
+            self.assertEqual(len(residue), 1)
+            data = residue[0].read_bytes()
+            self.assertNotIn(payload, data)
+            self.assertEqual(data, b"\0" * len(payload))
+
+    def test_cleanup_close_fault_hold(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows identity-bound temp cleanup")
+        real_close = identity._CloseHandle
+        calls = {"n": 0}
+
+        def fail_original_close(handle: int) -> bool:
+            calls["n"] += 1
+            result = real_close(handle)
+            if calls["n"] == 1:
+                return False
+            return bool(result)
+
+        disposition = mock.Mock(wraps=identity._SetFileInformationByHandle)
+        with mock.patch.object(identity, "_CloseHandle", side_effect=fail_original_close):
+            with mock.patch.object(identity, "_SetFileInformationByHandle", disposition):
+                self._assert_cleanup_fault_leaves_truncated_original(None)
+        self.assertFalse(disposition.called)
+
+    def test_cleanup_pathname_still_present_holds(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows identity-bound temp cleanup")
+        payload = b"synthetic-private-key-bytes"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            unrelated = root / "unrelated.bin"
+            unrelated.write_bytes(b"keep-unrelated")
+            keygen = self._echo_keygen(root)
+            temp_dir = root / "out"
+            with mock.patch.object(identity, "_temp_pathname_present", return_value=True):
+                with self.assertRaisesRegex(
+                    identity.TransportIdentityError,
+                    "GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED",
+                ):
+                    identity.derive_public_identity_from_accepted_bytes(
+                        payload,
+                        ssh_keygen=keygen,
+                        temp_dir=temp_dir,
+                        baseline_sha256=hashlib.sha256(payload).hexdigest(),
+                    )
+            self.assertEqual(unrelated.read_bytes(), b"keep-unrelated")
+            self.assertEqual(list(temp_dir.glob("ldw-gate-a1-key-*")), [])
+
+    def test_derivation_failure_preserved_when_cleanup_completes(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows identity-bound temp cleanup")
+        payload = b"synthetic-private-key-bytes"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            keygen = root / "ssh-keygen.cmd"
+            keygen.write_text("@echo off\r\nexit /b 1\r\n", encoding="ascii")
+            temp_dir = root / "out"
+            with self.assertRaisesRegex(
+                identity.TransportIdentityError,
+                "GATE_A1_TRANSPORT_PUBLIC_IDENTITY_DERIVATION_FAILED",
+            ):
+                identity.derive_public_identity_from_accepted_bytes(
                     payload,
                     ssh_keygen=keygen,
                     temp_dir=temp_dir,
                     baseline_sha256=hashlib.sha256(payload).hexdigest(),
                 )
-            self.assertEqual(digest, expected)
-            self.assertEqual(fixture.read_bytes(), fixture_bytes)
-            moved = moved_aside.get("path")
-            if moved is not None and moved.exists():
-                self.assertNotIn(payload, moved.read_bytes())
-            for path in temp_dir.glob("ldw-gate-a1-key-*"):
-                if not path.exists():
-                    continue
-                data = path.read_bytes()
-                self.assertNotIn(payload, data)
-                if data:
-                    self.assertEqual(data, b"\0" * len(data))
+            self.assertEqual(list(temp_dir.glob("ldw-gate-a1-key-*")), [])
+
+    def test_cleanup_failure_dominates_derivation_failure(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows identity-bound temp cleanup")
+        payload = b"synthetic-private-key-bytes"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            keygen = root / "ssh-keygen.cmd"
+            keygen.write_text("@echo off\r\nexit /b 1\r\n", encoding="ascii")
+            temp_dir = root / "out"
+            with mock.patch.object(identity, "_SetEndOfFile", return_value=False):
+                with self.assertRaisesRegex(
+                    identity.TransportIdentityError,
+                    "GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED",
+                ):
+                    identity.derive_public_identity_from_accepted_bytes(
+                        payload,
+                        ssh_keygen=keygen,
+                        temp_dir=temp_dir,
+                        baseline_sha256=hashlib.sha256(payload).hexdigest(),
+                    )
+
+    def test_trusted_ssh_keygen_reads_synthetic_file_while_handle_held(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows ssh-keygen share compatibility")
+        import os
+
+        payload = b"synthetic-not-a-real-private-key"
+        keygen = identity.resolve_trusted_ssh_keygen_path()
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "ldw-gate-a1-key-synthetic"
+            handle = identity._create_bound_temp_key_handle(path, payload)
+            try:
+                user = os.environ["USERNAME"]
+                for args in (
+                    ["/inheritance:r"],
+                    ["/grant:r", f"{user}:(R,W)"],
+                    ["/remove:g", "OWNER RIGHTS", "Users", "Authenticated Users", "Everyone"],
+                ):
+                    acl = subprocess.run(
+                        ["icacls", str(path), *args],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(acl.returncode, 0, acl.stdout + acl.stderr)
+                proc = subprocess.run(
+                    [str(keygen), "-y", "-P", "", "-f", str(path)],
+                    capture_output=True,
+                    timeout=30,
+                    check=False,
+                )
+            finally:
+                volume_serial, file_index = identity._destroy_bound_temp_key_handle(handle)
+                identity._delete_identity_bound_temp_key(path, volume_serial, file_index)
+            self.assertNotEqual(proc.returncode, 0)
+            blob = (proc.stderr + proc.stdout).decode("utf-8", "replace").lower()
+            self.assertIn("invalid format", blob)
+            self.assertNotIn("permission denied", blob)
+            self.assertNotIn("access is denied", blob)
+            self.assertFalse(path.exists())
+
+    def _echo_keygen(self, root: Path) -> Path:
+        line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture"
+        keygen = root / "ssh-keygen.cmd"
+        keygen.write_text(f"@echo off\r\necho {line}\r\n", encoding="ascii")
+        return keygen
+
+    def _assert_cleanup_fault_leaves_truncated_original(self, patcher) -> None:
+        payload = b"synthetic-private-key-bytes"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            keygen = self._echo_keygen(root)
+            temp_dir = root / "out"
+            context = patcher if patcher is not None else mock.patch.object(identity, "_FILE_BEGIN", 0)
+            with context:
+                with self.assertRaisesRegex(
+                    identity.TransportIdentityError,
+                    "GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED",
+                ):
+                    identity.derive_public_identity_from_accepted_bytes(
+                        payload,
+                        ssh_keygen=keygen,
+                        temp_dir=temp_dir,
+                        baseline_sha256=hashlib.sha256(payload).hexdigest(),
+                    )
+            residue = [p for p in temp_dir.glob("ldw-gate-a1-key-*") if p.is_file()]
+            self.assertEqual(len(residue), 1)
+            self.assertEqual(residue[0].read_bytes(), b"")
+            self.assertNotIn(payload, residue[0].read_bytes())
 
 
 class GateA3BootstrapRecordTests(unittest.TestCase):
