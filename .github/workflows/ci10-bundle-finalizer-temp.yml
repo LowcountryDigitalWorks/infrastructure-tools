@@ -33,6 +33,9 @@ jobs:
           if ($env:GITHUB_REF -cne 'refs/heads/fix/92-post164-bootstrap-bundle-provenance') {
             throw 'PROOF_BRANCH_REF_MISMATCH'
           }
+          $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+          'PROOF_IS_ADMIN=' + $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          'PROOF_GIT_PORCELAIN=' + (@(git status --porcelain) -join '|')
           $targetCommit = '6a51968c07e235f4257031ccb127fd4ea5c1e00e'
           $targetTree = '30f4cf0fce3d6f6acb4f81dcbc712da148073b9c'
           $liveTree = (git rev-parse ($targetCommit + '^{tree}')).Trim()
@@ -48,8 +51,21 @@ jobs:
           $targetTree = '30f4cf0fce3d6f6acb4f81dcbc712da148073b9c'
           $ldwRoot = Join-Path $env:ProgramData 'LDW'
           if (Test-Path -LiteralPath $ldwRoot) { throw 'PROGRAMDATA_LDW_PREEXISTS' }
+          function Protect-Ci10EphemeralDirectory([string]$Path) {
+            $null = New-Item -ItemType Directory -Path $Path -Force
+            $acl = [Security.AccessControl.DirectorySecurity]::new()
+            $acl.SetAccessRuleProtection($true, $false)
+            $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+            foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
+              $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                  [Security.Principal.SecurityIdentifier]::new($sid),
+                  'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+            }
+            Set-Acl -LiteralPath $Path -AclObject $acl
+          }
           try {
-            $lines = @(& pwsh -NoLogo -NoProfile -File ./ci-dispatch/Publish-Bundle.ps1 -Commit $targetCommit -Tree $targetTree)
+            Protect-Ci10EphemeralDirectory $ldwRoot
+            $lines = @(& pwsh -NoLogo -NoProfile -File ./ci-dispatch/tests/Ephemeral-PublishBundleProof.ps1 -Commit $targetCommit -Tree $targetTree 2>&1 | ForEach-Object { [string]$_ })
             foreach ($line in $lines) { Write-Output $line }
             $published = @($lines | Where-Object { $_ -ceq 'BUNDLE_PUBLISHED=PASS' })
             if ($published.Count -ne 1) { throw 'BUNDLE_PUBLISH_OUTPUT_INVALID' }
