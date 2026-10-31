@@ -202,6 +202,36 @@ class RedrixPreflightTests(unittest.TestCase):
         finally:
             decoy.unlink(missing_ok=True)
 
+    def test_in_memory_host_refuses_ambient_installer_without_injection(self):
+        orig_file = pre.__file__
+        try:
+            pre.__file__ = "<memory>"
+            if pre._VERIFIED_INSTALLER_GLOBAL in pre.__dict__:
+                delattr(pre, pre._VERIFIED_INSTALLER_GLOBAL)
+            with self.assertRaisesRegex(pre.PreflightError, "REDRIX_PREFLIGHT_INSTALLER_UNAVAILABLE"):
+                pre._installer_bytes_from_host()
+        finally:
+            pre.__file__ = orig_file
+
+    def test_in_memory_host_uses_injected_installer_not_cwd_decoy(self):
+        installer_bytes = pre.INSTALLER_PATH.read_bytes()
+        orig_file = pre.__file__
+        with tempfile.TemporaryDirectory() as td:
+            decoy = Path(td) / "dragonfly_canary_redrix_install.py"
+            decoy.write_text("# decoy\n", encoding="utf-8")
+            try:
+                pre.__file__ = "<memory>"
+                setattr(pre, pre._VERIFIED_INSTALLER_GLOBAL, installer_bytes)
+                module = pre._load_installer(decoy)
+                self.assertEqual(module.SOURCE_COMMIT, inst.SOURCE_COMMIT)
+                decoy.write_text("# mutated decoy\n", encoding="utf-8")
+                module2 = pre._load_installer(decoy)
+                self.assertEqual(module2.SOURCE_COMMIT, inst.SOURCE_COMMIT)
+            finally:
+                pre.__file__ = orig_file
+                if hasattr(pre, pre._VERIFIED_INSTALLER_GLOBAL):
+                    delattr(pre, pre._VERIFIED_INSTALLER_GLOBAL)
+
     def test_rollback_receiver_mode_drift_is_refused(self):
         receiver = self.home / inst.RECEIVER_REL
         receiver.chmod(0o644)

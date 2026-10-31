@@ -73,6 +73,31 @@ class GateA3BootstrapRecordTests(unittest.TestCase):
         self.assertEqual(len(data), bootstrap.ACCEPTED_A3_BYTES)
         self.assertEqual(hashlib.sha256(data).hexdigest(), bootstrap.ACCEPTED_A3_SHA256)
 
+    def test_accepted_installer_pin_matches_git_blob(self):
+        data = subprocess.check_output(
+            ["git", "-C", str(ROOT), "show", f"{bootstrap.ACCEPTED_INSTALLER_COMMIT}:tools/dragonfly_canary_redrix_install.py"],
+            stderr=subprocess.DEVNULL,
+        )
+        self.assertEqual(len(data), bootstrap.ACCEPTED_INSTALLER_BYTES)
+        self.assertEqual(hashlib.sha256(data).hexdigest(), bootstrap.ACCEPTED_INSTALLER_SHA256)
+
+    def test_bootstrap_embeds_dual_source_pins(self):
+        digest = "d" * 64
+        code = bootstrap.build_bootstrap_code(
+            url=bootstrap.ACCEPTED_A3_URL,
+            sha256=bootstrap.ACCEPTED_A3_SHA256,
+            exact_bytes=bootstrap.ACCEPTED_A3_BYTES,
+            max_bytes=bootstrap.MAX_SOURCE_BYTES,
+            installer_url=bootstrap.ACCEPTED_INSTALLER_URL,
+            installer_sha256=bootstrap.ACCEPTED_INSTALLER_SHA256,
+            installer_exact_bytes=bootstrap.ACCEPTED_INSTALLER_BYTES,
+            transport_key_sha256=digest,
+        )
+        self.assertIn(bootstrap.ACCEPTED_A3_SHA256, code)
+        self.assertIn(bootstrap.ACCEPTED_INSTALLER_SHA256, code)
+        self.assertIn("__LDW_VERIFIED_INSTALLER_BYTES__", code)
+        self.assertIn("fetch_pinned", code)
+
     def test_bare_digest_cli_is_not_accepted(self):
         proc = subprocess.run(
             [sys.executable, str(ROOT / "tools/dragonfly_gate_a3_bootstrap.py"), "--help"],

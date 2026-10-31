@@ -2,10 +2,11 @@
 """Render the bounded in-memory REDRIX Gate A3 preflight invocation.
 
 Source-only control-plane helper. It does not connect to REDRIX or mutate host
-state. It renders a shell-safe command whose embedded Python bootstrap fetches one
-immutable public preflight helper into memory, verifies exact byte length and
-SHA-256, compile/executes it only after verification, and passes the expected
-transport-key identity digest taken only from a Gate A1 transport identity record.
+state. It renders a shell-safe command whose embedded Python bootstrap fetches two
+immutable public helpers (preflight + pinned installer) into memory, verifies exact
+byte length and SHA-256 for each, injects verified installer bytes into the preflight
+exec namespace, compile/executes preflight only after verification, and passes the
+expected transport-key identity digest taken only from a Gate A1 transport identity record.
 """
 from __future__ import annotations
 
@@ -35,6 +36,16 @@ ACCEPTED_A3_URL = (
     + "/"
     + ACCEPTED_A3_PATH
 )
+ACCEPTED_INSTALLER_COMMIT = ACCEPTED_A3_COMMIT
+ACCEPTED_INSTALLER_SHA256 = "1c5f603560b851a13f71aa0cf3e7d499400d3259a3246f0ab5d00b94254adac7"
+ACCEPTED_INSTALLER_BYTES = 35944
+ACCEPTED_INSTALLER_PATH = "tools/dragonfly_canary_redrix_install.py"
+ACCEPTED_INSTALLER_URL = (
+    "https://raw.githubusercontent.com/LowcountryDigitalWorks/infrastructure-tools/"
+    + ACCEPTED_INSTALLER_COMMIT
+    + "/"
+    + ACCEPTED_INSTALLER_PATH
+)
 MAX_SOURCE_BYTES = 65536
 PYTHON = "/usr/bin/python3"
 PYTHON_FLAGS = ("-I", "-B")
@@ -50,6 +61,9 @@ def build_bootstrap_code(
     sha256: str,
     exact_bytes: int,
     max_bytes: int,
+    installer_url: str,
+    installer_sha256: str,
+    installer_exact_bytes: int,
     transport_key_sha256: str,
 ) -> str:
     if not re.fullmatch(
@@ -57,25 +71,63 @@ def build_bootstrap_code(
         url,
     ):
         raise BootstrapInputError("A3_BOOTSTRAP_URL_INVALID")
+    if not re.fullmatch(
+        r"https://raw\.githubusercontent\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[0-9a-f]{40}/[A-Za-z0-9_./-]+",
+        installer_url,
+    ):
+        raise BootstrapInputError("A3_BOOTSTRAP_INSTALLER_URL_INVALID")
     if re.fullmatch(r"[0-9a-f]{64}", sha256) is None:
         raise BootstrapInputError("A3_BOOTSTRAP_SHA256_INVALID")
+    if re.fullmatch(r"[0-9a-f]{64}", installer_sha256) is None:
+        raise BootstrapInputError("A3_BOOTSTRAP_INSTALLER_SHA256_INVALID")
     if re.fullmatch(r"[0-9a-f]{64}", transport_key_sha256) is None:
         raise BootstrapInputError("A3_EXPECTED_TRANSPORT_KEY_SHA256_INVALID")
     if not isinstance(exact_bytes, int) or isinstance(exact_bytes, bool) or exact_bytes <= 0:
         raise BootstrapInputError("A3_BOOTSTRAP_EXACT_SIZE_INVALID")
+    if (
+        not isinstance(installer_exact_bytes, int)
+        or isinstance(installer_exact_bytes, bool)
+        or installer_exact_bytes <= 0
+    ):
+        raise BootstrapInputError("A3_BOOTSTRAP_INSTALLER_EXACT_SIZE_INVALID")
     if (
         not isinstance(max_bytes, int)
         or isinstance(max_bytes, bool)
         or max_bytes <= 0
         or max_bytes > 1024 * 1024
         or exact_bytes > max_bytes
+        or installer_exact_bytes > max_bytes
     ):
         raise BootstrapInputError("A3_BOOTSTRAP_SIZE_LIMIT_INVALID")
+
+    fetch_fn = '''def fetch_pinned(url,expected_sha256,expected_bytes,max_bytes,prefix):
+    request=urllib.request.Request(url,headers={"User-Agent":"LDW-Dragonfly-A3/1","Accept":"text/plain"},method="GET")
+    opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect)
+    response=opener.open(request,timeout=10)
+    try:
+        if getattr(response,"status",None)!=200:
+            hold(prefix+"_SOURCE_HTTP_STATUS_INVALID")
+        if response.geturl()!=url:
+            hold(prefix+"_SOURCE_FINAL_URL_INVALID")
+        data=response.read(max_bytes+1)
+    finally:
+        response.close()
+    if len(data)>max_bytes:
+        hold(prefix+"_SOURCE_TOO_LARGE")
+    if len(data)!=expected_bytes:
+        hold(prefix+"_SOURCE_LENGTH_MISMATCH")
+    if hashlib.sha256(data).hexdigest()!=expected_sha256:
+        hold(prefix+"_SOURCE_SHA256_MISMATCH")
+    return data
+'''
 
     return f'''import hashlib,sys,urllib.request
 URL={url!r}
 EXPECTED_SHA256={sha256!r}
 EXPECTED_BYTES={exact_bytes}
+INSTALLER_URL={installer_url!r}
+INSTALLER_EXPECTED_SHA256={installer_sha256!r}
+INSTALLER_EXPECTED_BYTES={installer_exact_bytes}
 MAX_BYTES={max_bytes}
 TRANSPORT_SHA256={transport_key_sha256!r}
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -85,31 +137,18 @@ def hold(code):
     print("DRAGONFLY_GATE_A3_BOOTSTRAP=HOLD")
     print("CLASSIFICATION="+code)
     raise SystemExit(1)
+{fetch_fn}
 try:
-    request=urllib.request.Request(URL,headers={{"User-Agent":"LDW-Dragonfly-A3/1","Accept":"text/plain"}},method="GET")
-    opener=urllib.request.build_opener(urllib.request.ProxyHandler({{}}),NoRedirect)
-    response=opener.open(request,timeout=10)
-    try:
-        if getattr(response,"status",None)!=200:
-            hold("A3_SOURCE_HTTP_STATUS_INVALID")
-        if response.geturl()!=URL:
-            hold("A3_SOURCE_FINAL_URL_INVALID")
-        data=response.read(MAX_BYTES+1)
-    finally:
-        response.close()
-    if len(data)>MAX_BYTES:
-        hold("A3_SOURCE_TOO_LARGE")
-    if len(data)!=EXPECTED_BYTES:
-        hold("A3_SOURCE_LENGTH_MISMATCH")
-    if hashlib.sha256(data).hexdigest()!=EXPECTED_SHA256:
-        hold("A3_SOURCE_SHA256_MISMATCH")
+    data=fetch_pinned(URL,EXPECTED_SHA256,EXPECTED_BYTES,MAX_BYTES,"A3")
+    installer_data=fetch_pinned(INSTALLER_URL,INSTALLER_EXPECTED_SHA256,INSTALLER_EXPECTED_BYTES,MAX_BYTES,"A3_INSTALLER")
 except SystemExit:
     raise
 except Exception:
     hold("A3_SOURCE_FETCH_FAILED")
 sys.argv=["dragonfly_canary_redrix_preflight.py","--expected-transport-key-sha256",TRANSPORT_SHA256]
+namespace={{"__name__":"__main__","__file__":"<memory>","__LDW_VERIFIED_INSTALLER_BYTES__":installer_data}}
 try:
-    exec(compile(data,"<dragonfly_canary_redrix_preflight.py>","exec"),{{"__name__":"__main__","__file__":"<memory>"}})
+    exec(compile(data,"<dragonfly_canary_redrix_preflight.py>","exec"),namespace)
 except SystemExit:
     raise
 except Exception:
@@ -129,6 +168,9 @@ def render_command(*, gate_a1_transport_identity_record: Path) -> str:
         sha256=ACCEPTED_A3_SHA256,
         exact_bytes=ACCEPTED_A3_BYTES,
         max_bytes=MAX_SOURCE_BYTES,
+        installer_url=ACCEPTED_INSTALLER_URL,
+        installer_sha256=ACCEPTED_INSTALLER_SHA256,
+        installer_exact_bytes=ACCEPTED_INSTALLER_BYTES,
         transport_key_sha256=transport_key_sha256,
     )
     argv = [PYTHON, *PYTHON_FLAGS, "-c", code]

@@ -18,6 +18,7 @@ from types import ModuleType
 
 INSTALLER_BLOB = "036aae98e58f454dd761bbbcc591a6c52e12006d"
 INSTALLER_PATH = Path(__file__).resolve().with_name("dragonfly_canary_redrix_install.py")
+_VERIFIED_INSTALLER_GLOBAL = "__LDW_VERIFIED_INSTALLER_BYTES__"
 PRODUCTION_HOME = Path("/home/eddie")
 PRODUCTION_USER = "eddie"
 PRODUCTION_UID = 1000
@@ -39,11 +40,24 @@ def _exec_verified_module(data: bytes, module_name: str) -> ModuleType:
     return module
 
 
-def _load_installer(path: Path = INSTALLER_PATH) -> ModuleType:
+def _is_in_memory_host() -> bool:
+    return str(__file__).startswith("<")
+
+
+def _installer_bytes_from_host(path: Path = INSTALLER_PATH) -> bytes:
+    injected = globals().get(_VERIFIED_INSTALLER_GLOBAL)
+    if isinstance(injected, bytes):
+        return injected
+    if _is_in_memory_host():
+        raise PreflightError("REDRIX_PREFLIGHT_INSTALLER_UNAVAILABLE")
     try:
-        data = path.read_bytes()
+        return path.read_bytes()
     except OSError as exc:
         raise PreflightError("REDRIX_PREFLIGHT_INSTALLER_UNAVAILABLE") from exc
+
+
+def _load_installer(path: Path = INSTALLER_PATH) -> ModuleType:
+    data = _installer_bytes_from_host(path)
     if _git_blob(data) != INSTALLER_BLOB:
         raise PreflightError("REDRIX_PREFLIGHT_INSTALLER_IDENTITY_MISMATCH")
     return _exec_verified_module(data, "ldw_redrix_gate_a3_installer")
