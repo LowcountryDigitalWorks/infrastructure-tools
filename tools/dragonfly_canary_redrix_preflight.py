@@ -23,7 +23,7 @@ if str(_TOOLS_DIR) not in sys.path:
 
 from dragonfly_canary_redrix_a3 import assert_gate_a3_pre_install_state, exec_verified_module
 
-INSTALLER_BLOB = "0ec461dd163265414ab3b4110e6e80812977cc86"
+INSTALLER_BLOB = "424637e52468db59d464e2f4b0f547bb8b8490c8"
 INSTALLER_PATH = Path(__file__).resolve().with_name("dragonfly_canary_redrix_install.py")
 PRODUCTION_HOME = Path("/home/eddie")
 PRODUCTION_USER = "eddie"
