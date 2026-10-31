@@ -19,7 +19,7 @@ import re
 import shlex
 
 # Updated with each accepted Gate A3 preflight packet (same discipline as Gate A0).
-ACCEPTED_A3_COMMIT = "7af26f7ca4a27a540608e1df17b2d5b1d604dd4b"
+ACCEPTED_A3_COMMIT = "b5925f51390a468d99992c6f33321c637e9f0985"
 ACCEPTED_A3_SHA256 = "336d3dcfb445301394093f287935ee034f37db0073695ff4adba4c715b26e086"
 ACCEPTED_A3_BYTES = 4646
 ACCEPTED_A3_PATH = "tools/dragonfly_canary_redrix_preflight.py"
