@@ -48,9 +48,32 @@ class FakeInstaller:
     SOURCE_COMMIT = "78a3a23b1a9dac59698a09cec2dd6c9a81e4a3ca"
     SOURCE_TREE = "5f54ee5b76f49250db1358f058745cb30b6587ef"
     FORCED_COMMAND = "/home/eddie/.local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py"
-    CURRENT = tuple(range(7))
+    CURRENT = (
+        ("payload/a.py", "aa" * 20, Path(".local/lib/ldw-dragonfly-jit/a.py"), 0o600),
+        ("payload/b.py", "bb" * 20, Path(".local/lib/ldw-dragonfly-jit/b.py"), 0o600),
+        ("payload/c.sh", "cc" * 20, Path(".local/lib/ldw-dragonfly-jit/c.sh"), 0o700),
+    )
+    ROLLBACK = (
+        ("rollback/a.py", "dd" * 20, Path(".local/lib/ldw-dragonfly-jit/a.py"), 0o600),
+        ("rollback/b.py", "ee" * 20, Path(".local/lib/ldw-dragonfly-jit/b.py"), 0o600),
+    )
 
     def __init__(self):
+        rollback_targets = {rel.as_posix() for _, _, rel, _ in self.ROLLBACK}
+        preexisting = {
+            rel.as_posix(): rel.as_posix() in rollback_targets
+            for _, _, rel, _ in self.CURRENT
+        }
+        self.package_sha = "a" * 64
+        self.receipt = {
+            "schema": 2,
+            "sourceCommit": self.SOURCE_COMMIT,
+            "sourceTree": self.SOURCE_TREE,
+            "packageSha256": self.package_sha,
+            "authorizedKeysSha256": "b" * 64,
+            "rollbackBaseline": "accepted-115",
+            "preexisting": preexisting,
+        }
         self.result = {
             "sourceCommit": self.SOURCE_COMMIT,
             "sourceTree": self.SOURCE_TREE,
@@ -60,6 +83,12 @@ class FakeInstaller:
             "files": len(self.CURRENT),
         }
         self.calls = 0
+        self.receipt_reads = 0
+
+    def _read_receipt(self, home, uid):
+        del home, uid
+        self.receipt_reads += 1
+        return dict(self.receipt)
 
     def readback_fixture(self, home, uid, forced_command):
         del home, uid
@@ -133,7 +162,8 @@ class GateA4Tests(unittest.TestCase):
             "runner": object(),
             "expected_local_alias": "redrix",
             "expected_host_fingerprint": "SHA256:SyntheticFingerprint",
-            "expected_transport_key_sha256": "a" * 64,
+            "expected_transport_key_sha256": "c" * 64,
+            "expected_package_sha256": "a" * 64,
             "proc_root": Path("/synthetic/proc"),
         }
 
@@ -146,15 +176,20 @@ class GateA4Tests(unittest.TestCase):
         self.assertEqual(result["marker"], "DRAGONFLY_GATE_A4_V1")
         self.assertEqual(result["installedSourceCommit"], self.installer.SOURCE_COMMIT)
         self.assertEqual(result["installedSourceTree"], self.installer.SOURCE_TREE)
-        self.assertTrue(result["rollbackRetained"])
+        self.assertEqual(result["packageIdentity"], "expected")
+        self.assertTrue(result["rollbackReceiptValidated"])
         self.assertTrue(result["installReceiptValidated"])
         self.assertEqual(result["jitState"], "STOPPED")
         self.assertEqual(result["transportKeyIdentity"], "expected")
         self.assertEqual(result["stabilityPasses"], 2)
         self.assertRegex(result["snapshotSha256"], r"^[a-f0-9]{64}$")
         self.assertEqual(self.installer.calls, 2)
+        self.assertEqual(self.installer.receipt_reads, 2)
         self.assertNotIn("expectedTransportKeySha256", result)
         self.assertNotIn("expectedHostFingerprint", result)
+        self.assertNotIn("expectedPackageSha256", result)
+        self.assertNotIn("packageSha256", result)
+        self.assertNotIn("rollbackRetained", result)
 
     def test_snapshot_movement_is_refused(self):
         self.a0.mutate_network = True
@@ -280,6 +315,40 @@ class GateA4Tests(unittest.TestCase):
             with self.assertRaisesRegex(a4.A4Error, "A4_SOURCE_IMPORT_FAILED") as caught:
                 a4._load_pinned("ldw_gate_a4_bad", path, a4._git_blob(source))
             self.assertEqual(str(caught.exception), "A4_SOURCE_IMPORT_FAILED")
+
+    def test_invalid_expected_package_hash_is_refused(self):
+        self.kwargs["expected_package_sha256"] = "NOT_A_SHA"
+        with mock.patch.object(a4.socket, "gethostname", return_value="redrix"):
+            with self.assertRaisesRegex(a4.A4Error, "A4_EXPECTED_PACKAGE_SHA256_INVALID"):
+                a4.collect_a4(**self.kwargs)
+        self.assertEqual(self.installer.receipt_reads, 0)
+
+    def test_wrong_receipt_package_hash_is_refused(self):
+        self.installer.receipt["packageSha256"] = "f" * 64
+        with mock.patch.object(a4.socket, "gethostname", return_value="redrix"):
+            with self.assertRaisesRegex(a4.A4Error, "A4_RECEIPT_PACKAGE_IDENTITY_MISMATCH"):
+                a4.collect_a4(**self.kwargs)
+
+    def test_receipt_preexisting_true_to_false_on_rollback_target_is_refused(self):
+        target = self.installer.ROLLBACK[0][2].as_posix()
+        self.installer.receipt["preexisting"][target] = False
+        with mock.patch.object(a4.socket, "gethostname", return_value="redrix"):
+            with self.assertRaisesRegex(a4.A4Error, "A4_RECEIPT_PREEXISTING_MISMATCH"):
+                a4.collect_a4(**self.kwargs)
+
+    def test_receipt_preexisting_false_to_true_on_non_rollback_target_is_refused(self):
+        non_rollback = self.installer.CURRENT[2][2].as_posix()
+        self.assertNotIn(non_rollback, {rel.as_posix() for _, _, rel, _ in self.installer.ROLLBACK})
+        self.installer.receipt["preexisting"][non_rollback] = True
+        with mock.patch.object(a4.socket, "gethostname", return_value="redrix"):
+            with self.assertRaisesRegex(a4.A4Error, "A4_RECEIPT_PREEXISTING_MISMATCH"):
+                a4.collect_a4(**self.kwargs)
+
+    def test_accepted_receipt_package_identity_passes_before_readback(self):
+        with mock.patch.object(a4.socket, "gethostname", return_value="redrix"):
+            a4.collect_a4(**self.kwargs)
+        self.assertGreaterEqual(self.installer.receipt_reads, 1)
+        self.assertGreaterEqual(self.installer.calls, 1)
 
 
 if __name__ == "__main__":

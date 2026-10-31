@@ -25,6 +25,7 @@ A0_BLOB = "fc9784a52d5f0d20b02c5d95ad4adc2e86ae04e9"
 PRODUCTION_HOME = Path("/home/eddie")
 PRODUCTION_UID = 1000
 ACCEPTED_LOCAL_ALIASES = {"redrix", "penguin"}
+PACKAGE_SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 
 
 class A4Error(RuntimeError):
@@ -60,6 +61,42 @@ def _canonical(value: object) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
 
 
+def _accepted_115_preexisting_map(installer: ModuleType) -> dict[str, bool]:
+    rollback_targets = {rel.as_posix() for _, _, rel, _ in installer.ROLLBACK}
+    return {
+        rel.as_posix(): rel.as_posix() in rollback_targets
+        for _, _, rel, _ in installer.CURRENT
+    }
+
+
+def _validate_install_receipt(
+    *,
+    home: Path,
+    uid: int,
+    installer: ModuleType,
+    expected_package_sha256: str,
+) -> None:
+    if PACKAGE_SHA256_RE.fullmatch(expected_package_sha256) is None:
+        raise A4Error("A4_EXPECTED_PACKAGE_SHA256_INVALID")
+    read_receipt = getattr(installer, "_read_receipt", None)
+    if read_receipt is None:
+        raise A4Error("A4_RECEIPT_READBACK_INVALID")
+    try:
+        receipt = read_receipt(home, uid)
+    except Exception as exc:
+        raise A4Error("A4_RECEIPT_READBACK_INVALID") from exc
+    if receipt.get("packageSha256") != expected_package_sha256:
+        raise A4Error("A4_RECEIPT_PACKAGE_IDENTITY_MISMATCH")
+    if receipt.get("sourceCommit") != installer.SOURCE_COMMIT:
+        raise A4Error("A4_RECEIPT_SOURCE_COMMIT_MISMATCH")
+    if receipt.get("sourceTree") != installer.SOURCE_TREE:
+        raise A4Error("A4_RECEIPT_SOURCE_TREE_MISMATCH")
+    if receipt.get("rollbackBaseline") != "accepted-115":
+        raise A4Error("A4_ROLLBACK_BASELINE_NOT_RETAINED")
+    if receipt.get("preexisting") != _accepted_115_preexisting_map(installer):
+        raise A4Error("A4_RECEIPT_PREEXISTING_MISMATCH")
+
+
 def _collect_once(
     *,
     home: Path,
@@ -70,6 +107,7 @@ def _collect_once(
     expected_local_alias: str,
     expected_host_fingerprint: str,
     expected_transport_key_sha256: str,
+    expected_package_sha256: str,
     proc_root: Path,
 ) -> dict:
     alias = socket.gethostname().split(".", 1)[0].lower()
@@ -78,6 +116,12 @@ def _collect_once(
     if alias != expected_local_alias:
         raise A4Error("A4_LOCAL_HOST_IDENTITY_MISMATCH")
 
+    _validate_install_receipt(
+        home=home,
+        uid=uid,
+        installer=installer,
+        expected_package_sha256=expected_package_sha256,
+    )
     installed = installer.readback_fixture(home, uid, installer.FORCED_COMMAND)
     if installed.get("sourceCommit") != installer.SOURCE_COMMIT:
         raise A4Error("A4_INSTALLED_SOURCE_COMMIT_MISMATCH")
@@ -111,7 +155,8 @@ def _collect_once(
         "installedSourceTree": installed["sourceTree"],
         "installedFiles": installed["files"],
         "rollbackBaseline": installed["rollbackBaseline"],
-        "rollbackRetained": True,
+        "packageIdentity": "expected",
+        "rollbackReceiptValidated": True,
         "installTransactionPending": False,
         "installReceiptValidated": True,
         **jit,
@@ -131,6 +176,7 @@ def collect_a4(
     expected_local_alias: str,
     expected_host_fingerprint: str,
     expected_transport_key_sha256: str,
+    expected_package_sha256: str,
     proc_root: Path,
 ) -> dict:
     first = _collect_once(
@@ -142,6 +188,7 @@ def collect_a4(
         expected_local_alias=expected_local_alias,
         expected_host_fingerprint=expected_host_fingerprint,
         expected_transport_key_sha256=expected_transport_key_sha256,
+        expected_package_sha256=expected_package_sha256,
         proc_root=proc_root,
     )
     second = _collect_once(
@@ -153,6 +200,7 @@ def collect_a4(
         expected_local_alias=expected_local_alias,
         expected_host_fingerprint=expected_host_fingerprint,
         expected_transport_key_sha256=expected_transport_key_sha256,
+        expected_package_sha256=expected_package_sha256,
         proc_root=proc_root,
     )
     if first != second:
@@ -177,6 +225,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-local-alias", required=True, choices=sorted(ACCEPTED_LOCAL_ALIASES))
     parser.add_argument("--expected-host-fingerprint", required=True)
     parser.add_argument("--expected-transport-key-sha256", required=True)
+    parser.add_argument("--expected-package-sha256", required=True)
     args = parser.parse_args(argv)
     try:
         if sys.platform != "linux":
@@ -203,6 +252,7 @@ def main(argv: list[str] | None = None) -> int:
             expected_local_alias=args.expected_local_alias,
             expected_host_fingerprint=args.expected_host_fingerprint,
             expected_transport_key_sha256=args.expected_transport_key_sha256,
+            expected_package_sha256=args.expected_package_sha256,
             proc_root=a0.PROC_ROOT,
         )
         print("DRAGONFLY_GATE_A4=PASS")
