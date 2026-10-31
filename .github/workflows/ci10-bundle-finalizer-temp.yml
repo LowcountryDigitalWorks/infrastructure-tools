@@ -26,7 +26,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $expectedParent = '70459732db6221596c3efad06ba0835c2ca65ee9'
+          $expectedParent = 'c1bf7238ff350990175976ed25ec480413f9f3c3'
           $current = (git rev-parse HEAD).Trim()
           if ($current -cne $env:GITHUB_SHA) { throw 'FINALIZER_HEAD_MISMATCH' }
           $parent = (git rev-parse HEAD^).Trim()
@@ -45,7 +45,7 @@ jobs:
             $text = Get-Content -LiteralPath $path -Raw
             foreach ($old in $pairs.Keys) {
               $count = ([regex]::Matches($text, [regex]::Escape($old))).Count
-              if ($count -ne 1) { throw "FINALIZER_OCCURRENCE_COUNT:$path:$old:$count" }
+              if ($count -ne 1) { throw ('FINALIZER_OCCURRENCE_COUNT:{0}:{1}:{2}' -f $path,$old,$count) }
               $text = $text.Replace($old, $pairs[$old])
             }
             [IO.File]::WriteAllText((Resolve-Path $path), $text, [Text.UTF8Encoding]::new($false))
@@ -66,8 +66,6 @@ jobs:
             }
           }
 
-          $effective = @(git diff --name-only 6a51968c07e235f4257031ccb127fd4ea5c1e00e...HEAD)
-          # HEAD still contains temporary files before this working-tree commit; validate staged result after git add below.
           git add -A
           $stagedTree = @(git diff --cached --name-only)
           foreach ($required in @(
