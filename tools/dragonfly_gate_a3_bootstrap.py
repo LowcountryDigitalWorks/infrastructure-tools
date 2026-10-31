@@ -6,8 +6,8 @@ state. It renders a shell-safe command whose embedded Python bootstrap fetches t
 immutable public helpers (preflight + pinned installer) into memory, verifies exact
 byte length and SHA-256 for each, injects verified installer bytes into the preflight
 exec namespace, compile/executes preflight only after verification, and passes the
-expected transport-key identity digest derived from the Gate A1 protected private key (record
-optional audit match only).
+expected transport-key identity digest derived from the Gate A1 protected private key against
+an independently trusted Gate A1 baseline and audit record (both required).
 """
 from __future__ import annotations
 
@@ -162,15 +162,20 @@ except Exception:
 def render_command(
     *,
     gate_a1_transport_private_key: Path,
-    gate_a1_transport_identity_record: Path | None = None,
+    gate_a1_transport_identity_record: Path,
+    gate_a1_transport_private_key_baseline_sha256: str,
 ) -> str:
+    if re.fullmatch(r"[0-9a-f]{64}", gate_a1_transport_private_key_baseline_sha256) is None:
+        raise BootstrapInputError("GATE_A1_TRANSPORT_PRIVATE_KEY_BASELINE_INVALID")
     try:
-        transport_key_sha256 = derive_bound_transport_public_identity(gate_a1_transport_private_key)
-        if gate_a1_transport_identity_record is not None:
-            record_text = gate_a1_transport_identity_record.read_text(encoding="utf-8")
-            record_digest = parse_gate_a1_transport_identity_record(record_text)
-            if record_digest != transport_key_sha256:
-                raise BootstrapInputError("GATE_A1_TRANSPORT_IDENTITY_RECORD_MISMATCH")
+        transport_key_sha256 = derive_bound_transport_public_identity(
+            gate_a1_transport_private_key,
+            baseline_sha256=gate_a1_transport_private_key_baseline_sha256,
+        )
+        record_text = gate_a1_transport_identity_record.read_text(encoding="utf-8")
+        record_digest = parse_gate_a1_transport_identity_record(record_text)
+        if record_digest != transport_key_sha256:
+            raise BootstrapInputError("GATE_A1_TRANSPORT_IDENTITY_RECORD_MISMATCH")
     except TransportIdentityError as exc:
         raise BootstrapInputError(str(exc)) from exc
     except ValueError as exc:
@@ -201,15 +206,20 @@ def main() -> int:
     parser.add_argument(
         "--gate-a1-transport-identity-record",
         type=Path,
-        required=False,
-        default=None,
-        help="Optional Gate A1 audit record; must match bound derivation when present",
+        required=True,
+        help="Gate A1 audit record; must match bound derivation against the accepted baseline",
+    )
+    parser.add_argument(
+        "--gate-a1-transport-private-key-baseline-sha256",
+        required=True,
+        help="SHA-256 of accepted Gate A1 transport private key bytes (independent trust anchor)",
     )
     args = parser.parse_args()
     try:
         command = render_command(
             gate_a1_transport_private_key=args.gate_a1_transport_private_key,
             gate_a1_transport_identity_record=args.gate_a1_transport_identity_record,
+            gate_a1_transport_private_key_baseline_sha256=args.gate_a1_transport_private_key_baseline_sha256,
         )
     except BootstrapInputError as exc:
         print("DRAGONFLY_GATE_A3_BOOTSTRAP_RENDER=HOLD")

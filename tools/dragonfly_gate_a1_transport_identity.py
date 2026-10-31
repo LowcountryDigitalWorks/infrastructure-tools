@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import os
 import re
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -56,10 +57,20 @@ if sys.platform == "win32":
         wintypes.LPVOID,
     ]
     _kernel32.ReadFile.restype = wintypes.BOOL
+    _kernel32.WriteFile.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPCVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    ]
+    _kernel32.WriteFile.restype = wintypes.BOOL
 
     _GENERIC_READ = 0x80000000
+    _GENERIC_WRITE = 0x40000000
     _FILE_SHARE_READ = 0x00000001
     _OPEN_EXISTING = 3
+    _CREATE_NEW = 1
     _FILE_ATTRIBUTE_NORMAL = 0x80
     _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
     _INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
@@ -235,6 +246,87 @@ def resolve_trusted_ssh_keygen_path() -> Path:
     return candidate
 
 
+def _invalid_handle(handle: int) -> bool:
+    return handle is None or handle == -1 or handle == int(ctypes.c_void_p(-1).value)
+
+
+def _write_file_handle(handle: int, data: bytes) -> None:
+    offset = 0
+    while offset < len(data):
+        chunk = data[offset : offset + 65536]
+        written = wintypes.DWORD(0)
+        ok = _kernel32.WriteFile(
+            handle,
+            chunk,
+            len(chunk),
+            ctypes.byref(written),
+            None,
+        )
+        if not ok or written.value == 0:
+            raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_BIND_FAILED")
+        offset += int(written.value)
+
+
+def _new_exclusive_temp_key_path(temp_dir: Path) -> Path:
+    for _ in range(32):
+        candidate = temp_dir / f"ldw-gate-a1-key-{secrets.token_hex(16)}"
+        if not candidate.exists():
+            return candidate
+    raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_BIND_FAILED")
+
+
+def _create_bound_temp_key_handle(path: Path, key_bytes: bytes) -> int:
+    """Create temp key file and keep a handle open through ssh-keygen (no DELETE/WRITE share)."""
+    _require_windows_64()
+    handle = _CreateFileW(
+        str(path),
+        _GENERIC_READ | _GENERIC_WRITE,
+        _FILE_SHARE_READ,
+        None,
+        _CREATE_NEW,
+        _FILE_ATTRIBUTE_NORMAL,
+        None,
+    )
+    if _invalid_handle(int(handle)):
+        raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_BIND_FAILED")
+    opened = int(handle)
+    try:
+        _write_file_handle(opened, key_bytes)
+    except TransportIdentityError:
+        _CloseHandle(opened)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED") from exc
+        raise
+    return opened
+
+
+def _purge_and_remove_temp_key_path(path: Path) -> None:
+    """Best-effort zero then delete; HOLD if private-byte residue may remain."""
+    try:
+        if path.exists():
+            size = path.stat().st_size
+            if size:
+                with path.open("r+b") as handle:
+                    handle.write(b"\0" * size)
+                    handle.flush()
+            path.unlink()
+    except OSError as exc:
+        raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED") from exc
+    if path.exists():
+        raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
+
+
+def _purge_temp_directory(directory: Path) -> None:
+    try:
+        if any(directory.iterdir()):
+            raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
+        directory.rmdir()
+    except OSError as exc:
+        raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED") from exc
+
+
 def derive_public_identity_from_accepted_bytes(
     key_bytes: bytes,
     *,
@@ -253,14 +345,18 @@ def derive_public_identity_from_accepted_bytes(
     if temp_dir.is_symlink():
         raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_REPARSE")
     temp_dir.mkdir(parents=True, exist_ok=True)
-    fd, name = tempfile.mkstemp(prefix="ldw-gate-a1-key-", dir=temp_dir)
+    key_path = _new_exclusive_temp_key_path(temp_dir)
+    win_handle: int | None = None
+    posix_fd = -1
     try:
-        os.write(fd, key_bytes)
-        os.close(fd)
-        fd = -1
-        os.chmod(name, 0o600)
+        if sys.platform == "win32":
+            win_handle = _create_bound_temp_key_handle(key_path, key_bytes)
+        else:
+            posix_fd, name = tempfile.mkstemp(prefix="ldw-gate-a1-key-", dir=temp_dir)
+            key_path = Path(name)
+            os.write(posix_fd, key_bytes)
         proc = subprocess.run(
-            [str(ssh_keygen), "-y", "-P", "", "-f", name],
+            [str(ssh_keygen), "-y", "-P", "", "-f", str(key_path)],
             capture_output=True,
             timeout=30,
             check=False,
@@ -273,12 +369,13 @@ def derive_public_identity_from_accepted_bytes(
             raise TransportIdentityError("GATE_A1_SSH_KEYGEN_Y_OUTPUT_INVALID") from exc
         return digest_from_ssh_keygen_y(text)
     finally:
-        if fd >= 0:
-            os.close(fd)
-        try:
-            os.remove(name)
-        except OSError:
-            pass
+        if win_handle is not None:
+            _CloseHandle(win_handle)
+            win_handle = None
+        if posix_fd >= 0:
+            os.close(posix_fd)
+            posix_fd = -1
+        _purge_and_remove_temp_key_path(key_path)
 
 
 def derive_bound_transport_public_identity(
@@ -311,10 +408,7 @@ def derive_bound_transport_public_identity(
         )
     finally:
         if created_temp:
-            try:
-                directory.rmdir()
-            except OSError:
-                pass
+            _purge_temp_directory(directory)
 
 
 def write_bound_record(
