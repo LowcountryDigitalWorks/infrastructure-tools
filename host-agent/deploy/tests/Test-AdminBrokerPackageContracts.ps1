@@ -60,3 +60,6 @@ Assert-True ($source.Contains('$start.FileName = $Executable',[StringComparison]
 Assert-True (-not $source.Contains("Environment['LDW_CORSAIR_NEON_SECRET'] =", [StringComparison]::OrdinalIgnoreCase)) 'publisher must never set a secret environment value'
 
 Write-Host "Admin Broker package contract assertions PASS: $script:Assertions"
+
+# Read-only historical artifact/source identity tests; never launch a package.
+& (Join-Path $PSScriptRoot 'Test-AcceptedAdminBrokerProvenance.ps1')
