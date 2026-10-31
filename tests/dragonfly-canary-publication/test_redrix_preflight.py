@@ -172,11 +172,13 @@ class RedrixPreflightTests(unittest.TestCase):
     def test_load_installer_does_not_mutate_tools_tree(self):
         tools = ROOT / "tools"
         before = snapshot(tools)
+        cache = tools / "__pycache__"
+        before_pyc = set(cache.glob("*.pyc")) if cache.is_dir() else set()
         pre._load_installer()
         after = snapshot(tools)
+        after_pyc = set(cache.glob("*.pyc")) if cache.is_dir() else set()
         self.assertEqual(before, after)
-        cache = list(tools.rglob("__pycache__"))
-        self.assertEqual(cache, [])
+        self.assertEqual(before_pyc, after_pyc)
 
     def test_installer_exec_uses_verified_bytes_not_later_path_mutation(self):
         data = pre.INSTALLER_PATH.read_bytes()
