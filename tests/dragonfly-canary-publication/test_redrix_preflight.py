@@ -143,7 +143,7 @@ class RedrixPreflightTests(unittest.TestCase):
         self.authorized.write_text(bad, encoding="utf-8")
         self.authorized.chmod(0o600)
         before = self.authorized.read_bytes()
-        with self.assertRaisesRegex(inst.InstallError, "REDRIX_FORCED_KEY_RESTRICTION_INVALID"):
+        with self.assertRaisesRegex(pre.PreflightError, "REDRIX_PREFLIGHT_TRANSPORT_KEY_IDENTITY_INVALID"):
             self.collect()
         self.assertEqual(self.authorized.read_bytes(), before)
 

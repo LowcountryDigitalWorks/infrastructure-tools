@@ -194,7 +194,7 @@ class RedrixInstallTests(unittest.TestCase):
         self.authorized.write_text(bad, encoding="utf-8")
         os.chmod(self.authorized, 0o600)
         before = self.authorized.read_bytes()
-        with self.assertRaisesRegex(inst.InstallError, "REDRIX_FORCED_KEY_RESTRICTION_INVALID"):
+        with self.assertRaisesRegex(inst.InstallError, "REDRIX_TRANSPORT_KEY_IDENTITY_INVALID"):
             self._install()
         self.assertEqual(self.authorized.read_bytes(), before)
 
