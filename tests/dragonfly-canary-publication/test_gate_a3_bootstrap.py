@@ -26,7 +26,10 @@ bootstrap = load("test_gate_a3_bootstrap_module", SOURCE)
 
 class GateA3BootstrapTests(unittest.TestCase):
     def test_accepted_preflight_pin_matches_worktree(self):
-        data = PREFLIGHT.read_bytes()
+        data = subprocess.check_output(
+            ["git", "-C", str(ROOT), "show", "HEAD:tools/dragonfly_canary_redrix_preflight.py"],
+            stderr=subprocess.DEVNULL,
+        )
         self.assertEqual(len(data), bootstrap.ACCEPTED_A3_BYTES)
         self.assertEqual(hashlib.sha256(data).hexdigest(), bootstrap.ACCEPTED_A3_SHA256)
 

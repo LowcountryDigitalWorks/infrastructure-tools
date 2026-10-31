@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -18,6 +19,7 @@ def load(name: str, path: Path):
     if spec is None or spec.loader is None:
         raise RuntimeError("MODULE_LOAD_FAILED")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 

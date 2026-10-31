@@ -445,10 +445,13 @@ def _revalidate_gate_a3_before_transaction(
     *,
     require_accepted_115: bool,
 ) -> dict[str, object]:
+    installer = sys.modules.get(__name__)
+    if installer is None:
+        raise InstallError("REDRIX_INSTALL_MODULE_CONTEXT_INVALID")
     return assert_gate_a3_pre_install_state(
         home,
         uid,
-        sys.modules[__name__],
+        installer,
         forced_command,
         expected_transport_key_sha256,
         error_cls=InstallError,
