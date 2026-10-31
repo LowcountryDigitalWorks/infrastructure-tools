@@ -1,6 +1,6 @@
-# TEMPORARY measurement scaffolding for fix/92-post164-bootstrap-bundle-provenance only.
-# Must be deleted before merge; do not reuse for runtime publish.
-name: CI10 bundle manifest finalizer (temp)
+# TEMPORARY self-deleting finalizer for fix/92-post164-bootstrap-bundle-provenance only.
+# This file deletes itself and the temporary hosted-proof helper before the PR is opened.
+name: CI10 bundle provenance finalizer (temp)
 
 on:
   push:
@@ -8,80 +8,97 @@ on:
       - fix/92-post164-bootstrap-bundle-provenance
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  derive-manifest:
+  finalize:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
-      - name: Checkout exact candidate
+      - name: Checkout exact branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: fix/92-post164-bootstrap-bundle-provenance
           fetch-depth: 0
-          persist-credentials: false
+          persist-credentials: true
 
-      - name: Prove branch and publisher target identities
+      - name: Apply exact pin refresh and remove temporary proof files
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $head = (git rev-parse HEAD).Trim()
-          if ($head -cne $env:GITHUB_SHA) { throw 'PROOF_HEAD_SHA_MISMATCH' }
-          'PROOF_BRANCH_HEAD=' + $head
-          'PROOF_GITHUB_SHA=' + $env:GITHUB_SHA
-          'PROOF_GITHUB_REF=' + $env:GITHUB_REF
-          if ($env:GITHUB_REF -cne 'refs/heads/fix/92-post164-bootstrap-bundle-provenance') {
-            throw 'PROOF_BRANCH_REF_MISMATCH'
-          }
-          $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
-          'PROOF_IS_ADMIN=' + $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-          'PROOF_GIT_PORCELAIN=' + (@(git status --porcelain) -join '|')
-          $targetCommit = '6a51968c07e235f4257031ccb127fd4ea5c1e00e'
-          $targetTree = '30f4cf0fce3d6f6acb4f81dcbc712da148073b9c'
-          $liveTree = (git rev-parse ($targetCommit + '^{tree}')).Trim()
-          if ($LASTEXITCODE -ne 0 -or $liveTree -cne $targetTree) { throw 'PROOF_TARGET_TREE_MISMATCH' }
-          'PROOF_BUNDLE_COMMIT=' + $targetCommit
-          'PROOF_BUNDLE_TREE=' + $targetTree
+          $expectedParent = '70459732db6221596c3efad06ba0835c2ca65ee9'
+          $current = (git rev-parse HEAD).Trim()
+          if ($current -cne $env:GITHUB_SHA) { throw 'FINALIZER_HEAD_MISMATCH' }
+          $parent = (git rev-parse HEAD^).Trim()
+          if ($parent -cne $expectedParent) { throw "FINALIZER_PARENT_MISMATCH:$parent" }
 
-      - name: Derive protected bundle manifest on ephemeral ProgramData
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $targetCommit = '6a51968c07e235f4257031ccb127fd4ea5c1e00e'
-          $targetTree = '30f4cf0fce3d6f6acb4f81dcbc712da148073b9c'
-          $ldwRoot = Join-Path $env:ProgramData 'LDW'
-          if (Test-Path -LiteralPath $ldwRoot) { throw 'PROGRAMDATA_LDW_PREEXISTS' }
-          function Protect-Ci10EphemeralDirectory([string]$Path) {
-            $null = New-Item -ItemType Directory -Path $Path -Force
-            $acl = [Security.AccessControl.DirectorySecurity]::new()
-            $acl.SetAccessRuleProtection($true, $false)
-            $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
-            foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
-              $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
-                  [Security.Principal.SecurityIdentifier]::new($sid),
-                  'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
-            }
-            Set-Acl -LiteralPath $Path -AclObject $acl
+          $bootstrap = 'host-agent/deploy/Bootstrap-CiJitControlTasks.ps1'
+          $test = 'host-agent/deploy/tests/Test-DeploymentContracts.ps1'
+          $pairs = [ordered]@{
+            'ec8acecfca4a85e2e01a25aced4dce763493ca13' = '6a51968c07e235f4257031ccb127fd4ea5c1e00e'
+            '53c0777a8a721c11e04b4afa1ad02bb8b5f9eb9ea59f8e74502d5cb5443ac436' = 'e56412548f58ceed7ae701be1d55526302a7baf9be3bb44b4ed02d45825a8193'
+            '4efeb043162ee773f7115d99fbc8ff1688e0f00c' = '6a51968c07e235f4257031ccb127fd4ea5c1e00e'
+            '0ba833fa376b8be385cecddef447c1f81db61300' = '30f4cf0fce3d6f6acb4f81dcbc712da148073b9c'
           }
-          try {
-            Protect-Ci10EphemeralDirectory $ldwRoot
-            $lines = @(& pwsh -NoLogo -NoProfile -File ./ci-dispatch/tests/Ephemeral-PublishBundleProof.ps1 -Commit $targetCommit -Tree $targetTree 2>&1 | ForEach-Object { [string]$_ })
-            foreach ($line in $lines) { Write-Output $line }
-            $published = @($lines | Where-Object { $_ -ceq 'BUNDLE_PUBLISHED=PASS' })
-            if ($published.Count -ne 1) { throw 'BUNDLE_PUBLISH_OUTPUT_INVALID' }
-            $commitLine = @($lines | Where-Object { $_ -like 'BUNDLE_COMMIT=*' } | Select-Object -First 1)
-            $treeLine = @($lines | Where-Object { $_ -like 'BUNDLE_TREE=*' } | Select-Object -First 1)
-            $shaLine = @($lines | Where-Object { $_ -like 'BUNDLE_MANIFEST_SHA256=*' } | Select-Object -First 1)
-            if ($commitLine.Count -ne 1 -or $treeLine.Count -ne 1 -or $shaLine.Count -ne 1) {
-              throw 'BUNDLE_PUBLISH_MARKER_MISSING'
+
+          foreach ($path in @($bootstrap, $test)) {
+            $text = Get-Content -LiteralPath $path -Raw
+            foreach ($old in $pairs.Keys) {
+              $count = ([regex]::Matches($text, [regex]::Escape($old))).Count
+              if ($count -ne 1) { throw "FINALIZER_OCCURRENCE_COUNT:$path:$old:$count" }
+              $text = $text.Replace($old, $pairs[$old])
             }
-            if ($commitLine[0] -cne ('BUNDLE_COMMIT=' + $targetCommit)) { throw 'BUNDLE_COMMIT_MISMATCH' }
-            if ($treeLine[0] -cne ('BUNDLE_TREE=' + $targetTree)) { throw 'BUNDLE_TREE_MISMATCH' }
-            if ($shaLine[0] -notmatch '^BUNDLE_MANIFEST_SHA256=[a-f0-9]{64}$') { throw 'BUNDLE_MANIFEST_SHA256_INVALID' }
+            [IO.File]::WriteAllText((Resolve-Path $path), $text, [Text.UTF8Encoding]::new($false))
           }
-          finally {
-            if (Test-Path -LiteralPath $ldwRoot) {
-              Remove-Item -LiteralPath $ldwRoot -Recurse -Force
+
+          Remove-Item -LiteralPath '.github/workflows/ci10-bundle-finalizer-temp.yml' -Force
+          Remove-Item -LiteralPath 'ci-dispatch/tests/Ephemeral-PublishBundleProof.ps1' -Force
+
+          foreach ($unchanged in @(
+            'fd52f44134dda198cb35ed7ef999e166ab143bbe',
+            'a0a79f92d31859dd4a930b358b10c7b4cf11db48',
+            'dabb1083994b635ff7d8f83ed673379276036885'
+          )) {
+            $bootstrapText = Get-Content -LiteralPath $bootstrap -Raw
+            $testText = Get-Content -LiteralPath $test -Raw
+            if (-not $bootstrapText.Contains($unchanged) -or -not $testText.Contains($unchanged)) {
+              throw "FINALIZER_UNCHANGED_PIN_MISSING:$unchanged"
             }
-            if (Test-Path -LiteralPath $ldwRoot) { throw 'PROGRAMDATA_LDW_CLEANUP_FAILED' }
           }
+
+          $effective = @(git diff --name-only 6a51968c07e235f4257031ccb127fd4ea5c1e00e...HEAD)
+          # HEAD still contains temporary files before this working-tree commit; validate staged result after git add below.
+          git add -A
+          $stagedTree = @(git diff --cached --name-only)
+          foreach ($required in @(
+            '.github/workflows/ci10-bundle-finalizer-temp.yml',
+            'ci-dispatch/tests/Ephemeral-PublishBundleProof.ps1',
+            'host-agent/deploy/Bootstrap-CiJitControlTasks.ps1',
+            'host-agent/deploy/tests/Test-DeploymentContracts.ps1'
+          )) {
+            if ($stagedTree -notcontains $required) { throw "FINALIZER_STAGED_PATH_MISSING:$required" }
+          }
+
+          git diff --cached --check
+          if ($LASTEXITCODE -ne 0) { throw 'FINALIZER_DIFF_CHECK_FAILED' }
+
+          git config user.name 'Eddie-LowcountryDigitalWorks'
+          git config user.email 'eddie@lowcountrydigitalworks.com'
+          git commit -m 'ci10: refresh bootstrap bundle provenance after #164 (#92)'
+          if ($LASTEXITCODE -ne 0) { throw 'FINALIZER_COMMIT_FAILED' }
+
+          $finalFiles = @(git diff --name-only 6a51968c07e235f4257031ccb127fd4ea5c1e00e...HEAD)
+          $expectedFiles = @(
+            'host-agent/deploy/Bootstrap-CiJitControlTasks.ps1',
+            'host-agent/deploy/tests/Test-DeploymentContracts.ps1'
+          )
+          if ($finalFiles.Count -ne 2 -or @($finalFiles | Where-Object { $_ -notin $expectedFiles }).Count -ne 0) {
+            throw ('FINALIZER_EFFECTIVE_DIFF_INVALID:' + ($finalFiles -join ','))
+          }
+
+          git push origin HEAD:fix/92-post164-bootstrap-bundle-provenance
+          if ($LASTEXITCODE -ne 0) { throw 'FINALIZER_PUSH_FAILED' }
+
+          'FINALIZER=PASS'
+          'FINAL_HEAD=' + (git rev-parse HEAD).Trim()
+          'FINAL_FILES=' + ($finalFiles -join ',')
