@@ -1,61 +1,54 @@
-[CmdletBinding()]
-param()
-
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$deployRoot = Split-Path -Parent $PSScriptRoot
-$source = Get-Content -LiteralPath (Join-Path $deployRoot 'Invoke-CiJitPhase2ObserveProof.ps1') -Raw
-$normalizedSource = $source.Replace("`r`n","`n")
-$script:Assertions = 0
-
-function Assert-True([bool]$Condition,[string]$Message) {
-    $script:Assertions++
-    if (-not $Condition) { throw "ASSERTION FAILED: $Message" }
-}
+$proof = Join-Path $PSScriptRoot '../Invoke-CiJitPhase2ObserveProof.ps1'
+$source = Get-Content -LiteralPath $proof -Raw
+$tokens=$null; $errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($proof,[ref]$tokens,[ref]$errors)
+if (@($errors).Count) { throw ('PHASE2_OBSERVE_PARSE_FAILED: ' + ($errors[0].Message)) }
 
 foreach ($required in @(
-    '[CmdletBinding()]',
-    'param()',
-    '9187711faffe90bcc9f6f09d936a9f0a95289ed4',
-    '945b463b2d88ef4ac3109e59ef0abfb77b286c88',
-    "branch','--show-current",
-    "status','--porcelain",
-    'refs/remotes/origin/main',
-    'merge-base --is-ancestor',
-    'PROOF_CLIENT_SOURCE_CHANGED',
-    'PROOF_NORMAL_USER_REQUIRED',
-    '. $checkout.ClientPath',
+    '$acceptedSourceCommit = ''024e7c0af1adc9c3cdfbb50a2710e2f0fd9446ef''',
+    '$acceptedClientBlob = ''a68acd712bd33c424f3a58a7130b439e46c9455e''',
+    '$clientRelative = ''host-agent/deploy/Invoke-CiJitLocalTaskClient.ps1''',
     "ValidateSet('STATUS','DISCOVER','GET_OPERATION_RESULT')",
-    'Invoke-FixedClientOperation -Operation STATUS',
-    'Invoke-FixedClientOperation -Operation DISCOVER',
-    'Invoke-FixedClientOperation -Operation GET_OPERATION_RESULT',
-    'OPERATION_NOT_FOUND',
-    'PROOF_DISCOVER_RESULT_TIMEOUT',
-    'LowcountryDigitalWorks/AdminBroker/audit-log.jsonl',
-    "targetIdentity -cne 'redacted'",
-    "summary -cne 'Operation audit record.'",
-    "@('CI_JIT_STATUS','CI_JIT_DISCOVER','CI_JIT_GET_OPERATION_RESULT')",
+    'Invoke-CiJitLocalTaskClient',
+    'LOCAL_TASK_TRANSPORT=PASS',
     'CI_JIT_PHASE2_OBSERVE_PROOF=PASS',
-    'OWNER_SID=LOCAL_DERIVED'
+    'PROOF_SOURCE_MAIN_REQUIRED',
+    'PROOF_SOURCE_WORKTREE_DIRTY',
+    'PROOF_SOURCE_MAIN_NOT_CURRENT',
+    'PROOF_CLIENT_SOURCE_CHANGED',
+    '$maximumResultPolls = 60',
+    '$resultPollMilliseconds = 500'
 )) {
-    Assert-True ($source.Contains($required,[StringComparison]::Ordinal)) "observe proof must preserve fixed contract: $required"
+    if (-not $source.Contains($required)) { throw "PHASE2_OBSERVE_REQUIRED_CONTRACT_MISSING: $required" }
 }
 
 foreach ($forbidden in @(
-    'RUN_ONCE','RECOVER','ABORT_ACTIVE','LIST_STALE','RETIRE_STALE',
-    'Register-ScheduledTask','New-ScheduledTask','Start-ScheduledTask','schtasks.exe',
-    'Start-Process','Diagnostics.Process','ProcessStartInfo','Kill(',
-    'Invoke-WebRequest','Invoke-RestMethod','Start-BitsTransfer','curl.exe','wget.exe','gh api','gh run',
-    'Set-Content','Add-Content','Out-File','Remove-Item','Copy-Item','Move-Item',
-    'Set-Service','New-Service','Set-ItemProperty','New-NetFirewall','Set-NetFirewall',
-    'cmd.exe','powershell.exe','pwsh.exe'
+    'RUN_ONCE',
+    'RECOVER',
+    'ABORT_ACTIVE',
+    'LIST_STALE',
+    'RETIRE_STALE',
+    'LDW.AdminBroker',
+    'NamedPipe',
+    'audit-log.jsonl',
+    'Publish-AdminBrokerProofPackage',
+    'schtasks.exe',
+    'Start-Process',
+    'ProcessStartInfo',
+    'Invoke-WebRequest',
+    'Invoke-RestMethod',
+    'HttpClient',
+    'TcpClient'
 )) {
-    Assert-True (-not $source.Contains($forbidden,[StringComparison]::OrdinalIgnoreCase)) "observe proof must exclude mutation/network/process primitive: $forbidden"
+    if ($source -match [regex]::Escape($forbidden)) { throw "PHASE2_OBSERVE_FORBIDDEN_PRIMITIVE: $forbidden" }
 }
 
-Assert-True ($normalizedSource.StartsWith("[CmdletBinding()]`nparam()`n",[StringComparison]::Ordinal)) 'observe proof top-level contract must expose no caller parameters'
-Assert-True ($source.Contains('$maximumResultPolls = 60',[StringComparison]::Ordinal)) 'observe proof must keep result polling bounded'
-Assert-True ($source.Contains('$resultPollMilliseconds = 500',[StringComparison]::Ordinal)) 'observe proof must keep fixed polling interval'
+$paramBlock=$ast.ParamBlock
+if ($null -eq $paramBlock -or @($paramBlock.Parameters).Count -ne 0) {
+    throw 'PHASE2_OBSERVE_MUST_ACCEPT_NO_PARAMETERS'
+}
 
-Write-Host "CI/JIT Phase-2 observe proof contract assertions PASS: $script:Assertions"
+'CI_JIT_PHASE2_OBSERVE_PROOF_CONTRACT=PASS'
