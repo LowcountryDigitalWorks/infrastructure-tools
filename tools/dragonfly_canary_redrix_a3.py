@@ -126,6 +126,10 @@ def assert_gate_a3_pre_install_state(
         }
         if preexisting != expected_preexisting:
             raise error_cls("REDRIX_PREFLIGHT_RESIDUE_PRESENT")
+    else:
+        if baseline != "accepted-133":
+            raise error_cls("REDRIX_RECEIPT_STATE_INVALID")
+        installer._verify_current_files(home, uid)
 
     installer._authorized_keys_digest(home, uid, forced_command)
     assert_transport_key_identity(

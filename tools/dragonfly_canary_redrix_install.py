@@ -444,6 +444,7 @@ def _revalidate_gate_a3_before_transaction(
     expected_transport_key_sha256: str,
     *,
     require_accepted_115: bool,
+    require_no_receipt: bool,
 ) -> dict[str, object]:
     installer = sys.modules.get(__name__)
     if installer is None:
@@ -457,7 +458,7 @@ def _revalidate_gate_a3_before_transaction(
         error_cls=InstallError,
         require_accepted_115=require_accepted_115,
         require_no_transaction=True,
-        require_no_receipt=require_accepted_115,
+        require_no_receipt=require_no_receipt,
         transport_error_codes=_gate_a3_transport_error_codes(),
     )
 
@@ -493,11 +494,11 @@ def install_fixture(
                 forced_command,
                 expected_transport_key_sha256,
                 require_accepted_115=False,
+                require_no_receipt=False,
             )
             auth_before = str(gate_state["authorizedKeysSha256"])
             if existing["packageSha256"] != archive_digest or existing["authorizedKeysSha256"] != auth_before:
                 raise InstallError("REDRIX_RECEIPT_STATE_INVALID")
-            _verify_current_files(home, uid)
             return existing
         gate_state = _revalidate_gate_a3_before_transaction(
             home,
@@ -505,6 +506,7 @@ def install_fixture(
             forced_command,
             expected_transport_key_sha256,
             require_accepted_115=(baseline == "accepted-115"),
+            require_no_receipt=True,
         )
         auth_before = str(gate_state["authorizedKeysSha256"])
         baseline = str(gate_state["baseline"])

@@ -121,6 +121,18 @@ class RedrixInstallTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertFalse((self.home / inst.TRANSACTION_REL).exists())
 
+    def test_idempotent_reinstall_holds_on_invalid_receipt_not_residue(self):
+        import json
+
+        self._install()
+        receipt = self.home / inst.RECEIPT_REL
+        record = json.loads(receipt.read_text(encoding="utf-8"))
+        record["packageSha256"] = "0" * 64
+        receipt.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(inst.InstallError, "REDRIX_RECEIPT_STATE_INVALID"):
+            self._install()
+        self.assertFalse((self.home / inst.TRANSACTION_REL).exists())
+
     def test_partial_failure_rolls_back_exact_accepted_115_baseline(self):
         before = self._auth_digest()
         with self.assertRaisesRegex(inst.InstallError, "REDRIX_SYNTHETIC_INSTALL_FAULT"):
@@ -292,6 +304,7 @@ class RedrixInstallTests(unittest.TestCase):
             inst.FORCED_COMMAND,
             self.key_sha256,
             require_accepted_115=True,
+            require_no_receipt=True,
         )
         swapped = self.line.replace(self.key_data, "AAAAC3NzaC1lZDI1NTE5AAAAIAnotherFixtureOnlyKey")
         self.authorized.write_text(swapped, encoding="utf-8")
