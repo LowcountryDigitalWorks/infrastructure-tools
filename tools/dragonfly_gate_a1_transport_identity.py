@@ -65,7 +65,22 @@ if sys.platform == "win32":
         wintypes.LPVOID,
     ]
     _kernel32.WriteFile.restype = wintypes.BOOL
+    _SetFilePointerEx = _kernel32.SetFilePointerEx
+    _SetFilePointerEx.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LARGE_INTEGER,
+        ctypes.POINTER(wintypes.LARGE_INTEGER),
+        wintypes.DWORD,
+    ]
+    _SetFilePointerEx.restype = wintypes.BOOL
+    _SetEndOfFile = _kernel32.SetEndOfFile
+    _SetEndOfFile.argtypes = [wintypes.HANDLE]
+    _SetEndOfFile.restype = wintypes.BOOL
+    _FlushFileBuffers = _kernel32.FlushFileBuffers
+    _FlushFileBuffers.argtypes = [wintypes.HANDLE]
+    _FlushFileBuffers.restype = wintypes.BOOL
 
+    _FILE_BEGIN = 0
     _GENERIC_READ = 0x80000000
     _GENERIC_WRITE = 0x40000000
     _FILE_SHARE_READ = 0x00000001
@@ -267,6 +282,93 @@ def _write_file_handle(handle: int, data: bytes) -> None:
         offset += int(written.value)
 
 
+def _file_size_from_handle(handle: int) -> int:
+    _require_windows_64()
+
+    class _FileTime(ctypes.Structure):
+        _fields_ = [("dwLowDateTime", wintypes.DWORD), ("dwHighDateTime", wintypes.DWORD)]
+
+    class _ByHandle(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", _FileTime),
+            ("ftLastAccessTime", _FileTime),
+            ("ftLastWriteTime", _FileTime),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    info = _ByHandle()
+    if not _kernel32.GetFileInformationByHandle(handle, ctypes.byref(info)):
+        raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
+    return (int(info.nFileSizeHigh) << 32) + int(info.nFileSizeLow)
+
+
+def _set_file_pointer(handle: int, offset: int) -> None:
+    _require_windows_64()
+    distance = wintypes.LARGE_INTEGER(offset)
+    if not _SetFilePointerEx(handle, distance, None, _FILE_BEGIN):
+        raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
+
+
+def _destroy_bound_temp_key_handle(handle: int) -> None:
+    """Zero the bound file object via the open handle, then close. Never reopens by pathname."""
+    _require_windows_64()
+    try:
+        size = _file_size_from_handle(handle)
+        if size:
+            _set_file_pointer(handle, 0)
+            remaining = size
+            zero_block = b"\0" * 65536
+            while remaining > 0:
+                chunk_len = min(remaining, len(zero_block))
+                _write_file_handle(handle, zero_block[:chunk_len])
+                remaining -= chunk_len
+            _set_file_pointer(handle, 0)
+            if not _SetEndOfFile(handle):
+                raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
+            if not _FlushFileBuffers(handle):
+                raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
+            if _file_size_from_handle(handle) != 0:
+                raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
+    finally:
+        if not _CloseHandle(handle):
+            raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
+
+
+def _destroy_posix_temp_key_fd(fd: int) -> None:
+    try:
+        size = os.fstat(fd).st_size
+        if size:
+            os.lseek(fd, 0, os.SEEK_SET)
+            remaining = size
+            zero_block = b"\0" * 65536
+            while remaining > 0:
+                chunk_len = min(remaining, len(zero_block))
+                written = os.write(fd, zero_block[:chunk_len])
+                if written <= 0:
+                    raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
+                remaining -= written
+            os.ftruncate(fd, 0)
+            os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _remove_temp_key_pathname(path: Path) -> None:
+    """Remove the temp pathname only. Private bytes must already be destroyed on the bound object."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED") from exc
+    if path.exists():
+        raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
+
+
 def _new_exclusive_temp_key_path(temp_dir: Path) -> Path:
     for _ in range(32):
         candidate = temp_dir / f"ldw-gate-a1-key-{secrets.token_hex(16)}"
@@ -300,22 +402,6 @@ def _create_bound_temp_key_handle(path: Path, key_bytes: bytes) -> int:
             raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED") from exc
         raise
     return opened
-
-
-def _purge_and_remove_temp_key_path(path: Path) -> None:
-    """Best-effort zero then delete; HOLD if private-byte residue may remain."""
-    try:
-        if path.exists():
-            size = path.stat().st_size
-            if size:
-                with path.open("r+b") as handle:
-                    handle.write(b"\0" * size)
-                    handle.flush()
-            path.unlink()
-    except OSError as exc:
-        raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED") from exc
-    if path.exists():
-        raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
 
 
 def _purge_temp_directory(directory: Path) -> None:
@@ -370,12 +456,12 @@ def derive_public_identity_from_accepted_bytes(
         return digest_from_ssh_keygen_y(text)
     finally:
         if win_handle is not None:
-            _CloseHandle(win_handle)
+            _destroy_bound_temp_key_handle(win_handle)
             win_handle = None
         if posix_fd >= 0:
-            os.close(posix_fd)
+            _destroy_posix_temp_key_fd(posix_fd)
             posix_fd = -1
-        _purge_and_remove_temp_key_path(key_path)
+        _remove_temp_key_pathname(key_path)
 
 
 def derive_bound_transport_public_identity(

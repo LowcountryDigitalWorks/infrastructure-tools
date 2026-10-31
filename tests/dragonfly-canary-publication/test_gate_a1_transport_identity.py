@@ -247,7 +247,7 @@ class GateA1TransportIdentityTests(unittest.TestCase):
             temp_dir = root / "out"
             with mock.patch.object(
                 identity,
-                "_purge_and_remove_temp_key_path",
+                "_remove_temp_key_pathname",
                 side_effect=identity.TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED"),
             ):
                 with self.assertRaisesRegex(
@@ -320,6 +320,58 @@ else:
             self.assertTrue(attack_log.exists(), "attack thread should run during consumption")
             self.assertNotEqual(attack_log.read_text(encoding="utf-8"), "no-error")
             self.assertEqual(list(temp_dir.glob("ldw-gate-a1-key-*")), [])
+
+    def test_temp_key_cleanup_pathname_hardlink_after_bound_destroy(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows bound-handle cleanup pathname substitution")
+        import os
+
+        line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture"
+        expected = identity.digest_from_ssh_keygen_y(line + "\n")
+        payload = b"synthetic-private-key-bytes"
+        fixture_bytes = b"UNRELATED-FIXTURE-BYTES-KEEP-INTACT"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fixture = root / "fixture.bin"
+            fixture.write_bytes(fixture_bytes)
+            keygen = root / "ssh-keygen.cmd"
+            keygen.write_text(f"@echo off\r\necho {line}\r\n", encoding="ascii")
+            temp_dir = root / "out"
+            moved_aside: dict[str, Path] = {}
+            real_remove = identity._remove_temp_key_pathname
+
+            def remove_with_pathname_substitution(path: Path) -> None:
+                moved = path.with_name(path.name + ".moved-aside")
+                try:
+                    if path.exists():
+                        os.replace(path, moved)
+                        moved_aside["path"] = moved
+                    os.link(fixture, path)
+                except OSError:
+                    pass
+                real_remove(path)
+
+            with mock.patch.object(
+                identity,
+                "_remove_temp_key_pathname",
+                side_effect=remove_with_pathname_substitution,
+            ):
+                digest = identity.derive_public_identity_from_accepted_bytes(
+                    payload,
+                    ssh_keygen=keygen,
+                    temp_dir=temp_dir,
+                    baseline_sha256=hashlib.sha256(payload).hexdigest(),
+                )
+            self.assertEqual(digest, expected)
+            self.assertEqual(fixture.read_bytes(), fixture_bytes)
+            moved = moved_aside.get("path")
+            self.assertIsNotNone(moved)
+            assert moved is not None
+            self.assertTrue(moved.exists())
+            self.assertNotIn(payload, moved.read_bytes())
+            self.assertEqual(moved.read_bytes(), b"")
+            for path in temp_dir.glob("ldw-gate-a1-key-*"):
+                self.assertIn(".moved-aside", path.name)
 
 
 class GateA3BootstrapRecordTests(unittest.TestCase):
