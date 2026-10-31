@@ -429,6 +429,78 @@ else:
             self.assertEqual(fixture.read_bytes(), fixture_bytes)
             self.assertTrue(fixture.exists())
 
+    def test_windows_system_ssh_keygen_ephemeral_ed25519_derive_and_cleanup(self):
+        """Hosted Windows: real System32 ssh-keygen against bound temp handle (FILE_SHARE_READ only)."""
+        if sys.platform != "win32":
+            self.skipTest("System32 OpenSSH integration requires Windows")
+        system_keygen = identity.resolve_trusted_ssh_keygen_path()
+        if not system_keygen.is_file():
+            self.fail(
+                "GATE_A1_SYSTEM_SSH_KEYGEN_MISSING: "
+                f"trusted path not present: {system_keygen}"
+            )
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            gen_stem = root / "ephemeral-ed25519"
+            gen_proc = subprocess.run(
+                [
+                    str(system_keygen),
+                    "-t",
+                    "ed25519",
+                    "-f",
+                    str(gen_stem),
+                    "-N",
+                    "",
+                    "-q",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            if gen_proc.returncode != 0:
+                self.fail(
+                    "GATE_A1_EPHEMERAL_KEYGEN_FAILED: "
+                    f"rc={gen_proc.returncode} stderr={gen_proc.stderr!r}"
+                )
+            private_key_path = Path(f"{gen_stem}")
+            pub_path = Path(f"{gen_stem}.pub")
+            self.assertTrue(private_key_path.is_file(), "expected OpenSSH private key file")
+            private_bytes = private_key_path.read_bytes()
+            baseline = hashlib.sha256(private_bytes).hexdigest()
+            y_proc = subprocess.run(
+                [str(system_keygen), "-y", "-P", "", "-f", str(private_key_path)],
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+            if y_proc.returncode != 0 or not y_proc.stdout.strip():
+                self.fail(
+                    "GATE_A1_EPHEMERAL_KEYGEN_Y_FAILED: "
+                    f"rc={y_proc.returncode} stderr={y_proc.stderr!r}"
+                )
+            expected_digest = identity.digest_from_ssh_keygen_y(
+                y_proc.stdout.decode("ascii", errors="strict")
+            )
+            private_key_path.unlink(missing_ok=True)
+            pub_path.unlink(missing_ok=True)
+            self.assertFalse(private_key_path.exists())
+            temp_dir = root / "derive-out"
+            digest = identity.derive_public_identity_from_accepted_bytes(
+                private_bytes,
+                ssh_keygen=system_keygen,
+                temp_dir=temp_dir,
+                baseline_sha256=baseline,
+            )
+            self.assertEqual(digest, expected_digest)
+            for path in temp_dir.glob("ldw-gate-a1-key-*"):
+                if path.exists():
+                    residue = path.read_bytes()
+                    self.assertNotIn(private_bytes, residue)
+                    if residue:
+                        self.assertEqual(residue, b"\0" * len(residue))
+                    self.fail(f"unexpected temp key pathname after cleanup: {path}")
+
     def test_accepted_preflight_pin_matches_git_blob(self):
         data = subprocess.check_output(
             ["git", "-C", str(ROOT), "show", f"{bootstrap.ACCEPTED_A3_COMMIT}:tools/dragonfly_canary_redrix_preflight.py"],

@@ -482,6 +482,31 @@ def _new_exclusive_temp_key_path(temp_dir: Path) -> Path:
     raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_BIND_FAILED")
 
 
+def _harden_openssh_private_key_acl(path: Path) -> None:
+    """Strip inherited ACL so System32 OpenSSH accepts the bound temp key (share flags unchanged)."""
+    _require_windows_64()
+    principal = os.environ.get("USERNAME", "").strip()
+    if not principal:
+        raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_BIND_FAILED")
+    proc = subprocess.run(
+        [
+            "icacls",
+            str(path),
+            "/inheritance:r",
+            "/grant:r",
+            f"{principal}:(F)",
+            "/remove",
+            "Owner Rights",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_BIND_FAILED")
+
+
 def _create_bound_temp_key_handle(path: Path, key_bytes: bytes) -> int:
     """Create temp key file and keep a handle open through ssh-keygen (no DELETE/WRITE share)."""
     _require_windows_64()
@@ -499,6 +524,7 @@ def _create_bound_temp_key_handle(path: Path, key_bytes: bytes) -> int:
     opened = int(handle)
     try:
         _write_file_handle(opened, key_bytes)
+        _harden_openssh_private_key_acl(path)
     except TransportIdentityError:
         _CloseHandle(opened)
         try:
