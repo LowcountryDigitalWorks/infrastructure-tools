@@ -63,6 +63,11 @@ try {
         Assert ($invokeSource.IndexOf('Get-FileHash -LiteralPath $manifestPath') -lt $moduleImport)
     }
 
+    Check 'dispatcher status projection update failures fail closed' {
+        Assert ($invokeSource.Contains('Set-Ci10StatusQueueProjection -QueueSnapshot $queueProjection -Capacity $projectionCapacity -ProvenanceValid'))
+        Assert (-not ($invokeSource -match 'Set-Ci10StatusQueueProjection[\s\S]{0,200}catch\s*\{\s*\}'))
+    }
+
     $owner='LDW\Owner'
     $action=[pscustomobject]@{Execute='C:\Program Files\PowerShell\7\pwsh.exe';Arguments=$taskArguments;WorkingDirectory=$null}
     $principal=[pscustomobject]@{UserId=$owner;LogonType='Interactive';RunLevel='Highest'}

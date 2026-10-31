@@ -138,7 +138,7 @@ try {
             else { 'CONTROLLER_GATE_UNCERTAIN' }
         $queueProjection = Get-Ci10QueueSnapshot $profiles
         $projectionCapacity = if ($gate -in @('READY','BUSY','CAPACITY')) { $gate } else { 'UNKNOWN' }
-        try { Set-Ci10StatusQueueProjection -QueueSnapshot $queueProjection -Capacity $projectionCapacity -ProvenanceValid } catch { }
+        Set-Ci10StatusQueueProjection -QueueSnapshot $queueProjection -Capacity $projectionCapacity -ProvenanceValid
         if ($Mode -eq 'Recover') {
             if ($gate -notin @('READY','CAPACITY')) { throw 'RECOVERY_BUSY_OR_UNCERTAIN' }
             'DISPATCHER_RESULT=RECOVERED'
