@@ -29,9 +29,9 @@ from dragonfly_gate_a1_transport_identity import (  # noqa: E402
 )
 
 # Updated with each accepted Gate A3 preflight packet (same discipline as Gate A0).
-ACCEPTED_A3_COMMIT = "5cbf810b1ac27bbe77801a58d95c9e1d559ba763"
-ACCEPTED_A3_SHA256 = "361efe23235f2069b903040537ef8575d1402ef0d18bf82b2f0e4d5b3946030d"
-ACCEPTED_A3_BYTES = 5019
+ACCEPTED_A3_COMMIT = "5c402c7a8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8"
+ACCEPTED_A3_SHA256 = "869173b850243ec71a7a1b346a69bd1a169a36d68bbd8b8b794d8d5306eaad6e"
+ACCEPTED_A3_BYTES = 5171
 ACCEPTED_A3_PATH = "tools/dragonfly_canary_redrix_preflight.py"
 ACCEPTED_A3_URL = (
     "https://raw.githubusercontent.com/LowcountryDigitalWorks/infrastructure-tools/"
@@ -39,8 +39,8 @@ ACCEPTED_A3_URL = (
     + "/"
     + ACCEPTED_A3_PATH
 )
-ACCEPTED_INSTALLER_COMMIT = "98613ad8f8e8c8e8e8e8e8e8e8e8e8e8e8e8e8e8"
-ACCEPTED_INSTALLER_SHA256 = "a846a65fe6d189910143bba2068f8f4bdf7df10999290fd8f2a675234929fd42"
+ACCEPTED_INSTALLER_COMMIT = "98613ad38d36c16b71ed19f270ebec397d8c8f8e"
+ACCEPTED_INSTALLER_SHA256 = "2ddb5e290270f2536f896b1c1dcaf902c66a64640ac4c4265e7705193fbdd288"
 ACCEPTED_INSTALLER_BYTES = 37106
 ACCEPTED_INSTALLER_PATH = "tools/dragonfly_canary_redrix_install.py"
 ACCEPTED_INSTALLER_URL = (
