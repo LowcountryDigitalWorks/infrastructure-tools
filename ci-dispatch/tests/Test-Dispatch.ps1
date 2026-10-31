@@ -361,7 +361,102 @@ $bad.event='push'
     Check 'capacity unavailable leaves queue untouched' {
         & $module {$script:CapacityBlocked=$true}
         Assert ((Get-Ci10ControllerGate $controllerRoot $profile) -ceq 'CAPACITY')
+        Assert ((Get-Ci10CapacitySubreason $profile.id) -ceq 'CAPACITY_RAM_RESERVE_4GIB_REQUIRED')
         & $module {$script:CapacityBlocked=$false}
+        Assert ((Get-Ci10ControllerGate $controllerRoot $profile) -ceq 'READY')
+        Assert ($null -eq (Get-Ci10CapacitySubreason $profile.id))
+    }
+    Check 'each accepted capacity predicate stays a bounded sanitized subreason' {
+        $codes=@(
+            'CAPACITY_RAM_RESERVE_4GIB_REQUIRED',
+            'CAPACITY_CPU_RESERVE_REQUIRED',
+            'CAPACITY_CPU_LOAD_TOO_HIGH',
+            'CAPACITY_DISK_RESERVE_40GIB_REQUIRED',
+            'DEFAULT_NAT_SWITCH_REQUIRED'
+        )
+        foreach($code in $codes){
+            & $module ([scriptblock]::Create("function script:Assert-Ci7Capacity { throw '$code' }"))
+            Assert ((Get-Ci10ControllerGate $controllerRoot $profile) -ceq 'CAPACITY')
+            Assert ((Get-Ci10CapacitySubreason $profile.id) -ceq $code)
+            Assert ((ConvertTo-Ci10CapacityResultReason 'CAPACITY' $code) -ceq $code)
+            Assert ((Get-Ci10CapacityDiagnostic @([pscustomobject]@{Profile=$profile})) -ceq $code)
+            Assert (Test-Ci10SanitizedCapacitySubreasonLine "CAPACITY_SUBREASON=$code")
+            Assert (-not (Test-Ci10SanitizedCapacitySubreasonLine "CAPACITY_SUBREASON=$code extra"))
+            Assert (-not (Test-Ci10SanitizedCapacitySubreasonLine "DISPATCHER_RESULT=$code"))
+        }
+        & $module { function script:Assert-Ci7Capacity { throw 'CAPACITY_RAW_FREE_PHYSICAL_MEMORY' } }
+        Assert ((Get-Ci10ControllerGate $controllerRoot $profile) -ceq 'CAPACITY')
+        Assert ($null -eq (Get-Ci10CapacitySubreason $profile.id))
+        Assert ((ConvertTo-Ci10CapacityResultReason 'CAPACITY' 'FreePhysicalMemory=1024') -ceq 'CAPACITY')
+        Assert ((ConvertTo-Ci10CapacityResultReason 'CAPACITY' $null) -ceq 'CAPACITY')
+        Assert ($null -eq (ConvertTo-Ci10CapacityResultReason 'READY' 'CAPACITY_CPU_LOAD_TOO_HIGH'))
+        Assert (-not (Test-Ci10SanitizedCapacitySubreasonLine 'CAPACITY_SUBREASON=FreePhysicalMemory=1024'))
+        & $module {
+            $script:Ci10CapacitySubreasonByProfile['left']='CAPACITY_CPU_RESERVE_REQUIRED'
+            $script:Ci10CapacitySubreasonByProfile['right']='DEFAULT_NAT_SWITCH_REQUIRED'
+        }
+        Assert ($null -eq (Get-Ci10CapacityDiagnostic @(
+            [pscustomobject]@{Profile=[pscustomobject]@{id='left'}},
+            [pscustomobject]@{Profile=[pscustomobject]@{id='right'}}
+        )))
+        $runner=Get-Content -LiteralPath (Join-Path $repo 'ci-runner/CiRunner.psm1') -Raw
+        foreach($predicate in @(
+            'if ($os.FreePhysicalMemory * 1024 -lt ($Configuration.MemoryMiB * 1MB + 4GB)) { throw ''CAPACITY_RAM_RESERVE_4GIB_REQUIRED'' }',
+            'if (($cpu | Measure-Object NumberOfLogicalProcessors -Sum).Sum -lt $Configuration.CpuCount + 2) { throw ''CAPACITY_CPU_RESERVE_REQUIRED'' }',
+            'if (($cpu | Measure-Object LoadPercentage -Average).Average -gt 70) { throw ''CAPACITY_CPU_LOAD_TOO_HIGH'' }',
+            'if ($drive.AvailableFreeSpace -lt 40GB) { throw ''CAPACITY_DISK_RESERVE_40GIB_REQUIRED'' }',
+            'if ($switch.Count -ne 1) { throw ''DEFAULT_NAT_SWITCH_REQUIRED'' }'
+        )) { Assert ($runner.Contains($predicate)) }
+        $dispatcher=Get-Content -LiteralPath (Join-Path $repo 'ci-dispatch/Invoke-Dispatcher.ps1') -Raw
+        Assert ($dispatcher.Contains("if (`$gate -cne 'READY') { throw 'CONTROLLER_GATE_CHANGED' }"))
+        $finalStart=$dispatcher.IndexOf('$finalGate = Resolve-Ci10FinalLaunchGate')
+        $launchStart=$dispatcher.IndexOf('Start-Ci10Controller $bundle $controllerRoot $candidate')
+        Assert ($finalStart -ge 0 -and $launchStart -gt $finalStart)
+        $finalBranch=$dispatcher.Substring($finalStart, $launchStart - $finalStart)
+        Assert ($finalBranch.Contains("'DISPATCHER_RESULT=CAPACITY'"))
+        Assert ($finalBranch.Contains('break'))
+        Assert (-not $finalBranch.Contains('Start-Ci10Controller'))
+        foreach($code in $codes){
+            $decision=Resolve-Ci10FinalLaunchGate 'CAPACITY' $code
+            Assert (-not $decision.Launch)
+            Assert ($decision.Result -ceq 'CAPACITY')
+            Assert ($decision.Subreason -ceq $code)
+        }
+        $rawFinal=Resolve-Ci10FinalLaunchGate 'CAPACITY' 'FreePhysicalMemory=1024'
+        Assert (-not $rawFinal.Launch -and $rawFinal.Result -ceq 'CAPACITY' -and $null -eq $rawFinal.Subreason)
+        foreach($blocked in @('BUSY','STALE','CONTROLLER_GATE_UNCERTAIN','')){
+            $decision=Resolve-Ci10FinalLaunchGate $blocked $codes[0]
+            Assert (-not $decision.Launch)
+            Assert ($decision.Result -ceq 'CONTROLLER_GATE_CHANGED')
+            Assert ($null -eq $decision.Subreason)
+        }
+        $readyFinal=Resolve-Ci10FinalLaunchGate 'READY' $codes[0]
+        Assert ($readyFinal.Launch -and $readyFinal.Result -ceq 'READY' -and $null -eq $readyFinal.Subreason)
+        Assert ($dispatcher.Contains("`$gate -in @('BUSY','CAPACITY')"))
+        Assert ($dispatcher.Contains("elseif (@(`$gates | Where-Object Value -ceq 'CAPACITY').Count) { 'CAPACITY' }"))
+        Assert ($dispatcher.Contains("if (`$gate -notin @('READY','CAPACITY')) { throw 'RECOVERY_BUSY_OR_UNCERTAIN' }"))
+        $capacityBranch=$dispatcher.Substring($dispatcher.IndexOf("if (`$gate -in @('BUSY','CAPACITY'))"), $dispatcher.IndexOf("elseif (`$gate -ceq 'READY')") - $dispatcher.IndexOf("if (`$gate -in @('BUSY','CAPACITY'))"))
+        Assert (-not $capacityBranch.Contains('Start-Ci10Controller'))
+        $worker=Get-Content -LiteralPath (Join-Path $repo 'host-agent/deploy/Invoke-CiJitControlTask.ps1') -Raw
+        Assert ($worker.Contains("`'RUN_ONCE' { `$r=Invoke-DispatcherMode Once"))
+        Assert ($worker.Contains("`$code -ceq 'CAPACITY'"))
+        Assert ($worker.Contains(($codes -join '|')))
+        $general='^(DISPATCHER_RESULT|DISCOVERED_RUN_ID|DISCOVERED_JOB_ID|INTERRUPTED_CLEANUP|CLEANUP_IDEMPOTENT)=([A-Z_]+|[0-9]+|PASS)$'
+        Assert ($worker.Contains($general))
+        Assert ('DISPATCHER_RESULT=CAPACITY' -cmatch $general)
+        Assert (-not ('DISPATCHER_RESULT=CAPACITY_RAM_RESERVE_4GIB_REQUIRED' -cmatch $general))
+        $client=Get-Content -LiteralPath (Join-Path $repo 'host-agent/deploy/Invoke-CiJitLocalTaskClient.ps1') -Raw
+        $contract=Get-Content -LiteralPath (Join-Path $repo 'host-agent/src/LDW.AdminBroker/CiJitControlContract.cs') -Raw
+        $status=Get-Content -LiteralPath (Join-Path $repo 'ci-dispatch/StatusProjection.psm1') -Raw
+        $statusCore=Get-Content -LiteralPath (Join-Path $repo 'host-agent/src/LDW.HostAgent.Core/CiJitStatus.cs') -Raw
+        foreach($code in $codes){
+            Assert (([regex]::Matches($worker, [regex]::Escape("'$code'"))).Count -ge 2)
+            Assert ($client.Contains("'$code'"))
+            Assert ($contract.Contains('"'+$code+'"'))
+            Assert (-not $status.Contains($code))
+            Assert (-not $statusCore.Contains($code))
+        }
+        & $module { function script:Assert-Ci7Capacity { if($script:CapacityBlocked){ throw 'CAPACITY_RAM_RESERVE_4GIB_REQUIRED' } } }
     }
     Check 'unrelated ci7-looking VM refused, no deletion' {
         & $module {$script:VMFixture=@([pscustomobject]@{Name='ci7-unrelated';VMId='unrelated'})}

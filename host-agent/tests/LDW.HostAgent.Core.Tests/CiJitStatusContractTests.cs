@@ -90,6 +90,22 @@ internal static class CiJitStatusContractTests
         AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { SourceVersion = "ci10/raw/provider" }), "raw path-like source provenance rejected");
         AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { ReasonCode = "CAPACITY\nraw" }), "raw multiline reason rejected");
         AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { ReasonCode = "TOKEN_VALUE" }), "unrecognized reason code rejected");
+        foreach (var subreason in new[]
+        {
+            "CAPACITY_RAM_RESERVE_4GIB_REQUIRED",
+            "CAPACITY_CPU_RESERVE_REQUIRED",
+            "CAPACITY_CPU_LOAD_TOO_HIGH",
+            "CAPACITY_DISK_RESERVE_40GIB_REQUIRED",
+            "DEFAULT_NAT_SWITCH_REQUIRED"
+        })
+        {
+            AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with
+            {
+                EligibleQueuedCount = 1,
+                Capacity = CiJitCapacityState.Capacity,
+                ReasonCode = subreason
+            }), "status capacity stays coarse CAPACITY and rejects diagnostic " + subreason);
+        }
         AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { SelectedProfile = "https://api.github.com/raw", SelectedRunId = 123, SelectedJobId = 456 }), "raw provider reference rejected as profile");
         AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { SelectedProfile = new string('b', 40), SelectedRunId = 123, SelectedJobId = 456 }), "SHA-like profile value rejected");
         AssertThrows<ArgumentException>(() => CiJitStatusResolver.Resolve(clean with { SelectedProfile = "ci10-bo-secret-scan" }), "profile-only selected identity rejected");
