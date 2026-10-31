@@ -342,12 +342,8 @@ else:
             self.assertTrue(attack_log.exists(), "attack thread should run during consumption")
             self.assertNotEqual(attack_log.read_text(encoding="utf-8"), "no-error")
             for path in temp_dir.glob("ldw-gate-a1-key-*"):
-                if not path.exists():
-                    continue
-                data = path.read_bytes()
-                self.assertNotIn(payload, data)
-                if data:
-                    self.assertEqual(data, b"\0" * len(data))
+                if path.exists():
+                    self.fail(f"unexpected temp key pathname residue: {path}")
 
     def test_temp_key_cleanup_pathname_hardlink_after_bound_destroy(self):
         if sys.platform != "win32":
@@ -366,51 +362,73 @@ else:
             keygen.write_text(f"@echo off\r\necho {line}\r\n", encoding="ascii")
             temp_dir = root / "out"
             moved_aside: dict[str, Path] = {}
-            real_close = identity._CloseHandle
+            real_delete = identity._delete_temp_key_path_if_same_object
 
-            def close_with_pathname_substitution(handle: int) -> bool:
+            def delete_with_pathname_substitution(
+                path: Path,
+                expected_identity: tuple[int, int, int],
+            ) -> None:
                 candidates = [
                     p
                     for p in temp_dir.glob("ldw-gate-a1-key-*")
                     if ".moved-aside" not in p.name and p.exists()
                 ]
                 if candidates:
-                    path = candidates[0]
-                    moved = path.with_name(path.name + ".moved-aside")
+                    target = candidates[0]
+                    moved = target.with_name(target.name + ".moved-aside")
                     try:
-                        if path.exists():
-                            os.replace(path, moved)
+                        if target.exists():
+                            os.replace(target, moved)
                             moved_aside["path"] = moved
-                        os.link(fixture, path)
+                        os.link(fixture, target)
                     except OSError:
                         pass
-                result = real_close(handle)
-                if not result:
-                    raise identity.TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
-                return result
+                real_delete(path, expected_identity)
 
-            with mock.patch.object(identity, "_CloseHandle", side_effect=close_with_pathname_substitution):
-                digest = identity.derive_public_identity_from_accepted_bytes(
-                    payload,
-                    ssh_keygen=keygen,
-                    temp_dir=temp_dir,
-                    baseline_sha256=hashlib.sha256(payload).hexdigest(),
-                )
-            self.assertEqual(digest, expected)
+            with mock.patch.object(
+                identity,
+                "_delete_temp_key_path_if_same_object",
+                side_effect=delete_with_pathname_substitution,
+            ):
+                with self.assertRaisesRegex(
+                    identity.TransportIdentityError,
+                    "GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED",
+                ):
+                    identity.derive_public_identity_from_accepted_bytes(
+                        payload,
+                        ssh_keygen=keygen,
+                        temp_dir=temp_dir,
+                        baseline_sha256=hashlib.sha256(payload).hexdigest(),
+                    )
             self.assertEqual(fixture.read_bytes(), fixture_bytes)
             moved = moved_aside.get("path")
             if moved is not None and moved.exists():
                 self.assertNotIn(payload, moved.read_bytes())
-            for path in temp_dir.glob("ldw-gate-a1-key-*"):
-                if not path.exists():
-                    continue
-                data = path.read_bytes()
-                self.assertNotIn(payload, data)
-                if data:
-                    self.assertEqual(data, b"\0" * len(data))
 
 
-class GateA3BootstrapRecordTests(unittest.TestCase):
+    def test_blind_pathname_unlink_would_destroy_substitute_fixture(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows verified-delete collateral regression")
+        import os
+
+        fixture_bytes = b"UNRELATED-FIXTURE-MUST-SURVIVE"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fixture = root / "fixture.bin"
+            fixture.write_bytes(fixture_bytes)
+            temp_dir = root / "out"
+            temp_dir.mkdir()
+            key_path = identity._new_exclusive_temp_key_path(temp_dir)
+            handle = identity._create_bound_temp_key_handle(key_path, b"synthetic-private-key-bytes")
+            bound = identity._bound_file_identity(handle)
+            identity._CloseHandle(handle)
+            os.replace(key_path, key_path.with_name(key_path.name + ".moved-aside"))
+            os.link(fixture, key_path)
+            with self.assertRaisesRegex(identity.TransportIdentityError, "TEMP_CLEANUP_FAILED"):
+                identity._delete_temp_key_path_if_same_object(key_path, bound)
+            self.assertEqual(fixture.read_bytes(), fixture_bytes)
+            self.assertTrue(fixture.exists())
+
     def test_accepted_preflight_pin_matches_git_blob(self):
         data = subprocess.check_output(
             ["git", "-C", str(ROOT), "show", f"{bootstrap.ACCEPTED_A3_COMMIT}:tools/dragonfly_canary_redrix_preflight.py"],

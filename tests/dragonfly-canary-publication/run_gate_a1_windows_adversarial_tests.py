@@ -13,6 +13,7 @@ ADVERSARIAL = (
     "test_temp_key_replacement_during_ssh_keygen_blocked",
     "test_temp_key_cleanup_pathname_hardlink_after_bound_destroy",
     "test_temp_key_cleanup_failure_hold",
+    "test_blind_pathname_unlink_would_destroy_substitute_fixture",
 )
 
 

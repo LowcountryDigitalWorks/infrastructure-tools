@@ -79,10 +79,40 @@ if sys.platform == "win32":
     _FlushFileBuffers = _kernel32.FlushFileBuffers
     _FlushFileBuffers.argtypes = [wintypes.HANDLE]
     _FlushFileBuffers.restype = wintypes.BOOL
+    _SetFileInformationByHandle = _kernel32.SetFileInformationByHandle
+    _SetFileInformationByHandle.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    _SetFileInformationByHandle.restype = wintypes.BOOL
 
+    class _FileTime(ctypes.Structure):
+        _fields_ = [("dwLowDateTime", wintypes.DWORD), ("dwHighDateTime", wintypes.DWORD)]
+
+    class _FileInfoByHandle(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", _FileTime),
+            ("ftLastAccessTime", _FileTime),
+            ("ftLastWriteTime", _FileTime),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    class _FileDispositionInfo(ctypes.Structure):
+        _fields_ = [("DeleteFile", wintypes.BYTE)]
+
+    _FILE_DISPOSITION_INFO = 4
     _FILE_BEGIN = 0
     _GENERIC_READ = 0x80000000
     _GENERIC_WRITE = 0x40000000
+    _DELETE = 0x00010000
     _FILE_SHARE_READ = 0x00000001
     _OPEN_EXISTING = 3
     _CREATE_NEW = 1
@@ -282,29 +312,25 @@ def _write_file_handle(handle: int, data: bytes) -> None:
         offset += int(written.value)
 
 
-def _file_size_from_handle(handle: int) -> int:
+def _file_info_by_handle(handle: int) -> _FileInfoByHandle:
     _require_windows_64()
-
-    class _FileTime(ctypes.Structure):
-        _fields_ = [("dwLowDateTime", wintypes.DWORD), ("dwHighDateTime", wintypes.DWORD)]
-
-    class _ByHandle(ctypes.Structure):
-        _fields_ = [
-            ("dwFileAttributes", wintypes.DWORD),
-            ("ftCreationTime", _FileTime),
-            ("ftLastAccessTime", _FileTime),
-            ("ftLastWriteTime", _FileTime),
-            ("dwVolumeSerialNumber", wintypes.DWORD),
-            ("nFileSizeHigh", wintypes.DWORD),
-            ("nFileSizeLow", wintypes.DWORD),
-            ("nNumberOfLinks", wintypes.DWORD),
-            ("nFileIndexHigh", wintypes.DWORD),
-            ("nFileIndexLow", wintypes.DWORD),
-        ]
-
-    info = _ByHandle()
+    info = _FileInfoByHandle()
     if not _kernel32.GetFileInformationByHandle(handle, ctypes.byref(info)):
         raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
+    return info
+
+
+def _bound_file_identity(handle: int) -> tuple[int, int, int]:
+    info = _file_info_by_handle(handle)
+    return (
+        int(info.dwVolumeSerialNumber),
+        int(info.nFileIndexHigh),
+        int(info.nFileIndexLow),
+    )
+
+
+def _file_size_from_handle(handle: int) -> int:
+    info = _file_info_by_handle(handle)
     return (int(info.nFileSizeHigh) << 32) + int(info.nFileSizeLow)
 
 
@@ -334,9 +360,64 @@ def _verify_handle_region_is_zero(handle: int, size: int) -> None:
         remaining -= int(read.value)
 
 
-def _destroy_bound_temp_key_handle(handle: int) -> None:
-    """Zero the bound file object via the open handle, verify, flush, then close (no pathname reopen)."""
+def _mark_handle_delete_on_close(handle: int) -> None:
     _require_windows_64()
+    info = _FileDispositionInfo(DeleteFile=1)
+    if not _SetFileInformationByHandle(
+        handle,
+        _FILE_DISPOSITION_INFO,
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+    ):
+        raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
+
+
+def _open_nofollow_for_verified_delete(path: Path) -> int:
+    _require_windows_64()
+    handle = _CreateFileW(
+        str(path),
+        _GENERIC_READ | _DELETE,
+        _FILE_SHARE_READ,
+        None,
+        _OPEN_EXISTING,
+        _FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    if handle is None or int(handle) == -1 or int(handle) == int(ctypes.c_void_p(-1).value):
+        raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
+    opened = int(handle)
+    if _handle_is_reparse(opened):
+        _CloseHandle(opened)
+        raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_REPARSE")
+    return opened
+
+
+def _delete_temp_key_path_if_same_object(
+    path: Path,
+    expected_identity: tuple[int, int, int],
+) -> None:
+    """Delete via handle only when no-follow reopen matches the zeroed temp object identity."""
+    _require_windows_64()
+    if not path.exists():
+        return
+    handle = _open_nofollow_for_verified_delete(path)
+    try:
+        if _bound_file_identity(handle) != expected_identity:
+            raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
+        _mark_handle_delete_on_close(handle)
+    except TransportIdentityError:
+        _CloseHandle(handle)
+        raise
+    if not _CloseHandle(handle):
+        raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
+    if path.exists():
+        raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
+
+
+def _finalize_bound_temp_key_cleanup(handle: int, path: Path) -> None:
+    """Zero on the consumption handle, then verified identity delete (never blind pathname unlink)."""
+    _require_windows_64()
+    bound_identity = _bound_file_identity(handle)
     try:
         original_size = _file_size_from_handle(handle)
         if original_size:
@@ -357,6 +438,11 @@ def _destroy_bound_temp_key_handle(handle: int) -> None:
         raise
     if not _CloseHandle(handle):
         raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
+    _delete_temp_key_path_if_same_object(path, bound_identity)
+
+
+def _destroy_bound_temp_key_handle(handle: int, path: Path) -> None:
+    _finalize_bound_temp_key_cleanup(handle, path)
 
 
 def _destroy_posix_temp_key_fd(fd: int) -> None:
@@ -475,7 +561,7 @@ def derive_public_identity_from_accepted_bytes(
         return digest_from_ssh_keygen_y(text)
     finally:
         if win_handle is not None:
-            _destroy_bound_temp_key_handle(win_handle)
+            _finalize_bound_temp_key_cleanup(win_handle, key_path)
             win_handle = None
         if posix_fd >= 0:
             _destroy_posix_temp_key_fd(posix_fd)
