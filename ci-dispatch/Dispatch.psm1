@@ -462,6 +462,18 @@ function ConvertTo-Ci10CapacityResultReason {
     'CAPACITY'
 }
 
+function Resolve-Ci10FinalLaunchGate {
+    param([string]$Gate, [string]$Subreason)
+    if ($Gate -ceq 'CAPACITY') {
+        $diagnostic = if (Test-Ci10CapacitySubreason $Subreason) { $Subreason } else { $null }
+        return [pscustomobject]@{ Launch = $false; Result = 'CAPACITY'; Subreason = $diagnostic }
+    }
+    if ($Gate -cne 'READY') {
+        return [pscustomobject]@{ Launch = $false; Result = 'CONTROLLER_GATE_CHANGED'; Subreason = $null }
+    }
+    [pscustomobject]@{ Launch = $true; Result = 'READY'; Subreason = $null }
+}
+
 function Test-Ci10SanitizedCapacitySubreasonLine {
     param([string]$Line)
     $pattern = '^CAPACITY_SUBREASON=(' + (($script:Ci10CapacitySubreasonCodes | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')$'

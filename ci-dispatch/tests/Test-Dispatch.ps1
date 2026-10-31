@@ -409,6 +409,29 @@ $bad.event='push'
         )) { Assert ($runner.Contains($predicate)) }
         $dispatcher=Get-Content -LiteralPath (Join-Path $repo 'ci-dispatch/Invoke-Dispatcher.ps1') -Raw
         Assert ($dispatcher.Contains("if (`$gate -cne 'READY') { throw 'CONTROLLER_GATE_CHANGED' }"))
+        $finalStart=$dispatcher.IndexOf('$finalGate = Resolve-Ci10FinalLaunchGate')
+        $launchStart=$dispatcher.IndexOf('Start-Ci10Controller $bundle $controllerRoot $candidate')
+        Assert ($finalStart -ge 0 -and $launchStart -gt $finalStart)
+        $finalBranch=$dispatcher.Substring($finalStart, $launchStart - $finalStart)
+        Assert ($finalBranch.Contains("'DISPATCHER_RESULT=CAPACITY'"))
+        Assert ($finalBranch.Contains('break'))
+        Assert (-not $finalBranch.Contains('Start-Ci10Controller'))
+        foreach($code in $codes){
+            $decision=Resolve-Ci10FinalLaunchGate 'CAPACITY' $code
+            Assert (-not $decision.Launch)
+            Assert ($decision.Result -ceq 'CAPACITY')
+            Assert ($decision.Subreason -ceq $code)
+        }
+        $rawFinal=Resolve-Ci10FinalLaunchGate 'CAPACITY' 'FreePhysicalMemory=1024'
+        Assert (-not $rawFinal.Launch -and $rawFinal.Result -ceq 'CAPACITY' -and $null -eq $rawFinal.Subreason)
+        foreach($blocked in @('BUSY','STALE','CONTROLLER_GATE_UNCERTAIN','')){
+            $decision=Resolve-Ci10FinalLaunchGate $blocked $codes[0]
+            Assert (-not $decision.Launch)
+            Assert ($decision.Result -ceq 'CONTROLLER_GATE_CHANGED')
+            Assert ($null -eq $decision.Subreason)
+        }
+        $readyFinal=Resolve-Ci10FinalLaunchGate 'READY' $codes[0]
+        Assert ($readyFinal.Launch -and $readyFinal.Result -ceq 'READY' -and $null -eq $readyFinal.Subreason)
         Assert ($dispatcher.Contains("`$gate -in @('BUSY','CAPACITY')"))
         Assert ($dispatcher.Contains("elseif (@(`$gates | Where-Object Value -ceq 'CAPACITY').Count) { 'CAPACITY' }"))
         Assert ($dispatcher.Contains("if (`$gate -notin @('READY','CAPACITY')) { throw 'RECOVERY_BUSY_OR_UNCERTAIN' }"))
