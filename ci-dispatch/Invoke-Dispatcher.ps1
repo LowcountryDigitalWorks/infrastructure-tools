@@ -146,6 +146,10 @@ try {
         }
         if ($gate -in @('BUSY','CAPACITY')) {
             Write-Ci10Log $dispatchRoot $gate.ToLowerInvariant()
+            if ($gate -ceq 'CAPACITY') {
+                $capacityDiagnostic = Get-Ci10CapacityDiagnostic @($gates | Where-Object Value -ceq 'CAPACITY')
+                if ($capacityDiagnostic) { 'CAPACITY_SUBREASON=' + $capacityDiagnostic }
+            }
             'DISPATCHER_RESULT=' + $gate
         } elseif ($gate -ceq 'READY') {
             $selected = @(Find-Ci10QueuedJob $profiles)

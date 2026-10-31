@@ -422,8 +422,57 @@ function Enter-Ci10DispatcherLock {
     catch { throw 'DISPATCHER_BUSY_OR_LOCK_UNCERTAIN' }
 }
 
+$script:Ci10CapacitySubreasonCodes = @(
+    'CAPACITY_RAM_RESERVE_4GIB_REQUIRED',
+    'CAPACITY_CPU_RESERVE_REQUIRED',
+    'CAPACITY_CPU_LOAD_TOO_HIGH',
+    'CAPACITY_DISK_RESERVE_40GIB_REQUIRED',
+    'DEFAULT_NAT_SWITCH_REQUIRED'
+)
+$script:Ci10CapacitySubreasonByProfile = @{}
+
+function Test-Ci10CapacitySubreason {
+    param([string]$Message)
+    $Message -cin $script:Ci10CapacitySubreasonCodes
+}
+
+function Get-Ci10CapacitySubreason {
+    param([string]$ProfileId)
+    if ([string]::IsNullOrEmpty($ProfileId) -or -not $script:Ci10CapacitySubreasonByProfile.ContainsKey($ProfileId)) { return $null }
+    $recorded = [string]$script:Ci10CapacitySubreasonByProfile[$ProfileId]
+    if (Test-Ci10CapacitySubreason $recorded) { return $recorded }
+    $null
+}
+
+function Get-Ci10CapacityDiagnostic {
+    param([object[]]$CapacityProfiles)
+    $profiles = @($CapacityProfiles | Where-Object { $null -ne $_ })
+    if ($profiles.Count -lt 1) { return $null }
+    $reasons = @($profiles | ForEach-Object { Get-Ci10CapacitySubreason ([string]$_.Profile.id) })
+    $present = @($reasons | Where-Object { -not [string]::IsNullOrEmpty($_) })
+    $unique = @($present | Select-Object -Unique)
+    if ($present.Count -eq $profiles.Count -and $unique.Count -eq 1) { return [string]$unique[0] }
+    $null
+}
+
+function ConvertTo-Ci10CapacityResultReason {
+    param([string]$DispatcherCode, [string]$Subreason)
+    if ($DispatcherCode -cne 'CAPACITY') { return $null }
+    if (Test-Ci10CapacitySubreason $Subreason) { return $Subreason }
+    'CAPACITY'
+}
+
+function Test-Ci10SanitizedCapacitySubreasonLine {
+    param([string]$Line)
+    $pattern = '^CAPACITY_SUBREASON=(' + (($script:Ci10CapacitySubreasonCodes | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')$'
+    $Line -cmatch $pattern
+}
+
 function Get-Ci10ControllerGate {
     param([string]$ControllerRoot, [object]$Profile)
+    if ($Profile.id -and $script:Ci10CapacitySubreasonByProfile.ContainsKey([string]$Profile.id)) {
+        [void]$script:Ci10CapacitySubreasonByProfile.Remove([string]$Profile.id)
+    }
     $lock = $null
     try {
         try { $lock = Enter-Ci7ControllerLock $ControllerRoot }
@@ -481,7 +530,15 @@ function Get-Ci10ControllerGate {
         $capacityBlobSha = if ($Profile.id -ceq 'ci10-royal-dashboard-deploy') { '0000000000000000000000000000000000000000' } else { $Profile.workflowBlobSha }
         $configuration = New-Ci7Configuration -Repository $Profile.repository -WorkflowRunId 1 -ExpectedSha ('0' * 40) -Root $ControllerRoot -ApprovedRepositories $approved -AllowPublicSyntheticProof:($Profile.id -ceq 'ci10-accepted-synthetic') -WorkflowPath $Profile.workflowPath -WorkflowBlobSha $capacityBlobSha -ExpectedJobName $Profile.jobName -StaticLabels $Profile.labels
         try { Assert-Ci7Capacity $configuration }
-        catch { if ($_.Exception.Message -cmatch '^CAPACITY_' -or $_.Exception.Message -ceq 'DEFAULT_NAT_SWITCH_REQUIRED') { return 'CAPACITY' }; throw }
+        catch {
+            $message = [string]$_.Exception.Message
+            if (Test-Ci10CapacitySubreason $message) {
+                $script:Ci10CapacitySubreasonByProfile[[string]$Profile.id] = $message
+                return 'CAPACITY'
+            }
+            if ($message -cmatch '^CAPACITY_' -or $message -ceq 'DEFAULT_NAT_SWITCH_REQUIRED') { return 'CAPACITY' }
+            throw
+        }
         'READY'
     } finally { if ($lock) { $lock.Dispose() } }
 }
