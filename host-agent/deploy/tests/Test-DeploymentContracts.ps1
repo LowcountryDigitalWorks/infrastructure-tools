@@ -192,13 +192,13 @@ finally {
 
 $bootstrapSource = Get-Content -LiteralPath (Join-Path $deployRoot 'Bootstrap-CiJitControlTasks.ps1') -Raw
 foreach ($literal in @(
-    'ec8acecfca4a85e2e01a25aced4dce763493ca13',
+    '6a51968c07e235f4257031ccb127fd4ea5c1e00e',
     'fd52f44134dda198cb35ed7ef999e166ab143bbe',
     'a0a79f92d31859dd4a930b358b10c7b4cf11db48',
     'dabb1083994b635ff7d8f83ed673379276036885',
-    '53c0777a8a721c11e04b4afa1ad02bb8b5f9eb9ea59f8e74502d5cb5443ac436',
-    '4efeb043162ee773f7115d99fbc8ff1688e0f00c',
-    '0ba833fa376b8be385cecddef447c1f81db61300'
+    'e56412548f58ceed7ae701be1d55526302a7baf9be3bb44b4ed02d45825a8193',
+    '6a51968c07e235f4257031ccb127fd4ea5c1e00e',
+    '30f4cf0fce3d6f6acb4f81dcbc712da148073b9c'
 )) {
     Assert-True ($bootstrapSource.Contains($literal, [StringComparison]::Ordinal)) "CI/JIT bootstrap must pin accepted identity $literal"
 }
