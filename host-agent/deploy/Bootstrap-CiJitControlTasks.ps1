@@ -8,12 +8,13 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# Accepted PR #144 squash merge and exact installer/worker/status-access blobs. Historical
-# #92 DO_NOT_RETRY_INSTALL / DO_NOT_HAND_EDIT markers remain fail-closed source evidence;
+# Accepted control-source identity. Manager and status-access blobs remain the prior
+# accepted pins. The worker blob is the capacity-diagnostic source commit below.
+# Historical #92 DO_NOT_RETRY_INSTALL / DO_NOT_HAND_EDIT markers remain fail-closed;
 # live #92 disposition controls when this bootstrap may be used.
-$acceptedSourceCommit = '0bd049c879936966a497822541862ec7fa70f6be'
+$acceptedSourceCommit = 'ec8acecfca4a85e2e01a25aced4dce763493ca13'
 $acceptedManageBlob = 'fd52f44134dda198cb35ed7ef999e166ab143bbe'
-$acceptedWorkerBlob = '02bc6f1526b27a4bf2ef786dd91ba8b816beb68c'
+$acceptedWorkerBlob = 'a0a79f92d31859dd4a930b358b10c7b4cf11db48'
 # Public Git blob identity, split in the assignment below so a generic credential detector
 # does not mistake the variable name plus this non-secret object ID for an access credential:
 # dabb1083994b635ff7d8f83ed673379276036885
