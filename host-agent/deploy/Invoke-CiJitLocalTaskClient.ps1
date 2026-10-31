@@ -386,18 +386,22 @@ function Invoke-CiJitLocalTaskClient {
         [long]$RequestedRunId = 0,
         [guid]$RequestedOperationId = [guid]::Empty
     )
-    Assert-CiJitLocalTaskClientNormalUser
     if ($RequestedOperation -ceq 'STATUS') {
         if ($RequestedRunId -ne 0 -or $RequestedOperationId -ne [guid]::Empty) { throw 'LOCAL_CLIENT_ARGUMENT_REFUSED' }
+    } elseif ($RequestedOperation -ceq 'GET_OPERATION_RESULT') {
+        if ($RequestedRunId -ne 0 -or $RequestedOperationId -eq [guid]::Empty) { throw 'LOCAL_CLIENT_ARGUMENT_REFUSED' }
+    } elseif ($RequestedOperation -ceq 'RETIRE_STALE') {
+        if ($RequestedRunId -le 0 -or $RequestedOperationId -ne [guid]::Empty) { throw 'LOCAL_CLIENT_ARGUMENT_REFUSED' }
+    } elseif ($RequestedRunId -ne 0 -or $RequestedOperationId -ne [guid]::Empty) {
+        throw 'LOCAL_CLIENT_ARGUMENT_REFUSED'
+    }
+    Assert-CiJitLocalTaskClientNormalUser
+    if ($RequestedOperation -ceq 'STATUS') {
         return (Get-CiJitLocalStatus)
     }
     if ($RequestedOperation -ceq 'GET_OPERATION_RESULT') {
-        if ($RequestedRunId -ne 0 -or $RequestedOperationId -eq [guid]::Empty) { throw 'LOCAL_CLIENT_ARGUMENT_REFUSED' }
         return (ConvertFrom-CiJitTaskResult $RequestedOperationId)
     }
-    if ($RequestedOperation -ceq 'RETIRE_STALE') {
-        if ($RequestedRunId -le 0 -or $RequestedOperationId -ne [guid]::Empty) { throw 'LOCAL_CLIENT_ARGUMENT_REFUSED' }
-    } elseif ($RequestedRunId -ne 0 -or $RequestedOperationId -ne [guid]::Empty) { throw 'LOCAL_CLIENT_ARGUMENT_REFUSED' }
     Invoke-CiJitTaskOperation $RequestedOperation $RequestedRunId
 }
 
