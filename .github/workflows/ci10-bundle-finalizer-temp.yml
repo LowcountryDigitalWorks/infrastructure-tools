@@ -52,14 +52,7 @@ jobs:
           $ldwRoot = Join-Path $env:ProgramData 'LDW'
           if (Test-Path -LiteralPath $ldwRoot) { throw 'PROGRAMDATA_LDW_PREEXISTS' }
           try {
-            $publishScript = Join-Path (Get-Location) 'ci-dispatch/Publish-Bundle.ps1'
-            $lines = @()
-            try {
-              $lines = @(& $publishScript -Commit $targetCommit -Tree $targetTree 2>&1 | ForEach-Object { [string]$_ })
-            } catch {
-              'PUBLISH_INVOKE_EXCEPTION=' + $_.Exception.Message
-              throw
-            }
+            $lines = @(& pwsh -NoLogo -NoProfile -File ./ci-dispatch/tests/Ephemeral-PublishBundleProof.ps1 -Commit $targetCommit -Tree $targetTree 2>&1 | ForEach-Object { [string]$_ })
             foreach ($line in $lines) { Write-Output $line }
             $published = @($lines | Where-Object { $_ -ceq 'BUNDLE_PUBLISHED=PASS' })
             if ($published.Count -ne 1) { throw 'BUNDLE_PUBLISH_OUTPUT_INVALID' }
