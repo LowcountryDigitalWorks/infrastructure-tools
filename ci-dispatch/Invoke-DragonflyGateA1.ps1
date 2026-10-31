@@ -111,6 +111,36 @@ function Get-LdwGateA1TailscaleStatus {
     Assert-LdwGateA1TailscaleStatusObject -Status $status
 }
 
+function Get-LdwGateA1FixedSshKeygen {
+    if (-not [Environment]::Is64BitProcess) { throw 'GATE_A1_WINDOWS_64BIT_REQUIRED' }
+    $path = Join-Path ([Environment]::SystemDirectory) 'OpenSSH\ssh-keygen.exe'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'GATE_A1_SSH_KEYGEN_TRUSTED_PATH_MISSING' }
+    $item = Get-Item -LiteralPath $path -Force
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.LinkType -in @('SymbolicLink', 'Junction')) {
+        throw 'GATE_A1_SSH_KEYGEN_REPARSE'
+    }
+    return [IO.Path]::GetFullPath($item.FullName)
+}
+
+function Get-LdwGateA1TransportPublicIdentitySha256 {
+    param(
+        [Parameter(Mandatory)][string]$RepositoryRoot,
+        [Parameter(Mandatory)][string]$Python,
+        [Parameter(Mandatory)][string]$PrivateKeyPath,
+        [Parameter(Mandatory)][string]$BaselineSha256
+    )
+    if ($BaselineSha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'GATE_A1_TRANSPORT_PRIVATE_KEY_BASELINE_INVALID' }
+    $helper = Join-Path $RepositoryRoot 'tools\dragonfly_gate_a1_transport_identity.py'
+    if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) { throw 'GATE_A1_TRANSPORT_IDENTITY_HELPER_MISSING' }
+    $sshKeygen = Get-LdwGateA1FixedSshKeygen
+    if ($sshKeygen -notlike ('*' + [IO.Path]::DirectorySeparatorChar + 'OpenSSH\ssh-keygen.exe')) {
+        throw 'GATE_A1_SSH_KEYGEN_UNTRUSTED'
+    }
+    $digest = (& $Python $helper derive-bound --private-key $PrivateKeyPath --baseline-sha256 $BaselineSha256 2>$null).Trim()
+    if ($LASTEXITCODE -ne 0 -or $digest -cnotmatch '^[0-9a-f]{64}$') { throw 'GATE_A1_TRANSPORT_PUBLIC_IDENTITY_INVALID' }
+    return $digest.ToLowerInvariant()
+}
+
 function Invoke-LdwDragonflyGateA1 {
     param(
         [Parameter(Mandatory)][string]$Root,
@@ -213,12 +243,22 @@ function Invoke-LdwDragonflyGateA1 {
     if ($ci10After -cne $ci10Before) { throw 'GATE_A1_CI10_PROTECTED_BUNDLE_CHANGED' }
     Write-LdwGateA1Pass 'CI10_PROTECTED_BUNDLE_UNCHANGED'
 
-    $privateKeyAfter = (Get-FileHash -LiteralPath $privateKey -Algorithm SHA256).Hash.ToLowerInvariant()
     $knownHostsAfter = (Get-FileHash -LiteralPath $knownHosts -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($privateKeyAfter -cne $privateKeyBefore) { throw 'GATE_A1_TRANSPORT_PRIVATE_KEY_CHANGED' }
     if ($knownHostsAfter -cne $knownHostsBefore) { throw 'GATE_A1_TRANSPORT_KNOWN_HOSTS_CHANGED' }
-    Write-LdwGateA1Pass 'TRANSPORT_PRIVATE_KEY_UNCHANGED'
     Write-LdwGateA1Pass 'TRANSPORT_KNOWN_HOSTS_UNCHANGED'
+
+    $transportIdentitySha256 = Get-LdwGateA1TransportPublicIdentitySha256 -RepositoryRoot $repo.Root -Python $python -PrivateKeyPath $privateKey -BaselineSha256 $privateKeyBefore
+    Write-LdwGateA1Pass 'TRANSPORT_PRIVATE_KEY_UNCHANGED'
+    Write-Output ('TRANSPORT_PUBLIC_IDENTITY_SHA256=' + $transportIdentitySha256)
+    Write-Output 'TRANSPORT_KEY_PROVENANCE=gate-a1-ldw01-transport-private-key-unchanged-contract'
+    $identityRecord = Join-Path $taskRoot 'gate-a1-transport-identity.record'
+    $recordText = "GATE_A1_TRANSPORT_IDENTITY_V1`nPROVENANCE=gate-a1-ldw01-transport-private-key-unchanged-contract`nTRANSPORT_PUBLIC_IDENTITY_SHA256=$transportIdentitySha256`n"
+    [IO.File]::WriteAllText($identityRecord, $recordText, (New-Object System.Text.UTF8Encoding $false))
+    if (-not (Test-Path -LiteralPath $identityRecord -PathType Leaf)) {
+        throw 'GATE_A1_TRANSPORT_IDENTITY_RECORD_FAILED'
+    }
+    Write-LdwGateA1Pass 'TRANSPORT_PUBLIC_IDENTITY_DERIVED'
+    Write-Output ('GATE_A1_TRANSPORT_IDENTITY_RECORD=' + $identityRecord)
 
     if (Test-Path -LiteralPath $uncertainty) { throw 'GATE_A1_DRAGONFLY_UNCERTAINTY_CREATED' }
     Write-LdwGateA1Pass 'DRAGONFLY_CANARY_UNCERTAINTY_ABSENT_AFTER'

@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import os
 from pathlib import Path
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -17,6 +18,7 @@ def load(name: str, path: Path):
     if spec is None or spec.loader is None:
         raise RuntimeError("MODULE_LOAD_FAILED")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -35,9 +37,13 @@ class RedrixInstallTests(unittest.TestCase):
         ssh = self.home / ".ssh"
         ssh.mkdir(mode=0o700)
         self.authorized = ssh / "authorized_keys"
+        self.key_data = "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey"
+        self.key_sha256 = hashlib.sha256(
+            f"ssh-ed25519 {self.key_data}".encode("ascii")
+        ).hexdigest()
         self.line = (
             f'restrict,command="{inst.FORCED_COMMAND}" '
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey material\n"
+            f"ssh-ed25519 {self.key_data} material\n"
         )
         self.authorized.write_text(self.line, encoding="utf-8")
         os.chmod(self.authorized, 0o600)
@@ -52,6 +58,17 @@ class RedrixInstallTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def _install(self, **kwargs):
+        return inst.install_fixture(
+            self.archive,
+            self.checksum,
+            self.home,
+            self.uid,
+            inst.FORCED_COMMAND,
+            self.key_sha256,
+            **kwargs,
+        )
 
     def _write(self, rel: Path, data: bytes, mode: int):
         target = self.home / rel
@@ -86,9 +103,7 @@ class RedrixInstallTests(unittest.TestCase):
 
     def test_install_and_readback_preserve_authorized_keys(self):
         before = self._auth_digest()
-        receipt = inst.install_fixture(
-            self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND
-        )
+        receipt = self._install()
         self.assertEqual(receipt["rollbackBaseline"], "accepted-115")
         self.assertEqual(self._auth_digest(), before)
         result = inst.readback_fixture(self.home, self.uid, inst.FORCED_COMMAND)
@@ -101,26 +116,27 @@ class RedrixInstallTests(unittest.TestCase):
             self.assertEqual(target.stat().st_mode & 0o777, mode)
 
     def test_reinstall_of_current_receipted_state_is_idempotent(self):
-        first = inst.install_fixture(
-            self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND
-        )
-        second = inst.install_fixture(
-            self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND
-        )
+        first = self._install()
+        second = self._install()
         self.assertEqual(first, second)
+        self.assertFalse((self.home / inst.TRANSACTION_REL).exists())
+
+    def test_idempotent_reinstall_holds_on_invalid_receipt_not_residue(self):
+        import json
+
+        self._install()
+        receipt = self.home / inst.RECEIPT_REL
+        record = json.loads(receipt.read_text(encoding="utf-8"))
+        record["packageSha256"] = "0" * 64
+        receipt.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(inst.InstallError, "REDRIX_RECEIPT_STATE_INVALID"):
+            self._install()
         self.assertFalse((self.home / inst.TRANSACTION_REL).exists())
 
     def test_partial_failure_rolls_back_exact_accepted_115_baseline(self):
         before = self._auth_digest()
         with self.assertRaisesRegex(inst.InstallError, "REDRIX_SYNTHETIC_INSTALL_FAULT"):
-            inst.install_fixture(
-                self.archive,
-                self.checksum,
-                self.home,
-                self.uid,
-                inst.FORCED_COMMAND,
-                fault_after=3,
-            )
+            self._install(fault_after=3)
         self.assertEqual(self._auth_digest(), before)
         self.assertFalse((self.home / inst.TRANSACTION_REL).exists())
         self.assertFalse((self.home / inst.RECEIPT_REL).exists())
@@ -129,14 +145,7 @@ class RedrixInstallTests(unittest.TestCase):
     def test_post_receipt_fault_rolls_back_and_removes_stale_receipt(self):
         before = self._auth_digest()
         with self.assertRaisesRegex(inst.InstallError, "REDRIX_SYNTHETIC_POST_RECEIPT_FAULT"):
-            inst.install_fixture(
-                self.archive,
-                self.checksum,
-                self.home,
-                self.uid,
-                inst.FORCED_COMMAND,
-                fault_after_receipt=True,
-            )
+            self._install(fault_after_receipt=True)
         self.assertEqual(self._auth_digest(), before)
         self.assertFalse((self.home / inst.TRANSACTION_REL).exists())
         self.assertFalse((self.home / inst.RECEIPT_REL).exists())
@@ -144,7 +153,7 @@ class RedrixInstallTests(unittest.TestCase):
 
     def test_explicit_rollback_restores_115_and_removes_receipt(self):
         before = self._auth_digest()
-        inst.install_fixture(self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND)
+        self._install()
         inst.rollback_fixture(self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND)
         self.assertEqual(self._auth_digest(), before)
         self.assertFalse((self.home / inst.TRANSACTION_REL).exists())
@@ -153,7 +162,7 @@ class RedrixInstallTests(unittest.TestCase):
 
     def test_interrupted_rollback_requires_and_completes_recovery(self):
         before = self._auth_digest()
-        inst.install_fixture(self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND)
+        self._install()
         with self.assertRaisesRegex(inst.InstallError, "REDRIX_SYNTHETIC_ROLLBACK_FAULT"):
             inst.rollback_fixture(
                 self.archive,
@@ -165,7 +174,7 @@ class RedrixInstallTests(unittest.TestCase):
             )
         self.assertTrue((self.home / inst.TRANSACTION_REL).is_file())
         with self.assertRaisesRegex(inst.InstallError, "REDRIX_TRANSACTION_RECOVERY_REQUIRED"):
-            inst.install_fixture(self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND)
+            self._install()
         inst.recover_fixture(self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND)
         self.assertFalse((self.home / inst.TRANSACTION_REL).exists())
         self.assertFalse((self.home / inst.RECEIPT_REL).exists())
@@ -177,9 +186,7 @@ class RedrixInstallTests(unittest.TestCase):
         receiver.write_bytes(b"unknown receiver\n")
         os.chmod(receiver, 0o700)
         with self.assertRaisesRegex(inst.InstallError, "REDRIX_BASELINE_UNRECOGNIZED"):
-            inst.install_fixture(
-                self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND
-            )
+            self._install()
         self.assertFalse((self.home / inst.TRANSACTION_REL).exists())
 
     def test_forced_key_options_must_be_exact_and_are_never_rewritten(self):
@@ -187,19 +194,15 @@ class RedrixInstallTests(unittest.TestCase):
         self.authorized.write_text(bad, encoding="utf-8")
         os.chmod(self.authorized, 0o600)
         before = self.authorized.read_bytes()
-        with self.assertRaisesRegex(inst.InstallError, "REDRIX_FORCED_KEY_RESTRICTION_INVALID"):
-            inst.install_fixture(
-                self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND
-            )
+        with self.assertRaisesRegex(inst.InstallError, "REDRIX_TRANSPORT_KEY_IDENTITY_INVALID"):
+            self._install()
         self.assertEqual(self.authorized.read_bytes(), before)
 
     def test_authorized_keys_mode_must_be_owner_only(self):
         os.chmod(self.authorized, 0o644)
         before = self.authorized.read_bytes()
         with self.assertRaisesRegex(inst.InstallError, "REDRIX_FILE_MODE_INVALID"):
-            inst.install_fixture(
-                self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND
-            )
+            self._install()
         self.assertEqual(self.authorized.read_bytes(), before)
         self.assertFalse((self.home / inst.TRANSACTION_REL).exists())
 
@@ -207,26 +210,50 @@ class RedrixInstallTests(unittest.TestCase):
         app = self.home / ".local/lib/ldw-dragonfly-jit"
         os.chmod(app, 0o770)
         with self.assertRaisesRegex(inst.InstallError, "REDRIX_TARGET_PARENT_INVALID"):
-            inst.install_fixture(
-                self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND
-            )
+            self._install()
         self.assertFalse((self.home / inst.TRANSACTION_REL).exists())
 
     def test_group_writable_home_is_refused(self):
         os.chmod(self.home, 0o770)
         with self.assertRaisesRegex(inst.InstallError, "REDRIX_HOME_INVALID"):
-            inst.install_fixture(
-                self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND
-            )
+            self._install()
 
     def test_readback_refuses_post_install_authorized_keys_change(self):
-        inst.install_fixture(
-            self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND
-        )
+        self._install()
         self.authorized.write_text(self.line + "# changed\n", encoding="utf-8")
         os.chmod(self.authorized, 0o600)
         with self.assertRaisesRegex(inst.InstallError, "REDRIX_AUTHORIZED_KEYS_CHANGED"):
             inst.readback_fixture(self.home, self.uid, inst.FORCED_COMMAND)
+
+    def test_readback_refuses_authorized_keys2(self):
+        self._install()
+        alternate = self.home / ".ssh" / "authorized_keys2"
+        alternate.write_text("ssh-ed25519 AAA\n", encoding="utf-8")
+        os.chmod(alternate, 0o600)
+        with self.assertRaisesRegex(inst.InstallError, "REDRIX_AUTHORIZED_KEYS2_PRESENT"):
+            inst.readback_fixture(self.home, self.uid, inst.FORCED_COMMAND)
+
+    def test_recover_refuses_loosened_ssh_directory_mode(self):
+        auth = self._auth_digest()
+        archive_digest = hashlib.sha256(self.archive.read_bytes()).hexdigest()
+        preexisting = {rel.as_posix(): rel in {item[2] for item in inst.ROLLBACK} for _, _, rel, _ in inst.CURRENT}
+        marker = {
+            "schema": 2,
+            "operation": "install",
+            "sourceCommit": inst.SOURCE_COMMIT,
+            "packageSha256": archive_digest,
+            "authorizedKeysSha256": auth,
+            "baseline": "accepted-115",
+            "preexisting": preexisting,
+        }
+        transaction = self.home / inst.TRANSACTION_REL
+        transaction.parent.mkdir(parents=True, exist_ok=True)
+        inst._write_transaction(transaction, marker)
+        os.chmod(self.home / ".ssh", 0o755)
+        with self.assertRaisesRegex(inst.InstallError, "REDRIX_SSH_DIR_INVALID"):
+            inst.recover_fixture(
+                self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND
+            )
 
     def test_existing_transaction_blocks_blind_retry(self):
         transaction = self.home / inst.TRANSACTION_REL
@@ -242,9 +269,7 @@ class RedrixInstallTests(unittest.TestCase):
         }
         inst._write_transaction(transaction, marker)
         with self.assertRaisesRegex(inst.InstallError, "REDRIX_TRANSACTION_RECOVERY_REQUIRED"):
-            inst.install_fixture(
-                self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND
-            )
+            self._install()
 
     def test_recovery_restores_partial_receiver_from_durable_marker(self):
         auth = self._auth_digest()
@@ -279,7 +304,7 @@ class RedrixInstallTests(unittest.TestCase):
             if path.exists():
                 path.unlink()
         self._write_current_baseline()
-        receipt = inst.install_fixture(self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND)
+        receipt = self._install()
         self.assertEqual(receipt["rollbackBaseline"], "accepted-133")
         with self.assertRaisesRegex(inst.InstallError, "REDRIX_ROLLBACK_BASELINE_REFUSED"):
             inst.rollback_fixture(self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND)
@@ -293,9 +318,30 @@ class RedrixInstallTests(unittest.TestCase):
         elsewhere.mkdir()
         app.symlink_to(elsewhere, target_is_directory=True)
         with self.assertRaisesRegex(inst.InstallError, "REDRIX_TARGET_PARENT_INVALID"):
-            inst.install_fixture(
-                self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND
-            )
+            self._install()
+
+    def test_rollback_receiver_mode_drift_is_refused_before_transaction(self):
+        receiver = self.home / inst.RECEIVER_REL
+        os.chmod(receiver, 0o644)
+        with self.assertRaisesRegex(inst.InstallError, "REDRIX_FILE_MODE_INVALID"):
+            self._install()
+        self.assertFalse((self.home / inst.TRANSACTION_REL).exists())
+
+    def test_post_preflight_authorized_keys_swap_is_refused_at_install(self):
+        inst._revalidate_gate_a3_before_transaction(
+            self.home,
+            self.uid,
+            inst.FORCED_COMMAND,
+            self.key_sha256,
+            require_accepted_115=True,
+            require_no_receipt=True,
+        )
+        swapped = self.line.replace(self.key_data, "AAAAC3NzaC1lZDI1NTE5AAAAIAnotherFixtureOnlyKey")
+        self.authorized.write_text(swapped, encoding="utf-8")
+        os.chmod(self.authorized, 0o600)
+        with self.assertRaisesRegex(inst.InstallError, "REDRIX_TRANSPORT_KEY_IDENTITY_INVALID"):
+            self._install()
+        self.assertFalse((self.home / inst.TRANSACTION_REL).exists())
 
 
 if __name__ == "__main__":
