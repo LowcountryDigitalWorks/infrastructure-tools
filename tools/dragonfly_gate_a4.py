@@ -69,22 +69,12 @@ def _accepted_115_preexisting_map(installer: ModuleType) -> dict[str, bool]:
     }
 
 
-def _validate_install_receipt(
+def _assert_receipt_validated(
+    receipt: dict,
     *,
-    home: Path,
-    uid: int,
     installer: ModuleType,
     expected_package_sha256: str,
-) -> None:
-    if PACKAGE_SHA256_RE.fullmatch(expected_package_sha256) is None:
-        raise A4Error("A4_EXPECTED_PACKAGE_SHA256_INVALID")
-    read_receipt = getattr(installer, "_read_receipt", None)
-    if read_receipt is None:
-        raise A4Error("A4_RECEIPT_READBACK_INVALID")
-    try:
-        receipt = read_receipt(home, uid)
-    except Exception as exc:
-        raise A4Error("A4_RECEIPT_READBACK_INVALID") from exc
+) -> dict:
     if receipt.get("packageSha256") != expected_package_sha256:
         raise A4Error("A4_RECEIPT_PACKAGE_IDENTITY_MISMATCH")
     if receipt.get("sourceCommit") != installer.SOURCE_COMMIT:
@@ -95,6 +85,57 @@ def _validate_install_receipt(
         raise A4Error("A4_ROLLBACK_BASELINE_NOT_RETAINED")
     if receipt.get("preexisting") != _accepted_115_preexisting_map(installer):
         raise A4Error("A4_RECEIPT_PREEXISTING_MISMATCH")
+    bound = dict(receipt)
+    bound["preexisting"] = dict(receipt["preexisting"])
+    return bound
+
+
+def _validate_install_receipt(
+    *,
+    home: Path,
+    uid: int,
+    installer: ModuleType,
+    expected_package_sha256: str,
+) -> dict:
+    if PACKAGE_SHA256_RE.fullmatch(expected_package_sha256) is None:
+        raise A4Error("A4_EXPECTED_PACKAGE_SHA256_INVALID")
+    read_receipt = getattr(installer, "_read_receipt", None)
+    if read_receipt is None:
+        raise A4Error("A4_RECEIPT_READBACK_INVALID")
+    try:
+        receipt = read_receipt(home, uid)
+    except Exception as exc:
+        raise A4Error("A4_RECEIPT_READBACK_INVALID") from exc
+    return _assert_receipt_validated(
+        receipt,
+        installer=installer,
+        expected_package_sha256=expected_package_sha256,
+    )
+
+
+def _read_validated_receipt_after_readback(
+    *,
+    home: Path,
+    uid: int,
+    installer: ModuleType,
+    expected_package_sha256: str,
+    receipt_before: dict,
+) -> dict:
+    read_receipt = getattr(installer, "_read_receipt", None)
+    if read_receipt is None:
+        raise A4Error("A4_RECEIPT_READBACK_INVALID")
+    try:
+        receipt = dict(read_receipt(home, uid))
+    except Exception as exc:
+        raise A4Error("A4_RECEIPT_READBACK_INVALID") from exc
+    receipt["preexisting"] = dict(receipt["preexisting"])
+    if receipt_before != receipt:
+        raise A4Error("A4_RECEIPT_CHANGED_DURING_READBACK")
+    return _assert_receipt_validated(
+        receipt,
+        installer=installer,
+        expected_package_sha256=expected_package_sha256,
+    )
 
 
 def _collect_once(
@@ -116,13 +157,20 @@ def _collect_once(
     if alias != expected_local_alias:
         raise A4Error("A4_LOCAL_HOST_IDENTITY_MISMATCH")
 
-    _validate_install_receipt(
+    receipt_before = _validate_install_receipt(
         home=home,
         uid=uid,
         installer=installer,
         expected_package_sha256=expected_package_sha256,
     )
     installed = installer.readback_fixture(home, uid, installer.FORCED_COMMAND)
+    _read_validated_receipt_after_readback(
+        home=home,
+        uid=uid,
+        installer=installer,
+        expected_package_sha256=expected_package_sha256,
+        receipt_before=receipt_before,
+    )
     if installed.get("sourceCommit") != installer.SOURCE_COMMIT:
         raise A4Error("A4_INSTALLED_SOURCE_COMMIT_MISMATCH")
     if installed.get("sourceTree") != installer.SOURCE_TREE:

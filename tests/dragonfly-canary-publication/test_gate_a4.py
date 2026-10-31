@@ -84,6 +84,7 @@ class FakeInstaller:
         }
         self.calls = 0
         self.receipt_reads = 0
+        self.mutate_receipt_on_readback = False
 
     def _read_receipt(self, home, uid):
         del home, uid
@@ -95,6 +96,8 @@ class FakeInstaller:
         if forced_command != self.FORCED_COMMAND:
             raise RuntimeError("FORCED_COMMAND_DRIFT")
         self.calls += 1
+        if self.mutate_receipt_on_readback:
+            self.receipt["packageSha256"] = "f" * 64
         return dict(self.result)
 
 
@@ -184,7 +187,7 @@ class GateA4Tests(unittest.TestCase):
         self.assertEqual(result["stabilityPasses"], 2)
         self.assertRegex(result["snapshotSha256"], r"^[a-f0-9]{64}$")
         self.assertEqual(self.installer.calls, 2)
-        self.assertEqual(self.installer.receipt_reads, 2)
+        self.assertEqual(self.installer.receipt_reads, 4)
         self.assertNotIn("expectedTransportKeySha256", result)
         self.assertNotIn("expectedHostFingerprint", result)
         self.assertNotIn("expectedPackageSha256", result)
@@ -347,8 +350,30 @@ class GateA4Tests(unittest.TestCase):
     def test_accepted_receipt_package_identity_passes_before_readback(self):
         with mock.patch.object(a4.socket, "gethostname", return_value="redrix"):
             a4.collect_a4(**self.kwargs)
-        self.assertGreaterEqual(self.installer.receipt_reads, 1)
-        self.assertGreaterEqual(self.installer.calls, 1)
+        self.assertEqual(self.installer.receipt_reads, 4)
+        self.assertEqual(self.installer.calls, 2)
+
+    def test_receipt_package_mutation_during_readback_is_refused(self):
+        self.installer.mutate_receipt_on_readback = True
+        with mock.patch.object(a4.socket, "gethostname", return_value="redrix"):
+            with self.assertRaisesRegex(a4.A4Error, "A4_RECEIPT_CHANGED_DURING_READBACK"):
+                a4.collect_a4(**self.kwargs)
+
+    def test_receipt_preexisting_mutation_during_readback_is_refused(self):
+        target = self.installer.ROLLBACK[0][2].as_posix()
+
+        def mutate_readback(home, uid, forced_command):
+            del home, uid
+            if forced_command != self.installer.FORCED_COMMAND:
+                raise RuntimeError("FORCED_COMMAND_DRIFT")
+            self.installer.calls += 1
+            self.installer.receipt["preexisting"][target] = False
+            return dict(self.installer.result)
+
+        self.installer.readback_fixture = mutate_readback
+        with mock.patch.object(a4.socket, "gethostname", return_value="redrix"):
+            with self.assertRaisesRegex(a4.A4Error, "A4_RECEIPT_CHANGED_DURING_READBACK"):
+                a4.collect_a4(**self.kwargs)
 
 
 if __name__ == "__main__":
