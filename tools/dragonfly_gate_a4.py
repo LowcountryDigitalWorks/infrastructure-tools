@@ -19,7 +19,8 @@ import socket
 import sys
 from types import ModuleType
 
-INSTALLER_BLOB = "889cff6d25aff80963c21070e994406414b272a4"
+ACCEPTED_MAIN_COMMIT = "f736bbd36da4e99bb10c6e33b0dfba3bd7074f0b"
+INSTALLER_BLOB = "ed8337a74a85ddfe4f1afff8fe02789fd533f51f"
 A0_BLOB = "fc9784a52d5f0d20b02c5d95ad4adc2e86ae04e9"
 PRODUCTION_HOME = Path("/home/eddie")
 PRODUCTION_UID = 1000

@@ -5,11 +5,27 @@ import hashlib
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
+ACCEPTED_MAIN_COMMIT = "f736bbd36da4e99bb10c6e33b0dfba3bd7074f0b"
+
+
+def git_tree_blob(commit: str, path: str) -> str:
+    output = subprocess.check_output(
+        ["git", "-C", str(ROOT), "ls-tree", commit, path],
+        text=True,
+    ).strip()
+    return output.split()[2]
+
+
+def git_cat_file_blob(blob: str) -> bytes:
+    return subprocess.check_output(
+        ["git", "-C", str(ROOT), "cat-file", "blob", blob],
+    )
 
 
 def load(name: str, path: Path):
@@ -163,11 +179,45 @@ class GateA4Tests(unittest.TestCase):
             with self.assertRaisesRegex(a4.A4Error, "A4_LOCAL_HOST_IDENTITY_MISMATCH"):
                 a4.collect_a4(**self.kwargs)
 
-    def test_pinned_dependency_blobs_match_accepted_sources(self):
-        installer = ROOT / "tools" / "dragonfly_canary_redrix_install.py"
-        a0_source = ROOT / "tools" / "dragonfly_gate_a0.py"
-        self.assertEqual(git_blob(installer.read_bytes()), a4.INSTALLER_BLOB)
-        self.assertEqual(git_blob(a0_source.read_bytes()), a4.A0_BLOB)
+    def test_pinned_dependency_blobs_match_accepted_main_git_objects(self):
+        self.assertEqual(
+            a4.INSTALLER_BLOB,
+            git_tree_blob(ACCEPTED_MAIN_COMMIT, "tools/dragonfly_canary_redrix_install.py"),
+        )
+        self.assertEqual(
+            a4.A0_BLOB,
+            git_tree_blob(ACCEPTED_MAIN_COMMIT, "tools/dragonfly_gate_a0.py"),
+        )
+
+    def test_pinned_installer_git_object_bytes_match_executed_bytes(self):
+        data = git_cat_file_blob(a4.INSTALLER_BLOB)
+        self.assertEqual(a4._git_blob(data), a4.INSTALLER_BLOB)
+        recorded: dict[str, bytes] = {}
+        real_compile = compile
+
+        def recording_compile(source, filename, mode, dont_inherit=False, optimize=-1, **_kwargs):
+            recorded["source"] = source
+            return real_compile(b"RESULT='ok'\n", filename, mode, dont_inherit=True)
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "dependency.py"
+            path.write_bytes(data)
+            with mock.patch("builtins.compile", side_effect=recording_compile):
+                module = a4._load_pinned(
+                    "ldw_gate_a4_installer_bytes",
+                    path,
+                    a4.INSTALLER_BLOB,
+                )
+            self.assertEqual(recorded["source"], data)
+            self.assertEqual(module.RESULT, "ok")
+
+    def test_worktree_crlf_does_not_weaken_git_object_pin(self):
+        data = git_cat_file_blob(a4.INSTALLER_BLOB)
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "dependency.py"
+            path.write_bytes(data.replace(b"\n", b"\r\n"))
+            with self.assertRaisesRegex(a4.A4Error, "A4_SOURCE_IDENTITY_MISMATCH"):
+                a4._load_pinned("ldw_gate_a4_crlf", path, a4.INSTALLER_BLOB)
 
     def test_source_has_no_runtime_mutation_or_remote_control_surface(self):
         text = (ROOT / "tools" / "dragonfly_gate_a4.py").read_text(encoding="utf-8")

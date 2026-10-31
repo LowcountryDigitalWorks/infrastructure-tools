@@ -11,6 +11,7 @@ on:
       - 'tools/dragonfly_gate_a1_transport_identity.py'
       - 'tools/dragonfly_gate_a0.py'
       - 'tools/dragonfly_gate_a0_bootstrap.py'
+      - 'tools/dragonfly_gate_a4.py'
       - 'tests/dragonfly-canary-publication/**'
       - 'ci-dispatch/DragonflyCanary.psm1'
       - 'ci-dispatch/DragonflyCanaryRuntime.psm1'
@@ -35,6 +36,7 @@ on:
       - 'tools/dragonfly_gate_a1_transport_identity.py'
       - 'tools/dragonfly_gate_a0.py'
       - 'tools/dragonfly_gate_a0_bootstrap.py'
+      - 'tools/dragonfly_gate_a4.py'
       - 'tests/dragonfly-canary-publication/**'
       - 'ci-dispatch/DragonflyCanary.psm1'
       - 'ci-dispatch/DragonflyCanaryRuntime.psm1'
@@ -101,7 +103,8 @@ jobs:
             tools/dragonfly_gate_a3_bootstrap.py \
             tools/dragonfly_gate_a1_transport_identity.py \
             tools/dragonfly_gate_a0.py \
-            tools/dragonfly_gate_a0_bootstrap.py
+            tools/dragonfly_gate_a0_bootstrap.py \
+            tools/dragonfly_gate_a4.py
       - name: Parse bounded LDW01 publication source
         shell: pwsh
         run: |
