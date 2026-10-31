@@ -538,6 +538,58 @@ else:
                     if path.exists():
                         self.assertNotIn(payload, path.read_bytes())
 
+    def test_temp_key_cleanup_zeroed_object_moved_outside_temp_dir_holds(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows verified-delete missing pathname after zero")
+        import os
+
+        line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture"
+        payload = b"synthetic-private-key-bytes"
+        moved_outside: dict[str, Path] = {}
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            keygen = root / "ssh-keygen.cmd"
+            keygen.write_text(f"@echo off\r\necho {line}\r\n", encoding="ascii")
+            temp_dir = root / "out"
+            outside = root / "outside-artifact"
+            outside.mkdir()
+            real_delete = identity._delete_temp_key_path_if_same_object
+
+            def delete_after_moving_zeroed_object_away(
+                path: Path,
+                expected_identity: tuple[int, int, int],
+            ) -> None:
+                if path.exists():
+                    destination = outside / path.name
+                    os.replace(path, destination)
+                    moved_outside["path"] = destination
+                real_delete(path, expected_identity)
+
+            with mock.patch.object(
+                identity,
+                "_delete_temp_key_path_if_same_object",
+                side_effect=delete_after_moving_zeroed_object_away,
+            ):
+                with self.assertRaisesRegex(
+                    identity.TransportIdentityError,
+                    "GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED",
+                ):
+                    identity.derive_public_identity_from_accepted_bytes(
+                        payload,
+                        ssh_keygen=keygen,
+                        temp_dir=temp_dir,
+                        baseline_sha256=hashlib.sha256(payload).hexdigest(),
+                    )
+            moved = moved_outside.get("path")
+            self.assertIsNotNone(moved)
+            self.assertTrue(moved.is_file())
+            data = moved.read_bytes()
+            self.assertNotIn(payload, data)
+            if data:
+                self.assertEqual(data, b"\0" * len(data))
+            for path in temp_dir.glob("ldw-gate-a1-key-*"):
+                self.assertFalse(path.exists(), f"temp pathname must stay absent: {path}")
+
     def test_temp_key_cleanup_setfileinformation_delete_failure_holds(self):
         if sys.platform != "win32":
             self.skipTest("Windows verified-delete SetFileInformation failure")

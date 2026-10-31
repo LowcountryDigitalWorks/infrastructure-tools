@@ -14,6 +14,7 @@ ADVERSARIAL = (
     "test_temp_key_cleanup_pathname_hardlink_after_bound_destroy",
     "test_temp_key_cleanup_single_link_pathname_replacement_holds",
     "test_temp_key_cleanup_parent_directory_substitution_holds",
+    "test_temp_key_cleanup_zeroed_object_moved_outside_temp_dir_holds",
     "test_temp_key_cleanup_failure_hold",
     "test_temp_key_cleanup_setfileinformation_delete_failure_holds",
     "test_temp_key_cleanup_hardlink_same_zeroed_object_removed",

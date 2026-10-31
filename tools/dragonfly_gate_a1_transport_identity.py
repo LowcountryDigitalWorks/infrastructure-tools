@@ -402,7 +402,7 @@ def _delete_temp_key_path_if_same_object(
     """Two-handle fallback: delete only via verified second handle (never pathname unlink)."""
     _require_windows_64()
     if not path.exists():
-        return
+        raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
     handle = _open_nofollow_for_verified_delete(path)
     try:
         if _bound_file_identity(handle) != expected_identity:
