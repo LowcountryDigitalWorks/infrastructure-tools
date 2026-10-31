@@ -20,6 +20,7 @@ ADVERSARIAL = (
     "test_temp_key_cleanup_hardlink_same_zeroed_object_removed",
     "test_blind_pathname_unlink_would_destroy_substitute_fixture",
     "test_windows_derive_bound_temp_dir_none_purges_created_directory",
+    "test_trusted_icacls_ignores_path_substitution",
     "test_windows_system_ssh_keygen_ephemeral_ed25519_derive_and_cleanup",
 )
 

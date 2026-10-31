@@ -88,6 +88,38 @@ if sys.platform == "win32":
     ]
     _SetFileInformationByHandle.restype = wintypes.BOOL
 
+    _advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    _advapi32.OpenProcessToken.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    ]
+    _advapi32.OpenProcessToken.restype = wintypes.BOOL
+    _advapi32.GetTokenInformation.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _advapi32.GetTokenInformation.restype = wintypes.BOOL
+    _advapi32.ConvertSidToStringSidW.argtypes = [
+        wintypes.LPVOID,
+        ctypes.POINTER(wintypes.LPWSTR),
+    ]
+    _advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    _kernel32.GetCurrentProcess.argtypes = []
+    _kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+
+    class _SidAndAttributes(ctypes.Structure):
+        _fields_ = [("Sid", wintypes.LPVOID), ("Attributes", wintypes.DWORD)]
+
+    class _TokenUser(ctypes.Structure):
+        _fields_ = [("User", _SidAndAttributes)]
+
+    _TOKEN_QUERY = 0x0008
+    _TOKEN_USER = 1
+
     class _FileTime(ctypes.Structure):
         _fields_ = [("dwLowDateTime", wintypes.DWORD), ("dwHighDateTime", wintypes.DWORD)]
 
@@ -181,6 +213,51 @@ _MAX_PRIVATE_KEY_BYTES = 1024 * 1024
 def ssh_keygen_path_from_system_directory(system_directory: Path) -> Path:
     """Join the trusted OpenSSH binary under the Windows system directory. PATH is not used."""
     return system_directory / "OpenSSH" / "ssh-keygen.exe"
+
+
+def icacls_path_from_system_directory(system_directory: Path) -> Path:
+    """Join the trusted icacls binary under the Windows system directory. PATH is not used."""
+    return system_directory / "icacls.exe"
+
+
+def _current_process_user_sid_string() -> str:
+    _require_windows_64()
+    token_handle = wintypes.HANDLE()
+    if not _advapi32.OpenProcessToken(
+        _kernel32.GetCurrentProcess(),
+        _TOKEN_QUERY,
+        ctypes.byref(token_handle),
+    ):
+        raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_BIND_FAILED")
+    try:
+        size = wintypes.DWORD(0)
+        _advapi32.GetTokenInformation(
+            token_handle,
+            _TOKEN_USER,
+            None,
+            0,
+            ctypes.byref(size),
+        )
+        buffer = ctypes.create_string_buffer(int(size.value))
+        if not _advapi32.GetTokenInformation(
+            token_handle,
+            _TOKEN_USER,
+            buffer,
+            size,
+            ctypes.byref(size),
+        ):
+            raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_BIND_FAILED")
+        user = ctypes.cast(buffer, ctypes.POINTER(_TokenUser)).contents
+        sid_string = wintypes.LPWSTR()
+        if not _advapi32.ConvertSidToStringSidW(user.User.Sid, ctypes.byref(sid_string)):
+            raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_BIND_FAILED")
+        result = str(sid_string.value or "")
+        if not re.fullmatch(r"S-\d(-\d+)+", result):
+            raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_BIND_FAILED")
+        return result
+    finally:
+        if token_handle:
+            _CloseHandle(token_handle)
 
 
 def _require_windows_64() -> None:
@@ -288,6 +365,14 @@ def read_accepted_private_key_bytes(private_key_path: Path) -> bytes:
 def resolve_trusted_ssh_keygen_path() -> Path:
     system = _system_directory()
     candidate = ssh_keygen_path_from_system_directory(system)
+    handle = _open_nofollow(candidate, directory=False)
+    _CloseHandle(handle)
+    return candidate
+
+
+def resolve_trusted_icacls_path() -> Path:
+    system = _system_directory()
+    candidate = icacls_path_from_system_directory(system)
     handle = _open_nofollow(candidate, directory=False)
     _CloseHandle(handle)
     return candidate
@@ -497,16 +582,15 @@ def _new_exclusive_temp_key_path(temp_dir: Path) -> Path:
 def _harden_openssh_private_key_acl(path: Path) -> None:
     """Strip inherited ACL so System32 OpenSSH accepts the bound temp key (share flags unchanged)."""
     _require_windows_64()
-    principal = os.environ.get("USERNAME", "").strip()
-    if not principal:
-        raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_BIND_FAILED")
+    icacls = resolve_trusted_icacls_path()
+    principal_sid = _current_process_user_sid_string()
     proc = subprocess.run(
         [
-            "icacls",
+            str(icacls),
             str(path),
             "/inheritance:r",
             "/grant:r",
-            f"{principal}:(F)",
+            f"*{principal_sid}:(F)",
             "/remove",
             "Owner Rights",
         ],

@@ -176,6 +176,11 @@ class GateA1TransportIdentityTests(unittest.TestCase):
         source = SOURCE.read_text(encoding="utf-8")
         self.assertIn("GetSystemDirectoryW", source)
         self.assertIn('system_directory / "OpenSSH" / "ssh-keygen.exe"', source)
+        self.assertIn('system_directory / "icacls.exe"', source)
+        self.assertIn("resolve_trusted_icacls_path", source)
+        self.assertIn("ConvertSidToStringSidW", source)
+        self.assertNotIn('["icacls",', source)
+        self.assertNotIn('os.environ.get("USERNAME"', source)
         self.assertNotIn("Get-Command", source)
         self.assertNotIn("shutil.which", source)
         operator = (ROOT / "ci-dispatch/Invoke-DragonflyGateA1.ps1").read_text(encoding="utf-8")
@@ -184,6 +189,49 @@ class GateA1TransportIdentityTests(unittest.TestCase):
         self.assertNotIn("WINDIR", SOURCE.read_text(encoding="utf-8"))
         self.assertIn("GetSystemDirectoryW", SOURCE.read_text(encoding="utf-8"))
         self.assertIn("[Environment]::SystemDirectory", operator)
+
+    def test_trusted_icacls_ignores_path_substitution(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows trusted icacls path binding")
+        import os
+
+        line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture"
+        expected = identity.digest_from_ssh_keygen_y(line + "\n")
+        payload = b"synthetic-private-key-bytes"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            decoy_dir = root / "decoy-path"
+            decoy_dir.mkdir()
+            sentinel = root / "decoy-icacls-executed.txt"
+            decoy_icacls = decoy_dir / "icacls.cmd"
+            decoy_icacls.write_text(
+                f'@echo off\r\necho compromised> "{sentinel}"\r\nexit /b 1\r\n',
+                encoding="ascii",
+            )
+            keygen = root / "ssh-keygen.cmd"
+            keygen.write_text(f"@echo off\r\necho {line}\r\n", encoding="ascii")
+            temp_dir = root / "out"
+            trusted_icacls = identity.resolve_trusted_icacls_path()
+            self.assertEqual(
+                trusted_icacls,
+                identity.icacls_path_from_system_directory(identity._system_directory()),
+            )
+            old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = f"{decoy_dir}{os.pathsep}{old_path}"
+            try:
+                digest = identity.derive_public_identity_from_accepted_bytes(
+                    payload,
+                    ssh_keygen=keygen,
+                    temp_dir=temp_dir,
+                    baseline_sha256=hashlib.sha256(payload).hexdigest(),
+                )
+            finally:
+                os.environ["PATH"] = old_path
+            self.assertEqual(digest, expected)
+            self.assertFalse(
+                sentinel.exists(),
+                "PATH-resolved decoy icacls must not run when trusted System32 path is used",
+            )
 
     def test_ssh_keygen_consumes_accepted_byte_snapshot_not_live_path(self):
         line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture"
