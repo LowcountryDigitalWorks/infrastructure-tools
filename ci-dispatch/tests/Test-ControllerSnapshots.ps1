@@ -181,7 +181,10 @@ try {
         if($LASTEXITCODE -ne 0){throw 'TEST_MAIN_ONLY_INIT_FAILED'}
         & git -C $mainOnly config user.name 'CI-10 deterministic test'
         & git -C $mainOnly config user.email 'ci10-test@example.invalid'
-        & git -C $mainOnly config core.autocrlf false
+        & git -C $mainOnly config core.autocrlf true
+        $infoDir=Join-Path $mainOnly '.git/info'
+        $null=New-Item -ItemType Directory -Path $infoDir -Force
+        [IO.File]::WriteAllText((Join-Path $infoDir 'attributes'),"ci-dispatch/verifier-provenance.json -text`n",[Text.UTF8Encoding]::new($false))
         Copy-AcceptedVerifierFixture $mainOnly
         & git -C $mainOnly add -- ci-dispatch/Dispatch.psm1 ci-dispatch/verifier-provenance.json
         & git -C $mainOnly commit -m 'Create squash-equivalent accepted verifier tree' 2>$null
