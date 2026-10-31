@@ -118,13 +118,14 @@ def assert_gate_a3_pre_install_state(
     if require_accepted_115 and baseline != "accepted-115":
         raise error_cls("REDRIX_PREFLIGHT_BASELINE_NOT_ACCEPTED_115")
 
-    rollback_targets = {rel.as_posix() for _, _, rel, _ in installer.ROLLBACK}
-    expected_preexisting = {
-        rel.as_posix(): rel.as_posix() in rollback_targets
-        for _, _, rel, _ in installer.CURRENT
-    }
-    if preexisting != expected_preexisting:
-        raise error_cls("REDRIX_PREFLIGHT_RESIDUE_PRESENT")
+    if require_accepted_115:
+        rollback_targets = {rel.as_posix() for _, _, rel, _ in installer.ROLLBACK}
+        expected_preexisting = {
+            rel.as_posix(): rel.as_posix() in rollback_targets
+            for _, _, rel, _ in installer.CURRENT
+        }
+        if preexisting != expected_preexisting:
+            raise error_cls("REDRIX_PREFLIGHT_RESIDUE_PRESENT")
 
     installer._authorized_keys_digest(home, uid, forced_command)
     assert_transport_key_identity(
