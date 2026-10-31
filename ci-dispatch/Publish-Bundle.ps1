@@ -7,7 +7,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $script:AcceptedDispatcherSource = [pscustomobject]@{
     path='ci-dispatch/Dispatch.psm1'
-    blob='c862dd503b98060ec984206e63ef9efa5f957e8f'; sha256='0a41b338ca6b8b05ff31a26f30486381c7c836e484985a813b6fce6d07232c72'
+    blob='ff79366f5b4ed7a64b974b3bcc09fc3f21a672b8'; sha256='da88616493edf064bd767acfe7dd6e9259f7b3e7fe5a49825db4b4af51fc1bde'
 }
 $script:AcceptedVerifierRecordSource = [pscustomobject]@{
     path='ci-dispatch/verifier-provenance.json'
