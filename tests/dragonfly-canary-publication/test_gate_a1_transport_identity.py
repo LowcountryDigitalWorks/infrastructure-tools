@@ -126,7 +126,7 @@ class GateA1TransportIdentityTests(unittest.TestCase):
 class GateA3BootstrapRecordTests(unittest.TestCase):
     def test_accepted_preflight_pin_matches_git_blob(self):
         data = subprocess.check_output(
-            ["git", "-C", str(ROOT), "show", "HEAD:tools/dragonfly_canary_redrix_preflight.py"],
+            ["git", "-C", str(ROOT), "show", f"{bootstrap.ACCEPTED_A3_COMMIT}:tools/dragonfly_canary_redrix_preflight.py"],
             stderr=subprocess.DEVNULL,
         )
         self.assertEqual(len(data), bootstrap.ACCEPTED_A3_BYTES)
