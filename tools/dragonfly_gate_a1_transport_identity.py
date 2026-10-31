@@ -114,6 +114,8 @@ if sys.platform == "win32":
     _GENERIC_WRITE = 0x40000000
     _DELETE = 0x00010000
     _FILE_SHARE_READ = 0x00000001
+    _FILE_SHARE_WRITE = 0x00000002
+    _FILE_SHARE_DELETE = 0x00000004
     _OPEN_EXISTING = 3
     _CREATE_NEW = 1
     _FILE_ATTRIBUTE_NORMAL = 0x80
@@ -373,11 +375,12 @@ def _mark_handle_delete_on_close(handle: int) -> None:
 
 
 def _open_nofollow_for_verified_delete(path: Path) -> int:
+    """Second handle: no-follow reopen after ssh-keygen; permissive share is safe post-consumption."""
     _require_windows_64()
     handle = _CreateFileW(
         str(path),
         _GENERIC_READ | _DELETE,
-        _FILE_SHARE_READ,
+        _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
         None,
         _OPEN_EXISTING,
         _FILE_FLAG_OPEN_REPARSE_POINT,
@@ -396,13 +399,15 @@ def _delete_temp_key_path_if_same_object(
     path: Path,
     expected_identity: tuple[int, int, int],
 ) -> None:
-    """Delete via handle only when no-follow reopen matches the zeroed temp object identity."""
+    """Two-handle fallback: delete only via verified second handle (never pathname unlink)."""
     _require_windows_64()
     if not path.exists():
         return
     handle = _open_nofollow_for_verified_delete(path)
     try:
         if _bound_file_identity(handle) != expected_identity:
+            raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
+        if _file_size_from_handle(handle) != 0:
             raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
         _mark_handle_delete_on_close(handle)
     except TransportIdentityError:
@@ -415,7 +420,7 @@ def _delete_temp_key_path_if_same_object(
 
 
 def _finalize_bound_temp_key_cleanup(handle: int, path: Path) -> None:
-    """Zero on the consumption handle, then verified identity delete (never blind pathname unlink)."""
+    """Consumption handle (FILE_SHARE_READ) through ssh-keygen, then identity-checked delete handle."""
     _require_windows_64()
     bound_identity = _bound_file_identity(handle)
     try:
@@ -433,6 +438,13 @@ def _finalize_bound_temp_key_cleanup(handle: int, path: Path) -> None:
             if not _FlushFileBuffers(handle):
                 raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
             _verify_handle_region_is_zero(handle, original_size)
+            _set_file_pointer(handle, 0)
+            if not _SetEndOfFile(handle):
+                raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
+            if not _FlushFileBuffers(handle):
+                raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
+            if _file_size_from_handle(handle) != 0:
+                raise TransportIdentityError("GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED")
     except TransportIdentityError:
         _CloseHandle(handle)
         raise

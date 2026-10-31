@@ -538,6 +538,82 @@ else:
                     if path.exists():
                         self.assertNotIn(payload, path.read_bytes())
 
+    def test_temp_key_cleanup_setfileinformation_delete_failure_holds(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows verified-delete SetFileInformation failure")
+        line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture"
+        payload = b"synthetic-private-key-bytes"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            keygen = root / "ssh-keygen.cmd"
+            keygen.write_text(f"@echo off\r\necho {line}\r\n", encoding="ascii")
+            temp_dir = root / "out"
+            with mock.patch.object(
+                identity,
+                "_mark_handle_delete_on_close",
+                side_effect=identity.TransportIdentityError(
+                    "GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED"
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    identity.TransportIdentityError,
+                    "GATE_A1_TRANSPORT_TEMP_CLEANUP_FAILED",
+                ):
+                    identity.derive_public_identity_from_accepted_bytes(
+                        payload,
+                        ssh_keygen=keygen,
+                        temp_dir=temp_dir,
+                        baseline_sha256=hashlib.sha256(payload).hexdigest(),
+                    )
+
+    def test_temp_key_cleanup_hardlink_same_zeroed_object_removed(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows verified-delete same-object hardlink")
+        import os
+
+        line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyNotARealKey fixture"
+        expected = identity.digest_from_ssh_keygen_y(line + "\n")
+        payload = b"synthetic-private-key-bytes"
+        extra_links: list[Path] = []
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            keygen = root / "ssh-keygen.cmd"
+            keygen.write_text(f"@echo off\r\necho {line}\r\n", encoding="ascii")
+            temp_dir = root / "out"
+            real_delete = identity._delete_temp_key_path_if_same_object
+
+            def delete_with_same_object_hardlink(
+                path: Path,
+                expected_identity: tuple[int, int, int],
+            ) -> None:
+                if path.exists():
+                    extra = path.with_name(path.name + ".extra-hardlink")
+                    os.link(path, extra)
+                    extra_links.append(extra)
+                real_delete(path, expected_identity)
+
+            with mock.patch.object(
+                identity,
+                "_delete_temp_key_path_if_same_object",
+                side_effect=delete_with_same_object_hardlink,
+            ):
+                digest = identity.derive_public_identity_from_accepted_bytes(
+                    payload,
+                    ssh_keygen=keygen,
+                    temp_dir=temp_dir,
+                    baseline_sha256=hashlib.sha256(payload).hexdigest(),
+                )
+            self.assertEqual(digest, expected)
+            for path in temp_dir.glob("ldw-gate-a1-key-*"):
+                if ".extra-hardlink" in path.name:
+                    if path.exists():
+                        data = path.read_bytes()
+                        self.assertNotIn(payload, data)
+                        if data:
+                            self.assertEqual(data, b"\0" * len(data))
+                else:
+                    self.assertFalse(path.exists(), f"primary temp path must be deleted: {path}")
+
     def test_windows_derive_bound_temp_dir_none_purges_created_directory(self):
         if sys.platform != "win32":
             self.skipTest("Windows production derive_bound temp_dir=None purge path")
