@@ -22,7 +22,7 @@ function New-ControllerFixture([string]$Commit,[string]$Destination){
     Remove-Item -LiteralPath $zip -Force
 }
 function Copy-AcceptedVerifierFixture([string]$DestinationRoot){
-    $commit='6a1edeabc3b021e6c5f436be121432d3dfb55393'
+    $commit='1688c2bacdf022ffd4889cd858c0e7e43787a0b1'
     $stage=Join-Path $root ('accepted-verifier-'+[guid]::NewGuid().ToString('N'))
     $zip=$stage+'.zip'
     $null=New-Item -ItemType Directory -Path $stage
@@ -103,7 +103,7 @@ try {
             [pscustomobject]@{path='ci-dispatch/Dispatch.psm1';sha256=$accepted.sha256}
         )}
         $provenance=Get-Ci10ManifestDispatcherProvenance -BundleRoot $verifierBundle -Manifest $verifierManifest
-        Assert ($provenance.blob -ceq 'c862dd503b98060ec984206e63ef9efa5f957e8f')
+        Assert ($provenance.blob -ceq '3a8b2d402166490f60912f5d0bce5b74b4bdcb6c')
         $royal=Join-Path $root ('candidate-'+$snapshots[1].commit)
         $stage=Join-Path $root 'stage-verifier-royal'
         $null=New-Item -ItemType Directory -Path $stage -Force
@@ -173,8 +173,8 @@ try {
         Invoke-Expression $function[0].Extent.Text
         Invoke-Expression $guard[0].Extent.Text
         Invoke-Expression $materializer[0].Extent.Text
-        $script:AcceptedDispatcherSource=[pscustomobject]@{path='ci-dispatch/Dispatch.psm1';blob='c862dd503b98060ec984206e63ef9efa5f957e8f';sha256='0a41b338ca6b8b05ff31a26f30486381c7c836e484985a813b6fce6d07232c72'}
-        $script:AcceptedVerifierRecordSource=[pscustomobject]@{path='ci-dispatch/verifier-provenance.json';blob='6ed6339eed313bfc6a2710ead2d6c56df1551500';sha256='b7ab4e288b5476e29b2effbd1dca95da67e08bcc26c7ed864d350584f22ac0cd'}
+        $script:AcceptedDispatcherSource=[pscustomobject]@{path='ci-dispatch/Dispatch.psm1';blob='3a8b2d402166490f60912f5d0bce5b74b4bdcb6c';sha256='15964a8dc7aac0baf7cbf83ce9e41a93c315f3c590e76e567e4154c5e24a1694'}
+        $script:AcceptedVerifierRecordSource=[pscustomobject]@{path='ci-dispatch/verifier-provenance.json';blob='ec7ad3b727c408295b9e52e1fdc0ce5535362190';sha256='2b03683081cb58ca27e0c50133b378d576fa3bdf4bfb92e7be510bca5222dd5e'}
         $mainOnly=Join-Path $root 'squash-equivalent-main-only'
         $null=New-Item -ItemType Directory -Path (Join-Path $mainOnly 'ci-dispatch') -Force
         & git init $mainOnly 2>$null
@@ -251,8 +251,8 @@ try {
         Assert ($function.Count -eq 1 -and $guard.Count -eq 1)
         Invoke-Expression $function[0].Extent.Text
         Invoke-Expression $guard[0].Extent.Text
-        $script:AcceptedDispatcherSource=[pscustomobject]@{path='ci-dispatch/Dispatch.psm1';blob='c862dd503b98060ec984206e63ef9efa5f957e8f';sha256='0a41b338ca6b8b05ff31a26f30486381c7c836e484985a813b6fce6d07232c72'}
-        $script:AcceptedVerifierRecordSource=[pscustomobject]@{path='ci-dispatch/verifier-provenance.json';blob='6ed6339eed313bfc6a2710ead2d6c56df1551500';sha256='b7ab4e288b5476e29b2effbd1dca95da67e08bcc26c7ed864d350584f22ac0cd'}
+        $script:AcceptedDispatcherSource=[pscustomobject]@{path='ci-dispatch/Dispatch.psm1';blob='3a8b2d402166490f60912f5d0bce5b74b4bdcb6c';sha256='15964a8dc7aac0baf7cbf83ce9e41a93c315f3c590e76e567e4154c5e24a1694'}
+        $script:AcceptedVerifierRecordSource=[pscustomobject]@{path='ci-dispatch/verifier-provenance.json';blob='ec7ad3b727c408295b9e52e1fdc0ce5535362190';sha256='2b03683081cb58ca27e0c50133b378d576fa3bdf4bfb92e7be510bca5222dd5e'}
         $unaccepted=Join-Path $root 'unaccepted-repository'
         $null=New-Item -ItemType Directory -Path (Join-Path $unaccepted 'ci-dispatch') -Force
         & git init $unaccepted 2>$null
@@ -320,7 +320,7 @@ try {
         & git -C $untrusted commit -m 'Create clean unaccepted controller module' 2>$null
         if($LASTEXITCODE -ne 0 -or (& git -C $untrusted status --porcelain)){throw 'TEST_UNTRUSTED_CONTROLLER_SETUP_FAILED'}
         Assert ((git -C $untrusted rev-parse 'HEAD:ci-dispatch/Dispatch.psm1').Trim() -ceq
-            'c862dd503b98060ec984206e63ef9efa5f957e8f')
+            '3a8b2d402166490f60912f5d0bce5b74b4bdcb6c')
         [IO.File]::WriteAllText((Join-Path $untrusted 'ci-dispatch/Dispatch.psm1'),
             "[IO.File]::WriteAllText('$dispatcherMarker','executed'); throw 'HIDDEN_DISPATCHER_EXECUTED'")
         & git -C $untrusted update-index --skip-worktree ci-dispatch/Dispatch.psm1
@@ -343,8 +343,8 @@ try {
         $parameters=([regex]::Match($source,'(?s)^.*?param\((.*?)\)')).Groups[1].Value
         Assert (-not ($parameters -match 'AcceptedController|ControllerCommit|ControllerTree|Snapshot'))
         Assert ($source.Contains('Get-Ci10MatchedControllerSnapshot'))
-        Assert ($source.Contains('c862dd503b98060ec984206e63ef9efa5f957e8f'))
-        Assert ($source.Contains('6ed6339eed313bfc6a2710ead2d6c56df1551500'))
+        Assert ($source.Contains('3a8b2d402166490f60912f5d0bce5b74b4bdcb6c'))
+        Assert ($source.Contains('ec7ad3b727c408295b9e52e1fdc0ce5535362190'))
         Assert ($source.Contains("path='ci-dispatch/Dispatch.psm1'"))
         Assert ($source.Contains("path='ci-dispatch/verifier-provenance.json'"))
         Assert (-not ($source.Contains('805b71f36232412e072b0c860c1f4d665511d347')))
