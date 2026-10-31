@@ -1,0 +1,71 @@
+# TEMPORARY measurement scaffolding for fix/92-post160-bootstrap-bundle-provenance only.
+# Must be deleted before merge; do not reuse for runtime publish.
+name: CI10 bundle manifest finalizer (temp)
+
+on:
+  push:
+    branches:
+      - fix/92-post160-bootstrap-bundle-provenance
+
+permissions:
+  contents: read
+
+jobs:
+  derive-manifest:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prove branch and publisher target identities
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $head = (git rev-parse HEAD).Trim()
+          if ($head -cne $env:GITHUB_SHA) { throw 'PROOF_HEAD_SHA_MISMATCH' }
+          'PROOF_BRANCH_HEAD=' + $head
+          'PROOF_GITHUB_SHA=' + $env:GITHUB_SHA
+          'PROOF_GITHUB_REF=' + $env:GITHUB_REF
+          if ($env:GITHUB_REF -cne 'refs/heads/fix/92-post160-bootstrap-bundle-provenance') {
+            throw 'PROOF_BRANCH_REF_MISMATCH'
+          }
+          $targetCommit = '4efeb043162ee773f7115d99fbc8ff1688e0f00c'
+          $targetTree = '0ba833fa376b8be385cecddef447c1f81db61300'
+          $liveTree = (git rev-parse ($targetCommit + '^{tree}')).Trim()
+          if ($LASTEXITCODE -ne 0 -or $liveTree -cne $targetTree) { throw 'PROOF_TARGET_TREE_MISMATCH' }
+          'PROOF_BUNDLE_COMMIT=' + $targetCommit
+          'PROOF_BUNDLE_TREE=' + $targetTree
+
+      - name: Derive protected bundle manifest on ephemeral ProgramData
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $targetCommit = '4efeb043162ee773f7115d99fbc8ff1688e0f00c'
+          $targetTree = '0ba833fa376b8be385cecddef447c1f81db61300'
+          $ldwRoot = Join-Path $env:ProgramData 'LDW'
+          if (Test-Path -LiteralPath $ldwRoot) { throw 'PROGRAMDATA_LDW_PREEXISTS' }
+          try {
+            $lines = @(& pwsh -NoLogo -NoProfile -File ./ci-dispatch/Publish-Bundle.ps1 -Commit $targetCommit -Tree $targetTree)
+            foreach ($line in $lines) { Write-Output $line }
+            $published = @($lines | Where-Object { $_ -ceq 'BUNDLE_PUBLISHED=PASS' })
+            if ($published.Count -ne 1) { throw 'BUNDLE_PUBLISH_OUTPUT_INVALID' }
+            $commitLine = @($lines | Where-Object { $_ -like 'BUNDLE_COMMIT=*' } | Select-Object -First 1)
+            $treeLine = @($lines | Where-Object { $_ -like 'BUNDLE_TREE=*' } | Select-Object -First 1)
+            $shaLine = @($lines | Where-Object { $_ -like 'BUNDLE_MANIFEST_SHA256=*' } | Select-Object -First 1)
+            if ($commitLine.Count -ne 1 -or $treeLine.Count -ne 1 -or $shaLine.Count -ne 1) {
+              throw 'BUNDLE_PUBLISH_MARKER_MISSING'
+            }
+            if ($commitLine[0] -cne ('BUNDLE_COMMIT=' + $targetCommit)) { throw 'BUNDLE_COMMIT_MISMATCH' }
+            if ($treeLine[0] -cne ('BUNDLE_TREE=' + $targetTree)) { throw 'BUNDLE_TREE_MISMATCH' }
+            if ($shaLine[0] -notmatch '^BUNDLE_MANIFEST_SHA256=[a-f0-9]{64}$') { throw 'BUNDLE_MANIFEST_SHA256_INVALID' }
+          }
+          finally {
+            if (Test-Path -LiteralPath $ldwRoot) {
+              Remove-Item -LiteralPath $ldwRoot -Recurse -Force
+            }
+            if (Test-Path -LiteralPath $ldwRoot) { throw 'PROGRAMDATA_LDW_CLEANUP_FAILED' }
+          }
