@@ -9,7 +9,7 @@ if (@($errors).Count) { throw ('PHASE2_OBSERVE_PARSE_FAILED: ' + ($errors[0].Mes
 
 foreach ($required in @(
     '$acceptedSourceCommit = ''024e7c0af1adc9c3cdfbb50a2710e2f0fd9446ef''',
-    '$acceptedClientBlob = ''a68acd712bd33c424f3a58a7130b439e46c9455e''',
+    '$acceptedClientBlob = ''87e0d491dd1d3666b6161e0487529c88946cf611''',
     '$clientRelative = ''host-agent/deploy/Invoke-CiJitLocalTaskClient.ps1''',
     "ValidateSet('STATUS','DISCOVER','GET_OPERATION_RESULT')",
     'Invoke-CiJitLocalTaskClient',
