@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
+import tempfile
 import unittest
 from unittest import mock
 
@@ -186,6 +187,49 @@ class GateA4Tests(unittest.TestCase):
             ".rollback_fixture(",
         ):
             self.assertNotIn(forbidden, text)
+
+    def test_verified_bytes_execute_after_path_replacement(self):
+        verified = b"VALUE = 'verified-bytes'\n"
+        substituted = b"VALUE = 'substituted-bytes'\n"
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "dependency.py"
+            path.write_bytes(verified)
+            expected = a4._git_blob(verified)
+            real_blob = a4._git_blob
+
+            def swap_after_verified_read(data: bytes) -> str:
+                path.write_bytes(substituted)
+                return real_blob(data)
+
+            with mock.patch.object(a4, "_git_blob", side_effect=swap_after_verified_read):
+                module = a4._load_pinned("ldw_gate_a4_race", path, expected)
+            self.assertEqual(path.read_bytes(), substituted)
+            self.assertEqual(module.VALUE, "verified-bytes")
+            self.assertEqual(module.__name__, "ldw_gate_a4_race")
+            self.assertEqual(module.__file__, str(path))
+
+    def test_mismatched_blob_does_not_execute(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "dependency.py"
+            side = root / "executed.txt"
+            path.write_bytes(
+                f"from pathlib import Path\nPath({str(side)!r}).write_text('ran', encoding='utf-8')\n".encode(
+                    "utf-8"
+                )
+            )
+            with self.assertRaisesRegex(a4.A4Error, "A4_SOURCE_IDENTITY_MISMATCH"):
+                a4._load_pinned("ldw_gate_a4_mismatch", path, "0" * 40)
+            self.assertFalse(side.exists())
+
+    def test_compile_failure_is_sanitized_import_failure(self):
+        source = b"def (\n"
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "dependency.py"
+            path.write_bytes(source)
+            with self.assertRaisesRegex(a4.A4Error, "A4_SOURCE_IMPORT_FAILED") as caught:
+                a4._load_pinned("ldw_gate_a4_bad", path, a4._git_blob(source))
+            self.assertEqual(str(caught.exception), "A4_SOURCE_IMPORT_FAILED")
 
 
 if __name__ == "__main__":

@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -36,17 +35,23 @@ def _git_blob(data: bytes) -> str:
 
 
 def _load_pinned(name: str, path: Path, expected_blob: str) -> ModuleType:
+    """Execute one verified byte string. The pathname is not opened again."""
     try:
         data = path.read_bytes()
     except OSError as exc:
         raise A4Error("A4_SOURCE_UNAVAILABLE") from exc
     if _git_blob(data) != expected_blob:
         raise A4Error("A4_SOURCE_IDENTITY_MISMATCH")
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise A4Error("A4_SOURCE_IMPORT_FAILED")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = ModuleType(name)
+    module.__file__ = str(path)
+    module.__package__ = None
+    module.__loader__ = None
+    module.__spec__ = None
+    try:
+        code = compile(data, str(path), "exec", dont_inherit=True)
+        exec(code, module.__dict__)
+    except Exception as exc:
+        raise A4Error("A4_SOURCE_IMPORT_FAILED") from exc
     return module
 
 
