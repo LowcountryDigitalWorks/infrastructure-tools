@@ -64,6 +64,7 @@ public static class CiJitControlContract
         "SUPERSEDED",
         "PROFILE_MISMATCH",
         "OPERATION_NOT_FOUND",
+        "RECOVERY_BUSY_OR_UNCERTAIN",
         "FAILED"
     };
 

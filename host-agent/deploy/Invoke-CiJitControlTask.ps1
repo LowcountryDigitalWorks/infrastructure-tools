@@ -27,6 +27,75 @@ $slotNames = @{
 $requestPath = Join-Path $requestRoot $slotNames[$Operation]
 $operationId = $null
 $script:CapacitySubreasonPattern = 'CAPACITY_RAM_RESERVE_4GIB_REQUIRED|CAPACITY_CPU_RESERVE_REQUIRED|CAPACITY_CPU_LOAD_TOO_HIGH|CAPACITY_DISK_RESERVE_40GIB_REQUIRED|DEFAULT_NAT_SWITCH_REQUIRED'
+$script:AllowedDispatcherClassifications = @(
+    'RECOVERY_BUSY_OR_UNCERTAIN',
+    'DISPATCHER_BUSY_OR_LOCK_UNCERTAIN',
+    'CONTROLLER_GATE_UNCERTAIN',
+    'CONTROLLER_GATE_CHANGED',
+    'CONTROLLER_FAILED_OR_CLEANUP_UNCERTAIN',
+    'CLEANUP_UNCONFIRMED',
+    'LOCK_OR_RESIDUE_UNCERTAIN',
+    'STALE_PROFILE_OWNERSHIP_REFUSED',
+    'STALE_VM_OWNERSHIP_AMBIGUOUS',
+    'ORPHAN_VM_REQUIRES_CONCLUSIVE_STATE',
+    'RUNNER_OWNERSHIP_UNCERTAIN',
+    'PROVENANCE_MISMATCH',
+    'PREFLIGHT_PROVENANCE_MISMATCH',
+    'BUNDLE_PROVENANCE_MISMATCH',
+    'BUNDLE_VERIFIER_PROVENANCE_MISMATCH',
+    'MANIFEST_HASH_DRIFT',
+    'DISPATCHER_PREFLIGHT_HASH_DRIFT',
+    'BUNDLE_VERIFIER_HASH_DRIFT',
+    'BUNDLE_FILE_HASH_DRIFT',
+    'BUNDLE_FILE_SET_DRIFT',
+    'BUNDLE_MANIFEST_INVALID',
+    'ACCEPTED_CONTROLLER_UNAVAILABLE',
+    'ACCEPTED_CONTROLLER_CHANGED',
+    'ACCEPTED_CONTROLLER_MATCH_AMBIGUOUS',
+    'PREFLIGHT_REPARSE_PATH_REFUSED',
+    'PREFLIGHT_PARENT_OWNER_UNTRUSTED',
+    'PREFLIGHT_PARENT_REPLACEMENT_UNTRUSTED',
+    'PREFLIGHT_OWNER_UNTRUSTED',
+    'PREFLIGHT_ACL_UNTRUSTED_WRITE',
+    'PREFLIGHT_ACL_REQUIRED_PRINCIPAL_MISSING',
+    'PREFLIGHT_ENTRY_PATH_MISMATCH',
+    'BUNDLE_PARENT_OWNER_UNTRUSTED',
+    'BUNDLE_PARENT_REPLACEMENT_UNTRUSTED',
+    'BUNDLE_OWNER_UNTRUSTED',
+    'BUNDLE_ACL_UNTRUSTED_WRITE',
+    'BUNDLE_ACL_REQUIRED_PRINCIPAL_MISSING',
+    'EXACT_BUNDLE_REFERENCE_REQUIRED',
+    'REPARSE_PATH_REFUSED',
+    'QUEUE_UNAVAILABLE',
+    'API_SCOPE_REFUSED',
+    'API_READ_FAILED',
+    'API_RESPONSE_INVALID',
+    'QUEUE_BOUND_EXCEEDED',
+    'QUEUE_PAGE_RACE_REFUSED',
+    'PROFILE_REGISTRY_REFUSED',
+    'PROFILE_CONTRACT_REFUSED',
+    'PROFILE_LABELS_REFUSED',
+    'PROFILE_SCOPE_REFUSED',
+    'DISCOVERY_HOLD_REQUIRES_DISCOVER_MODE',
+    'TARGET_REFUSED',
+    'WRONG_REPOSITORY',
+    'WRONG_WORKFLOW',
+    'FROZEN_ROYAL_HEAD_REQUIRED',
+    'FROZEN_ROYAL_WORKFLOW_BLOB_REQUIRED',
+    'PRE_ROUTING_ROYAL_PAIR_REFUSED',
+    'WRONG_EVENT_REF_SOURCE',
+    'RUN_NOT_QUEUED',
+    'EXACTLY_ONE_JOB_REQUIRED',
+    'JOB_IDENTITY_MISMATCH',
+    'JOB_NOT_UNASSIGNED_QUEUED',
+    'WRONG_LABELS',
+    'RUN_TIME_INVALID',
+    'DUPLICATE_CANDIDATE_REFUSED',
+    'SELECTED_JOB_DRIFT',
+    'DISPATCHER_OPERATION_FAILED',
+    'FAILED'
+)
+$script:DispatcherClassificationPattern = ($script:AllowedDispatcherClassifications -join '|')
 
 function Assert-ElevatedOwnerTask {
     if ($env:OS -ne 'Windows_NT') { throw 'WINDOWS_REQUIRED' }
@@ -139,7 +208,7 @@ function Read-Request {
 function Write-Result([bool]$Success,[string]$State,[string]$Reason,[string]$ProfileId=$null,[long]$RunId=0,[long]$JobId=0,[string]$StaleItems=$null) {
     if ($operationId -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { return }
     if ($State -cnotin @('QUEUED','STARTED','PASS','BLOCKED','FAILED','STALE','AMBIGUOUS')) { $State='FAILED' }
-    if ($Reason -cnotin @('NONE','ADAPTER_UNAVAILABLE','INVALID_ADAPTER_RESULT','TARGET_REFUSED','QUEUE_UNAVAILABLE','QUEUE_STALE','NO_ELIGIBLE_JOB','BUSY','CAPACITY','CAPACITY_RAM_RESERVE_4GIB_REQUIRED','CAPACITY_CPU_RESERVE_REQUIRED','CAPACITY_CPU_LOAD_TOO_HIGH','CAPACITY_DISK_RESERVE_40GIB_REQUIRED','DEFAULT_NAT_SWITCH_REQUIRED','POLICY_HOLD','PROVENANCE_MISMATCH','LOCK_OR_RESIDUE_UNCERTAIN','IDENTITY_MISMATCH','NO_ACTIVE_JOB','CURRENT_CANDIDATE','NOT_STALE','PR_CLOSED','PR_MERGED','PR_HEAD_MOVED','SUPERSEDED','PROFILE_MISMATCH','OPERATION_NOT_FOUND','FAILED')) { $Reason='FAILED' }
+    if ($Reason -cnotin @('NONE','ADAPTER_UNAVAILABLE','INVALID_ADAPTER_RESULT','TARGET_REFUSED','QUEUE_UNAVAILABLE','QUEUE_STALE','NO_ELIGIBLE_JOB','BUSY','CAPACITY','CAPACITY_RAM_RESERVE_4GIB_REQUIRED','CAPACITY_CPU_RESERVE_REQUIRED','CAPACITY_CPU_LOAD_TOO_HIGH','CAPACITY_DISK_RESERVE_40GIB_REQUIRED','DEFAULT_NAT_SWITCH_REQUIRED','POLICY_HOLD','PROVENANCE_MISMATCH','LOCK_OR_RESIDUE_UNCERTAIN','IDENTITY_MISMATCH','NO_ACTIVE_JOB','CURRENT_CANDIDATE','NOT_STALE','PR_CLOSED','PR_MERGED','PR_HEAD_MOVED','SUPERSEDED','PROFILE_MISMATCH','OPERATION_NOT_FOUND','RECOVERY_BUSY_OR_UNCERTAIN','FAILED')) { $Reason='FAILED' }
     if ($ProfileId -and $ProfileId -cnotmatch '^[a-z0-9._-]{1,64}$') { $ProfileId=$null }
     $payload = [ordered]@{
         schema=1; operationId=$operationId; success=$Success; resultState=$State; reasonCode=$Reason;
@@ -168,7 +237,8 @@ function Invoke-Child([string]$Path,[string[]]$Arguments) {
     while (-not $process.StandardOutput.EndOfStream) {
         $line = $process.StandardOutput.ReadLine()
         if ($line -cmatch '^(DISPATCHER_RESULT|DISCOVERED_RUN_ID|DISCOVERED_JOB_ID|INTERRUPTED_CLEANUP|CLEANUP_IDEMPOTENT)=([A-Z_]+|[0-9]+|PASS)$' -or
-            $line -cmatch ('^CAPACITY_SUBREASON=(' + $script:CapacitySubreasonPattern + ')$')) { $safe.Add($line) }
+            $line -cmatch ('^CAPACITY_SUBREASON=(' + $script:CapacitySubreasonPattern + ')$') -or
+            $line -cmatch ('^CLASSIFICATION=(' + $script:DispatcherClassificationPattern + ')$')) { $safe.Add($line) }
     }
     $process.WaitForExit()
     $code=$process.ExitCode; $process.Dispose()
@@ -181,11 +251,94 @@ function Get-OutputValue([string[]]$Lines,[string]$Name) {
     $match[0].Substring($Name.Length+1)
 }
 
+function Resolve-CiJitDispatcherFailureReason([string]$Classification) {
+    if (-not $Classification) { return 'FAILED' }
+    switch ($Classification) {
+        'RECOVERY_BUSY_OR_UNCERTAIN' { return 'RECOVERY_BUSY_OR_UNCERTAIN' }
+        { $_ -in @(
+            'DISPATCHER_BUSY_OR_LOCK_UNCERTAIN',
+            'CONTROLLER_GATE_UNCERTAIN',
+            'CONTROLLER_GATE_CHANGED',
+            'CONTROLLER_FAILED_OR_CLEANUP_UNCERTAIN',
+            'CLEANUP_UNCONFIRMED',
+            'LOCK_OR_RESIDUE_UNCERTAIN',
+            'STALE_PROFILE_OWNERSHIP_REFUSED',
+            'STALE_VM_OWNERSHIP_AMBIGUOUS',
+            'ORPHAN_VM_REQUIRES_CONCLUSIVE_STATE',
+            'RUNNER_OWNERSHIP_UNCERTAIN'
+        ) } { return 'LOCK_OR_RESIDUE_UNCERTAIN' }
+        { $_ -in @(
+            'PROVENANCE_MISMATCH',
+            'PREFLIGHT_PROVENANCE_MISMATCH',
+            'BUNDLE_PROVENANCE_MISMATCH',
+            'BUNDLE_VERIFIER_PROVENANCE_MISMATCH',
+            'MANIFEST_HASH_DRIFT',
+            'DISPATCHER_PREFLIGHT_HASH_DRIFT',
+            'BUNDLE_VERIFIER_HASH_DRIFT',
+            'BUNDLE_FILE_HASH_DRIFT',
+            'BUNDLE_FILE_SET_DRIFT',
+            'BUNDLE_MANIFEST_INVALID',
+            'ACCEPTED_CONTROLLER_UNAVAILABLE',
+            'ACCEPTED_CONTROLLER_CHANGED',
+            'ACCEPTED_CONTROLLER_MATCH_AMBIGUOUS',
+            'PREFLIGHT_REPARSE_PATH_REFUSED',
+            'PREFLIGHT_PARENT_OWNER_UNTRUSTED',
+            'PREFLIGHT_PARENT_REPLACEMENT_UNTRUSTED',
+            'PREFLIGHT_OWNER_UNTRUSTED',
+            'PREFLIGHT_ACL_UNTRUSTED_WRITE',
+            'PREFLIGHT_ACL_REQUIRED_PRINCIPAL_MISSING',
+            'PREFLIGHT_ENTRY_PATH_MISMATCH',
+            'BUNDLE_PARENT_OWNER_UNTRUSTED',
+            'BUNDLE_PARENT_REPLACEMENT_UNTRUSTED',
+            'BUNDLE_OWNER_UNTRUSTED',
+            'BUNDLE_ACL_UNTRUSTED_WRITE',
+            'BUNDLE_ACL_REQUIRED_PRINCIPAL_MISSING',
+            'EXACT_BUNDLE_REFERENCE_REQUIRED',
+            'REPARSE_PATH_REFUSED'
+        ) } { return 'PROVENANCE_MISMATCH' }
+        { $_ -in @(
+            'QUEUE_UNAVAILABLE',
+            'API_SCOPE_REFUSED',
+            'API_READ_FAILED',
+            'API_RESPONSE_INVALID',
+            'QUEUE_BOUND_EXCEEDED',
+            'QUEUE_PAGE_RACE_REFUSED'
+        ) } { return 'QUEUE_UNAVAILABLE' }
+        { $_ -in @(
+            'PROFILE_REGISTRY_REFUSED',
+            'PROFILE_CONTRACT_REFUSED',
+            'PROFILE_LABELS_REFUSED',
+            'PROFILE_SCOPE_REFUSED',
+            'DISCOVERY_HOLD_REQUIRES_DISCOVER_MODE',
+            'TARGET_REFUSED',
+            'WRONG_REPOSITORY',
+            'WRONG_WORKFLOW',
+            'FROZEN_ROYAL_HEAD_REQUIRED',
+            'FROZEN_ROYAL_WORKFLOW_BLOB_REQUIRED',
+            'PRE_ROUTING_ROYAL_PAIR_REFUSED',
+            'WRONG_EVENT_REF_SOURCE',
+            'RUN_NOT_QUEUED',
+            'EXACTLY_ONE_JOB_REQUIRED',
+            'JOB_IDENTITY_MISMATCH',
+            'JOB_NOT_UNASSIGNED_QUEUED',
+            'WRONG_LABELS',
+            'RUN_TIME_INVALID',
+            'DUPLICATE_CANDIDATE_REFUSED',
+            'SELECTED_JOB_DRIFT'
+        ) } { return 'TARGET_REFUSED' }
+        default { return 'FAILED' }
+    }
+}
+
 function Invoke-DispatcherMode([ValidateSet('Discover','Once','Recover')][string]$Mode) {
     $args = @('-ManifestSha',$ManifestSha,'-Commit',$Commit,'-Tree',$Tree,'-Mode',$Mode)
     $result = Invoke-Child $dispatcher $args
     $code = Get-OutputValue $result.Lines 'DISPATCHER_RESULT'
-    if ($result.ExitCode -ne 0 -or $code -ceq 'FAIL' -or -not $code) { return [pscustomobject]@{Success=$false;State='FAILED';Reason='FAILED';RunId=0;JobId=0;ProfileId=$null} }
+    if ($result.ExitCode -ne 0 -or $code -ceq 'FAIL' -or -not $code) {
+        $classification = Get-OutputValue $result.Lines 'CLASSIFICATION'
+        $failedReason = Resolve-CiJitDispatcherFailureReason $classification
+        return [pscustomobject]@{Success=$false;State='FAILED';Reason=$failedReason;RunId=0;JobId=0;ProfileId=$null}
+    }
     if ($code -ceq 'BUSY') { return [pscustomobject]@{Success=$false;State='BLOCKED';Reason='BUSY';RunId=0;JobId=0;ProfileId=$null} }
     if ($code -ceq 'CAPACITY') {
         $sub = Get-OutputValue $result.Lines 'CAPACITY_SUBREASON'
@@ -193,7 +346,11 @@ function Invoke-DispatcherMode([ValidateSet('Discover','Once','Recover')][string
         return [pscustomobject]@{Success=$false;State='BLOCKED';Reason=$reason;RunId=0;JobId=0;ProfileId=$null}
     }
     if ($code -ceq 'IDLE') { return [pscustomobject]@{Success=($Mode -ceq 'Discover');State=$(if($Mode -ceq 'Discover'){'PASS'}else{'BLOCKED'});Reason=$(if($Mode -ceq 'Discover'){'NONE'}else{'NO_ELIGIBLE_JOB'});RunId=0;JobId=0;ProfileId=$null} }
-    if ($code -notin @('DISCOVERED','PASS','RECOVERED')) { return [pscustomobject]@{Success=$false;State='FAILED';Reason='FAILED';RunId=0;JobId=0;ProfileId=$null} }
+    if ($code -notin @('DISCOVERED','PASS','RECOVERED')) {
+        $classification = Get-OutputValue $result.Lines 'CLASSIFICATION'
+        $failedReason = Resolve-CiJitDispatcherFailureReason $classification
+        return [pscustomobject]@{Success=$false;State='FAILED';Reason=$failedReason;RunId=0;JobId=0;ProfileId=$null}
+    }
     $run = Get-OutputValue $result.Lines 'DISCOVERED_RUN_ID'; $job = Get-OutputValue $result.Lines 'DISCOVERED_JOB_ID'
     $statusPath = Join-Path $env:ProgramData 'LDW/CiJitStatus/status.json'
     $profile = $null

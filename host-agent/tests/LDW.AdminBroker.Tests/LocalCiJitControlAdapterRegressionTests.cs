@@ -174,6 +174,9 @@ internal static class LocalCiJitControlAdapterRegressionTests
         }
         Assert(CiJitControlContract.IsReasonCode("CAPACITY"), "coarse capacity classification remains a result reason");
         Assert(!CiJitControlContract.IsReasonCode("FreePhysicalMemory=1024"), "raw capacity payload is not a result reason");
+        Assert(CiJitControlContract.IsReasonCode("RECOVERY_BUSY_OR_UNCERTAIN"), "broker result preserves RECOVERY_BUSY_OR_UNCERTAIN");
+        Assert(!CiJitControlContract.IsReasonCode("RECOVERY_BUSY_OR_UNCERTAIN extra"), "broker result rejects unbounded recovery text");
+        Assert(worker.Contains("'RECOVERY_BUSY_OR_UNCERTAIN'", StringComparison.Ordinal), "control task preserves RECOVERY_BUSY_OR_UNCERTAIN");
 
         var staleReasonBody = Slice(worker, "function Get-PrStaleReason", "function Get-ProvenStaleEntries");
         Assert(staleReasonBody.Contains("if ($pr.merged_at) { return 'PR_MERGED' }", StringComparison.Ordinal)
