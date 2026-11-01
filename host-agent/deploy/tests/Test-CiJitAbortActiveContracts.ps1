@@ -6,8 +6,8 @@ $worker = Join-Path $deployRoot 'Invoke-CiJitControlTask.ps1'
 $bootstrap = Join-Path $deployRoot 'Bootstrap-CiJitControlTasks.ps1'
 
 $workerRelative = 'host-agent/deploy/Invoke-CiJitControlTask.ps1'
-$expectedCandidateWorkerBlob = '28e2d52ad1fa48ffacdf9fa69e1e4984f3a5ea38'
-$expectedAcceptedWorkerBlob = 'a0a79f92d31859dd4a930b358b10c7b4cf11db48'
+$expectedAcceptedWorkerBlob = '28e2d52ad1fa48ffacdf9fa69e1e4984f3a5ea38'
+$expectedPriorAcceptedWorkerBlob = 'a0a79f92d31859dd4a930b358b10c7b4cf11db48'
 
 $script:Assertions = 0
 $script:CleanupCalls = [Collections.Generic.List[object]]::new()
@@ -137,7 +137,7 @@ Assert-True (
     $actualAbortCall -ceq $expectedAbortCall
 ) 'production ABORT_ACTIVE helper wiring must remain exact'
 
-# Candidate/runtime provenance split.
+# Accepted source provenance after the separately reviewed provenance refresh.
 $bootstrapTokens = $null
 $bootstrapErrors = $null
 
@@ -193,25 +193,29 @@ $currentWorkerBlob = (
 
 Assert-True (
     $LASTEXITCODE -eq 0 -and
-    $currentWorkerBlob -ceq $expectedCandidateWorkerBlob
-) 'source-review worker must be exact #168 candidate blob'
+    $currentWorkerBlob -ceq $expectedAcceptedWorkerBlob
+) 'source-review worker must be exact accepted #169 worker blob'
 
 Assert-True (
     $acceptedWorkerBlob -ceq $expectedAcceptedWorkerBlob
-) 'runtime bootstrap must remain pinned to prior accepted worker'
+) 'bootstrap must pin the accepted #169 worker after provenance refresh'
 
 Assert-True (
-    $acceptedWorkerBlob -cne $currentWorkerBlob
-) 'candidate and accepted runtime worker identities must remain split'
+    $acceptedWorkerBlob -ceq $currentWorkerBlob
+) 'source-review and accepted worker identities must converge after provenance refresh'
 
 $bootstrapSource = Get-Content -LiteralPath $bootstrap -Raw
 
 Assert-True (
+    $bootstrapSource.Contains(
+        $expectedAcceptedWorkerBlob,
+        [StringComparison]::Ordinal
+    ) -and
     -not $bootstrapSource.Contains(
-        $expectedCandidateWorkerBlob,
+        $expectedPriorAcceptedWorkerBlob,
         [StringComparison]::Ordinal
     )
-) 'runtime bootstrap must not promote #168 candidate before provenance refresh'
+) 'bootstrap must promote only the accepted #169 worker provenance'
 
 $guard = $bootstrapAst.Find(
     {
@@ -232,7 +236,7 @@ Assert-True (
         '$workerBlob -cne $acceptedWorkerBlob',
         [StringComparison]::Ordinal
     )
-) 'bootstrap guard must reject candidate worker until provenance refresh'
+) 'bootstrap guard must reject worker drift after provenance refresh'
 
 # Load only the helper function, never the worker top-level runtime.
 . ([scriptblock]::Create($helper.Extent.Text))
