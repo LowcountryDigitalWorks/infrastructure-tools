@@ -192,9 +192,9 @@ finally {
 
 $bootstrapSource = Get-Content -LiteralPath (Join-Path $deployRoot 'Bootstrap-CiJitControlTasks.ps1') -Raw
 foreach ($literal in @(
-    '6a51968c07e235f4257031ccb127fd4ea5c1e00e',
+    'ecc801ffbce6d0fca444d6a4ea7b07e404bb9161',
     'fd52f44134dda198cb35ed7ef999e166ab143bbe',
-    'a0a79f92d31859dd4a930b358b10c7b4cf11db48',
+    '28e2d52ad1fa48ffacdf9fa69e1e4984f3a5ea38',
     'dabb1083994b635ff7d8f83ed673379276036885',
     'e56412548f58ceed7ae701be1d55526302a7baf9be3bb44b4ed02d45825a8193',
     '6a51968c07e235f4257031ccb127fd4ea5c1e00e',
@@ -225,7 +225,7 @@ foreach ($forbidden in @('Invoke-WebRequest','Invoke-RestMethod','curl.exe','Sta
     Assert-True (-not $bootstrapSource.Contains($forbidden, [StringComparison]::OrdinalIgnoreCase)) "CI/JIT bootstrap must not add network or task-definition primitive $forbidden"
 }
 
-# Verify the bootstrap pins the accepted merged PR #144 source and rejects any
+# Verify the bootstrap pins the accepted merged #169 source and rejects any
 # installer/worker/status-access drift.
 $bootstrapTokens=$null;$bootstrapErrors=$null
 $bootstrapAst=[Management.Automation.Language.Parser]::ParseInput($bootstrapSource,[ref]$bootstrapTokens,[ref]$bootstrapErrors)
@@ -236,16 +236,15 @@ Assert-True ($bootstrapErrors.Count -eq 0) 'bootstrap must parse'
         . ([scriptblock]::Create($assignment.Extent.Text))
     }
     $acceptedManage=(& git -C $deployRoot rev-parse ($acceptedSourceCommit+':'+$manageRelative)).Trim()
-    Assert-True ($LASTEXITCODE -eq 0 -and $acceptedManage -ceq $acceptedManageBlob) 'bootstrap manager pin must match accepted PR #144 merge'
+    Assert-True ($LASTEXITCODE -eq 0 -and $acceptedManage -ceq $acceptedManageBlob) 'bootstrap manager pin must match accepted merged source'
     $acceptedWorker=(& git -C $deployRoot rev-parse ($acceptedSourceCommit+':'+$workerRelative)).Trim()
-    Assert-True ($LASTEXITCODE -eq 0 -and $acceptedWorker -ceq $acceptedWorkerBlob) 'bootstrap worker pin must match accepted PR #144 merge'
+    Assert-True ($LASTEXITCODE -eq 0 -and $acceptedWorker -ceq $acceptedWorkerBlob) 'bootstrap worker pin must match accepted #169 merged worker'
     $acceptedStatusAccess=(& git -C $deployRoot rev-parse ($acceptedSourceCommit+':'+$statusAccessRelative)).Trim()
     Assert-True ($LASTEXITCODE -eq 0 -and $acceptedStatusAccess -ceq $acceptedStatusAccessBlob) 'bootstrap status-access pin must match accepted source bytes'
-    $candidateWorkerBlob = '28e2d52ad1fa48ffacdf9fa69e1e4984f3a5ea38'
     $currentManage=(& git -C $deployRoot rev-parse ('HEAD:'+$manageRelative)).Trim()
-    Assert-True ($LASTEXITCODE -eq 0 -and $currentManage -ceq $acceptedManageBlob) 'candidate manager must match accepted merged manager bytes'
+    Assert-True ($LASTEXITCODE -eq 0 -and $currentManage -ceq $acceptedManageBlob) 'current manager must match accepted merged manager bytes'
     $currentWorker=(& git -C $deployRoot rev-parse ('HEAD:'+$workerRelative)).Trim()
-    Assert-True ($LASTEXITCODE -eq 0 -and $currentWorker -in @($acceptedWorkerBlob,$candidateWorkerBlob)) 'current worker must match accepted runtime bytes or exact #168 candidate bytes'
+    Assert-True ($LASTEXITCODE -eq 0 -and $currentWorker -ceq $acceptedWorkerBlob) 'current worker must match accepted #169 merged worker bytes exactly'
     $currentStatusAccess=(& git -C $deployRoot rev-parse ('HEAD:'+$statusAccessRelative)).Trim()
     Assert-True ($LASTEXITCODE -eq 0 -and $currentStatusAccess -ceq $acceptedStatusAccessBlob) 'current status-access helper must match accepted bytes'
     $guard=$bootstrapAst.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-AcceptedCheckout'},$false)
@@ -273,11 +272,11 @@ Assert-True ($bootstrapErrors.Count -eq 0) 'bootstrap must parse'
         $script:LASTEXITCODE=if($fixture.Ancestor){0}else{1}
     }
     $context=Assert-AcceptedCheckout
-    Assert-True ($context.Head -ceq $acceptedSourceCommit) 'accepted PR #144 checkout must pass guard'
+    Assert-True ($context.Head -ceq $acceptedSourceCommit) 'accepted #169 merged checkout must pass guard'
     foreach($case in @(
         @{Field='Manage';Value='622ded670d2805bf163699a77c076454e92f90bc';Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
         @{Field='Manage';Value=('f'*40);Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
-        @{Field='Worker';Value=$candidateWorkerBlob;Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
+        @{Field='Worker';Value='a0a79f92d31859dd4a930b358b10c7b4cf11db48';Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
         @{Field='Worker';Value='1877c993dabe7e9d1e2a712a317a0d935ab74dfd';Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
         @{Field='Worker';Value=('f'*40);Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
         @{Field='StatusAccess';Value=('f'*40);Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
