@@ -166,13 +166,18 @@ Assert-True (
     $null -ne $acceptedWorkerAssignment
 ) 'bootstrap accepted worker assignment must exist'
 
+$acceptedWorkerMatch = [regex]::Match(
+    $acceptedWorkerAssignment.Extent.Text,
+    '^\s*\$acceptedWorkerBlob\s*=\s*''([a-f0-9]{40})''\s*$',
+    [Text.RegularExpressions.RegexOptions]::CultureInvariant
+)
+
 Assert-True (
-    $acceptedWorkerAssignment.Right -is
-        [Management.Automation.Language.StringConstantExpressionAst]
+    $acceptedWorkerMatch.Success
 ) 'bootstrap accepted worker pin must remain a literal'
 
 $acceptedWorkerBlob =
-    [string]$acceptedWorkerAssignment.Right.Value
+    [string]$acceptedWorkerMatch.Groups[1].Value
 
 $repoRoot = (
     & git -C $PSScriptRoot rev-parse --show-toplevel
