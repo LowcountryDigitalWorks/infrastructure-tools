@@ -241,10 +241,11 @@ Assert-True ($bootstrapErrors.Count -eq 0) 'bootstrap must parse'
     Assert-True ($LASTEXITCODE -eq 0 -and $acceptedWorker -ceq $acceptedWorkerBlob) 'bootstrap worker pin must match accepted PR #144 merge'
     $acceptedStatusAccess=(& git -C $deployRoot rev-parse ($acceptedSourceCommit+':'+$statusAccessRelative)).Trim()
     Assert-True ($LASTEXITCODE -eq 0 -and $acceptedStatusAccess -ceq $acceptedStatusAccessBlob) 'bootstrap status-access pin must match accepted source bytes'
+    $candidateWorkerBlob = '28e2d52ad1fa48ffacdf9fa69e1e4984f3a5ea38'
     $currentManage=(& git -C $deployRoot rev-parse ('HEAD:'+$manageRelative)).Trim()
     Assert-True ($LASTEXITCODE -eq 0 -and $currentManage -ceq $acceptedManageBlob) 'candidate manager must match accepted merged manager bytes'
     $currentWorker=(& git -C $deployRoot rev-parse ('HEAD:'+$workerRelative)).Trim()
-    Assert-True ($LASTEXITCODE -eq 0 -and $currentWorker -ceq $acceptedWorkerBlob) 'current worker must match accepted PR #144 merged bytes'
+    Assert-True ($LASTEXITCODE -eq 0 -and $currentWorker -in @($acceptedWorkerBlob,$candidateWorkerBlob)) 'current worker must match accepted runtime bytes or exact #168 candidate bytes'
     $currentStatusAccess=(& git -C $deployRoot rev-parse ('HEAD:'+$statusAccessRelative)).Trim()
     Assert-True ($LASTEXITCODE -eq 0 -and $currentStatusAccess -ceq $acceptedStatusAccessBlob) 'current status-access helper must match accepted bytes'
     $guard=$bootstrapAst.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-AcceptedCheckout'},$false)
@@ -276,6 +277,7 @@ Assert-True ($bootstrapErrors.Count -eq 0) 'bootstrap must parse'
     foreach($case in @(
         @{Field='Manage';Value='622ded670d2805bf163699a77c076454e92f90bc';Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
         @{Field='Manage';Value=('f'*40);Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
+        @{Field='Worker';Value=$candidateWorkerBlob;Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
         @{Field='Worker';Value='1877c993dabe7e9d1e2a712a317a0d935ab74dfd';Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
         @{Field='Worker';Value=('f'*40);Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
         @{Field='StatusAccess';Value=('f'*40);Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},

@@ -57,6 +57,10 @@ jobs:
         shell: pwsh
         run: pwsh ./host-agent/deploy/tests/Test-CiJitLocalTaskClientContracts.ps1
 
+      - name: Run CI/JIT ABORT_ACTIVE semantic contract tests
+        shell: pwsh
+        run: pwsh ./host-agent/deploy/tests/Test-CiJitAbortActiveContracts.ps1
+
       - name: Run CI/JIT Phase-2 observe proof contract tests
         shell: pwsh
         run: pwsh ./host-agent/deploy/tests/Test-CiJitPhase2ObserveProofContracts.ps1

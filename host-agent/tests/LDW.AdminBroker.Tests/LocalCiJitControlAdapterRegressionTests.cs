@@ -198,11 +198,17 @@ internal static class LocalCiJitControlAdapterRegressionTests
         var cancel = retireBody.IndexOf("/cancel", StringComparison.Ordinal);
         Assert(secondRead >= 0 && cancel > secondRead, "cancel occurs only after the second exact stale-evidence read");
 
+        var abortHelperBody = Slice(worker, "function Invoke-AbortActive", "function Invoke-ControlGhRead");
         var abortBody = Slice(worker, "'ABORT_ACTIVE' {", "'LIST_STALE' {");
-        Assert(abortBody.Contains("$runs.Count -eq 0", StringComparison.Ordinal)
-            && abortBody.Contains("$runs.Count -ne 1", StringComparison.Ordinal)
-            && abortBody.Contains("'-Mode','Cleanup','-LocalRunId'", StringComparison.Ordinal),
-            "abort refuses absent/ambiguous ownership and reaches only exact local cleanup");
+        Assert(abortBody.Contains("Invoke-AbortActive (Join-Path $controllerRoot 'runs') $runnerEntry", StringComparison.Ordinal)
+            && !abortBody.Contains("Invoke-Child", StringComparison.Ordinal)
+            && abortHelperBody.Contains("$runs.Count -eq 0", StringComparison.Ordinal)
+            && abortHelperBody.Contains("$runs.Count -ne 1", StringComparison.Ordinal)
+            && abortHelperBody.Contains("Reason = 'LOCK_OR_RESIDUE_UNCERTAIN'", StringComparison.Ordinal)
+            && abortHelperBody.Contains("'Cleanup'", StringComparison.Ordinal)
+            && abortHelperBody.Contains("'-LocalRunId'", StringComparison.Ordinal)
+            && abortHelperBody.Contains("$runs[0].Name", StringComparison.Ordinal),
+            "abort refuses absent/residue/ambiguous ownership and reaches cleanup only through exact local run identity");
 
         var apiReadBody = Slice(worker, "function Invoke-ControlGhRead", "function Test-UnassignedQueued");
         Assert(apiReadBody.Contains("--method GET", StringComparison.Ordinal)

@@ -201,6 +201,61 @@ function Invoke-DispatcherMode([ValidateSet('Discover','Once','Recover')][string
     [pscustomobject]@{Success=$true;State='PASS';Reason='NONE';RunId=$(if($run){[long]$run}else{0});JobId=$(if($job){[long]$job}else{0});ProfileId=$profile}
 }
 
+function Invoke-AbortActive([string]$RunsPath,[string]$RunnerPath) {
+    $runs = @()
+
+    if (Test-Path -LiteralPath $RunsPath) {
+        if (-not (Test-Path -LiteralPath $RunsPath -PathType Container)) {
+            return [pscustomobject]@{
+                Success = $false
+                State = 'BLOCKED'
+                Reason = 'LOCK_OR_RESIDUE_UNCERTAIN'
+            }
+        }
+
+        $runs = @(Get-ChildItem -LiteralPath $RunsPath -Directory -Force)
+    }
+
+    if ($runs.Count -eq 0) {
+        return [pscustomobject]@{
+            Success = $false
+            State = 'BLOCKED'
+            Reason = 'NO_ACTIVE_JOB'
+        }
+    }
+
+    if ($runs.Count -ne 1 -or $runs[0].Name -cnotmatch '^[a-f0-9]{32}$') {
+        return [pscustomobject]@{
+            Success = $false
+            State = 'AMBIGUOUS'
+            Reason = 'IDENTITY_MISMATCH'
+        }
+    }
+
+    $child = Invoke-Child $RunnerPath @(
+        '-Mode',
+        'Cleanup',
+        '-LocalRunId',
+        $runs[0].Name
+    )
+
+    $ok = $child.ExitCode -eq 0 -and @(
+        $child.Lines |
+        Where-Object {
+            $_ -cin @(
+                'INTERRUPTED_CLEANUP=PASS',
+                'CLEANUP_IDEMPOTENT=PASS'
+            )
+        }
+    ).Count -eq 1
+
+    [pscustomobject]@{
+        Success = $ok
+        State = $(if ($ok) { 'PASS' } else { 'FAILED' })
+        Reason = $(if ($ok) { 'NONE' } else { 'FAILED' })
+    }
+}
+
 function Invoke-ControlGhRead([string]$Path) {
     if ($Path -cnotmatch '^repos/LowcountryDigitalWorks/(infrastructure-tools|business-operations|royal-cruise-tracker)/(actions/(runs|workflows)|pulls)(/|\?|$)') { throw 'API_SCOPE_REFUSED' }
     $raw = & gh api --method GET $Path 2>$null
@@ -286,12 +341,8 @@ try {
         'RUN_ONCE' { $r=Invoke-DispatcherMode Once; Write-Result $r.Success $r.State $r.Reason $r.ProfileId $r.RunId $r.JobId }
         'RECOVER' { $r=Invoke-DispatcherMode Recover; Write-Result $r.Success $r.State $r.Reason $r.ProfileId $r.RunId $r.JobId }
         'ABORT_ACTIVE' {
-            $runs=if(Test-Path -LiteralPath (Join-Path $controllerRoot 'runs')){@(Get-ChildItem -LiteralPath (Join-Path $controllerRoot 'runs') -Directory -Force)}else{@()}
-            if($runs.Count -eq 0){Write-Result $false 'BLOCKED' 'NO_ACTIVE_JOB';break}
-            if($runs.Count -ne 1 -or $runs[0].Name -cnotmatch '^[a-f0-9]{32}$'){Write-Result $false 'AMBIGUOUS' 'IDENTITY_MISMATCH';break}
-            $child=Invoke-Child $runnerEntry @('-Mode','Cleanup','-LocalRunId',$runs[0].Name)
-            $ok=$child.ExitCode -eq 0 -and @($child.Lines|Where-Object{$_ -cin @('INTERRUPTED_CLEANUP=PASS','CLEANUP_IDEMPOTENT=PASS')}).Count -eq 1
-            Write-Result $ok $(if($ok){'PASS'}else{'FAILED'}) $(if($ok){'NONE'}else{'FAILED'})
+            $r=Invoke-AbortActive (Join-Path $controllerRoot 'runs') $runnerEntry
+            Write-Result $r.Success $r.State $r.Reason
         }
         'LIST_STALE' {
             $items=@(Get-ProvenStaleEntries)
