@@ -5,7 +5,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $acceptedSourceCommit = '024e7c0af1adc9c3cdfbb50a2710e2f0fd9446ef'
-$acceptedClientBlob = '87e0d491dd1d3666b6161e0487529c88946cf611'
+$acceptedClientBlob = '1ac08213a486b020e022af4e203cc175641ecbed'
 $clientRelative = 'host-agent/deploy/Invoke-CiJitLocalTaskClient.ps1'
 $maximumResultPolls = 60
 $resultPollMilliseconds = 500
