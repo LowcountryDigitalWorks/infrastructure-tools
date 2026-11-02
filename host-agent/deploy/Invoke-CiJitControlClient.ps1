@@ -3,7 +3,7 @@ param(
     [ValidateSet('STATUS','DISCOVER','RUN_ONCE','RECOVER','ABORT_ACTIVE','LIST_STALE','RETIRE_STALE','GET_OPERATION_RESULT')]
     [string]$Operation,
     [long]$RunId,
-    [guid]$OperationId
+    [guid]$OperationId = [guid]::Empty
 )
 
 Set-StrictMode -Version Latest
@@ -35,7 +35,7 @@ function New-CiJitClientRequest {
     param(
         [Parameter(Mandatory)][string]$RequestedOperation,
         [long]$RequestedRunId,
-        [guid]$RequestedOperationId
+        [guid]$RequestedOperationId = [guid]::Empty
     )
 
     $operationToken = switch ($RequestedOperation) {
