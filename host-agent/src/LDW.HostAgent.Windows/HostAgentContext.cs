@@ -1,4 +1,6 @@
 using System.Text;
+using System.Security.Principal;
+using LDW.AdminBroker;
 using LDW.HostAgent.Core;
 
 namespace LDW.HostAgent.Windows;
@@ -10,16 +12,23 @@ internal sealed class HostAgentContext : ApplicationContext
     private readonly System.Windows.Forms.Timer _timer;
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
     private readonly HostAgentLiveSnapshotProvider _provider;
+    private readonly CancellationTokenSource _brokerShutdown = new();
+    private readonly ToolStripMenuItem _brokerStatusItem;
+    private readonly SynchronizationContext? _uiContext;
     private StatusForm? _statusForm;
     private HostAgentLiveSnapshot? _lastSnapshot;
 
     public HostAgentContext()
     {
+        SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
+        _uiContext = SynchronizationContext.Current;
         _provider = new HostAgentLiveSnapshotProvider(HostAgentSettingsLoader.Load());
         var menu = new ContextMenuStrip();
         menu.Items.Add("Open Status", null, (_, _) => ShowStatus());
         menu.Items.Add("Refresh Now", null, async (_, _) => await RefreshAsync());
         menu.Items.Add("Copy Diagnostics", null, (_, _) => CopyDiagnostics());
+        _brokerStatusItem = new ToolStripMenuItem("Admin Broker: starting") { Enabled = false };
+        menu.Items.Add(_brokerStatusItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) => ExitThread());
         _summaryItem = new ToolStripMenuItem("Collecting status…") { Enabled = false };
@@ -31,6 +40,60 @@ internal sealed class HostAgentContext : ApplicationContext
         _timer.Tick += async (_, _) => await RefreshAsync();
         _timer.Start();
         _ = RefreshAsync();
+        _ = RunAdminBrokerAsync();
+    }
+
+    private async Task RunAdminBrokerAsync()
+    {
+        try
+        {
+            using var identity = WindowsIdentity.GetCurrent();
+            var ownerSid = identity.User?.Value;
+            if (ownerSid is null || new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator))
+            {
+                ReportBrokerState(AdminBrokerLifecycleState.Failed);
+                return;
+            }
+
+            var server = new AdminBrokerPipeServer(
+                [ownerSid],
+                new AdminBrokerEngine(
+                    new CodyncBotHandler(),
+                    new HostAgentOperationHandler(new LocalCiJitControlAdapter()),
+                    new AdminPrivilegedOperationHandler(new LocalAdminPrivilegedControlAdapter())),
+                new AdminBrokerAuditLogger());
+
+            await AdminBrokerOwnerSessionLifecycle.RunAsync(async cancellationToken =>
+            {
+                using var pipe = server.CreateServerPipe();
+                ReportBrokerState(AdminBrokerLifecycleState.Ready);
+                await server.ServeOneAsync(pipe, cancellationToken);
+            }, ReportBrokerState, _brokerShutdown.Token);
+        }
+        catch (OperationCanceledException) when (_brokerShutdown.IsCancellationRequested)
+        {
+            ReportBrokerState(AdminBrokerLifecycleState.Stopped);
+        }
+        catch
+        {
+            ReportBrokerState(AdminBrokerLifecycleState.Failed);
+        }
+    }
+
+    private void ReportBrokerState(AdminBrokerLifecycleState state)
+    {
+        _uiContext?.Post(_ =>
+        {
+            if (_brokerStatusItem.IsDisposed) return;
+            _brokerStatusItem.Text = state switch
+            {
+                AdminBrokerLifecycleState.Starting => "Admin Broker: starting",
+                AdminBrokerLifecycleState.Ready => "Admin Broker: ready (owner session)",
+                AdminBrokerLifecycleState.Recovering => "Admin Broker: recovering",
+                AdminBrokerLifecycleState.Failed => "Admin Broker: unavailable",
+                _ => "Admin Broker: stopped"
+            };
+        }, null);
     }
 
     private async Task RefreshAsync()
@@ -106,6 +169,7 @@ internal sealed class HostAgentContext : ApplicationContext
 
     protected override void ExitThreadCore()
     {
+        _brokerShutdown.Cancel();
         _timer.Stop();
         _timer.Dispose();
         _trayIcon.Visible = false;

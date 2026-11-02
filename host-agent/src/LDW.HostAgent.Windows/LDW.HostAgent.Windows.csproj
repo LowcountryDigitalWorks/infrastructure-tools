@@ -8,6 +8,7 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="..\LDW.AdminBroker\LDW.AdminBroker.csproj" />
     <ProjectReference Include="..\LDW.HostAgent.Core\LDW.HostAgent.Core.csproj" />
   </ItemGroup>
   <ItemGroup>

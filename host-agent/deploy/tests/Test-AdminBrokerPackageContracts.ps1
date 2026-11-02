@@ -7,6 +7,10 @@ $ErrorActionPreference = 'Stop'
 $deployRoot = Split-Path -Parent $PSScriptRoot
 $publisherPath = Join-Path $deployRoot 'Publish-AdminBrokerProofPackage.ps1'
 $source = Get-Content -LiteralPath $publisherPath -Raw
+$repoRoot = [IO.Path]::GetFullPath((Join-Path $deployRoot '../..'))
+$hostProject = Get-Content -LiteralPath (Join-Path $repoRoot 'host-agent/src/LDW.HostAgent.Windows/LDW.HostAgent.Windows.csproj') -Raw
+$hostContext = Get-Content -LiteralPath (Join-Path $repoRoot 'host-agent/src/LDW.HostAgent.Windows/HostAgentContext.cs') -Raw
+$lifecycle = Get-Content -LiteralPath (Join-Path $repoRoot 'host-agent/src/LDW.AdminBroker/AdminBrokerOwnerSessionLifecycle.cs') -Raw
 $script:Assertions = 0
 
 function Assert-True([bool]$Condition,[string]$Message) {
@@ -58,5 +62,15 @@ Assert-True ($source.Contains('LDW.AdminBroker.Host.exe,LDW.LocalSecretProbe.exe
 Assert-True ($source.Contains('[Diagnostics.ProcessStartInfo]::new()',[StringComparison]::Ordinal)) 'smoke checks must launch only fixed package executables'
 Assert-True ($source.Contains('$start.FileName = $Executable',[StringComparison]::Ordinal)) 'smoke helper must use its fixed executable argument'
 Assert-True (-not $source.Contains("Environment['LDW_CORSAIR_NEON_SECRET'] =", [StringComparison]::OrdinalIgnoreCase)) 'publisher must never set a secret environment value'
+
+Assert-True ($hostProject.Contains('..\LDW.AdminBroker\LDW.AdminBroker.csproj',[StringComparison]::Ordinal)) 'existing Host Agent must compose the Admin Broker directly'
+Assert-True ($hostContext.Contains('AdminBrokerOwnerSessionLifecycle.RunAsync',[StringComparison]::Ordinal)) 'Host Agent owner-session startup must own the broker accept lifecycle'
+Assert-True ($hostContext.Contains('Admin Broker: ready (owner session)',[StringComparison]::Ordinal)) 'tray menu must expose broker readiness'
+Assert-True ($hostContext.Contains('_brokerShutdown.Cancel()',[StringComparison]::Ordinal)) 'Host Agent exit must stop the broker accept lifecycle'
+Assert-True ($lifecycle.Contains('MaximumConsecutiveFailures = 3',[StringComparison]::Ordinal)) 'broker recovery must remain bounded'
+Assert-True ($lifecycle.Contains('AdminBrokerLifecycleState.Failed',[StringComparison]::Ordinal)) 'terminal broker failure must be reported visibly'
+foreach ($forbidden in @('Register-ScheduledTask','New-Service','TcpListener','HttpListener','ProcessStartInfo','PowerShell','cmd.exe')) {
+    Assert-True (-not $lifecycle.Contains($forbidden,[StringComparison]::OrdinalIgnoreCase)) "owner-session lifecycle must not add a generic control or listener surface: $forbidden"
+}
 
 Write-Host "Admin Broker package contract assertions PASS: $script:Assertions"
