@@ -409,7 +409,6 @@ try {
                 $previousMovedToRollback = $true
                 $newRollback = Get-HostAgentWindowsRollbackContext
                 Assert-ContextEqual -Expected $previousContext -Actual $newRollback -Code 'HOST_AGENT_WINDOWS_ROLLBACK_READBACK_FAILED'
-                if ($rollbackMovedAside) { Remove-TransactionDirectoryIfSafe -Path $rollbackOld }
             }
 
             $transactionCommitted = $true
@@ -481,10 +480,12 @@ try {
         $currentBackup = Join-Path $constants.InstallRoot ('.current-' + $token)
         $rollbackOld = Join-Path $constants.InstallRoot ('.rollback-old-' + $token)
         $failedNewRollback = Join-Path $constants.InstallRoot ('.failed-new-rollback-' + $token)
+        $currentBackupReady = $false
         $transactionCommitted = $false
         $recoveryProven = $false
         try {
             $null = Copy-ManagedState -Context $installed -Destination $currentBackup
+            $currentBackupReady = $true
             if ((Get-HostAgentWindowsRunningCount) -gt 0) { throw 'HOST_AGENT_WINDOWS_RUNNING_REFUSED' }
             Assert-HostAgentWindowsSafeFile -Path $constants.ExecutablePath
             Assert-HostAgentWindowsSafeFile -Path $constants.InstalledManifestPath
@@ -498,7 +499,6 @@ try {
             Move-Item -LiteralPath $currentBackup -Destination $constants.RollbackRoot -ErrorAction Stop
             $newRollback = Get-HostAgentWindowsRollbackContext
             Assert-ContextEqual -Expected $installed -Actual $newRollback -Code 'HOST_AGENT_WINDOWS_ROLLBACK_SWAP_FAILED'
-            Remove-TransactionDirectoryIfSafe -Path $rollbackOld
 
             $transactionCommitted = $true
             [pscustomobject]@{
@@ -514,9 +514,15 @@ try {
         } catch {
             $rollbackError = $_
             try {
-                $restoreSource = if (Test-Path -LiteralPath $currentBackup -PathType Container) { $currentBackup } elseif (Test-Path -LiteralPath $constants.RollbackRoot -PathType Container) { $constants.RollbackRoot } else { $null }
-                if ($null -eq $restoreSource) { throw 'HOST_AGENT_WINDOWS_ROLLBACK_RECOVERY_SOURCE_MISSING' }
-                Restore-ManagedState -SourceDirectory $restoreSource
+                if ($currentBackupReady) {
+                    if (-not (Test-Path -LiteralPath $currentBackup -PathType Container)) { throw 'HOST_AGENT_WINDOWS_ROLLBACK_RECOVERY_SOURCE_MISSING' }
+                    $backupContext = Read-HostAgentWindowsManifest -ManifestPath (Join-Path $currentBackup $constants.InstalledManifestName) -ExecutablePath (Join-Path $currentBackup $constants.ExecutableName)
+                    Assert-ContextEqual -Expected $installed -Actual $backupContext -Code 'HOST_AGENT_WINDOWS_ROLLBACK_RECOVERY_SOURCE_MISMATCH'
+                    Restore-ManagedState -SourceDirectory $currentBackup
+                } else {
+                    $unchangedInstalled = Get-HostAgentWindowsInstalledContext
+                    Assert-ContextEqual -Expected $installed -Actual $unchangedInstalled -Code 'HOST_AGENT_WINDOWS_ROLLBACK_RECOVERY_STATE_CHANGED'
+                }
                 if (Test-Path -LiteralPath $rollbackOld -PathType Container) {
                     if (Test-Path -LiteralPath $constants.RollbackRoot -PathType Container) {
                         Move-Item -LiteralPath $constants.RollbackRoot -Destination $failedNewRollback -ErrorAction Stop

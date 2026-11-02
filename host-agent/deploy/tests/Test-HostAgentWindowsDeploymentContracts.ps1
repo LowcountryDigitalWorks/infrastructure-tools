@@ -117,7 +117,10 @@ foreach ($required in @(
     '$transactionCommitted -or $recoveryProven',
     "StartupRegistrationMutation = `$false",
     'HOST_AGENT_WINDOWS_INSTALL_ROLLBACK_FAILED',
-    'HOST_AGENT_WINDOWS_ROLLBACK_RECOVERY_FAILED'
+    'HOST_AGENT_WINDOWS_ROLLBACK_RECOVERY_FAILED',
+    'HOST_AGENT_WINDOWS_ROLLBACK_RECOVERY_SOURCE_MISMATCH',
+    'HOST_AGENT_WINDOWS_ROLLBACK_RECOVERY_STATE_CHANGED',
+    '$currentBackupReady = $true'
 )) {
     Assert-True ($manager.Contains($required,[StringComparison]::Ordinal)) "manager must preserve fail-closed deployment contract: $required"
 }
@@ -138,6 +141,8 @@ Assert-True ($lockIndex -ge 0 -and $ensureIndex -gt $lockIndex -and $installCopy
 Assert-True (([regex]::Matches($manager,[regex]::Escape('Get-HostAgentWindowsRunningCount'))).Count -ge 3) 'tray state must be rechecked under transaction protection and immediately before activation'
 $cleanupGateIndex = $manager.IndexOf('$transactionCommitted -or $recoveryProven',[StringComparison]::Ordinal)
 Assert-True ($cleanupGateIndex -ge 0) 'recovery evidence cleanup must be gated on proven commit or restoration'
+Assert-True (-not $manager.Contains("elseif (Test-Path -LiteralPath `$constants.RollbackRoot -PathType Container) { `$constants.RollbackRoot }",[StringComparison]::Ordinal)) 'rollback recovery must never substitute the rollback target for an incomplete current-state backup'
+Assert-True (-not $manager.Contains('Remove-TransactionDirectoryIfSafe -Path $rollbackOld',[StringComparison]::Ordinal)) 'rollback-old cleanup must occur only through the post-commit/post-recovery finally gate'
 
 $tempParent = [IO.Path]::GetTempPath()
 $tempRoot = Join-Path $tempParent ('ldw-host-agent-windows-deploy-contract-' + [guid]::NewGuid().ToString('N'))
