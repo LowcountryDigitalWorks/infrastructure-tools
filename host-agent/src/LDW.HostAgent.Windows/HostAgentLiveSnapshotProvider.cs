@@ -23,10 +23,10 @@ internal sealed class HostAgentLiveSnapshotProvider
     private readonly WindowsLiveAdapters _adapters;
     private readonly DeviceDefinition _definition;
 
-    public HostAgentLiveSnapshotProvider(HostAgentSettingsLoadResult configuration)
+    public HostAgentLiveSnapshotProvider(HostAgentSettingsLoadResult configuration, ICodyncHealthClient? codyncClient = null)
     {
         _configuration = configuration;
-        _adapters = new WindowsLiveAdapters(_commands, configuration.Settings);
+        _adapters = new WindowsLiveAdapters(_commands, configuration.Settings, codyncClient);
         _definition = CreateDefinition(configuration.Settings);
     }
 
@@ -46,6 +46,7 @@ internal sealed class HostAgentLiveSnapshotProvider
         var wsl = await _adapters.ObserveWslAsync(definitions[Ids.Wsl], runtime, cancellationToken);
         observations.Add(wsl.Observation);
         observations.Add(await _adapters.ObserveCursorWorkerAsync(definitions[Ids.CursorWorker], runtime, wsl.Distro, cancellationToken));
+        observations.Add(await _adapters.ObserveCodyncAsync(definitions[Ids.CodyncHost], runtime, cancellationToken));
 
         var linux = await _adapters.ObserveLinuxNodeAsync(definitions[Ids.LinuxNode], runtime, cancellationToken);
         observations.Add(linux.Observation);
@@ -87,6 +88,7 @@ internal sealed class HostAgentLiveSnapshotProvider
         [
             new ComponentDefinition(Ids.Wsl, "Ubuntu (Cursor)", ComponentKind.WslUbuntu, DesiredState.OnDemand, Required: false),
             new ComponentDefinition(Ids.CursorWorker, "Cursor Worker", ComponentKind.CursorWorker, DesiredState.RunningAfterLogin, DependsOn: [Ids.Wsl]),
+            new ComponentDefinition(Ids.CodyncHost, "Codync background host", ComponentKind.CodyncHost, DesiredState.RunningAfterLogin, Required: true),
             new ComponentDefinition(Ids.LinuxNode, settings.LinuxNode?.DisplayName ?? "Linux CI node", ComponentKind.LinuxNode, DesiredState.Reachable),
             new ComponentDefinition(Ids.GitHubRunner, settings.GitHubRunner?.DisplayName ?? "GitHub Runner", ComponentKind.GithubRunner, DesiredState.Running, DependsOn: [Ids.LinuxNode])
         ]);
@@ -152,6 +154,7 @@ internal sealed class HostAgentLiveSnapshotProvider
         public const string DesktopCommander = "remote.desktop-commander";
         public const string Wsl = "dev.wsl-ubuntu";
         public const string CursorWorker = "dev.cursor-worker";
+        public const string CodyncHost = "dev.codync-host";
         public const string LinuxNode = "dev.linux-ci-node";
         public const string GitHubRunner = "dev.github-runner";
         public const string Memory = "system.memory";

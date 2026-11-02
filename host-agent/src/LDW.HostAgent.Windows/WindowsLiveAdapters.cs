@@ -7,11 +7,20 @@ internal sealed class WindowsLiveAdapters
 {
     private readonly ReadOnlyCommandRunner _commands;
     private readonly HostAgentSettings _settings;
+    private readonly ICodyncHealthClient _codyncClient;
 
-    public WindowsLiveAdapters(ReadOnlyCommandRunner commands, HostAgentSettings settings)
+    public WindowsLiveAdapters(ReadOnlyCommandRunner commands, HostAgentSettings settings, ICodyncHealthClient? codyncClient = null)
     {
         _commands = commands;
         _settings = settings;
+        _codyncClient = codyncClient ?? new CodyncLoopbackHealthClient();
+    }
+
+    public async ValueTask<ComponentObservation> ObserveCodyncAsync(
+        ComponentDefinition component, RuntimeContext runtime, CancellationToken cancellationToken)
+    {
+        var result = await _codyncClient.ProbeHealthAsync(cancellationToken);
+        return CodyncHealthContract.Evaluate(component, runtime, result, DateTimeOffset.UtcNow);
     }
 
     public async ValueTask<ComponentObservation> ObserveTailscaleAsync(

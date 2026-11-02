@@ -10,7 +10,7 @@ public enum StatusColor { Green, Blue, Purple, Yellow, Red, Gray }
 public enum ComponentKind
 {
     OperatingSystem, Memory, Disk, Cpu, Tailscale, RustDesk, DesktopCommander,
-    WslUbuntu, CursorWorker, LinuxNode, HyperV, GithubRunner, Custom
+    WslUbuntu, CursorWorker, LinuxNode, HyperV, GithubRunner, CodyncHost, Custom
 }
 
 public sealed record RuntimeContext(OwnerSessionState OwnerSession, bool OwnerSessionSettling = false);
