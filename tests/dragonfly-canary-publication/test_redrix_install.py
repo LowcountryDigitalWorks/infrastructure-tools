@@ -101,6 +101,12 @@ class RedrixInstallTests(unittest.TestCase):
             if rel not in rollback_rels:
                 self.assertFalse((self.home / rel).exists())
 
+    def test_forced_command_matches_accepted_115_baseline(self):
+        self.assertEqual(
+            inst.FORCED_COMMAND,
+            "/usr/bin/python3 /home/eddie/.local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py",
+        )
+
     def test_install_and_readback_preserve_authorized_keys(self):
         before = self._auth_digest()
         receipt = self._install()
@@ -191,6 +197,16 @@ class RedrixInstallTests(unittest.TestCase):
 
     def test_forced_key_options_must_be_exact_and_are_never_rewritten(self):
         bad = self.line.replace("restrict,", "restrict,port-forwarding,")
+        self.authorized.write_text(bad, encoding="utf-8")
+        os.chmod(self.authorized, 0o600)
+        before = self.authorized.read_bytes()
+        with self.assertRaisesRegex(inst.InstallError, "REDRIX_TRANSPORT_KEY_IDENTITY_INVALID"):
+            self._install()
+        self.assertEqual(self.authorized.read_bytes(), before)
+
+    def test_old_direct_receiver_forced_command_is_refused_and_never_rewritten(self):
+        old_direct_command = "/home/eddie/.local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py"
+        bad = self.line.replace(inst.FORCED_COMMAND, old_direct_command)
         self.authorized.write_text(bad, encoding="utf-8")
         os.chmod(self.authorized, 0o600)
         before = self.authorized.read_bytes()
