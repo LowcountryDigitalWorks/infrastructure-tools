@@ -190,7 +190,8 @@ function Get-OutputValue([string[]]$Lines,[string]$Name) {
     $match[0].Substring($Name.Length+1)
 }
 
-function Resolve-RecoverFailureReason([string[]]$Lines) {
+function Resolve-DispatcherFailureReason([string[]]$Lines, [ValidateSet('Discover','Once','Recover')][string]$Mode) {
+    if ($Mode -notin @('Discover','Recover')) { return 'FAILED' }
     $classification = Get-OutputValue $Lines 'CLASSIFICATION'
     if (-not $classification) { return 'FAILED' }
     if ($classification -cin @(
@@ -214,16 +215,20 @@ function Resolve-RecoverFailureReason([string[]]$Lines) {
     'FAILED'
 }
 
+function Resolve-RecoverFailureReason([string[]]$Lines) {
+    Resolve-DispatcherFailureReason $Lines 'Recover'
+}
+
 function Invoke-DispatcherMode([ValidateSet('Discover','Once','Recover')][string]$Mode) {
     $args = @('-ManifestSha',$ManifestSha,'-Commit',$Commit,'-Tree',$Tree,'-Mode',$Mode)
     $result = Invoke-Child $dispatcher $args
     $code = Get-OutputValue $result.Lines 'DISPATCHER_RESULT'
     if ($result.ExitCode -ne 0 -or $code -ceq 'FAIL' -or -not $code) {
         $reason = 'FAILED'
-        if ($Mode -ceq 'Recover' -and $code -ceq 'FAIL') {
+        if ($code -ceq 'FAIL' -and ($Mode -ceq 'Recover' -or $Mode -ceq 'Discover')) {
             $invalidProperty = $result.PSObject.Properties['ClassificationInvalid']
             $classificationInvalid = $null -eq $invalidProperty -or [bool]$invalidProperty.Value
-            if (-not $classificationInvalid) { $reason = Resolve-RecoverFailureReason $result.Lines }
+            if (-not $classificationInvalid) { $reason = Resolve-DispatcherFailureReason $result.Lines $Mode }
         }
         return [pscustomobject]@{Success=$false;State='FAILED';Reason=$reason;RunId=0;JobId=0;ProfileId=$null}
     }

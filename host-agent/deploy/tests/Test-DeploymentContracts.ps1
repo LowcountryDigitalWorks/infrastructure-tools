@@ -192,16 +192,18 @@ finally {
 
 $invokeChildAst=$workerAst.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Invoke-Child'},$false)
 $getOutputValueAst=$workerAst.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Get-OutputValue'},$false)
+$resolveDispatcherFailureReasonAst=$workerAst.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Resolve-DispatcherFailureReason'},$false)
 $resolveRecoverFailureReasonAst=$workerAst.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Resolve-RecoverFailureReason'},$false)
 $invokeDispatcherModeAst=$workerAst.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Invoke-DispatcherMode'},$false)
-Assert-True ($null -ne $invokeChildAst -and $null -ne $getOutputValueAst -and $null -ne $resolveRecoverFailureReasonAst -and $null -ne $invokeDispatcherModeAst) 'RECOVER classification functions must be discoverable'
+Assert-True ($null -ne $invokeChildAst -and $null -ne $getOutputValueAst -and $null -ne $resolveDispatcherFailureReasonAst -and $null -ne $resolveRecoverFailureReasonAst -and $null -ne $invokeDispatcherModeAst) 'DISPATCHER failure classification functions must be discoverable'
 $recoverFixtureRoot = Join-Path $tempParent ('ldw-ci-jit-recover-contract-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $recoverFixtureRoot | Out-Null
 try {
     & {
-        param([string]$InvokeChildSource,[string]$GetOutputValueSource,[string]$ResolveRecoverFailureReasonSource,[string]$InvokeDispatcherModeSource,[string]$FixtureRoot)
+        param([string]$InvokeChildSource,[string]$GetOutputValueSource,[string]$ResolveDispatcherFailureReasonSource,[string]$ResolveRecoverFailureReasonSource,[string]$InvokeDispatcherModeSource,[string]$FixtureRoot)
         . ([scriptblock]::Create($InvokeChildSource))
         . ([scriptblock]::Create($GetOutputValueSource))
+        . ([scriptblock]::Create($ResolveDispatcherFailureReasonSource))
         . ([scriptblock]::Create($ResolveRecoverFailureReasonSource))
         . ([scriptblock]::Create($InvokeDispatcherModeSource))
         $script:CapacitySubreasonPattern='CAPACITY_RAM_RESERVE_4GIB_REQUIRED|CAPACITY_CPU_RESERVE_REQUIRED|CAPACITY_CPU_LOAD_TOO_HIGH|CAPACITY_DISK_RESERVE_40GIB_REQUIRED|DEFAULT_NAT_SWITCH_REQUIRED'
@@ -244,6 +246,22 @@ try {
         Assert-True ((Resolve-RecoverFailureReason @('CLASSIFICATION=FUTURE_UNKNOWN_CLASS')) -ceq 'FAILED') 'unknown bounded classification must not widen external reason codes'
         Assert-True ((Resolve-RecoverFailureReason @()) -ceq 'FAILED') 'missing classification must collapse fail closed'
 
+        # Discover failure classification resolver tests
+        Assert-True ((Resolve-DispatcherFailureReason @('CLASSIFICATION=API_READ_FAILED') 'Discover') -ceq 'QUEUE_UNAVAILABLE') 'Discover API_READ_FAILED must map to QUEUE_UNAVAILABLE'
+        Assert-True ((Resolve-DispatcherFailureReason @('CLASSIFICATION=QUEUE_STALE') 'Discover') -ceq 'QUEUE_UNAVAILABLE') 'Discover QUEUE_STALE must map to QUEUE_UNAVAILABLE'
+        Assert-True ((Resolve-DispatcherFailureReason @('CLASSIFICATION=PREFLIGHT_OWNER_UNTRUSTED') 'Discover') -ceq 'PROVENANCE_MISMATCH') 'Discover PREFLIGHT_OWNER_UNTRUSTED must map to PROVENANCE_MISMATCH'
+        Assert-True ((Resolve-DispatcherFailureReason @('CLASSIFICATION=MANIFEST_HASH_DRIFT') 'Discover') -ceq 'PROVENANCE_MISMATCH') 'Discover MANIFEST_HASH_DRIFT must map to PROVENANCE_MISMATCH'
+        Assert-True ((Resolve-DispatcherFailureReason @('CLASSIFICATION=DISPATCHER_BUSY_OR_LOCK_UNCERTAIN') 'Discover') -ceq 'LOCK_OR_RESIDUE_UNCERTAIN') 'Discover DISPATCHER_BUSY_OR_LOCK_UNCERTAIN must map to LOCK_OR_RESIDUE_UNCERTAIN'
+        Assert-True ((Resolve-DispatcherFailureReason @('CLASSIFICATION=RECOVERY_BUSY_OR_UNCERTAIN') 'Discover') -ceq 'LOCK_OR_RESIDUE_UNCERTAIN') 'Discover RECOVERY_BUSY_OR_UNCERTAIN must map to LOCK_OR_RESIDUE_UNCERTAIN'
+        Assert-True ((Resolve-DispatcherFailureReason @('CLASSIFICATION=FUTURE_UNKNOWN_CLASS') 'Discover') -ceq 'FAILED') 'Discover unknown classification must collapse to FAILED'
+        Assert-True ((Resolve-DispatcherFailureReason @() 'Discover') -ceq 'FAILED') 'Discover missing classification must collapse to FAILED'
+        Assert-True ((Resolve-DispatcherFailureReason $duplicate.Lines 'Discover') -ceq 'FAILED') 'Discover duplicate classification must collapse to FAILED'
+
+        # Once mode failure classification must always return FAILED
+        Assert-True ((Resolve-DispatcherFailureReason @('CLASSIFICATION=QUEUE_UNAVAILABLE') 'Once') -ceq 'FAILED') 'Once mode must reject failure classification'
+        Assert-True ((Resolve-DispatcherFailureReason @('CLASSIFICATION=PREFLIGHT_OWNER_UNTRUSTED') 'Once') -ceq 'FAILED') 'Once mode must reject provenance classification'
+        Assert-True ((Resolve-DispatcherFailureReason @('CLASSIFICATION=RECOVERY_BUSY_OR_UNCERTAIN') 'Once') -ceq 'FAILED') 'Once mode must reject lock classification'
+
         $script:FixtureChildResult=$null
         function Invoke-Child([string]$Path,[string[]]$Arguments){$script:FixtureChildResult}
         $originalProgramData=$env:ProgramData
@@ -265,13 +283,75 @@ try {
             $missingInvalidMarker=Invoke-DispatcherMode Recover
             Assert-True (-not $missingInvalidMarker.Success -and $missingInvalidMarker.Reason -ceq 'FAILED') 'missing classification-invalid marker must fail closed to generic FAILED'
 
+            # Discover success/idle/capacity semantics
+            $script:FixtureChildResult=[pscustomobject]@{ExitCode=0;Lines=@('DISPATCHER_RESULT=IDLE');ClassificationInvalid=$false}
+            $idleDiscover=Invoke-DispatcherMode Discover
+            Assert-True ($idleDiscover.Success -and $idleDiscover.State -ceq 'PASS' -and $idleDiscover.Reason -ceq 'NONE') 'DISCOVER IDLE must remain PASS/NONE'
+
+            $script:FixtureChildResult=[pscustomobject]@{ExitCode=0;Lines=@('DISPATCHER_RESULT=DISCOVERED','DISCOVERED_RUN_ID=123','DISCOVERED_JOB_ID=456');ClassificationInvalid=$false}
+            $discovered=Invoke-DispatcherMode Discover
+            Assert-True ($discovered.Success -and $discovered.State -ceq 'PASS' -and $discovered.Reason -ceq 'NONE' -and $discovered.RunId -eq 123 -and $discovered.JobId -eq 456) 'DISCOVERED must remain PASS/NONE with run and job IDs'
+
+            $script:FixtureChildResult=[pscustomobject]@{ExitCode=0;Lines=@('DISPATCHER_RESULT=BUSY');ClassificationInvalid=$false}
+            $busyDiscover=Invoke-DispatcherMode Discover
+            Assert-True (-not $busyDiscover.Success -and $busyDiscover.State -ceq 'BLOCKED' -and $busyDiscover.Reason -ceq 'BUSY') 'DISCOVER BUSY must remain BLOCKED/BUSY'
+
+            $script:FixtureChildResult=[pscustomobject]@{ExitCode=0;Lines=@('DISPATCHER_RESULT=CAPACITY','CAPACITY_SUBREASON=CAPACITY_RAM_RESERVE_4GIB_REQUIRED');ClassificationInvalid=$false}
+            $capacityDiscover=Invoke-DispatcherMode Discover
+            Assert-True (-not $capacityDiscover.Success -and $capacityDiscover.State -ceq 'BLOCKED' -and $capacityDiscover.Reason -ceq 'CAPACITY_RAM_RESERVE_4GIB_REQUIRED') 'DISCOVER CAPACITY must preserve subreason'
+
+            # Discover failure classification mappings
+            $script:FixtureChildResult=[pscustomobject]@{ExitCode=1;Lines=@('DISPATCHER_RESULT=FAIL','CLASSIFICATION=API_READ_FAILED');ClassificationInvalid=$false}
+            $failedDiscoverQueue=Invoke-DispatcherMode Discover
+            Assert-True (-not $failedDiscoverQueue.Success -and $failedDiscoverQueue.State -ceq 'FAILED' -and $failedDiscoverQueue.Reason -ceq 'QUEUE_UNAVAILABLE') 'DISCOVER API_READ_FAILED must map to QUEUE_UNAVAILABLE'
+
+            $script:FixtureChildResult=[pscustomobject]@{ExitCode=1;Lines=@('DISPATCHER_RESULT=FAIL','CLASSIFICATION=PREFLIGHT_OWNER_UNTRUSTED');ClassificationInvalid=$false}
+            $failedDiscoverProv=Invoke-DispatcherMode Discover
+            Assert-True (-not $failedDiscoverProv.Success -and $failedDiscoverProv.State -ceq 'FAILED' -and $failedDiscoverProv.Reason -ceq 'PROVENANCE_MISMATCH') 'DISCOVER PREFLIGHT_OWNER_UNTRUSTED must map to PROVENANCE_MISMATCH'
+
+            $script:FixtureChildResult=[pscustomobject]@{ExitCode=1;Lines=@('DISPATCHER_RESULT=FAIL','CLASSIFICATION=DISPATCHER_BUSY_OR_LOCK_UNCERTAIN');ClassificationInvalid=$false}
+            $failedDiscoverLock=Invoke-DispatcherMode Discover
+            Assert-True (-not $failedDiscoverLock.Success -and $failedDiscoverLock.State -ceq 'FAILED' -and $failedDiscoverLock.Reason -ceq 'LOCK_OR_RESIDUE_UNCERTAIN') 'DISCOVER DISPATCHER_BUSY_OR_LOCK_UNCERTAIN must map to LOCK_OR_RESIDUE_UNCERTAIN'
+
             $script:FixtureChildResult=[pscustomobject]@{ExitCode=1;Lines=@('DISPATCHER_RESULT=FAIL','CLASSIFICATION=RECOVERY_BUSY_OR_UNCERTAIN');ClassificationInvalid=$false}
-            $failedDiscover=Invoke-DispatcherMode Discover
-            Assert-True (-not $failedDiscover.Success -and $failedDiscover.Reason -ceq 'FAILED') 'DISCOVER failure reason contract must not widen from RECOVER diagnosis'
+            $failedDiscoverRecov=Invoke-DispatcherMode Discover
+            Assert-True (-not $failedDiscoverRecov.Success -and $failedDiscoverRecov.State -ceq 'FAILED' -and $failedDiscoverRecov.Reason -ceq 'LOCK_OR_RESIDUE_UNCERTAIN') 'DISCOVER RECOVERY_BUSY_OR_UNCERTAIN must map to LOCK_OR_RESIDUE_UNCERTAIN'
+
+            # Discover fail-closed cases
+            $script:FixtureChildResult=[pscustomobject]@{ExitCode=1;Lines=@('DISPATCHER_RESULT=FAIL','CLASSIFICATION=FUTURE_UNKNOWN_CLASS');ClassificationInvalid=$false}
+            $failedDiscoverUnknown=Invoke-DispatcherMode Discover
+            Assert-True (-not $failedDiscoverUnknown.Success -and $failedDiscoverUnknown.Reason -ceq 'FAILED') 'DISCOVER unknown classification must collapse to generic FAILED'
+
+            $script:FixtureChildResult=[pscustomobject]@{ExitCode=1;Lines=@('DISPATCHER_RESULT=FAIL');ClassificationInvalid=$false}
+            $failedDiscoverMissing=Invoke-DispatcherMode Discover
+            Assert-True (-not $failedDiscoverMissing.Success -and $failedDiscoverMissing.Reason -ceq 'FAILED') 'DISCOVER missing classification must collapse to generic FAILED'
+
+            $script:FixtureChildResult=[pscustomobject]@{ExitCode=1;Lines=@('DISPATCHER_RESULT=FAIL','CLASSIFICATION=API_READ_FAILED');ClassificationInvalid=$true}
+            $invalidDiscover=Invoke-DispatcherMode Discover
+            Assert-True (-not $invalidDiscover.Success -and $invalidDiscover.Reason -ceq 'FAILED') 'DISCOVER valid plus malformed classification must collapse to generic FAILED'
+
+            $script:FixtureChildResult=[pscustomobject]@{ExitCode=1;Lines=@('DISPATCHER_RESULT=FAIL','CLASSIFICATION=API_READ_FAILED')}
+            $missingInvalidDiscover=Invoke-DispatcherMode Discover
+            Assert-True (-not $missingInvalidDiscover.Success -and $missingInvalidDiscover.Reason -ceq 'FAILED') 'DISCOVER missing classification-invalid marker must collapse to generic FAILED'
+
+            $script:FixtureChildResult=[pscustomobject]@{ExitCode=1;Lines=@('DISPATCHER_RESULT=FAIL','CLASSIFICATION=API_READ_FAILED','CLASSIFICATION=QUEUE_STALE');ClassificationInvalid=$false}
+            $dupDiscover=Invoke-DispatcherMode Discover
+            Assert-True (-not $dupDiscover.Success -and $dupDiscover.Reason -ceq 'FAILED') 'DISCOVER duplicate classification must collapse to generic FAILED'
+
+            # RUN_ONCE failure contract must remain generic FAILED
+            $script:FixtureChildResult=[pscustomobject]@{ExitCode=1;Lines=@('DISPATCHER_RESULT=FAIL','CLASSIFICATION=RECOVERY_BUSY_OR_UNCERTAIN');ClassificationInvalid=$false}
             $failedOnce=Invoke-DispatcherMode Once
-            Assert-True (-not $failedOnce.Success -and $failedOnce.Reason -ceq 'FAILED') 'RUN_ONCE failure reason contract must not widen from RECOVER diagnosis'
+            Assert-True (-not $failedOnce.Success -and $failedOnce.Reason -ceq 'FAILED') 'RUN_ONCE failure reason contract must remain generic FAILED for lock uncertainty'
+
+            $script:FixtureChildResult=[pscustomobject]@{ExitCode=1;Lines=@('DISPATCHER_RESULT=FAIL','CLASSIFICATION=API_READ_FAILED');ClassificationInvalid=$false}
+            $failedOnceQueue=Invoke-DispatcherMode Once
+            Assert-True (-not $failedOnceQueue.Success -and $failedOnceQueue.Reason -ceq 'FAILED') 'RUN_ONCE failure reason contract must remain generic FAILED for queue failures'
+
+            $script:FixtureChildResult=[pscustomobject]@{ExitCode=1;Lines=@('DISPATCHER_RESULT=FAIL','CLASSIFICATION=PREFLIGHT_OWNER_UNTRUSTED');ClassificationInvalid=$false}
+            $failedOnceProv=Invoke-DispatcherMode Once
+            Assert-True (-not $failedOnceProv.Success -and $failedOnceProv.Reason -ceq 'FAILED') 'RUN_ONCE failure reason contract must remain generic FAILED for provenance failures'
         } finally { $env:ProgramData=$originalProgramData }
-    } $invokeChildAst.Extent.Text $getOutputValueAst.Extent.Text $resolveRecoverFailureReasonAst.Extent.Text $invokeDispatcherModeAst.Extent.Text $recoverFixtureRoot
+    } $invokeChildAst.Extent.Text $getOutputValueAst.Extent.Text $resolveDispatcherFailureReasonAst.Extent.Text $resolveRecoverFailureReasonAst.Extent.Text $invokeDispatcherModeAst.Extent.Text $recoverFixtureRoot
 }
 finally {
     if (Test-Path -LiteralPath $recoverFixtureRoot) { Remove-Item -LiteralPath $recoverFixtureRoot -Recurse -Force }
