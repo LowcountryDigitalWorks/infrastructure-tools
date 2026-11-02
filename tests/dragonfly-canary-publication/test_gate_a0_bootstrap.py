@@ -99,13 +99,13 @@ class GateA0BootstrapTests(unittest.TestCase):
         return exit_code, output.getvalue(), response, opener
 
     def test_accepted_source_identity_is_exact_and_matches_checked_out_bytes(self):
-        self.assertEqual(bootstrap.ACCEPTED_A0_COMMIT, "0f68aa6984b1553d5e76bc4297020d0a0bc14eaf")
-        self.assertEqual(bootstrap.ACCEPTED_A0_BLOB, "4fce9a9c3868a7624cf8d5858d0366f6ed402e9a")
-        self.assertEqual(bootstrap.ACCEPTED_A0_SHA256, "a3776ae51dd8a20cd915879f0bf524081518ba0a89bf956f0a7f2e7e57b4f6fd")
-        self.assertEqual(bootstrap.ACCEPTED_A0_BYTES, 25736)
+        self.assertEqual(bootstrap.ACCEPTED_A0_COMMIT, "dfc7640d7f572595f4b883dd17260a35aa329257")
+        self.assertEqual(bootstrap.ACCEPTED_A0_BLOB, "0d674f6a5686b53d6c86b4f54b8cc8ca69fa9a49")
+        self.assertEqual(bootstrap.ACCEPTED_A0_SHA256, "93f1577470b02c0092b9b0075786b59bfff0a638ee6848ac244a85fc71080776")
+        self.assertEqual(bootstrap.ACCEPTED_A0_BYTES, 27202)
         self.assertEqual(
             bootstrap.ACCEPTED_A0_URL,
-            "https://raw.githubusercontent.com/LowcountryDigitalWorks/infrastructure-tools/0f68aa6984b1553d5e76bc4297020d0a0bc14eaf/tools/dragonfly_gate_a0.py",
+            "https://raw.githubusercontent.com/LowcountryDigitalWorks/infrastructure-tools/dfc7640d7f572595f4b883dd17260a35aa329257/tools/dragonfly_gate_a0.py",
         )
         self.assertEqual(bootstrap.MAX_SOURCE_BYTES, 65536)
         self.assertEqual(bootstrap.PYTHON, "/usr/bin/python3")
@@ -125,7 +125,7 @@ class GateA0BootstrapTests(unittest.TestCase):
         self.assertEqual(argv[:4], ["/usr/bin/python3", "-I", "-B", "-c"])
         self.assertIn(bootstrap.ACCEPTED_A0_URL, argv[4])
         self.assertIn(bootstrap.ACCEPTED_A0_SHA256, argv[4])
-        self.assertIn("EXPECTED_BYTES=25736", argv[4])
+        self.assertIn("EXPECTED_BYTES=27202", argv[4])
         self.assertEqual(
             argv[5:],
             [
