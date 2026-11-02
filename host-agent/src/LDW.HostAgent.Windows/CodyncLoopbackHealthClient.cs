@@ -15,16 +15,22 @@ internal sealed class CodyncLoopbackHealthClient : ICodyncHealthClient
         }
         else
         {
-            var handler = new SocketsHttpHandler
-            {
-                ConnectTimeout = TimeSpan.FromSeconds(2),
-                AutomaticDecompression = System.Net.DecompressionMethods.None
-            };
+            var handler = CreateOwnedHandler();
             _httpClient = new HttpClient(handler, disposeHandler: true)
             {
                 Timeout = TimeSpan.FromSeconds(3)
             };
         }
+    }
+
+    internal static SocketsHttpHandler CreateOwnedHandler()
+    {
+        return new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            ConnectTimeout = TimeSpan.FromSeconds(2),
+            AutomaticDecompression = System.Net.DecompressionMethods.None
+        };
     }
 
     public async ValueTask<CodyncProbeResult> ProbeHealthAsync(CancellationToken cancellationToken)

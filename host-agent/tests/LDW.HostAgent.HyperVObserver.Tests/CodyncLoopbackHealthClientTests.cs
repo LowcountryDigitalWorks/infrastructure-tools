@@ -35,7 +35,31 @@ internal static class CodyncLoopbackHealthClientTests
             assert(!result.TimedOut && !result.ConnectionRefused && !result.Unavailable, "successful probe must not report failure flags");
         }
 
-        // 2. Non-200 responses (e.g. 500, 404)
+        // 2. Production-owned handler must fail closed on redirects, and a 3xx must not trigger a second request.
+        using (var ownedHandler = CodyncLoopbackHealthClient.CreateOwnedHandler())
+        {
+            assert(!ownedHandler.AllowAutoRedirect, "production-owned handler must disable automatic redirects");
+        }
+
+        var redirectRequests = new List<Uri?>();
+        var redirectHandler = new MockHttpHandler(req =>
+        {
+            redirectRequests.Add(req.RequestUri);
+            return new HttpResponseMessage(HttpStatusCode.Redirect)
+            {
+                Headers = { Location = new Uri("https://example.invalid/escape") }
+            };
+        });
+        using (var httpClient = new HttpClient(redirectHandler))
+        {
+            var client = new CodyncLoopbackHealthClient(httpClient);
+            var result = client.ProbeHealthAsync(CancellationToken.None).AsTask().GetAwaiter().GetResult();
+            assert(result.HttpStatusCode == 302, "redirect response must be surfaced as 302 rather than followed");
+            assert(redirectRequests.Count == 1, "redirect response must not produce a second request");
+            assert(redirectRequests[0] == CodyncHealthContract.EndpointUri, "redirect test request must remain fixed to the loopback endpoint");
+        }
+
+        // 3. Non-200 responses (e.g. 500, 404)
         var error500Handler = new MockHttpHandler(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError)
         {
             Content = new StringContent("{\"error\":\"Internal server error details\"}")
@@ -56,7 +80,7 @@ internal static class CodyncLoopbackHealthClientTests
             assert(result.HttpStatusCode == 404, "not found must report status code 404");
         }
 
-        // 3. Timeout handling
+        // 4. Timeout handling
         var timeoutHandler = new MockHttpHandler(_ => throw new TaskCanceledException("simulated client timeout"));
         using (var httpClient = new HttpClient(timeoutHandler))
         {
@@ -66,7 +90,7 @@ internal static class CodyncLoopbackHealthClientTests
             assert(result.HttpStatusCode is null, "timed out probe has no status code");
         }
 
-        // 4. Connection refused handling
+        // 5. Connection refused handling
         var connectionRefusedHandler = new MockHttpHandler(_ =>
             throw new HttpRequestException("connection refused", new SocketException((int)SocketError.ConnectionRefused)));
         using (var httpClient = new HttpClient(connectionRefusedHandler))
@@ -87,7 +111,7 @@ internal static class CodyncLoopbackHealthClientTests
             assert(result.ConnectionRefused, "direct SocketException with ConnectionRefused sets flag");
         }
 
-        // 5. Generic network failure / unavailable
+        // 6. Generic network failure / unavailable
         var genericNetworkHandler = new MockHttpHandler(_ =>
             throw new HttpRequestException("network down"));
         using (var httpClient = new HttpClient(genericNetworkHandler))
@@ -98,7 +122,7 @@ internal static class CodyncLoopbackHealthClientTests
             assert(!result.ConnectionRefused, "generic error is not connection refused");
         }
 
-        // 6. Definition and Snapshot integration through HostAgentLiveSnapshotProvider
+        // 7. Definition and Snapshot integration through HostAgentLiveSnapshotProvider
         var settingsResult = HostAgentSettingsLoader.Load();
         var mockHealthyClient = new MockCodyncHealthClient(new CodyncProbeResult(200));
         var provider = new HostAgentLiveSnapshotProvider(settingsResult, mockHealthyClient);
