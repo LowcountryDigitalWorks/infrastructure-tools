@@ -18,7 +18,9 @@ public static class AdminBrokerOwnerSessionLifecycle
         Func<CancellationToken, Task> serveOneRequestAsync,
         Action<AdminBrokerLifecycleState> reportState,
         CancellationToken cancellationToken) =>
-        RunCoreAsync(serveOneRequestAsync, reportState, cancellationToken, MaximumConsecutiveFailures, Task.Delay);
+        Task.Run(
+            () => RunCoreAsync(serveOneRequestAsync, reportState, cancellationToken, MaximumConsecutiveFailures, Task.Delay),
+            CancellationToken.None);
 
     internal static async Task RunCoreAsync(
         Func<CancellationToken, Task> serveOneRequestAsync,
