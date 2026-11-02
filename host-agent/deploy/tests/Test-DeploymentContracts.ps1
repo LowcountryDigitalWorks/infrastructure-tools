@@ -267,7 +267,7 @@ try {
 
             $script:FixtureChildResult=[pscustomobject]@{ExitCode=1;Lines=@('DISPATCHER_RESULT=FAIL','CLASSIFICATION=RECOVERY_BUSY_OR_UNCERTAIN');ClassificationInvalid=$false}
             $failedDiscover=Invoke-DispatcherMode Discover
-            Assert-True (-not $failedDiscover.Success -and $failedDiscover.Reason -ceq 'FAILED') 'DISCOVER failure reason contract must not widen from RECOVER diagnosis'
+            Assert-True (-not $failedDiscover.Success -and $failedDiscover.Reason -ceq 'FAILED') 'DISCOVER must not map Recover-only failure classifications'
             $failedOnce=Invoke-DispatcherMode Once
             Assert-True (-not $failedOnce.Success -and $failedOnce.Reason -ceq 'FAILED') 'RUN_ONCE failure reason contract must not widen from RECOVER diagnosis'
         } finally { $env:ProgramData=$originalProgramData }
@@ -314,12 +314,13 @@ foreach ($forbidden in @('Invoke-WebRequest','Invoke-RestMethod','curl.exe','Sta
     Assert-True (-not $bootstrapSource.Contains($forbidden, [StringComparison]::OrdinalIgnoreCase)) "CI/JIT bootstrap must not add network or task-definition primitive $forbidden"
 }
 
-# Verify the bootstrap pins the accepted merged #172 source and rejects any
-# installer/worker/status-access drift.
+# Verify the bootstrap pins the accepted merged #172 source while the exact
+# #179 worker candidate remains source-review-only until a later provenance refresh.
 $bootstrapTokens=$null;$bootstrapErrors=$null
 $bootstrapAst=[Management.Automation.Language.Parser]::ParseInput($bootstrapSource,[ref]$bootstrapTokens,[ref]$bootstrapErrors)
 Assert-True ($bootstrapErrors.Count -eq 0) 'bootstrap must parse'
 & {
+    $expectedCandidateWorkerBlob = '47fb3d8a81ca4c8abbae4c691a7fbcfc4c1b7cd6'
     foreach($name in @('acceptedSourceCommit','acceptedManageBlob','acceptedWorkerBlob','acceptedStatusAccessBlob','manageRelative','workerRelative','statusAccessRelative')){
         $assignment=$bootstrapAst.Find({param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -ceq ('$'+$name)},$false)
         . ([scriptblock]::Create($assignment.Extent.Text))
@@ -333,7 +334,9 @@ Assert-True ($bootstrapErrors.Count -eq 0) 'bootstrap must parse'
     $currentManage=(& git -C $deployRoot rev-parse ('HEAD:'+$manageRelative)).Trim()
     Assert-True ($LASTEXITCODE -eq 0 -and $currentManage -ceq $acceptedManageBlob) 'current manager must match accepted merged manager bytes'
     $currentWorker=(& git -C $deployRoot rev-parse ('HEAD:'+$workerRelative)).Trim()
-    Assert-True ($LASTEXITCODE -eq 0 -and $currentWorker -ceq $acceptedWorkerBlob) 'current worker must match accepted #172 merged worker bytes exactly'
+    Assert-True ($LASTEXITCODE -eq 0 -and $currentWorker -ceq $expectedCandidateWorkerBlob) 'source-review worker must match exact #179 candidate blob'
+    Assert-True ($acceptedWorkerBlob -cne $currentWorker) 'candidate and accepted runtime worker identities must remain split until post-merge provenance refresh'
+    Assert-True (-not $bootstrapSource.Contains($expectedCandidateWorkerBlob,[StringComparison]::Ordinal)) 'bootstrap must not promote the #179 candidate during source review'
     $currentStatusAccess=(& git -C $deployRoot rev-parse ('HEAD:'+$statusAccessRelative)).Trim()
     Assert-True ($LASTEXITCODE -eq 0 -and $currentStatusAccess -ceq $acceptedStatusAccessBlob) 'current status-access helper must match accepted bytes'
     $guard=$bootstrapAst.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-AcceptedCheckout'},$false)
