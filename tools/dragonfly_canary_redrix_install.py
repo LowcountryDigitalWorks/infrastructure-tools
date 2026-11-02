@@ -33,7 +33,7 @@ RECEIPT_REL = Path(".local/state/ldw/dragonfly-canary-publication/install-receip
 AUTHORIZED_KEYS_REL = Path(".ssh/authorized_keys")
 AUTHORIZED_KEYS2_REL = Path(".ssh/authorized_keys2")
 RECEIVER_REL = Path(".local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py")
-FORCED_COMMAND = "/home/eddie/.local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py"
+FORCED_COMMAND = "/usr/bin/python3 /home/eddie/.local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py"
 
 CURRENT = (
     ("dragonfly-jit/ssh_forced_receiver.py", "88b527fa4b9b7060216c661d58edf2e97034dafa", RECEIVER_REL, 0o700),

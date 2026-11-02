@@ -11,7 +11,7 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
-ACCEPTED_MAIN_COMMIT = "f736bbd36da4e99bb10c6e33b0dfba3bd7074f0b"
+ACCEPTED_MAIN_COMMIT = "d1e73c49b80509eba44170d7b449eab6b269bd70"
 
 
 def git_tree_blob(commit: str, path: str) -> str:
@@ -47,7 +47,7 @@ def git_blob(data: bytes) -> str:
 class FakeInstaller:
     SOURCE_COMMIT = "78a3a23b1a9dac59698a09cec2dd6c9a81e4a3ca"
     SOURCE_TREE = "5f54ee5b76f49250db1358f058745cb30b6587ef"
-    FORCED_COMMAND = "/home/eddie/.local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py"
+    FORCED_COMMAND = "/usr/bin/python3 /home/eddie/.local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py"
     CURRENT = (
         ("payload/a.py", "aa" * 20, Path(".local/lib/ldw-dragonfly-jit/a.py"), 0o600),
         ("payload/b.py", "bb" * 20, Path(".local/lib/ldw-dragonfly-jit/b.py"), 0o600),
@@ -216,6 +216,12 @@ class GateA4Tests(unittest.TestCase):
         with mock.patch.object(a4.socket, "gethostname", return_value="penguin"):
             with self.assertRaisesRegex(a4.A4Error, "A4_LOCAL_HOST_IDENTITY_MISMATCH"):
                 a4.collect_a4(**self.kwargs)
+
+    def test_installer_forced_command_matches_accepted_115_baseline(self):
+        self.assertEqual(
+            self.installer.FORCED_COMMAND,
+            "/usr/bin/python3 /home/eddie/.local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py",
+        )
 
     def test_pinned_dependency_blobs_match_accepted_main_git_objects(self):
         self.assertEqual(

@@ -225,6 +225,10 @@ class GateA0Tests(unittest.TestCase):
         current_only = {rel: value for rel, value in current.items() if rel not in rollback}
         self.assertEqual(a0.OPTIONAL_ACCEPTED_CURRENT, current_only)
         self.assertEqual(a0.FORCED_COMMAND, installer.FORCED_COMMAND)
+        self.assertEqual(
+            a0.FORCED_COMMAND,
+            "/usr/bin/python3 /home/eddie/.local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py",
+        )
 
     def test_source_is_standalone_read_only_and_has_no_checkout_or_remote_action_surface(self):
         text = A0_PATH.read_text(encoding="utf-8")
@@ -375,6 +379,15 @@ class GateA0Tests(unittest.TestCase):
         with self.assertRaisesRegex(a0.A0Error, "A0_TRANSPORT_KEY_IDENTITY_INVALID"):
             self.collect(expected_transport_key_sha256="0" * 64)
         self.auth.write_text(f"ssh-ed25519 {self.key_data} synthetic\n", encoding="utf-8")
+        with self.assertRaisesRegex(a0.A0Error, "A0_TRANSPORT_KEY_IDENTITY_INVALID"):
+            self.collect()
+
+    def test_old_direct_receiver_forced_command_is_refused(self):
+        old_direct_command = "/home/eddie/.local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py"
+        self.auth.write_text(
+            f'restrict,command="{old_direct_command}" ssh-ed25519 {self.key_data} synthetic\n',
+            encoding="utf-8",
+        )
         with self.assertRaisesRegex(a0.A0Error, "A0_TRANSPORT_KEY_IDENTITY_INVALID"):
             self.collect()
 

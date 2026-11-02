@@ -19,9 +19,9 @@ import socket
 import sys
 from types import ModuleType
 
-ACCEPTED_MAIN_COMMIT = "f736bbd36da4e99bb10c6e33b0dfba3bd7074f0b"
-INSTALLER_BLOB = "ed8337a74a85ddfe4f1afff8fe02789fd533f51f"
-A0_BLOB = "fc9784a52d5f0d20b02c5d95ad4adc2e86ae04e9"
+ACCEPTED_MAIN_COMMIT = "d1e73c49b80509eba44170d7b449eab6b269bd70"
+INSTALLER_BLOB = "03d149fab192f01c9d2c5cffd08541b095b8384c"
+A0_BLOB = "4fce9a9c3868a7624cf8d5858d0366f6ed402e9a"
 PRODUCTION_HOME = Path("/home/eddie")
 PRODUCTION_UID = 1000
 ACCEPTED_LOCAL_ALIASES = {"redrix", "penguin"}

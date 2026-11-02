@@ -13,10 +13,10 @@ import argparse
 import re
 import shlex
 
-ACCEPTED_A0_COMMIT = "5815e4e4e5ea4719c9d694b1ccefa1808c927ac7"
-ACCEPTED_A0_BLOB = "fc9784a52d5f0d20b02c5d95ad4adc2e86ae04e9"
-ACCEPTED_A0_SHA256 = "eed2ab4ef830a119b6c73915c20a07c354be43844806b692277004bc6d0461b7"
-ACCEPTED_A0_BYTES = 25719
+ACCEPTED_A0_COMMIT = "0f68aa6984b1553d5e76bc4297020d0a0bc14eaf"
+ACCEPTED_A0_BLOB = "4fce9a9c3868a7624cf8d5858d0366f6ed402e9a"
+ACCEPTED_A0_SHA256 = "a3776ae51dd8a20cd915879f0bf524081518ba0a89bf956f0a7f2e7e57b4f6fd"
+ACCEPTED_A0_BYTES = 25736
 ACCEPTED_A0_PATH = "tools/dragonfly_gate_a0.py"
 ACCEPTED_A0_URL = (
     "https://raw.githubusercontent.com/LowcountryDigitalWorks/infrastructure-tools/"
