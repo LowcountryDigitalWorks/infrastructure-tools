@@ -29,6 +29,15 @@ function Get-LdwAdjunctGitBlobSha1 {
     finally { $sha.Dispose() }
 }
 
+function Get-LdwAdjunctRelativePath {
+    param([Parameter(Mandatory)][string]$Root,[Parameter(Mandatory)][string]$Path)
+    $rootFull = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar)
+    $pathFull = [IO.Path]::GetFullPath($Path)
+    $prefix = $rootFull + [IO.Path]::DirectorySeparatorChar
+    if (-not $pathFull.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)) { throw 'ADJUNCT_TREE_PATH_OUTSIDE_ROOT' }
+    $pathFull.Substring($prefix.Length).Replace('\','/')
+}
+
 function Assert-LdwAdjunctRepository {
     param([Parameter(Mandatory)][string]$RepositoryRoot)
     $status = & git -C $RepositoryRoot status --porcelain --untracked-files=normal 2>$null
@@ -192,7 +201,7 @@ function Test-LdwDragonflyCanaryAdjunctCore {
     }
     $expectedPaths = @($script:Files.path)
     $actualPaths = @(Get-ChildItem -LiteralPath $ReleaseRoot -Recurse -Force -File | ForEach-Object {
-        [IO.Path]::GetRelativePath($ReleaseRoot,$_.FullName).Replace('\','/')
+        Get-LdwAdjunctRelativePath -Root $ReleaseRoot -Path $_.FullName
     })
     if (@($manifest.files).Count -ne $script:Files.Count -or
         @(Compare-Object $expectedPaths @($manifest.files.path) -CaseSensitive).Count -or
@@ -248,7 +257,8 @@ function New-LdwDragonflyCanaryAdjunctCore {
             files=@($records | Sort-Object path)
         }
         $manifestPath = Join-Path $bundle 'manifest.json'
-        $manifest | ConvertTo-Json -Depth 6 -Compress | Set-Content -LiteralPath $manifestPath -Encoding utf8NoBOM
+        $manifestJson = $manifest | ConvertTo-Json -Depth 6 -Compress
+        [IO.File]::WriteAllText($manifestPath, $manifestJson + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
         if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
             foreach ($item in @(Get-ChildItem -LiteralPath $bundle -Recurse -Force)) {
                 $acl = Get-Acl -LiteralPath $item.FullName

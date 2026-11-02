@@ -74,6 +74,10 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: powershell
         run: ./tests/dragonfly-canary-publication/Test-DragonflyAdjunctMaterializationPowerShell51.ps1
+      - name: Verify protected adjunct publisher under Windows PowerShell 5.1
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: ./tests/dragonfly-canary-publication/Test-DragonflyCanaryAdjunctPublisher.ps1
       - name: Verify Gate A1 operator under Windows PowerShell 5.1
         if: matrix.os == 'windows-latest'
         shell: powershell
