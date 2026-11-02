@@ -88,7 +88,7 @@ function Assert-DirectoryAcl([string]$Path, [ValidateSet('Protected','Requests',
 }
 
 function Get-ExpectedArguments([string]$WorkerSha) {
-    '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $workerInstalled + '" -WorkerSha256 ' + $WorkerSha
+    '-NoLogo -NoProfile -NonInteractive -File "' + $workerInstalled + '" -WorkerSha256 ' + $WorkerSha
 }
 
 function Get-TaskService {

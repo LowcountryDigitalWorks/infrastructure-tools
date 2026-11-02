@@ -67,11 +67,39 @@ function Assert-WorkerProvenance {
     if (-not [string]::Equals($actualWorker, [IO.Path]::GetFullPath($expectedWorker), [StringComparison]::OrdinalIgnoreCase)) {
         throw 'WORKER_PATH_REFUSED'
     }
+    foreach ($path in @($controlRoot, $binRoot, $requestRoot, $resultRoot, $lockRoot)) {
+        Assert-NoReparse $path
+    }
     Assert-ProtectedPath $binRoot
     Assert-ProtectedPath $actualWorker
     $actualHash = (Get-FileHash -LiteralPath $actualWorker -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actualHash -cne $WorkerSha256) {
         throw 'PROVENANCE_MISMATCH'
+    }
+    if (Test-Path -LiteralPath $requestRoot) {
+        $reqAcl = Get-Acl -LiteralPath ([IO.Path]::GetFullPath($requestRoot))
+        if ($reqAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @('S-1-5-18', 'S-1-5-32-544')) {
+            throw 'PROTECTED_OWNER_REFUSED'
+        }
+    }
+    if (Test-Path -LiteralPath $resultRoot) {
+        Assert-ProtectedPath $resultRoot
+    }
+}
+
+function Prune-StaleResults {
+    if (-not (Test-Path -LiteralPath $resultRoot -PathType Container)) { return }
+    Assert-NoReparse $resultRoot
+    $cutoff = [DateTime]::UtcNow.AddHours(-24)
+    $guidPattern = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$'
+    $pendingPattern = '^\.pending-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$'
+    $files = Get-ChildItem -LiteralPath $resultRoot -File -ErrorAction SilentlyContinue
+    foreach ($file in $files) {
+        if ($file.Name -cmatch $guidPattern -or $file.Name -cmatch $pendingPattern) {
+            if ($file.LastWriteTimeUtc -lt $cutoff) {
+                try { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue } catch { }
+            }
+        }
     }
 }
 
@@ -128,6 +156,24 @@ function Read-Request {
         if ([string]::IsNullOrWhiteSpace($opId) -or $opId -cnotmatch '^[A-Z0-9_]{1,64}$') {
             throw 'INVALID_REQUEST'
         }
+
+        # Durable replay check: reject if a completed result already exists for this correlationId
+        $targetResultPath = Join-Path $resultRoot ($corrId + '.json')
+        if (Test-Path -LiteralPath $targetResultPath) {
+            throw 'DUPLICATE_REQUEST'
+        }
+
+        # Crash/timeout reconciliation: reject stranded requests older than 15 minutes
+        $item = Get-Item -LiteralPath $requestPath -Force
+        $age = [DateTime]::UtcNow - $item.LastWriteTimeUtc
+        if ($age.TotalMinutes -ge 15) {
+            $script:CorrelationId = $corrId
+            $script:OperationId = $opId
+            Write-Result -Success $false -State 'FAILED' -Reason 'TIMEOUT' -Details @{ timeoutReason = 'REQUEST_EXPIRED' }
+            Remove-RequestSlot
+            return $null
+        }
+
         [pscustomobject]@{ CorrelationId = $corrId; OperationId = $opId }
     } finally {
         $document.Dispose()
@@ -247,11 +293,12 @@ $ReviewedOperationRegistry = @{
 
 try {
     Assert-WorkerProvenance
+    Prune-StaleResults
     Acquire-OperationLock
 
     $request = Read-Request
     if ($null -eq $request) {
-        # Nothing queued
+        # Nothing queued or request was expired
         return
     }
 
@@ -282,10 +329,11 @@ try {
         'BUSY' { 'BUSY' }
         'INVALID_REQUEST' { 'INVALID_REQUEST' }
         'UNKNOWN_OPERATION' { 'UNKNOWN_OPERATION' }
+        'DUPLICATE_REQUEST' { 'DUPLICATE_REQUEST' }
         default { 'FAILED' }
     }
 
-    if ($script:CorrelationId) {
+    if ($script:CorrelationId -and $msg -cne 'DUPLICATE_REQUEST') {
         Write-Result -Success $false -State 'FAILED' -Reason $reason
     }
     Remove-RequestSlot

@@ -35,17 +35,13 @@ public sealed class AdminPrivilegedOperationHandler
         {
             if (request.Operation == AdminBrokerContract.Operations.AdminReviewedOperationRun)
             {
-                var opId = request.Parameters!.ContainsKey("operationId")
-                    ? request.Parameters["operationId"].GetString()!
-                    : request.Parameters["reviewedOperation"].GetString()!;
+                var opId = request.Parameters!["operationId"].GetString()!;
                 var correlationId = Guid.ParseExact(request.RequestId, "D");
                 result = _adapter.RunReviewedOperation(opId, correlationId, cancellationToken);
             }
             else if (request.Operation == AdminBrokerContract.Operations.AdminReviewedOperationGetResult)
             {
-                var corrStr = request.Parameters!.ContainsKey("correlationId")
-                    ? request.Parameters["correlationId"].GetString()!
-                    : request.Parameters["operationId"].GetString()!;
+                var corrStr = request.Parameters!["correlationId"].GetString()!;
                 var correlationId = Guid.ParseExact(corrStr, "D");
                 result = _adapter.GetOperationResult(correlationId, cancellationToken);
             }

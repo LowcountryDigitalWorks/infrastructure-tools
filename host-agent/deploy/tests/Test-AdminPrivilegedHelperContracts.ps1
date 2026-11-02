@@ -45,10 +45,92 @@ Assert-True ($managePlan -contains 'TRIGGER_COUNT=0') 'Manage Plan specifies 0 t
 Assert-True ($managePlan -contains ('OWNER_SID=' + $ownerSid)) 'Manage Plan preserves owner SID'
 Assert-True ($managePlan -contains ('WORKER_SHA256=' + $actualWorkerSha)) 'Manage Plan hashes worker correctly'
 
-$bootstrapPlan = & $bootstrapPath -Mode Plan
-Assert-True ($bootstrapPlan -contains 'ADMIN_PRIVILEGED_HELPER_BOOTSTRAP=PASS') 'Bootstrap Plan emits PASS'
-Assert-True ($bootstrapPlan -contains 'ADMIN_PRIVILEGED_HELPER_PLAN=PASS') 'Bootstrap forwards Plan output'
-Assert-True ($bootstrapPlan -contains 'TRIGGER_COUNT=0') 'Bootstrap confirms 0 triggers'
+# 2b. Bootstrap-AdminPrivilegedHelper.ps1 pins and checkout validation
+$bootstrapSource = Get-Content -LiteralPath $bootstrapPath -Raw
+$actualManageBlob = (& git hash-object $managePath).Trim()
+$actualWorkerBlob = (& git hash-object $workerPath).Trim()
+Assert-True ($bootstrapSource.Contains($actualManageBlob, [StringComparison]::Ordinal)) 'Bootstrap pins current Manage blob'
+Assert-True ($bootstrapSource.Contains($actualWorkerBlob, [StringComparison]::Ordinal)) 'Bootstrap pins current Worker blob'
+Assert-True ($bootstrapSource.Contains("branch', '--show-current", [StringComparison]::Ordinal)) 'Bootstrap checks current branch'
+Assert-True ($bootstrapSource.Contains('$branch -cne ''main''', [StringComparison]::Ordinal)) 'Bootstrap requires main branch'
+Assert-True ($bootstrapSource.Contains("status', '--porcelain", [StringComparison]::Ordinal)) 'Bootstrap requires clean worktree'
+Assert-True ($bootstrapSource.Contains('refs/remotes/origin/main', [StringComparison]::Ordinal)) 'Bootstrap binds HEAD to origin/main'
+Assert-True ($bootstrapSource.Contains('LowcountryDigitalWorks/infrastructure-tools', [StringComparison]::Ordinal)) 'Bootstrap checks origin URL'
+Assert-True (-not $bootstrapSource.Contains('SkipProvenance', [StringComparison]::OrdinalIgnoreCase)) 'Bootstrap has no bypass flag'
+
+$bootstrapAst = [Management.Automation.Language.Parser]::ParseFile($bootstrapPath, [ref]$null, [ref]$null)
+$checkoutFn = $bootstrapAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-AcceptedCheckout' }, $false)
+if ($null -eq $checkoutFn) { throw 'FUNCTION_REQUIRED: Assert-AcceptedCheckout' }
+
+& {
+    param([string]$CheckoutFnSource, [string]$AcceptedManageBlob, [string]$AcceptedWorkerBlob)
+    $manageRelative = 'host-agent/deploy/Manage-AdminPrivilegedHelper.ps1'
+    $workerRelative = 'host-agent/deploy/Invoke-AdminPrivilegedOperation.ps1'
+    $acceptedManageBlob = $AcceptedManageBlob
+    $acceptedWorkerBlob = $AcceptedWorkerBlob
+    . ([scriptblock]::Create($CheckoutFnSource))
+
+    $fixture = [ordered]@{
+        OriginUrl = 'https://github.com/LowcountryDigitalWorks/infrastructure-tools.git'
+        Branch = 'main'
+        Dirty = $false
+        Head = '6fb9b5926a1c45f601b083dbada0eba61d23761d'
+        OriginMain = '6fb9b5926a1c45f601b083dbada0eba61d23761d'
+        ManageBlob = $AcceptedManageBlob
+        WorkerBlob = $AcceptedWorkerBlob
+    }
+
+    function Invoke-GitRead([string[]]$Arguments) {
+        switch ($Arguments[2]) {
+            'config' { $fixture.OriginUrl; return }
+            'branch' { $fixture.Branch; return }
+            'status' { if ($fixture.Dirty) { ' M modified' }; return }
+            'rev-parse' {
+                switch ($Arguments[3]) {
+                    '--show-toplevel' { 'C:\synthetic-repo'; return }
+                    'HEAD' { $fixture.Head; return }
+                    'refs/remotes/origin/main' { $fixture.OriginMain; return }
+                    'HEAD:host-agent/deploy/Manage-AdminPrivilegedHelper.ps1' { $fixture.ManageBlob; return }
+                    'HEAD:host-agent/deploy/Invoke-AdminPrivilegedOperation.ps1' { $fixture.WorkerBlob; return }
+                }
+            }
+        }
+        throw "UNEXPECTED_GIT_READ: $($Arguments -join ' ')"
+    }
+
+    $accepted = Assert-AcceptedCheckout
+    Assert-True ($accepted.Root -ceq 'C:\synthetic-repo') 'Synthetic Assert-AcceptedCheckout passes on valid fixture'
+
+    # Non-main branch rejected
+    $fixture.Branch = 'feat/some-branch'
+    Assert-Refused { Assert-AcceptedCheckout } 'SOURCE_MAIN_REQUIRED'
+    $fixture.Branch = 'main'
+
+    # Dirty worktree rejected
+    $fixture.Dirty = $true
+    Assert-Refused { Assert-AcceptedCheckout } 'SOURCE_WORKTREE_DIRTY'
+    $fixture.Dirty = $false
+
+    # HEAD diverged from origin/main rejected
+    $fixture.Head = '1111111111111111111111111111111111111111'
+    Assert-Refused { Assert-AcceptedCheckout } 'SOURCE_MAIN_NOT_CURRENT'
+    $fixture.Head = $fixture.OriginMain
+
+    # Wrong remote origin rejected
+    $fixture.OriginUrl = 'https://github.com/malicious/infrastructure-tools.git'
+    Assert-Refused { Assert-AcceptedCheckout } 'SOURCE_ORIGIN_REFUSED'
+    $fixture.OriginUrl = 'https://github.com/LowcountryDigitalWorks/infrastructure-tools.git'
+
+    # Manage blob drift rejected
+    $fixture.ManageBlob = '0000000000000000000000000000000000000000'
+    Assert-Refused { Assert-AcceptedCheckout } 'ACCEPTED_CONTROL_SOURCE_CHANGED'
+    $fixture.ManageBlob = $AcceptedManageBlob
+
+    # Worker blob drift rejected
+    $fixture.WorkerBlob = '0000000000000000000000000000000000000000'
+    Assert-Refused { Assert-AcceptedCheckout } 'ACCEPTED_CONTROL_SOURCE_CHANGED'
+    $fixture.WorkerBlob = $AcceptedWorkerBlob
+} $checkoutFn.Extent.Text $actualManageBlob $actualWorkerBlob
 
 # 3. Load functions from Manage-AdminPrivilegedHelper.ps1 for unit testing
 $manageAst = [Management.Automation.Language.Parser]::ParseFile($managePath, [ref]$null, [ref]$null)
@@ -118,6 +200,11 @@ $taskBadTimeout = New-TaskFixture
 $taskBadTimeout.Definition.Settings.ExecutionTimeLimit = 'PT2H'
 Assert-Refused { Assert-TaskDefinition $taskBadTimeout '\LDW-ADMIN-REVIEWED-OPERATION' $actualWorkerSha } 'TASK_SETTINGS_REFUSED'
 
+# ExecutionPolicy Bypass refusal: task argument cannot contain Bypass
+$taskBadBypass = New-TaskFixture
+$taskBadBypass.Definition.Actions.Value.Arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $workerInstalled + '" -WorkerSha256 ' + $actualWorkerSha
+Assert-Refused { Assert-TaskDefinition $taskBadBypass '\LDW-ADMIN-REVIEWED-OPERATION' $actualWorkerSha } 'TASK_ACTION_REFUSED'
+
 # DACL enforcement: owner can invoke but CANNOT modify/write
 foreach ($badAce in @(
     ('(A;;FA;;;' + $ownerSid + ')'),
@@ -133,7 +220,7 @@ foreach ($badAce in @(
 
 # 4. Load worker functions from Invoke-AdminPrivilegedOperation.ps1
 $workerAst = [Management.Automation.Language.Parser]::ParseFile($workerPath, [ref]$null, [ref]$null)
-foreach ($name in @('Assert-NoReparse', 'Read-Request', 'Write-Result', 'Invoke-ElevatedIdentityProof')) {
+foreach ($name in @('Assert-NoReparse', 'Read-Request', 'Write-Result', 'Remove-RequestSlot', 'Invoke-ElevatedIdentityProof', 'Prune-StaleResults')) {
     $node = $workerAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name }, $false)
     if ($null -eq $node) { throw "FUNCTION_REQUIRED: $name" }
     . ([scriptblock]::Create($node.Extent.Text))
@@ -221,6 +308,36 @@ try {
     Assert-True ($sanitizedJson.details.safe_key -ceq 'safe-value') 'Safe key preserved'
     Assert-True ($null -eq $sanitizedJson.details.PSObject.Properties['bad key with spaces']) 'Unsafe key stripped'
     Assert-True ($null -eq $sanitizedJson.details.PSObject.Properties['dangerous']) 'Unsafe value stripped'
+
+    # 5f. Durable replay: reject duplicate correlation ID when result file already exists
+    [IO.File]::WriteAllText($requestPath, $validPayload, [Text.UTF8Encoding]::new($false))
+    Assert-Refused { Read-Request } 'DUPLICATE_REQUEST'
+
+    # 5g. Stale request crash/timeout reconciliation: > 15m writes TIMEOUT and unlinks slot
+    $staleCorrId = [guid]::NewGuid().ToString('D')
+    $stalePayload = [ordered]@{ schema = 1; correlationId = $staleCorrId; operationId = 'ELEVATED_IDENTITY_PROOF' } | ConvertTo-Json -Compress
+    [IO.File]::WriteAllText($requestPath, $stalePayload, [Text.UTF8Encoding]::new($false))
+    (Get-Item -LiteralPath $requestPath).LastWriteTimeUtc = [DateTime]::UtcNow.AddMinutes(-20)
+    $staleParsed = Read-Request
+    Assert-True ($null -eq $staleParsed) 'Stale request returns null from Read-Request'
+    Assert-True (-not (Test-Path -LiteralPath $requestPath)) 'Stale request file unlinked from slot'
+    $staleResultFile = Join-Path $resultRoot ($staleCorrId + '.json')
+    Assert-True (Test-Path -LiteralPath $staleResultFile) 'Stale result file created'
+    $staleJson = Get-Content -LiteralPath $staleResultFile -Raw | ConvertFrom-Json
+    Assert-True ($staleJson.resultState -ceq 'FAILED' -and $staleJson.reasonCode -ceq 'TIMEOUT') 'Stale request recorded as TIMEOUT'
+
+    # 5h. Demand-driven result lifecycle pruning
+    $oldCorrId = [guid]::NewGuid().ToString('D')
+    $oldResultFile = Join-Path $resultRoot ($oldCorrId + '.json')
+    [IO.File]::WriteAllText($oldResultFile, '{}', [Text.UTF8Encoding]::new($false))
+    (Get-Item -LiteralPath $oldResultFile).LastWriteTimeUtc = [DateTime]::UtcNow.AddHours(-25)
+    $newCorrId = [guid]::NewGuid().ToString('D')
+    $newResultFile = Join-Path $resultRoot ($newCorrId + '.json')
+    [IO.File]::WriteAllText($newResultFile, '{}', [Text.UTF8Encoding]::new($false))
+    (Get-Item -LiteralPath $newResultFile).LastWriteTimeUtc = [DateTime]::UtcNow.AddHours(-1)
+    Prune-StaleResults
+    Assert-True (-not (Test-Path -LiteralPath $oldResultFile)) 'Old result (>24h) pruned'
+    Assert-True (Test-Path -LiteralPath $newResultFile) 'New result preserved'
 
 } finally {
     if (Test-Path -LiteralPath $sandbox) {

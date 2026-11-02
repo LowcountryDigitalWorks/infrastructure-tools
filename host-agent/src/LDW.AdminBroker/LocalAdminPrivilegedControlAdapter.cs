@@ -1,6 +1,9 @@
 using System.Diagnostics;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 
 namespace LDW.AdminBroker;
 
@@ -47,12 +50,38 @@ internal sealed class ScheduledTaskAdminPrivilegedOperationBoundary : IAdminPriv
     internal const int EnvelopeSchema = 1;
     private const int MaximumEnvelopeBytes = 16 * 1024;
     private const string TaskName = @"\LDW-ADMIN-REVIEWED-OPERATION";
+    private static readonly Regex GuidResultRegex = new(@"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    private static readonly string Root = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "LDW", "PrivilegedControl");
-    private static readonly string RequestRoot = Path.Combine(Root, "requests");
-    private static readonly string ResultRoot = Path.Combine(Root, "results");
-    private static readonly string RequestSlot = Path.Combine(RequestRoot, "request.json");
+    private readonly string _root;
+    private readonly string _requestRoot;
+    private readonly string _resultRoot;
+    private readonly string _requestSlot;
+    private readonly TimeSpan _executionTimeout;
+    private readonly TimeSpan _retentionTtl;
+    private readonly Func<string, CancellationToken, bool> _startTask;
+    private readonly bool _skipAclCheckForTesting;
+
+    public ScheduledTaskAdminPrivilegedOperationBoundary()
+        : this(null, null, null, null, false)
+    {
+    }
+
+    internal ScheduledTaskAdminPrivilegedOperationBoundary(
+        string? rootOverride = null,
+        TimeSpan? executionTimeoutOverride = null,
+        TimeSpan? retentionTtlOverride = null,
+        Func<string, CancellationToken, bool>? startTaskOverride = null,
+        bool skipAclCheckForTesting = false)
+    {
+        _root = rootOverride ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "LDW", "PrivilegedControl");
+        _requestRoot = Path.Combine(_root, "requests");
+        _resultRoot = Path.Combine(_root, "results");
+        _requestSlot = Path.Combine(_requestRoot, "request.json");
+        _executionTimeout = executionTimeoutOverride ?? TimeSpan.FromMinutes(15);
+        _retentionTtl = retentionTtlOverride ?? TimeSpan.FromHours(24);
+        _startTask = startTaskOverride ?? StartTask;
+        _skipAclCheckForTesting = skipAclCheckForTesting;
+    }
 
     public AdminPrivilegedControlResult Queue(string operationId, Guid correlationId, CancellationToken cancellationToken)
     {
@@ -60,10 +89,17 @@ internal sealed class ScheduledTaskAdminPrivilegedOperationBoundary : IAdminPriv
         if (!OperatingSystem.IsWindows())
             return new AdminPrivilegedControlResult(false, "BLOCKED", "ADAPTER_UNAVAILABLE", correlationId.ToString("D"), operationId);
 
-        if (!IsExpectedDirectory(RequestRoot) || !IsExpectedDirectory(ResultRoot))
-            return new AdminPrivilegedControlResult(false, "BLOCKED", "ADAPTER_UNAVAILABLE", correlationId.ToString("D"), operationId);
+        ReconcileStaleStateAndPrune();
 
-        if (!IsDirectChild(RequestRoot, RequestSlot) || File.Exists(RequestSlot))
+        if (!AssertTrustBoundary())
+            return new AdminPrivilegedControlResult(false, "BLOCKED", "PROVENANCE_MISMATCH", correlationId.ToString("D"), operationId);
+
+        // Durable replay check: if result already exists, reject duplicate execution
+        var resultPath = Path.Combine(_resultRoot, correlationId.ToString("D") + ".json");
+        if (File.Exists(resultPath))
+            return new AdminPrivilegedControlResult(false, "BLOCKED", "DUPLICATE_REQUEST", correlationId.ToString("D"), operationId);
+
+        if (!IsDirectChild(_requestRoot, _requestSlot) || File.Exists(_requestSlot))
             return new AdminPrivilegedControlResult(false, "BLOCKED", "BUSY", correlationId.ToString("D"), operationId);
 
         var envelope = new RequestEnvelope(
@@ -74,7 +110,7 @@ internal sealed class ScheduledTaskAdminPrivilegedOperationBoundary : IAdminPriv
         if (bytes.Length > MaximumEnvelopeBytes)
             return new AdminPrivilegedControlResult(false, "FAILED", "FAILED", correlationId.ToString("D"), operationId);
 
-        var temp = Path.Combine(RequestRoot, ".pending-" + correlationId.ToString("N") + ".json");
+        var temp = Path.Combine(_requestRoot, ".pending-" + correlationId.ToString("N") + ".json");
         try
         {
             using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
@@ -82,12 +118,12 @@ internal sealed class ScheduledTaskAdminPrivilegedOperationBoundary : IAdminPriv
                 stream.Write(bytes);
                 stream.Flush(true);
             }
-            File.Move(temp, RequestSlot, false);
+            File.Move(temp, _requestSlot, false);
 
-            var start = StartTask(TaskName, cancellationToken);
+            var start = _startTask(TaskName, cancellationToken);
             if (!start)
             {
-                TryDeleteOwned(RequestSlot);
+                TryDeleteOwned(_requestSlot);
                 return new AdminPrivilegedControlResult(false, "BLOCKED", "ADAPTER_UNAVAILABLE", correlationId.ToString("D"), operationId);
             }
             return new AdminPrivilegedControlResult(true, "QUEUED", "NONE", correlationId.ToString("D"), operationId);
@@ -105,7 +141,7 @@ internal sealed class ScheduledTaskAdminPrivilegedOperationBoundary : IAdminPriv
         catch
         {
             TryDeleteOwned(temp);
-            TryDeleteOwned(RequestSlot);
+            TryDeleteOwned(_requestSlot);
             return new AdminPrivilegedControlResult(false, "FAILED", "FAILED", correlationId.ToString("D"), operationId);
         }
     }
@@ -113,11 +149,16 @@ internal sealed class ScheduledTaskAdminPrivilegedOperationBoundary : IAdminPriv
     public AdminPrivilegedControlResult GetResult(Guid correlationId, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (correlationId == Guid.Empty || !IsExpectedDirectory(ResultRoot))
+        if (correlationId == Guid.Empty)
             return new AdminPrivilegedControlResult(false, "BLOCKED", "OPERATION_NOT_FOUND", correlationId.ToString("D"));
 
-        var path = Path.Combine(ResultRoot, correlationId.ToString("D") + ".json");
-        if (!IsDirectChild(ResultRoot, path) || !File.Exists(path))
+        ReconcileStaleStateAndPrune();
+
+        if (!AssertTrustBoundary())
+            return new AdminPrivilegedControlResult(false, "FAILED", "PROVENANCE_MISMATCH", correlationId.ToString("D"));
+
+        var path = Path.Combine(_resultRoot, correlationId.ToString("D") + ".json");
+        if (!IsDirectChild(_resultRoot, path) || !File.Exists(path))
             return new AdminPrivilegedControlResult(false, "BLOCKED", "OPERATION_NOT_FOUND", correlationId.ToString("D"));
 
         try
@@ -152,6 +193,139 @@ internal sealed class ScheduledTaskAdminPrivilegedOperationBoundary : IAdminPriv
         }
     }
 
+    internal void ReconcileStaleStateAndPrune()
+    {
+        try
+        {
+            // 1. Demand-driven stale request reconciliation
+            if (File.Exists(_requestSlot))
+            {
+                var info = new FileInfo(_requestSlot);
+                if (DateTime.UtcNow - info.LastWriteTimeUtc >= _executionTimeout)
+                {
+                    string? strandedCorrId = null;
+                    string? strandedOpId = null;
+                    try
+                    {
+                        var bytes = File.ReadAllBytes(_requestSlot);
+                        var req = JsonSerializer.Deserialize<RequestEnvelope>(bytes, JsonOptions);
+                        if (req is not null && Guid.TryParseExact(req.CorrelationId, "D", out _))
+                        {
+                            strandedCorrId = req.CorrelationId;
+                            strandedOpId = req.OperationId;
+                        }
+                    }
+                    catch { }
+
+                    if (strandedCorrId is not null && Directory.Exists(_resultRoot))
+                    {
+                        var targetResultPath = Path.Combine(_resultRoot, strandedCorrId + ".json");
+                        if (!File.Exists(targetResultPath))
+                        {
+                            var timeoutEnvelope = new ResultEnvelope(
+                                EnvelopeSchema,
+                                strandedCorrId,
+                                strandedOpId ?? "UNKNOWN",
+                                false,
+                                "FAILED",
+                                "TIMEOUT",
+                                new Dictionary<string, string> { ["reconciliation"] = "TASK_TIMEOUT_OR_CRASH" });
+                            var timeoutBytes = JsonSerializer.SerializeToUtf8Bytes(timeoutEnvelope, JsonOptions);
+                            var pendingPath = Path.Combine(_resultRoot, ".pending-" + strandedCorrId + ".json");
+                            try
+                            {
+                                File.WriteAllBytes(pendingPath, timeoutBytes);
+                                File.Move(pendingPath, targetResultPath, false);
+                            }
+                            catch { }
+                        }
+                    }
+
+                    TryDeleteOwned(_requestSlot);
+                }
+            }
+
+            // 2. Demand-driven result lifecycle pruning
+            if (Directory.Exists(_resultRoot) && !IsReparsePoint(_resultRoot))
+            {
+                var dir = new DirectoryInfo(_resultRoot);
+                foreach (var file in dir.EnumerateFiles("*.json", SearchOption.TopDirectoryOnly))
+                {
+                    if (file.Name.StartsWith(".pending", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (DateTime.UtcNow - file.LastWriteTimeUtc >= TimeSpan.FromMinutes(5))
+                        {
+                            try { file.Delete(); } catch { }
+                        }
+                        continue;
+                    }
+
+                    if (GuidResultRegex.IsMatch(file.Name))
+                    {
+                        if (DateTime.UtcNow - file.LastWriteTimeUtc >= _retentionTtl)
+                        {
+                            try { file.Delete(); } catch { }
+                        }
+                    }
+                }
+            }
+        }
+        catch { }
+    }
+
+    private bool AssertTrustBoundary()
+    {
+        if (!IsExpectedDirectory(_requestRoot) || !IsExpectedDirectory(_resultRoot))
+            return false;
+
+        if (_skipAclCheckForTesting)
+            return true;
+
+        if (!OperatingSystem.IsWindows())
+            return false;
+
+        try
+        {
+            var allowedOwners = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "S-1-5-18", "S-1-5-32-544" };
+
+            // Verify resultRoot security: owner SYSTEM/Admins; non-admins MUST NOT have write permissions
+            var resultInfo = new DirectoryInfo(_resultRoot);
+            var resultSecurity = resultInfo.GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access);
+            var resultOwner = resultSecurity.GetOwner(typeof(SecurityIdentifier))?.Value;
+            if (resultOwner is null || !allowedOwners.Contains(resultOwner))
+                return false;
+
+            const FileSystemRights writeRights = FileSystemRights.Write |
+                FileSystemRights.Delete |
+                FileSystemRights.DeleteSubdirectoriesAndFiles |
+                FileSystemRights.ChangePermissions |
+                FileSystemRights.TakeOwnership;
+
+            foreach (FileSystemAccessRule rule in resultSecurity.GetAccessRules(true, true, typeof(SecurityIdentifier)))
+            {
+                if (rule.AccessControlType == AccessControlType.Allow && (rule.FileSystemRights & writeRights) != 0)
+                {
+                    var sid = rule.IdentityReference.Value;
+                    if (!allowedOwners.Contains(sid))
+                        return false;
+                }
+            }
+
+            // Verify requestRoot security: owner SYSTEM/Admins
+            var requestInfo = new DirectoryInfo(_requestRoot);
+            var requestSecurity = requestInfo.GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access);
+            var requestOwner = requestSecurity.GetOwner(typeof(SecurityIdentifier))?.Value;
+            if (requestOwner is null || !allowedOwners.Contains(requestOwner))
+                return false;
+
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static bool StartTask(string taskName, CancellationToken cancellationToken)
     {
         var executable = Path.Combine(Environment.SystemDirectory, "schtasks.exe");
@@ -183,12 +357,36 @@ internal sealed class ScheduledTaskAdminPrivilegedOperationBoundary : IAdminPriv
         try
         {
             var info = new DirectoryInfo(path);
-            return info.Exists && (info.Attributes & FileAttributes.ReparsePoint) == 0;
+            if (!info.Exists) return false;
+            return !IsReparsePoint(path);
         }
         catch { return false; }
     }
 
-    private static bool IsDirectChild(string parent, string child)
+    private static bool IsReparsePoint(string path)
+    {
+        try
+        {
+            var cursor = Path.GetFullPath(path);
+            while (!string.IsNullOrEmpty(cursor))
+            {
+                if (Directory.Exists(cursor) || File.Exists(cursor))
+                {
+                    var attr = File.GetAttributes(cursor);
+                    if ((attr & FileAttributes.ReparsePoint) != 0)
+                        return true;
+                }
+                var parent = Path.GetDirectoryName(cursor);
+                if (string.IsNullOrEmpty(parent) || string.Equals(parent, cursor, StringComparison.OrdinalIgnoreCase))
+                    break;
+                cursor = parent;
+            }
+            return false;
+        }
+        catch { return true; }
+    }
+
+    private bool IsDirectChild(string parent, string child)
     {
         var expectedParent = Path.GetFullPath(parent).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
         var full = Path.GetFullPath(child);
@@ -196,9 +394,9 @@ internal sealed class ScheduledTaskAdminPrivilegedOperationBoundary : IAdminPriv
             && string.Equals(Path.GetDirectoryName(full), expectedParent.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase);
     }
 
-    private static void TryDeleteOwned(string path)
+    private void TryDeleteOwned(string path)
     {
-        try { if (File.Exists(path) && IsDirectChild(RequestRoot, path)) File.Delete(path); } catch { }
+        try { if (File.Exists(path) && IsDirectChild(_requestRoot, path)) File.Delete(path); } catch { }
     }
 
     private static readonly JsonSerializerOptions JsonOptions = new()

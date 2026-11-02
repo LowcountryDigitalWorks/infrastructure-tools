@@ -17,20 +17,10 @@ public static class AdminPrivilegedRequestPolicy
             if (request.Parameters is null) return false;
             if (request.Parameters.Count != 1) return false;
 
-            string? opName = null;
-            if (request.Parameters.TryGetValue("operationId", out var opVal) && opVal.ValueKind == JsonValueKind.String)
-            {
-                opName = opVal.GetString();
-            }
-            else if (request.Parameters.TryGetValue("reviewedOperation", out var revVal) && revVal.ValueKind == JsonValueKind.String)
-            {
-                opName = revVal.GetString();
-            }
-            else
-            {
+            if (!request.Parameters.TryGetValue("operationId", out var opVal) || opVal.ValueKind != JsonValueKind.String)
                 return false;
-            }
 
+            var opName = opVal.GetString();
             if (!AdminReviewedOperationRegistry.IsValidOperation(opName))
                 return false;
 
@@ -42,20 +32,10 @@ public static class AdminPrivilegedRequestPolicy
             if (request.Parameters is null) return false;
             if (request.Parameters.Count != 1) return false;
 
-            string? corrId = null;
-            if (request.Parameters.TryGetValue("correlationId", out var corrVal) && corrVal.ValueKind == JsonValueKind.String)
-            {
-                corrId = corrVal.GetString();
-            }
-            else if (request.Parameters.TryGetValue("operationId", out var opIdVal) && opIdVal.ValueKind == JsonValueKind.String)
-            {
-                corrId = opIdVal.GetString();
-            }
-            else
-            {
+            if (!request.Parameters.TryGetValue("correlationId", out var corrVal) || corrVal.ValueKind != JsonValueKind.String)
                 return false;
-            }
 
+            var corrId = corrVal.GetString();
             if (string.IsNullOrWhiteSpace(corrId) || !Guid.TryParseExact(corrId, "D", out _))
                 return false;
 

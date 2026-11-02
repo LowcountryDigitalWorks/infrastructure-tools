@@ -28,12 +28,11 @@ internal static class AdminPrivilegedControlContractTests
             "ADMIN_REVIEWED_OPERATION_RUN parses with operationId");
         Assert(AdminPrivilegedRequestPolicy.IsAllowed(runRequest!), "allowed reviewed operation passes policy");
 
-        // 2. ADMIN_REVIEWED_OPERATION_RUN with reviewedOperation alternative key
+        // 2. ADMIN_REVIEWED_OPERATION_RUN with reviewedOperation alternative key rejected
         var runAltJson = "{\"version\":1,\"requestId\":\"11111111-1111-1111-1111-111111111111\",\"operation\":\"ADMIN_REVIEWED_OPERATION_RUN\",\"targetIdentity\":\""
             + fixedTarget + "\",\"parameters\":{\"reviewedOperation\":\"ELEVATED_IDENTITY_PROOF\"}}";
-        Assert(AdminBrokerContract.TryParseRequest(runAltJson, out var runAltRequest) && runAltRequest is not null,
-            "ADMIN_REVIEWED_OPERATION_RUN parses with reviewedOperation");
-        Assert(AdminPrivilegedRequestPolicy.IsAllowed(runAltRequest!), "reviewedOperation alternative passes policy");
+        Assert(!AdminBrokerContract.TryParseRequest(runAltJson, out _),
+            "ADMIN_REVIEWED_OPERATION_RUN rejects reviewedOperation alias");
 
         // 3. Unknown operation ID fails closed before execution
         var unknownOpJson = "{\"version\":1,\"requestId\":\"11111111-1111-1111-1111-111111111111\",\"operation\":\"ADMIN_REVIEWED_OPERATION_RUN\",\"targetIdentity\":\""
@@ -82,12 +81,11 @@ internal static class AdminPrivilegedControlContractTests
             "ADMIN_REVIEWED_OPERATION_GET_RESULT parses with correlationId");
         Assert(AdminPrivilegedRequestPolicy.IsAllowed(getResultRequest!), "valid correlationId passes policy");
 
-        // 8. ADMIN_REVIEWED_OPERATION_GET_RESULT with operationId alternative key
+        // 8. ADMIN_REVIEWED_OPERATION_GET_RESULT with operationId alternative key rejected
         var getResultAltJson = "{\"version\":1,\"requestId\":\"22222222-2222-2222-2222-222222222222\",\"operation\":\"ADMIN_REVIEWED_OPERATION_GET_RESULT\",\"targetIdentity\":\""
             + fixedTarget + "\",\"parameters\":{\"operationId\":\"11111111-1111-1111-1111-111111111111\"}}";
-        Assert(AdminBrokerContract.TryParseRequest(getResultAltJson, out var getResultAltRequest) && getResultAltRequest is not null,
-            "ADMIN_REVIEWED_OPERATION_GET_RESULT parses with operationId alternative");
-        Assert(AdminPrivilegedRequestPolicy.IsAllowed(getResultAltRequest!), "operationId alternative passes policy");
+        Assert(!AdminBrokerContract.TryParseRequest(getResultAltJson, out _),
+            "ADMIN_REVIEWED_OPERATION_GET_RESULT rejects operationId alias");
 
         // 9. Non-UUID correlationId rejected
         var nonUuidResultJson = "{\"version\":1,\"requestId\":\"22222222-2222-2222-2222-222222222222\",\"operation\":\"ADMIN_REVIEWED_OPERATION_GET_RESULT\",\"targetIdentity\":\""

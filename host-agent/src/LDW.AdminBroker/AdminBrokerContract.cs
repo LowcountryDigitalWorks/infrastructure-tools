@@ -148,10 +148,9 @@ public static class AdminBrokerContract
 
             if (operation == Operations.AdminReviewedOperationRun)
             {
-                if (supplied.Count != 1 || (!supplied.Contains("operationId") && !supplied.Contains("reviewedOperation")))
+                if (supplied.Count != 1 || !supplied.Contains("operationId"))
                     return false;
-                var key = supplied.Contains("operationId") ? "operationId" : "reviewedOperation";
-                var valProp = parameters![key];
+                var valProp = parameters!["operationId"];
                 if (valProp.ValueKind != JsonValueKind.String)
                     return false;
                 var opVal = valProp.GetString();
@@ -162,10 +161,9 @@ public static class AdminBrokerContract
             }
             else if (operation == Operations.AdminReviewedOperationGetResult)
             {
-                if (supplied.Count != 1 || (!supplied.Contains("correlationId") && !supplied.Contains("operationId")))
+                if (supplied.Count != 1 || !supplied.Contains("correlationId"))
                     return false;
-                var key = supplied.Contains("correlationId") ? "correlationId" : "operationId";
-                var valProp = parameters![key];
+                var valProp = parameters!["correlationId"];
                 if (valProp.ValueKind != JsonValueKind.String
                     || !Guid.TryParseExact(valProp.GetString(), "D", out _))
                     return false;
