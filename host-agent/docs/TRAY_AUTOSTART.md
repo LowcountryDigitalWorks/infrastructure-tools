@@ -17,7 +17,7 @@ The protected binary path is:
 %ProgramFiles%\\LowcountryDigitalWorks\\HostAgent\\Windows\\LDW.HostAgent.Windows.exe
 ```
 
-The binary must already be installed at this path. Neither lifecycle script installs the application, starts the current process, or creates a shortcut. A new Run-key registration takes effect on the next user logon.
+The binary must already be installed at this path. Use the separately reviewed [Host Agent Windows deployment](HOST_AGENT_WINDOWS_DEPLOYMENT.md) package/install/readback path to place or update those application bytes. The autostart lifecycle scripts never install the application, start/stop the current process, or create a shortcut. A new Run-key registration takes effect on the next user logon.
 
 ## Read-only plan and status
 
