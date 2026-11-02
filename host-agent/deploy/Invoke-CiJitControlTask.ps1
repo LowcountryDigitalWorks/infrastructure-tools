@@ -27,6 +27,7 @@ $slotNames = @{
 $requestPath = Join-Path $requestRoot $slotNames[$Operation]
 $operationId = $null
 $script:CapacitySubreasonPattern = 'CAPACITY_RAM_RESERVE_4GIB_REQUIRED|CAPACITY_CPU_RESERVE_REQUIRED|CAPACITY_CPU_LOAD_TOO_HIGH|CAPACITY_DISK_RESERVE_40GIB_REQUIRED|DEFAULT_NAT_SWITCH_REQUIRED'
+$script:DispatcherClassificationPattern = '[A-Z][A-Z0-9_]{0,63}'
 
 function Assert-ElevatedOwnerTask {
     if ($env:OS -ne 'Windows_NT') { throw 'WINDOWS_REQUIRED' }
@@ -165,14 +166,23 @@ function Invoke-Child([string]$Path,[string[]]$Arguments) {
     $process = [Diagnostics.Process]::Start($info)
     $null = $process.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
     $safe = [Collections.Generic.List[string]]::new()
+    $classificationInvalid = $false
     while (-not $process.StandardOutput.EndOfStream) {
         $line = $process.StandardOutput.ReadLine()
-        if ($line -cmatch '^(DISPATCHER_RESULT|DISCOVERED_RUN_ID|DISCOVERED_JOB_ID|INTERRUPTED_CLEANUP|CLEANUP_IDEMPOTENT)=([A-Z_]+|[0-9]+|PASS)$' -or
-            $line -cmatch ('^CAPACITY_SUBREASON=(' + $script:CapacitySubreasonPattern + ')$')) { $safe.Add($line) }
+        if ($line -cmatch '^CLASSIFICATION=') {
+            if ($line -cmatch ('^CLASSIFICATION=(' + $script:DispatcherClassificationPattern + ')$')) {
+                $safe.Add($line)
+            } else {
+                $classificationInvalid = $true
+            }
+        } elseif ($line -cmatch '^(DISPATCHER_RESULT|DISCOVERED_RUN_ID|DISCOVERED_JOB_ID|INTERRUPTED_CLEANUP|CLEANUP_IDEMPOTENT)=([A-Z_]+|[0-9]+|PASS)$' -or
+            $line -cmatch ('^CAPACITY_SUBREASON=(' + $script:CapacitySubreasonPattern + ')$')) {
+            $safe.Add($line)
+        }
     }
     $process.WaitForExit()
     $code=$process.ExitCode; $process.Dispose()
-    [pscustomobject]@{ ExitCode=$code; Lines=@($safe) }
+    [pscustomobject]@{ ExitCode=$code; Lines=@($safe); ClassificationInvalid=$classificationInvalid }
 }
 
 function Get-OutputValue([string[]]$Lines,[string]$Name) {
@@ -181,11 +191,33 @@ function Get-OutputValue([string[]]$Lines,[string]$Name) {
     $match[0].Substring($Name.Length+1)
 }
 
+function Convert-DispatcherClassificationToReason([string]$Classification) {
+    if ($Classification -cnotmatch ('^' + $script:DispatcherClassificationPattern + '$')) { return 'FAILED' }
+    if ($Classification -cmatch ('^(' + $script:CapacitySubreasonPattern + ')$')) { return $Classification }
+    switch -Regex ($Classification) {
+        '^(PREFLIGHT_|MANIFEST_|BUNDLE_|WORKER_|PROTECTED_|DISPATCHER_PREFLIGHT_)' { return 'PROVENANCE_MISMATCH' }
+        '^(RECOVERY_|CONTROLLER_|CLEANUP_|LOCK_|RESIDUE_|ACTIVE_CONTROLLER)' { return 'LOCK_OR_RESIDUE_UNCERTAIN' }
+        '^(QUEUE_|API_|GITHUB_)' { return 'QUEUE_UNAVAILABLE' }
+        default { return 'FAILED' }
+    }
+}
+
 function Invoke-DispatcherMode([ValidateSet('Discover','Once','Recover')][string]$Mode) {
     $args = @('-ManifestSha',$ManifestSha,'-Commit',$Commit,'-Tree',$Tree,'-Mode',$Mode)
     $result = Invoke-Child $dispatcher $args
     $code = Get-OutputValue $result.Lines 'DISPATCHER_RESULT'
-    if ($result.ExitCode -ne 0 -or $code -ceq 'FAIL' -or -not $code) { return [pscustomobject]@{Success=$false;State='FAILED';Reason='FAILED';RunId=0;JobId=0;ProfileId=$null} }
+    if ($result.ExitCode -ne 0 -or $code -ceq 'FAIL' -or -not $code) {
+        $reason = 'FAILED'
+        if ($Mode -ceq 'Recover') {
+            $invalidProperty = $result.PSObject.Properties['ClassificationInvalid']
+            $classificationInvalid = $null -eq $invalidProperty -or [bool]$invalidProperty.Value
+            if (-not $classificationInvalid) {
+                $classification = Get-OutputValue $result.Lines 'CLASSIFICATION'
+                if ($classification) { $reason = Convert-DispatcherClassificationToReason $classification }
+            }
+        }
+        return [pscustomobject]@{Success=$false;State='FAILED';Reason=$reason;RunId=0;JobId=0;ProfileId=$null}
+    }
     if ($code -ceq 'BUSY') { return [pscustomobject]@{Success=$false;State='BLOCKED';Reason='BUSY';RunId=0;JobId=0;ProfileId=$null} }
     if ($code -ceq 'CAPACITY') {
         $sub = Get-OutputValue $result.Lines 'CAPACITY_SUBREASON'
