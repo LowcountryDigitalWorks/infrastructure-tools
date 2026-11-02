@@ -15,6 +15,7 @@ internal sealed class HostAgentContext : ApplicationContext
     private readonly CancellationTokenSource _brokerShutdown = new();
     private readonly ToolStripMenuItem _brokerStatusItem;
     private readonly SynchronizationContext? _uiContext;
+    private readonly Task _brokerTask;
     private StatusForm? _statusForm;
     private HostAgentLiveSnapshot? _lastSnapshot;
 
@@ -40,7 +41,7 @@ internal sealed class HostAgentContext : ApplicationContext
         _timer.Tick += async (_, _) => await RefreshAsync();
         _timer.Start();
         _ = RefreshAsync();
-        _ = RunAdminBrokerAsync();
+        _brokerTask = RunAdminBrokerAsync();
     }
 
     private async Task RunAdminBrokerAsync()
@@ -68,7 +69,8 @@ internal sealed class HostAgentContext : ApplicationContext
                 using var pipe = server.CreateServerPipe();
                 ReportBrokerState(AdminBrokerLifecycleState.Ready);
                 await server.ServeOneAsync(pipe, cancellationToken);
-            }, ReportBrokerState, _brokerShutdown.Token);
+            }, ReportBrokerState, _brokerShutdown.Token)
+                .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (_brokerShutdown.IsCancellationRequested)
         {
@@ -94,6 +96,19 @@ internal sealed class HostAgentContext : ApplicationContext
                 _ => "Admin Broker: stopped"
             };
         }, null);
+    }
+
+    private bool StopAdminBrokerForExit()
+    {
+        _brokerShutdown.Cancel();
+        try
+        {
+            return _brokerTask.Wait(TimeSpan.FromSeconds(5));
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private async Task RefreshAsync()
@@ -169,13 +184,19 @@ internal sealed class HostAgentContext : ApplicationContext
 
     protected override void ExitThreadCore()
     {
-        _brokerShutdown.Cancel();
+        if (!StopAdminBrokerForExit())
+        {
+            _brokerStatusItem.Text = "Admin Broker: shutdown incomplete";
+            return;
+        }
+
         _timer.Stop();
         _timer.Dispose();
         _trayIcon.Visible = false;
         _trayIcon.Dispose();
         _statusForm?.Close();
         _refreshGate.Dispose();
+        _brokerShutdown.Dispose();
         base.ExitThreadCore();
     }
 }

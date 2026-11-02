@@ -358,17 +358,26 @@ try
                 new AdminBrokerAuditLogger(Path.Combine(root, "shutdown-audit.jsonl")), allowElevatedTestProcess: true);
             using var shutdownCancellation = new CancellationTokenSource();
             var listenerReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var shutdownTask = AdminBrokerOwnerSessionLifecycle.RunCoreAsync(async cancellationToken =>
+            var priorSynchronizationContext = SynchronizationContext.Current;
+            SynchronizationContext.SetSynchronizationContext(new NonPumpingSynchronizationContext());
+            try
             {
-                using var pipe = shutdownServer.CreateServerPipe();
-                listenerReady.TrySetResult();
-                await shutdownServer.ServeOneAsync(pipe, cancellationToken);
-            }, _ => { }, shutdownCancellation.Token, 3, (_, _) => Task.CompletedTask);
-            await listenerReady.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            shutdownCancellation.Cancel();
-            await shutdownTask.WaitAsync(TimeSpan.FromSeconds(5));
-            using var rollbackListener = shutdownServer.CreateServerPipe();
-            Assert(!rollbackListener.IsConnected, "shutdown cancels and releases only the broker pipe so a clean restart can bind it");
+                var shutdownTask = AdminBrokerOwnerSessionLifecycle.RunAsync(async cancellationToken =>
+                {
+                    using var pipe = shutdownServer.CreateServerPipe();
+                    listenerReady.TrySetResult();
+                    await shutdownServer.ServeOneAsync(pipe, cancellationToken);
+                }, _ => { }, shutdownCancellation.Token);
+                Assert(listenerReady.Task.Wait(TimeSpan.FromSeconds(5)), "detached owner-session broker starts even when caller synchronization context does not pump");
+                shutdownCancellation.Cancel();
+                Assert(shutdownTask.Wait(TimeSpan.FromSeconds(5)), "detached owner-session broker completes cancellation without caller synchronization-context progress");
+                using var rollbackListener = shutdownServer.CreateServerPipe();
+                Assert(!rollbackListener.IsConnected, "shutdown completion releases only the broker pipe so a clean restart can bind it");
+            }
+            finally
+            {
+                SynchronizationContext.SetSynchronizationContext(priorSynchronizationContext);
+            }
         }
     }
     Console.WriteLine($"Admin Broker tests passed ({assertions} assertions).");
@@ -395,4 +404,9 @@ sealed class CountingEngine : IAdminBrokerEngine
         return Task.FromResult(new AdminBrokerResponse(AdminBrokerContract.Version, request.RequestId, request.Operation,
             false, "redacted", "Unavailable", "No reviewed adapter is available.", "NOT_IMPLEMENTED", DateTime.UtcNow, null));
     }
+}
+sealed class NonPumpingSynchronizationContext : SynchronizationContext
+{
+    public override void Post(SendOrPostCallback d, object? state) { }
+    public override void Send(SendOrPostCallback d, object? state) => throw new InvalidOperationException("Synthetic context does not pump.");
 }
