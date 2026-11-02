@@ -7,6 +7,7 @@ $bootstrap = Join-Path $deployRoot 'Bootstrap-CiJitControlTasks.ps1'
 
 $workerRelative = 'host-agent/deploy/Invoke-CiJitControlTask.ps1'
 $expectedAcceptedWorkerBlob = '28e2d52ad1fa48ffacdf9fa69e1e4984f3a5ea38'
+$expectedCandidateWorkerBlob = 'e3839c13f7b3b99249f56bf54f42c612a128c516'
 $expectedPriorAcceptedWorkerBlob = 'a0a79f92d31859dd4a930b358b10c7b4cf11db48'
 
 $script:Assertions = 0
@@ -193,16 +194,16 @@ $currentWorkerBlob = (
 
 Assert-True (
     $LASTEXITCODE -eq 0 -and
-    $currentWorkerBlob -ceq $expectedAcceptedWorkerBlob
-) 'source-review worker must be exact accepted #169 worker blob'
+    $currentWorkerBlob -ceq $expectedCandidateWorkerBlob
+) 'source-review worker must be exact #172 candidate blob'
 
 Assert-True (
     $acceptedWorkerBlob -ceq $expectedAcceptedWorkerBlob
-) 'bootstrap must pin the accepted #169 worker after provenance refresh'
+) 'runtime bootstrap must remain pinned to accepted #169 worker during #172 source review'
 
 Assert-True (
-    $acceptedWorkerBlob -ceq $currentWorkerBlob
-) 'source-review and accepted worker identities must converge after provenance refresh'
+    $acceptedWorkerBlob -cne $currentWorkerBlob
+) 'candidate and accepted runtime worker identities must remain split until post-merge provenance refresh'
 
 $bootstrapSource = Get-Content -LiteralPath $bootstrap -Raw
 
@@ -212,10 +213,14 @@ Assert-True (
         [StringComparison]::Ordinal
     ) -and
     -not $bootstrapSource.Contains(
+        $expectedCandidateWorkerBlob,
+        [StringComparison]::Ordinal
+    ) -and
+    -not $bootstrapSource.Contains(
         $expectedPriorAcceptedWorkerBlob,
         [StringComparison]::Ordinal
     )
-) 'bootstrap must promote only the accepted #169 worker provenance'
+) 'runtime bootstrap must keep accepted #169 provenance and must not promote the #172 candidate during source review'
 
 $guard = $bootstrapAst.Find(
     {

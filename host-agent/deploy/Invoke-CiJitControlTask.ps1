@@ -168,7 +168,9 @@ function Invoke-Child([string]$Path,[string[]]$Arguments) {
     while (-not $process.StandardOutput.EndOfStream) {
         $line = $process.StandardOutput.ReadLine()
         if ($line -cmatch '^(DISPATCHER_RESULT|DISCOVERED_RUN_ID|DISCOVERED_JOB_ID|INTERRUPTED_CLEANUP|CLEANUP_IDEMPOTENT)=([A-Z_]+|[0-9]+|PASS)$' -or
-            $line -cmatch ('^CAPACITY_SUBREASON=(' + $script:CapacitySubreasonPattern + ')$')) { $safe.Add($line) }
+            $line -cmatch ('^CAPACITY_SUBREASON=(' + $script:CapacitySubreasonPattern + ')$')) { $safe.Add($line); continue }
+        if ([string]::Equals([IO.Path]::GetFullPath($Path),[IO.Path]::GetFullPath($dispatcher),[StringComparison]::OrdinalIgnoreCase) -and
+            $line -cmatch '^CLASSIFICATION=[A-Z][A-Z0-9_]{0,63}$') { $safe.Add($line) }
     }
     $process.WaitForExit()
     $code=$process.ExitCode; $process.Dispose()
@@ -181,11 +183,33 @@ function Get-OutputValue([string[]]$Lines,[string]$Name) {
     $match[0].Substring($Name.Length+1)
 }
 
+function Resolve-RecoverFailureReason([string[]]$Lines) {
+    $classification = Get-OutputValue $Lines 'CLASSIFICATION'
+    if (-not $classification) { return 'FAILED' }
+    if ($classification -cin @(
+        'PREFLIGHT_REPARSE_PATH_REFUSED','PREFLIGHT_PARENT_OWNER_UNTRUSTED','PREFLIGHT_PARENT_REPLACEMENT_UNTRUSTED',
+        'PREFLIGHT_OWNER_UNTRUSTED','PREFLIGHT_ACL_UNTRUSTED_WRITE','PREFLIGHT_ACL_REQUIRED_PRINCIPAL_MISSING',
+        'PREFLIGHT_ENTRY_PATH_MISMATCH','MANIFEST_HASH_DRIFT','PREFLIGHT_PROVENANCE_MISMATCH','DISPATCHER_PREFLIGHT_HASH_DRIFT',
+        'BUNDLE_PROVENANCE_MISMATCH','BUNDLE_CONTROLLER_SNAPSHOT_MISMATCH','BUNDLE_VERIFIER_PROVENANCE_MISMATCH','BUNDLE_VERIFIER_HASH_DRIFT',
+        'BUNDLE_PARENT_OWNER_UNTRUSTED','BUNDLE_PARENT_REPLACEMENT_UNTRUSTED','BUNDLE_OWNER_UNTRUSTED','BUNDLE_ACL_UNTRUSTED_WRITE',
+        'BUNDLE_ACL_REQUIRED_PRINCIPAL_MISSING','ACCEPTED_CONTROLLER_UNAVAILABLE','ACCEPTED_CONTROLLER_CHANGED','ACCEPTED_CONTROLLER_MATCH_AMBIGUOUS',
+        'EXACT_BUNDLE_REFERENCE_REQUIRED'
+    )) { return 'PROVENANCE_MISMATCH' }
+    if ($classification -cin @('RECOVERY_BUSY_OR_UNCERTAIN','CONTROLLER_GATE_UNCERTAIN','CONTROLLER_GATE_CHANGED','CLEANUP_UNCONFIRMED')) {
+        return 'LOCK_OR_RESIDUE_UNCERTAIN'
+    }
+    if ($classification -cin @('QUEUE_UNAVAILABLE','QUEUE_STALE','API_READ_FAILED','API_RESPONSE_INVALID')) { return 'QUEUE_UNAVAILABLE' }
+    'FAILED'
+}
+
 function Invoke-DispatcherMode([ValidateSet('Discover','Once','Recover')][string]$Mode) {
     $args = @('-ManifestSha',$ManifestSha,'-Commit',$Commit,'-Tree',$Tree,'-Mode',$Mode)
     $result = Invoke-Child $dispatcher $args
     $code = Get-OutputValue $result.Lines 'DISPATCHER_RESULT'
-    if ($result.ExitCode -ne 0 -or $code -ceq 'FAIL' -or -not $code) { return [pscustomobject]@{Success=$false;State='FAILED';Reason='FAILED';RunId=0;JobId=0;ProfileId=$null} }
+    if ($result.ExitCode -ne 0 -or $code -ceq 'FAIL' -or -not $code) {
+        $reason = if ($Mode -ceq 'Recover' -and $code -ceq 'FAIL') { Resolve-RecoverFailureReason $result.Lines } else { 'FAILED' }
+        return [pscustomobject]@{Success=$false;State='FAILED';Reason=$reason;RunId=0;JobId=0;ProfileId=$null}
+    }
     if ($code -ceq 'BUSY') { return [pscustomobject]@{Success=$false;State='BLOCKED';Reason='BUSY';RunId=0;JobId=0;ProfileId=$null} }
     if ($code -ceq 'CAPACITY') {
         $sub = Get-OutputValue $result.Lines 'CAPACITY_SUBREASON'
