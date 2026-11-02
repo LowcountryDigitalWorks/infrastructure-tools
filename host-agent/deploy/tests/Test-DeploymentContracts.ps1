@@ -233,8 +233,11 @@ try {
         Assert-True ($foreign.Lines.Count -eq 0) 'classification from a non-dispatcher child must not be captured'
 
         Assert-True ((Resolve-RecoverFailureReason @('CLASSIFICATION=PREFLIGHT_OWNER_UNTRUSTED')) -ceq 'PROVENANCE_MISMATCH') 'trusted provenance classification must map to existing provenance reason'
+        Assert-True ((Resolve-RecoverFailureReason @('CLASSIFICATION=BUNDLE_FILE_HASH_DRIFT')) -ceq 'PROVENANCE_MISMATCH') 'known bundle hash drift must map to existing provenance reason'
         Assert-True ((Resolve-RecoverFailureReason @('CLASSIFICATION=RECOVERY_BUSY_OR_UNCERTAIN')) -ceq 'LOCK_OR_RESIDUE_UNCERTAIN') 'trusted recovery uncertainty must map to existing lock/residue reason'
+        Assert-True ((Resolve-RecoverFailureReason @('CLASSIFICATION=DISPATCHER_BUSY_OR_LOCK_UNCERTAIN')) -ceq 'LOCK_OR_RESIDUE_UNCERTAIN') 'known dispatcher lock uncertainty must map to existing lock/residue reason'
         Assert-True ((Resolve-RecoverFailureReason @('CLASSIFICATION=QUEUE_UNAVAILABLE')) -ceq 'QUEUE_UNAVAILABLE') 'trusted queue classification must map to existing queue reason'
+        Assert-True ((Resolve-RecoverFailureReason @('CLASSIFICATION=API_SCOPE_REFUSED')) -ceq 'QUEUE_UNAVAILABLE') 'known API scope refusal must map to existing queue reason'
         Assert-True ((Resolve-RecoverFailureReason @('CLASSIFICATION=FUTURE_UNKNOWN_CLASS')) -ceq 'FAILED') 'unknown bounded classification must not widen external reason codes'
         Assert-True ((Resolve-RecoverFailureReason @()) -ceq 'FAILED') 'missing classification must collapse fail closed'
 
@@ -264,7 +267,7 @@ finally {
 $dispatcherSource = Get-Content -LiteralPath (Join-Path (Split-Path (Split-Path $deployRoot -Parent) -Parent) 'ci-dispatch/Invoke-Dispatcher.ps1') -Raw
 Assert-True ($dispatcherSource.Contains("if (`$gate -notin @('READY','CAPACITY'))",[StringComparison]::Ordinal) -and $dispatcherSource.Contains("'DISPATCHER_RESULT=RECOVERED'",[StringComparison]::Ordinal)) 'protected dispatcher Recover must continue accepting READY or CAPACITY without launch semantics'
 
-$candidateRecoverWorkerBlob='e3839c13f7b3b99249f56bf54f42c612a128c516'
+$candidateRecoverWorkerBlob='168d66a5de097388af22440d478829522b9b9e6d'
 $bootstrapSource = Get-Content -LiteralPath (Join-Path $deployRoot 'Bootstrap-CiJitControlTasks.ps1') -Raw
 foreach ($literal in @(
     'ecc801ffbce6d0fca444d6a4ea7b07e404bb9161',
