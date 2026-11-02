@@ -9,6 +9,54 @@ var root = Path.Combine(Path.GetTempPath(), "LDW_AdminBroker_Tests_" + Guid.NewG
 Directory.CreateDirectory(root);
 try
 {
+    {
+        using var startupCancellation = new CancellationTokenSource();
+        var startupStates = new List<AdminBrokerLifecycleState>();
+        var startupCycles = 0;
+        await AdminBrokerOwnerSessionLifecycle.RunCoreAsync(_ =>
+        {
+            startupCycles++;
+            startupStates.Add(AdminBrokerLifecycleState.Ready);
+            startupCancellation.Cancel();
+            return Task.CompletedTask;
+        }, startupStates.Add, startupCancellation.Token, 3, (_, _) => Task.CompletedTask);
+        Assert(startupCycles == 1, "owner-session startup reaches ready without an interactive Serve selection");
+        Assert(startupStates.SequenceEqual(new[] { AdminBrokerLifecycleState.Starting, AdminBrokerLifecycleState.Ready, AdminBrokerLifecycleState.Stopped }),
+            "startup and shutdown readiness states are explicit");
+    }
+
+    {
+        using var reconnectCancellation = new CancellationTokenSource();
+        var reconnectCycles = 0;
+        await AdminBrokerOwnerSessionLifecycle.RunCoreAsync(_ =>
+        {
+            reconnectCycles++;
+            if (reconnectCycles == 2) reconnectCancellation.Cancel();
+            return Task.CompletedTask;
+        }, _ => { }, reconnectCancellation.Token, 3, (_, _) => Task.CompletedTask);
+        Assert(reconnectCycles == 2, "completed client connection is followed by a fresh bounded accept cycle");
+    }
+
+    {
+        var failureStates = new List<AdminBrokerLifecycleState>();
+        var failureCycles = 0;
+        var delays = new List<TimeSpan>();
+        await AdminBrokerOwnerSessionLifecycle.RunCoreAsync(_ =>
+        {
+            failureCycles++;
+            throw new IOException("synthetic broker startup failure");
+        }, failureStates.Add, CancellationToken.None, 3, (delay, _) =>
+        {
+            delays.Add(delay);
+            return Task.CompletedTask;
+        });
+        Assert(failureCycles == 3 && delays.SequenceEqual(new[] { TimeSpan.FromMilliseconds(250), TimeSpan.FromMilliseconds(500) }),
+            "recovery retries use bounded backoff and stop after the fixed failure limit");
+        Assert(failureStates.SequenceEqual(new[] { AdminBrokerLifecycleState.Starting, AdminBrokerLifecycleState.Recovering,
+            AdminBrokerLifecycleState.Recovering, AdminBrokerLifecycleState.Failed }),
+            "repeated failure remains visible and does not fabricate readiness");
+    }
+
     var secretPath = Path.Combine(root, "secret.dat");
     var store = new LocalSecretStore(secretPath, new TestProtector());
     const string secret = "synthetic-value-only";
@@ -266,6 +314,15 @@ try
         {
             var pipeServer = new AdminBrokerPipeServer([ownerSid], countingEngine, transportAudit, allowElevatedTestProcess: true);
             using var serverPipe = pipeServer.CreateServerPipe();
+            try
+            {
+                using var duplicatePipe = pipeServer.CreateServerPipe();
+                Assert(false, "duplicate owner-session start must not create another broker listener");
+            }
+            catch (IOException)
+            {
+                Assert(true, "duplicate owner-session start is rejected by the single-instance named pipe boundary");
+            }
             var serveTask = pipeServer.ServeOneAsync(serverPipe, CancellationToken.None);
             using var client = new NamedPipeClientStream(".", AdminBrokerContract.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous, TokenImpersonationLevel.Impersonation);
             await client.ConnectAsync(5000);
@@ -280,19 +337,39 @@ try
             Assert(transportAudit.ReadRecords().Count == 1, "transport writes sanitized durable audit before response");
         }
 
-        var deniedEngine = new CountingEngine();
-        var deniedServer = new AdminBrokerPipeServer([ownerSid], deniedEngine, new AdminBrokerAuditLogger(Path.Combine(root, "denied-audit.jsonl")), allowElevatedTestProcess: true);
-        using var deniedPipe = deniedServer.CreateServerPipe();
-        var deniedTask = deniedServer.ServeOneAsync(deniedPipe, CancellationToken.None);
-        using var deniedClient = new NamedPipeClientStream(".", AdminBrokerContract.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous, TokenImpersonationLevel.Impersonation);
-        await deniedClient.ConnectAsync(5000);
-        await using var deniedWriter = new StreamWriter(deniedClient, leaveOpen: true);
-        using var deniedReader = new StreamReader(deniedClient, leaveOpen: true);
-        await deniedWriter.WriteLineAsync(new string('x', AdminBrokerContract.MaximumRequestCharacters + 1));
-        await deniedWriter.FlushAsync();
-        await deniedReader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5));
-        await deniedTask.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert(deniedEngine.CallCount == 0, "oversized frame is rejected before handler invocation");
+        {
+            var deniedEngine = new CountingEngine();
+            var deniedServer = new AdminBrokerPipeServer([ownerSid], deniedEngine, new AdminBrokerAuditLogger(Path.Combine(root, "denied-audit.jsonl")), allowElevatedTestProcess: true);
+            using var deniedPipe = deniedServer.CreateServerPipe();
+            var deniedTask = deniedServer.ServeOneAsync(deniedPipe, CancellationToken.None);
+            using var deniedClient = new NamedPipeClientStream(".", AdminBrokerContract.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous, TokenImpersonationLevel.Impersonation);
+            await deniedClient.ConnectAsync(5000);
+            await using var deniedWriter = new StreamWriter(deniedClient, leaveOpen: true);
+            using var deniedReader = new StreamReader(deniedClient, leaveOpen: true);
+            await deniedWriter.WriteLineAsync(new string('x', AdminBrokerContract.MaximumRequestCharacters + 1));
+            await deniedWriter.FlushAsync();
+            await deniedReader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            await deniedTask.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert(deniedEngine.CallCount == 0, "oversized frame is rejected before handler invocation");
+        }
+
+        {
+            var shutdownServer = new AdminBrokerPipeServer([ownerSid], new CountingEngine(),
+                new AdminBrokerAuditLogger(Path.Combine(root, "shutdown-audit.jsonl")), allowElevatedTestProcess: true);
+            using var shutdownCancellation = new CancellationTokenSource();
+            var listenerReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var shutdownTask = AdminBrokerOwnerSessionLifecycle.RunCoreAsync(async cancellationToken =>
+            {
+                using var pipe = shutdownServer.CreateServerPipe();
+                listenerReady.TrySetResult();
+                await shutdownServer.ServeOneAsync(pipe, cancellationToken);
+            }, _ => { }, shutdownCancellation.Token, 3, (_, _) => Task.CompletedTask);
+            await listenerReady.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            shutdownCancellation.Cancel();
+            await shutdownTask.WaitAsync(TimeSpan.FromSeconds(5));
+            using var rollbackListener = shutdownServer.CreateServerPipe();
+            Assert(!rollbackListener.IsConnected, "shutdown cancels and releases only the broker pipe so a clean restart can bind it");
+        }
     }
     Console.WriteLine($"Admin Broker tests passed ({assertions} assertions).");
 }

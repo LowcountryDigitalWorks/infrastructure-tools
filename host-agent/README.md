@@ -11,9 +11,9 @@ Host Agent is a device-first, local status surface for owner-controlled LDW comp
 
 ## Local Admin Broker & Secret Handoff
 
-`src/LDW.AdminBroker` is contract scaffolding with no runnable transport or operations. `src/LDW.LocalSecretStore` requires Windows CurrentUser DPAPI in production; the Corsair launcher is unavailable. See [ADMIN_BROKER.md](docs/ADMIN_BROKER.md) for implemented behavior.
+`src/LDW.AdminBroker` provides the existing normal-user `LDW.AdminBroker.v1` transport and typed operation engine. The Host Agent owner-session lifecycle starts that broker alongside its tray, reports readiness/failure in the tray menu, and uses bounded recovery without adding another startup mechanism. `src/LDW.LocalSecretStore` requires Windows CurrentUser DPAPI in production; the Corsair launcher is unavailable. See [ADMIN_BROKER.md](docs/ADMIN_BROKER.md) for implemented behavior.
 
-The operation names are contract-only and return unavailable. Secret storage supports the fixed ID with CurrentUser DPAPI; no process handoff is implemented. See [Admin Broker documentation](docs/ADMIN_BROKER.md).
+The reviewed typed operation surface remains unchanged. Secret storage supports the fixed ID with CurrentUser DPAPI; no new process handoff is implemented. See [Admin Broker documentation](docs/ADMIN_BROKER.md).
 
 ## Normal-user tray autostart
 
