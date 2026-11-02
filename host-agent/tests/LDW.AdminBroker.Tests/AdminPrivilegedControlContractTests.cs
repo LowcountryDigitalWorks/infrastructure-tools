@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using LDW.AdminBroker;
 
 internal static class AdminPrivilegedControlContractTests
@@ -122,6 +123,41 @@ internal static class AdminPrivilegedControlContractTests
         };
         Assert(!AdminPrivilegedControlContract.IsSafeResult(unsafeKeyResult), "unsafe detail key rejected");
         Assert(!AdminPrivilegedControlContract.IsSafeResult(unsafeValueResult), "unsafe detail value rejected");
+
+        // 13. STARTED in-flight result is safe
+        var inFlightResult = new AdminPrivilegedControlResult(
+            true, "STARTED", "NONE", "11111111-1111-1111-1111-111111111111", "ELEVATED_IDENTITY_PROOF");
+        Assert(AdminPrivilegedControlContract.IsSafeResult(inFlightResult), "STARTED in-flight result passes safety check");
+
+        // 14. Registry consistency: C# reviewed operation IDs == PowerShell helper registry
+        var baseDir = AppContext.BaseDirectory;
+        var cursor = new DirectoryInfo(baseDir);
+        string? workerScriptPath = null;
+        while (cursor is not null)
+        {
+            var candidate = Path.Combine(cursor.FullName, "host-agent", "deploy", "Invoke-AdminPrivilegedOperation.ps1");
+            if (File.Exists(candidate))
+            {
+                workerScriptPath = candidate;
+                break;
+            }
+            cursor = cursor.Parent;
+        }
+        Assert(workerScriptPath is not null && File.Exists(workerScriptPath), "found Invoke-AdminPrivilegedOperation.ps1");
+
+        var workerContent = File.ReadAllText(workerScriptPath!);
+        var registryMatch = Regex.Match(workerContent, @"\$ReviewedOperationRegistry\s*=\s*@\{(?<bodycontent>.*?)\n\}", RegexOptions.Singleline);
+        Assert(registryMatch.Success, "found $ReviewedOperationRegistry block in worker script");
+
+        var psOps = new HashSet<string>(StringComparer.Ordinal);
+        var opMatches = Regex.Matches(registryMatch.Groups["bodycontent"].Value, @"'([A-Z0-9_]+)'\s*=");
+        foreach (Match m in opMatches)
+        {
+            psOps.Add(m.Groups[1].Value);
+        }
+
+        Assert(psOps.SetEquals(AdminReviewedOperationRegistry.All),
+            "C# reviewed operation registry exactly equals PowerShell reviewed operation registry");
 
         Console.WriteLine($"Privileged control contract tests: {assertions} assertions passed.");
     }

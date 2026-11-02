@@ -2,18 +2,21 @@
 param(
     [ValidateSet('Plan','Install','Status','Uninstall')][string]$Mode = 'Plan',
     [Parameter(Mandatory)][ValidatePattern('^S-1-5-21-(\d+-){3}\d+$')][string]$OwnerSid,
+    [string]$WorkerSourcePath,
     [switch]$AcceptInstall,
     [switch]$AcceptUninstall
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+$acceptedWorkerSha256 = 'db71da0a73f2943eb8837e7c1e7070a22251478e4acfba91338837c7fc699605'
+
 $controlRoot = Join-Path $env:ProgramData 'LDW/PrivilegedControl'
 $binRoot = Join-Path $controlRoot 'bin'
 $requestRoot = Join-Path $controlRoot 'requests'
 $resultRoot = Join-Path $controlRoot 'results'
 $lockRoot = Join-Path $controlRoot 'lock'
-$workerSource = Join-Path $PSScriptRoot 'Invoke-AdminPrivilegedOperation.ps1'
+$workerSource = if ($WorkerSourcePath) { $WorkerSourcePath } else { Join-Path $PSScriptRoot 'Invoke-AdminPrivilegedOperation.ps1' }
 $workerInstalled = Join-Path $binRoot 'Invoke-AdminPrivilegedOperation.ps1'
 $taskName = '\LDW-ADMIN-REVIEWED-OPERATION'
 $taskSddl = 'O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;' + $OwnerSid + ')'
@@ -69,20 +72,32 @@ function Assert-DirectoryAcl([string]$Path, [ValidateSet('Protected','Requests',
         throw 'CONTROL_ACL_OWNER_REFUSED'
     }
     $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
-    $owner = @($rules | Where-Object { $_.IdentityReference.Value -eq $OwnerSid -and $_.AccessControlType -eq 'Allow' })
-    if ($Kind -eq 'Protected') {
-        $forbidden = [Security.AccessControl.FileSystemRights]::Write -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
-        if (@($owner | Where-Object { $_.FileSystemRights -band $forbidden }).Count) {
+    $forbidden = [Security.AccessControl.FileSystemRights]::Write -bor
+        [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership
+
+    $nonAdminWriters = @($rules | Where-Object { $_.AccessControlType -eq 'Allow' -and ($_.FileSystemRights -band $forbidden) -and $_.IdentityReference.Value -notin @('S-1-5-18', 'S-1-5-32-544') })
+
+    if ($Kind -eq 'Protected' -or $Kind -eq 'Results') {
+        if ($nonAdminWriters.Count -gt 0) {
             throw 'OWNER_CONTROL_WRITE_REFUSED'
         }
+        if ($Kind -eq 'Results') {
+            $owner = @($rules | Where-Object { $_.IdentityReference.Value -eq $OwnerSid -and $_.AccessControlType -eq 'Allow' })
+            if (-not @($owner | Where-Object { $_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::Read }).Count) {
+                throw 'OWNER_RESULT_READ_ONLY_REQUIRED'
+            }
+        }
     } elseif ($Kind -eq 'Requests') {
+        $owner = @($rules | Where-Object { $_.IdentityReference.Value -eq $OwnerSid -and $_.AccessControlType -eq 'Allow' })
         if (-not @($owner | Where-Object { ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::Modify) -eq [Security.AccessControl.FileSystemRights]::Modify }).Count) {
             throw 'OWNER_REQUEST_WRITE_REQUIRED'
         }
-    } else {
-        $forbidden = [Security.AccessControl.FileSystemRights]::Write -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
-        if (@($owner | Where-Object { $_.FileSystemRights -band $forbidden }).Count -or -not @($owner | Where-Object { $_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::Read }).Count) {
-            throw 'OWNER_RESULT_READ_ONLY_REQUIRED'
+        $uniqueWriterSids = @($nonAdminWriters | ForEach-Object { $_.IdentityReference.Value } | Select-Object -Unique)
+        if ($uniqueWriterSids.Count -ne 1 -or $uniqueWriterSids[0] -cne $OwnerSid) {
+            throw 'OWNER_REQUEST_WRITE_DRIFT'
         }
     }
 }
@@ -175,6 +190,11 @@ function Install-Tasks {
     Assert-Elevated
     if (-not $AcceptInstall) { throw 'EXPLICIT_INSTALL_ACCEPTANCE_REQUIRED' }
     if (-not (Test-Path -LiteralPath $workerSource -PathType Leaf)) { throw 'WORKER_SOURCE_REQUIRED' }
+    $sourceSha = (Get-FileHash -LiteralPath $workerSource -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($sourceSha -cne $acceptedWorkerSha256) {
+        throw 'WORKER_PROVENANCE_MISMATCH'
+    }
+
     foreach ($path in @($controlRoot, $binRoot, $requestRoot, $resultRoot, $lockRoot)) { Assert-NoReparse $path }
     New-ProtectedDirectoryAcl $controlRoot Protected
     New-ProtectedDirectoryAcl $binRoot Protected
@@ -183,6 +203,10 @@ function Install-Tasks {
     New-ProtectedDirectoryAcl $lockRoot Protected
     Copy-Item -LiteralPath $workerSource -Destination $workerInstalled -Force
     $workerSha = (Get-FileHash -LiteralPath $workerInstalled -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($workerSha -cne $acceptedWorkerSha256) {
+        throw 'WORKER_PROVENANCE_MISMATCH'
+    }
+
     Assert-DirectoryAcl $controlRoot Protected
     Assert-DirectoryAcl $binRoot Protected
     Assert-DirectoryAcl $requestRoot Requests
@@ -223,6 +247,8 @@ function Get-Status {
     Assert-Elevated
     if (-not (Test-Path -LiteralPath $workerInstalled -PathType Leaf)) { throw 'WORKER_NOT_INSTALLED' }
     $workerSha = (Get-FileHash -LiteralPath $workerInstalled -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($workerSha -cne $acceptedWorkerSha256) { throw 'WORKER_PROVENANCE_MISMATCH' }
+
     Assert-DirectoryAcl $controlRoot Protected
     Assert-DirectoryAcl $binRoot Protected
     Assert-DirectoryAcl $requestRoot Requests
@@ -241,20 +267,86 @@ function Get-Status {
 function Uninstall-Tasks {
     Assert-Elevated
     if (-not $AcceptUninstall) { throw 'EXPLICIT_UNINSTALL_ACCEPTANCE_REQUIRED' }
-    $service = Get-TaskService
-    $folder = $service.GetFolder('\')
-    try {
-        $task = $folder.GetTask($taskName)
-        if ($task.State -eq 4) { throw 'ACTIVE_TASK_REFUSED' }
-        $folder.DeleteTask($taskName.TrimStart('\'), 0)
-    } catch {
-        if ($_.Exception.Message -eq 'ACTIVE_TASK_REFUSED') { throw }
-    }
-    if (Test-Path -LiteralPath $controlRoot) {
-        if (@(Get-ChildItem -LiteralPath $requestRoot -File -ErrorAction SilentlyContinue).Count) {
+
+    # 1. Prove no pending/in-flight/ambiguous request state FIRST
+    if (Test-Path -LiteralPath $requestRoot) {
+        Assert-NoReparse $requestRoot
+        $pendingFiles = @(Get-ChildItem -LiteralPath $requestRoot -File -ErrorAction Stop)
+        if ($pendingFiles.Count -gt 0) {
             throw 'PENDING_REQUEST_REFUSED'
         }
+    }
+    if (Test-Path -LiteralPath $resultRoot) {
+        Assert-NoReparse $resultRoot
+        $cutoff = [DateTime]::UtcNow.AddMinutes(-15)
+        $inFlight = @(Get-ChildItem -LiteralPath $resultRoot -File -ErrorAction Stop | Where-Object {
+            $_.Name -cmatch '^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}\.json$' -and $_.LastWriteTimeUtc -gt $cutoff
+        } | ForEach-Object {
+            try {
+                $doc = Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json
+                if ($doc.resultState -ceq 'STARTED') { $_ }
+            } catch { }
+        })
+        if ($inFlight.Count -gt 0) {
+            throw 'ACTIVE_TASK_REFUSED'
+        }
+    }
+
+    # 2. Resolve exact task state from Task Scheduler
+    $service = Get-TaskService
+    $folder = $service.GetFolder('\')
+    $task = $null
+    $taskFound = $false
+    try {
+        $task = $folder.GetTask($taskName)
+        $taskFound = $true
+    } catch {
+        $hResult = $_.Exception.HResult
+        $msg = $_.Exception.Message
+        if ($hResult -eq [int]0x80070002 -or $msg -match '0x80070002|The system cannot find the file specified') {
+            $taskFound = $false
+        } else {
+            throw 'TASK_LOOKUP_FAILED'
+        }
+    }
+
+    if ($taskFound) {
+        # TaskState: 0=Unknown, 1=Disabled, 2=Queued, 3=Ready, 4=Running
+        $state = [int]$task.State
+        if ($state -eq 4 -or $state -eq 2 -or $state -eq 0) {
+            throw 'ACTIVE_TASK_REFUSED'
+        }
+        if ($state -ne 1 -and $state -ne 3) {
+            throw 'ACTIVE_TASK_REFUSED'
+        }
+
+        # 3. Delete task
+        try {
+            $folder.DeleteTask($taskName.TrimStart('\'), 0)
+        } catch {
+            throw 'TASK_DELETE_FAILED'
+        }
+
+        # 4. Positively prove task absence
+        try {
+            $null = $folder.GetTask($taskName)
+            throw 'TASK_DELETION_VERIFICATION_FAILED'
+        } catch {
+            if ($_.Exception.Message -eq 'TASK_DELETION_VERIFICATION_FAILED') { throw }
+            $hResult = $_.Exception.HResult
+            $msg = $_.Exception.Message
+            if ($hResult -ne [int]0x80070002 -and $msg -notmatch '0x80070002|The system cannot find the file specified') {
+                throw 'TASK_DELETION_VERIFICATION_FAILED'
+            }
+        }
+    }
+
+    # 5. Only then remove protected root
+    if (Test-Path -LiteralPath $controlRoot) {
         Remove-Item -LiteralPath $controlRoot -Recurse -Force
+        if (Test-Path -LiteralPath $controlRoot) {
+            throw 'CONTROL_ROOT_REMOVAL_FAILED'
+        }
     }
     'ADMIN_PRIVILEGED_HELPER_UNINSTALL=PASS'
 }
@@ -262,6 +354,7 @@ function Uninstall-Tasks {
 if ($Mode -eq 'Plan') {
     if (-not (Test-Path -LiteralPath $workerSource -PathType Leaf)) { throw 'WORKER_SOURCE_REQUIRED' }
     $sha = (Get-FileHash -LiteralPath $workerSource -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($sha -cne $acceptedWorkerSha256) { throw 'WORKER_PROVENANCE_MISMATCH' }
     'ADMIN_PRIVILEGED_HELPER_PLAN=PASS'
     'TASK_COUNT=1'
     'TRIGGER_COUNT=0'

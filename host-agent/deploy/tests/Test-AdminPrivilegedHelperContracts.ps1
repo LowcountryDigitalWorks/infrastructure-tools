@@ -49,8 +49,13 @@ Assert-True ($managePlan -contains ('WORKER_SHA256=' + $actualWorkerSha)) 'Manag
 $bootstrapSource = Get-Content -LiteralPath $bootstrapPath -Raw
 $actualManageBlob = (& git hash-object $managePath).Trim()
 $actualWorkerBlob = (& git hash-object $workerPath).Trim()
+$actualManageSha = (Get-FileHash -LiteralPath $managePath -Algorithm SHA256).Hash.ToLowerInvariant()
+$actualWorkerSha = (Get-FileHash -LiteralPath $workerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+
 Assert-True ($bootstrapSource.Contains($actualManageBlob, [StringComparison]::Ordinal)) 'Bootstrap pins current Manage blob'
 Assert-True ($bootstrapSource.Contains($actualWorkerBlob, [StringComparison]::Ordinal)) 'Bootstrap pins current Worker blob'
+Assert-True ($bootstrapSource.Contains($actualManageSha, [StringComparison]::Ordinal)) 'Bootstrap pins current Manage sha256'
+Assert-True ($bootstrapSource.Contains($actualWorkerSha, [StringComparison]::Ordinal)) 'Bootstrap pins current Worker sha256'
 Assert-True ($bootstrapSource.Contains("branch', '--show-current", [StringComparison]::Ordinal)) 'Bootstrap checks current branch'
 Assert-True ($bootstrapSource.Contains('$branch -cne ''main''', [StringComparison]::Ordinal)) 'Bootstrap requires main branch'
 Assert-True ($bootstrapSource.Contains("status', '--porcelain", [StringComparison]::Ordinal)) 'Bootstrap requires clean worktree'
@@ -68,6 +73,11 @@ if ($null -eq $checkoutFn) { throw 'FUNCTION_REQUIRED: Assert-AcceptedCheckout' 
     $workerRelative = 'host-agent/deploy/Invoke-AdminPrivilegedOperation.ps1'
     $acceptedManageBlob = $AcceptedManageBlob
     $acceptedWorkerBlob = $AcceptedWorkerBlob
+    $approvedOrigins = @(
+        'https://github.com/LowcountryDigitalWorks/infrastructure-tools.git',
+        'https://github.com/LowcountryDigitalWorks/infrastructure-tools',
+        'git@github.com:LowcountryDigitalWorks/infrastructure-tools.git'
+    )
     . ([scriptblock]::Create($CheckoutFnSource))
 
     $fixture = [ordered]@{
@@ -101,7 +111,17 @@ if ($null -eq $checkoutFn) { throw 'FUNCTION_REQUIRED: Assert-AcceptedCheckout' 
     $accepted = Assert-AcceptedCheckout
     Assert-True ($accepted.Root -ceq 'C:\synthetic-repo') 'Synthetic Assert-AcceptedCheckout passes on valid fixture'
 
+    # Alternate approved origins pass
+    $fixture.OriginUrl = 'https://github.com/LowcountryDigitalWorks/infrastructure-tools'
+    $acceptedNoGit = Assert-AcceptedCheckout
+    Assert-True ($acceptedNoGit.Root -ceq 'C:\synthetic-repo') 'Assert-AcceptedCheckout passes without .git suffix'
+
+    $fixture.OriginUrl = 'git@github.com:LowcountryDigitalWorks/infrastructure-tools.git'
+    $acceptedSsh = Assert-AcceptedCheckout
+    Assert-True ($acceptedSsh.Root -ceq 'C:\synthetic-repo') 'Assert-AcceptedCheckout passes with SSH URL'
+
     # Non-main branch rejected
+    $fixture.OriginUrl = 'https://github.com/LowcountryDigitalWorks/infrastructure-tools.git'
     $fixture.Branch = 'feat/some-branch'
     Assert-Refused { Assert-AcceptedCheckout } 'SOURCE_MAIN_REQUIRED'
     $fixture.Branch = 'main'
@@ -119,6 +139,14 @@ if ($null -eq $checkoutFn) { throw 'FUNCTION_REQUIRED: Assert-AcceptedCheckout' 
     # Wrong remote origin rejected
     $fixture.OriginUrl = 'https://github.com/malicious/infrastructure-tools.git'
     Assert-Refused { Assert-AcceptedCheckout } 'SOURCE_ORIGIN_REFUSED'
+
+    # Attacker suffix / fork origins rejected
+    $fixture.OriginUrl = 'https://attacker.com/LowcountryDigitalWorks/infrastructure-tools.git'
+    Assert-Refused { Assert-AcceptedCheckout } 'SOURCE_ORIGIN_REFUSED'
+
+    $fixture.OriginUrl = 'https://github.com/LowcountryDigitalWorks/infrastructure-tools-fork.git'
+    Assert-Refused { Assert-AcceptedCheckout } 'SOURCE_ORIGIN_REFUSED'
+
     $fixture.OriginUrl = 'https://github.com/LowcountryDigitalWorks/infrastructure-tools.git'
 
     # Manage blob drift rejected
@@ -309,11 +337,49 @@ try {
     Assert-True ($null -eq $sanitizedJson.details.PSObject.Properties['bad key with spaces']) 'Unsafe key stripped'
     Assert-True ($null -eq $sanitizedJson.details.PSObject.Properties['dangerous']) 'Unsafe value stripped'
 
-    # 5f. Durable replay: reject duplicate correlation ID when result file already exists
+    # 5f. Restart / crash semantics:
+    # 5f-1. Terminal result already exists: completed => never execute again, unlink request slot, preserve result
     [IO.File]::WriteAllText($requestPath, $validPayload, [Text.UTF8Encoding]::new($false))
-    Assert-Refused { Read-Request } 'DUPLICATE_REQUEST'
+    $repeatParsed = Read-Request
+    Assert-True ($null -eq $repeatParsed) 'Completed request returns null from Read-Request'
+    Assert-True (-not (Test-Path -LiteralPath $requestPath)) 'Request slot unlinked when terminal result exists'
+    $existingResult = Get-Content -LiteralPath $resultFile -Raw | ConvertFrom-Json
+    Assert-True ($existingResult.resultState -ceq 'PASS') 'Terminal result preserved as PASS'
 
-    # 5g. Stale request crash/timeout reconciliation: > 15m writes TIMEOUT and unlinks slot
+    # 5f-2. In-flight STARTED result (< 15m): do not re-execute, preserve request slot and STARTED state
+    $inFlightCorrId = [guid]::NewGuid().ToString('D')
+    $inFlightPayload = [ordered]@{ schema = 1; correlationId = $inFlightCorrId; operationId = 'ELEVATED_IDENTITY_PROOF' } | ConvertTo-Json -Compress
+    [IO.File]::WriteAllText($requestPath, $inFlightPayload, [Text.UTF8Encoding]::new($false))
+    $script:CorrelationId = $inFlightCorrId
+    $script:OperationId = 'ELEVATED_IDENTITY_PROOF'
+    Write-Result -Success $true -State 'STARTED' -Reason 'NONE'
+    $inFlightFile = Join-Path $resultRoot ($inFlightCorrId + '.json')
+    (Get-Item -LiteralPath $inFlightFile).LastWriteTimeUtc = [DateTime]::UtcNow.AddMinutes(-5)
+    $inFlightParsed = Read-Request
+    Assert-True ($null -eq $inFlightParsed) 'In-flight (< 15m) returns null from Read-Request'
+    Assert-True (Test-Path -LiteralPath $requestPath) 'Request slot preserved for active in-flight task'
+    $inFlightJson = Get-Content -LiteralPath $inFlightFile -Raw | ConvertFrom-Json
+    Assert-True ($inFlightJson.resultState -ceq 'STARTED') 'In-flight record preserved as STARTED'
+
+    # 5f-3. In-flight STARTED result (>= 15m): timeout/crash => reconcile to TIMEOUT, unlink slot, never re-execute
+    (Get-Item -LiteralPath $inFlightFile).LastWriteTimeUtc = [DateTime]::UtcNow.AddMinutes(-20)
+    $inFlightTimeoutParsed = Read-Request
+    Assert-True ($null -eq $inFlightTimeoutParsed) 'Timed out in-flight returns null from Read-Request'
+    Assert-True (-not (Test-Path -LiteralPath $requestPath)) 'Request slot unlinked for timed out in-flight'
+    $inFlightTimeoutJson = Get-Content -LiteralPath $inFlightFile -Raw | ConvertFrom-Json
+    Assert-True ($inFlightTimeoutJson.resultState -ceq 'FAILED' -and $inFlightTimeoutJson.reasonCode -ceq 'TIMEOUT') 'In-flight crash reconciled to TIMEOUT'
+
+    # 5f-4. Corrupt result file: fail closed with INVALID_ADAPTER_RESULT
+    $corruptCorrId = [guid]::NewGuid().ToString('D')
+    $corruptPayload = [ordered]@{ schema = 1; correlationId = $corruptCorrId; operationId = 'ELEVATED_IDENTITY_PROOF' } | ConvertTo-Json -Compress
+    [IO.File]::WriteAllText($requestPath, $corruptPayload, [Text.UTF8Encoding]::new($false))
+    $corruptFile = Join-Path $resultRoot ($corruptCorrId + '.json')
+    [IO.File]::WriteAllText($corruptFile, '{"schema":999}', [Text.UTF8Encoding]::new($false))
+    Assert-Refused { Read-Request } 'INVALID_ADAPTER_RESULT'
+    Remove-Item -LiteralPath $corruptFile -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $requestPath -Force -ErrorAction SilentlyContinue
+
+    # 5g. Stale request crash/timeout reconciliation: unstarted request > 15m writes TIMEOUT and unlinks slot
     $staleCorrId = [guid]::NewGuid().ToString('D')
     $stalePayload = [ordered]@{ schema = 1; correlationId = $staleCorrId; operationId = 'ELEVATED_IDENTITY_PROOF' } | ConvertTo-Json -Compress
     [IO.File]::WriteAllText($requestPath, $stalePayload, [Text.UTF8Encoding]::new($false))
@@ -339,10 +405,90 @@ try {
     Assert-True (-not (Test-Path -LiteralPath $oldResultFile)) 'Old result (>24h) pruned'
     Assert-True (Test-Path -LiteralPath $newResultFile) 'New result preserved'
 
+    # 5h-2. Pruning fails closed on error (throw PRUNING_FAILED)
+    $lockedCorrId = [guid]::NewGuid().ToString('D')
+    $lockedResultFile = Join-Path $resultRoot ($lockedCorrId + '.json')
+    [IO.File]::WriteAllText($lockedResultFile, '{}', [Text.UTF8Encoding]::new($false))
+    (Get-Item -LiteralPath $lockedResultFile).LastWriteTimeUtc = [DateTime]::UtcNow.AddHours(-25)
+    $lockStream = [IO.File]::Open($lockedResultFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+    try {
+        Assert-Refused { Prune-StaleResults } 'PRUNING_FAILED'
+    } finally {
+        $lockStream.Dispose()
+        Remove-Item -LiteralPath $lockedResultFile -Force -ErrorAction SilentlyContinue
+    }
+
+    # 5i. Safe Uninstall preflight unit tests
+    $uninstallFn = $manageAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Uninstall-Tasks' }, $false)
+    if ($null -eq $uninstallFn) { throw 'FUNCTION_REQUIRED: Uninstall-Tasks' }
+
+    & {
+        param([string]$UninstallSource, [string]$SandboxDir)
+        $controlRoot = $SandboxDir
+        $requestRoot = Join-Path $controlRoot 'requests'
+        $resultRoot = Join-Path $controlRoot 'results'
+        $taskName = '\LDW-ADMIN-REVIEWED-OPERATION'
+        $AcceptUninstall = $true
+
+        function Assert-Elevated { }
+        function Assert-NoReparse([string]$Path) { }
+
+        . ([scriptblock]::Create($UninstallSource))
+
+        # Rejection when pending request exists
+        $testReq = Join-Path $requestRoot 'request.json'
+        [IO.File]::WriteAllText($testReq, '{}', [Text.UTF8Encoding]::new($false))
+        Assert-Refused { Uninstall-Tasks } 'PENDING_REQUEST_REFUSED'
+        Remove-Item -LiteralPath $testReq -Force
+
+        # Rejection when active in-flight task (< 15m STARTED) exists
+        $testRes = Join-Path $resultRoot ([guid]::NewGuid().ToString('D') + '.json')
+        [IO.File]::WriteAllText($testRes, '{"schema":1,"resultState":"STARTED"}', [Text.UTF8Encoding]::new($false))
+        Assert-Refused { Uninstall-Tasks } 'ACTIVE_TASK_REFUSED'
+        Remove-Item -LiteralPath $testRes -Force
+
+        # Active Task Scheduler running state (state 4, 2, or 0) rejected
+        foreach ($badState in @(4, 2, 0)) {
+            $mockTask = [pscustomobject]@{ State = $badState }
+            $mockFolder = [pscustomobject]@{}
+            $mockFolder | Add-Member ScriptMethod GetTask { param($tName) $mockTask }
+            $mockFolder | Add-Member ScriptMethod DeleteTask { param($tName, $flags) }
+            $mockService = [pscustomobject]@{}
+            $mockService | Add-Member ScriptMethod GetFolder { param($f) $mockFolder }
+            function script:Get-TaskService { $mockService }
+
+            Assert-Refused { Uninstall-Tasks } 'ACTIVE_TASK_REFUSED'
+        }
+    } $uninstallFn.Extent.Text $sandbox
+
 } finally {
     if (Test-Path -LiteralPath $sandbox) {
         Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
+
+# 6. Registry Consistency Contract (C# AdminReviewedOperationRegistry == PowerShell $ReviewedOperationRegistry)
+$contractCsPath = [IO.Path]::GetFullPath((Join-Path $deployRoot '..\src\LDW.AdminBroker\AdminPrivilegedControlContract.cs'))
+Assert-True (Test-Path -LiteralPath $contractCsPath) 'AdminPrivilegedControlContract.cs exists'
+$csContent = Get-Content -LiteralPath $contractCsPath -Raw
+$classMatch = [regex]::Match($csContent, 'public static class AdminReviewedOperationRegistry\s*\{(?<classbody>.*?)\}', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+Assert-True ($classMatch.Success) 'Found AdminReviewedOperationRegistry in AdminPrivilegedControlContract.cs'
+$csMatches = [regex]::Matches($classMatch.Groups['classbody'].Value, '"([A-Z0-9_]+)"')
+$csOperations = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+foreach ($m in $csMatches) {
+    [void]$csOperations.Add($m.Groups[1].Value)
+}
+
+$workerContent = Get-Content -LiteralPath $workerPath -Raw
+$registryMatch = [regex]::Match($workerContent, '\$ReviewedOperationRegistry\s*=\s*@\{(?<bodycontent>.*?)\n\}', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+Assert-True ($registryMatch.Success) 'Found $ReviewedOperationRegistry block in worker script'
+
+$psOperations = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+$opMatches = [regex]::Matches($registryMatch.Groups['bodycontent'].Value, "'([A-Z0-9_]+)'\s*=")
+foreach ($m in $opMatches) {
+    [void]$psOperations.Add($m.Groups[1].Value)
+}
+
+Assert-True ($csOperations.SetEquals($psOperations)) 'C# AdminReviewedOperationRegistry matches PowerShell $ReviewedOperationRegistry exactly'
 
 Write-Host "Admin Privileged Helper contract assertions PASS: $script:Assertions"

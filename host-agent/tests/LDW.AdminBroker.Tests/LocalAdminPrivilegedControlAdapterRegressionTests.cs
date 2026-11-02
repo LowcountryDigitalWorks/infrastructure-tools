@@ -121,36 +121,37 @@ internal static class LocalAdminPrivilegedControlAdapterRegressionTests
             Assert(!duplicateRunResult.Success && duplicateRunResult.ReasonCode == "DUPLICATE_REQUEST",
                 "durable replay: duplicate correlationId rejected with DUPLICATE_REQUEST");
 
-            // 7. Stale request crash/timeout reconciliation
+            // 7. In-flight STARTED state handling and timeout reconciliation
+            var inFlightCorrId = Guid.NewGuid();
+            var inFlightResultFile = Path.Combine(resDir, inFlightCorrId.ToString("D") + ".json");
+            File.WriteAllText(inFlightResultFile, "{\"schema\":1,\"correlationId\":\"" + inFlightCorrId.ToString("D") + "\",\"operationId\":\"ELEVATED_IDENTITY_PROOF\",\"success\":true,\"resultState\":\"STARTED\",\"reasonCode\":\"NONE\"}");
+
+            // Recent in-flight result returns STARTED
+            var inFlightCheck = realAdapter.GetOperationResult(inFlightCorrId, CancellationToken.None);
+            Assert(inFlightCheck.Success && inFlightCheck.ResultState == "STARTED",
+                "active in-flight result returns STARTED");
+
+            // Timed-out in-flight result returns FAILED/TIMEOUT
+            File.SetLastWriteTimeUtc(inFlightResultFile, DateTime.UtcNow.AddMinutes(-20));
+            var timedOutCheck = realAdapter.GetOperationResult(inFlightCorrId, CancellationToken.None);
+            Assert(!timedOutCheck.Success && timedOutCheck.ResultState == "FAILED" && timedOutCheck.ReasonCode == "TIMEOUT",
+                "expired in-flight result returns FAILED / TIMEOUT");
+
+            // 8. Stale request in request.json without result triggers reconciliation and returns TIMEOUT
             var staleCorrId = Guid.NewGuid();
             var staleReqFile = Path.Combine(reqDir, "request.json");
             File.WriteAllText(staleReqFile, "{\"schema\":1,\"correlationId\":\"" + staleCorrId.ToString("D") + "\",\"operationId\":\"ELEVATED_IDENTITY_PROOF\"}");
             File.SetLastWriteTimeUtc(staleReqFile, DateTime.UtcNow.AddMinutes(-20));
 
+            var staleGetResult = realAdapter.GetOperationResult(staleCorrId, CancellationToken.None);
+            Assert(!staleGetResult.Success && staleGetResult.ResultState == "FAILED" && staleGetResult.ReasonCode == "TIMEOUT",
+                "expired request in slot returns FAILED / TIMEOUT on query");
+
+            // Queueing when slot occupied returns BUSY and demand-starts task for reconciliation
             var freshCorrId = Guid.NewGuid();
-            var freshRunResult = realAdapter.RunReviewedOperation("ELEVATED_IDENTITY_PROOF", freshCorrId, CancellationToken.None);
-            Assert(freshRunResult.Success && freshRunResult.ResultState == "QUEUED",
-                "stale request unblocked: fresh request successfully queued");
-
-            var staleResultFile = Path.Combine(resDir, staleCorrId.ToString("D") + ".json");
-            Assert(File.Exists(staleResultFile), "stale request reconciled to result file");
-            var staleResultContent = File.ReadAllText(staleResultFile);
-            Assert(staleResultContent.Contains("\"TIMEOUT\""), "stale request marked as TIMEOUT");
-
-            // 8. Demand-driven result lifecycle pruning (>24h deleted, <24h preserved)
-            var oldGuid = Guid.NewGuid();
-            var oldFile = Path.Combine(resDir, oldGuid.ToString("D") + ".json");
-            File.WriteAllText(oldFile, "{\"schema\":1}");
-            File.SetLastWriteTimeUtc(oldFile, DateTime.UtcNow.AddHours(-25));
-
-            var newGuid = Guid.NewGuid();
-            var newFile = Path.Combine(resDir, newGuid.ToString("D") + ".json");
-            File.WriteAllText(newFile, "{\"schema\":1}");
-            File.SetLastWriteTimeUtc(newFile, DateTime.UtcNow.AddHours(-1));
-
-            _ = realAdapter.GetOperationResult(freshCorrId, CancellationToken.None);
-            Assert(!File.Exists(oldFile), "old result (>24h) pruned demand-driven");
-            Assert(File.Exists(newFile), "recent result preserved");
+            var busyRunResult = realAdapter.RunReviewedOperation("ELEVATED_IDENTITY_PROOF", freshCorrId, CancellationToken.None);
+            Assert(!busyRunResult.Success && busyRunResult.ReasonCode == "BUSY",
+                "queueing while slot occupied returns BUSY");
 
             // 9. Operational ACL drift rejection (tempRoot is non-admin/SYSTEM owned in user profile, so skipAclCheck=false fails closed)
             var failingAclAdapter = new LocalAdminPrivilegedControlAdapter(
@@ -167,6 +168,29 @@ internal static class LocalAdminPrivilegedControlAdapterRegressionTests
         {
             if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, true);
         }
+
+        // 10. Production Host composition regression:
+        // Proves AdminBrokerEngine configured as in Program.cs routes reviewed-admin operations
+        // to LocalAdminPrivilegedControlAdapter rather than defaulting to ADAPTER_UNAVAILABLE.
+        var hostEngine = new AdminBrokerEngine(
+            new CodyncBotHandler(),
+            new HostAgentOperationHandler(new LocalCiJitControlAdapter()),
+            new AdminPrivilegedOperationHandler(new LocalAdminPrivilegedControlAdapter(boundary)));
+
+        var hostRunReq = new AdminBrokerRequest(
+            AdminBrokerContract.Version,
+            Guid.NewGuid().ToString("D"),
+            AdminBrokerContract.Operations.AdminReviewedOperationRun,
+            AdminPrivilegedControlContract.TargetIdentity,
+            new Dictionary<string, JsonElement>
+            {
+                ["operationId"] = JsonElement("ELEVATED_IDENTITY_PROOF")
+            });
+        var hostRunResult = hostEngine.ProcessRequestAsync(hostRunReq, "S-1-5-21-1", CancellationToken.None).GetAwaiter().GetResult();
+        Assert(hostRunResult.Success && hostRunResult.ResultState == "QUEUED",
+            "production Host composition routes ADMIN_REVIEWED_OPERATION_RUN to QUEUED");
+        Assert(hostRunResult.ErrorCode != "ADAPTER_UNAVAILABLE",
+            "production Host composition does not fall back to ADAPTER_UNAVAILABLE");
 
         Console.WriteLine($"Privileged adapter regression tests: {assertions} assertions passed.");
     }

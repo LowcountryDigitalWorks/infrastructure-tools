@@ -76,14 +76,28 @@ function Assert-WorkerProvenance {
     if ($actualHash -cne $WorkerSha256) {
         throw 'PROVENANCE_MISMATCH'
     }
+    if (Test-Path -LiteralPath $resultRoot) {
+        Assert-ProtectedPath $resultRoot
+    }
     if (Test-Path -LiteralPath $requestRoot) {
         $reqAcl = Get-Acl -LiteralPath ([IO.Path]::GetFullPath($requestRoot))
         if ($reqAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @('S-1-5-18', 'S-1-5-32-544')) {
             throw 'PROTECTED_OWNER_REFUSED'
         }
-    }
-    if (Test-Path -LiteralPath $resultRoot) {
-        Assert-ProtectedPath $resultRoot
+        $forbidden = [Security.AccessControl.FileSystemRights]::Write -bor
+            [Security.AccessControl.FileSystemRights]::Delete -bor
+            [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+            [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+            [Security.AccessControl.FileSystemRights]::TakeOwnership
+        $rules = @($reqAcl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+        $writers = @($rules | Where-Object { $_.AccessControlType -eq 'Allow' -and ($_.FileSystemRights -band $forbidden) -and $_.IdentityReference.Value -notin @('S-1-5-18', 'S-1-5-32-544') })
+        if ($writers.Count -eq 0) {
+            throw 'PROTECTED_WRITE_REFUSED'
+        }
+        $uniqueWriterSids = @($writers | ForEach-Object { $_.IdentityReference.Value } | Select-Object -Unique)
+        if ($uniqueWriterSids.Count -ne 1 -or $uniqueWriterSids[0] -cnotmatch '^S-1-5-21-(\d+-){3}\d+$') {
+            throw 'PROTECTED_WRITE_REFUSED'
+        }
     }
 }
 
@@ -93,13 +107,21 @@ function Prune-StaleResults {
     $cutoff = [DateTime]::UtcNow.AddHours(-24)
     $guidPattern = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$'
     $pendingPattern = '^\.pending-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$'
-    $files = Get-ChildItem -LiteralPath $resultRoot -File -ErrorAction SilentlyContinue
+    $files = @(Get-ChildItem -LiteralPath $resultRoot -File -ErrorAction Stop)
+    $failed = $false
     foreach ($file in $files) {
         if ($file.Name -cmatch $guidPattern -or $file.Name -cmatch $pendingPattern) {
             if ($file.LastWriteTimeUtc -lt $cutoff) {
-                try { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue } catch { }
+                try {
+                    Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
+                } catch {
+                    $failed = $true
+                }
             }
         }
+    }
+    if ($failed) {
+        throw 'PRUNING_FAILED'
     }
 }
 
@@ -157,13 +179,47 @@ function Read-Request {
             throw 'INVALID_REQUEST'
         }
 
-        # Durable replay check: reject if a completed result already exists for this correlationId
+        # Durable in-flight / completed check
         $targetResultPath = Join-Path $resultRoot ($corrId + '.json')
         if (Test-Path -LiteralPath $targetResultPath) {
-            throw 'DUPLICATE_REQUEST'
+            $existingBytes = [IO.File]::ReadAllBytes($targetResultPath)
+            if ($existingBytes.Length -lt 2 -or $existingBytes.Length -gt 16384) {
+                throw 'INVALID_ADAPTER_RESULT'
+            }
+            [System.ReadOnlyMemory[byte]]$existingMem = $existingBytes
+            $existingDoc = [Text.Json.JsonDocument]::Parse($existingMem)
+            try {
+                $existingRoot = $existingDoc.RootElement
+                if ($existingRoot.ValueKind -ne [Text.Json.JsonValueKind]::Object -or
+                    $existingRoot.GetProperty('schema').GetInt32() -ne 1 -or
+                    $existingRoot.GetProperty('correlationId').GetString() -cne $corrId) {
+                    throw 'INVALID_ADAPTER_RESULT'
+                }
+                $existingState = $existingRoot.GetProperty('resultState').GetString()
+                if ($existingState -ceq 'STARTED') {
+                    $resultItem = Get-Item -LiteralPath $targetResultPath -Force
+                    $resultAge = [DateTime]::UtcNow - $resultItem.LastWriteTimeUtc
+                    if ($resultAge.TotalMinutes -lt 15) {
+                        # In-flight younger than timeout: do not re-execute, preserve bounded STARTED state
+                        return $null
+                    }
+                    # In-flight at or beyond timeout: reconcile to terminal TIMEOUT without action re-execution
+                    $script:CorrelationId = $corrId
+                    $script:OperationId = $opId
+                    Write-Result -Success $false -State 'FAILED' -Reason 'TIMEOUT' -Details @{ timeoutReason = 'IN_FLIGHT_CRASH_OR_TIMEOUT' }
+                    Remove-RequestSlot
+                    return $null
+                } else {
+                    # Terminal result already exists: completed => never execute again
+                    Remove-RequestSlot
+                    return $null
+                }
+            } finally {
+                $existingDoc.Dispose()
+            }
         }
 
-        # Crash/timeout reconciliation: reject stranded requests older than 15 minutes
+        # Result does not exist; check if request is expired
         $item = Get-Item -LiteralPath $requestPath -Force
         $age = [DateTime]::UtcNow - $item.LastWriteTimeUtc
         if ($age.TotalMinutes -ge 15) {
@@ -298,7 +354,7 @@ try {
 
     $request = Read-Request
     if ($null -eq $request) {
-        # Nothing queued or request was expired
+        # Nothing queued or request was in-flight/expired/completed
         return
     }
 
@@ -310,6 +366,9 @@ try {
         Remove-RequestSlot
         return
     }
+
+    # Persist protected durable in-flight record BEFORE executing action
+    Write-Result -Success $true -State 'STARTED' -Reason 'NONE'
 
     $action = $ReviewedOperationRegistry[$script:OperationId]
     $outcome = & $action $script:CorrelationId
@@ -328,12 +387,13 @@ try {
         'PROVENANCE_MISMATCH' { 'PROVENANCE_MISMATCH' }
         'BUSY' { 'BUSY' }
         'INVALID_REQUEST' { 'INVALID_REQUEST' }
+        'INVALID_ADAPTER_RESULT' { 'INVALID_ADAPTER_RESULT' }
         'UNKNOWN_OPERATION' { 'UNKNOWN_OPERATION' }
-        'DUPLICATE_REQUEST' { 'DUPLICATE_REQUEST' }
+        'PRUNING_FAILED' { 'FAILED' }
         default { 'FAILED' }
     }
 
-    if ($script:CorrelationId -and $msg -cne 'DUPLICATE_REQUEST') {
+    if ($script:CorrelationId) {
         Write-Result -Success $false -State 'FAILED' -Reason $reason
     }
     Remove-RequestSlot
