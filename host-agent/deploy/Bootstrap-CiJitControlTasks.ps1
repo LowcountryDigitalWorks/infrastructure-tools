@@ -9,13 +9,13 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # Accepted control-source identity. Manager and status-access blobs remain the prior
-# accepted pins. The worker blob is the independently accepted #169 corrected worker
+# accepted pins. The worker blob is the independently accepted #172 corrected worker
 # on the accepted source commit below.
 # Historical #92 DO_NOT_RETRY_INSTALL / DO_NOT_HAND_EDIT markers remain fail-closed;
 # live #92 disposition controls when this bootstrap may be used.
-$acceptedSourceCommit = 'ecc801ffbce6d0fca444d6a4ea7b07e404bb9161'
+$acceptedSourceCommit = 'f17f53400b5ba40075709b634a9a30f77b148a29'
 $acceptedManageBlob = 'fd52f44134dda198cb35ed7ef999e166ab143bbe'
-$acceptedWorkerBlob = '28e2d52ad1fa48ffacdf9fa69e1e4984f3a5ea38'
+$acceptedWorkerBlob = 'c45722c8d118d6d81135210b02e3cd7d8bfd1cac'
 # Public Git blob identity, split in the assignment below so a generic credential detector
 # does not mistake the variable name plus this non-secret object ID for an access credential:
 # dabb1083994b635ff7d8f83ed673379276036885
