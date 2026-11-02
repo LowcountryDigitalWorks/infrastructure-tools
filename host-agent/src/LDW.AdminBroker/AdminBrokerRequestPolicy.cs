@@ -53,6 +53,10 @@ public static class AdminBrokerRequestPolicy
                 return false;
             }
         }
+        else if (AdminPrivilegedControlContract.IsOperation(request.Operation))
+        {
+            return AdminPrivilegedRequestPolicy.IsAllowed(request);
+        }
         else if (parameters is { Count: > 0 })
         {
             return false;
