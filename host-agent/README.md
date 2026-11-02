@@ -15,9 +15,11 @@ Host Agent is a device-first, local status surface for owner-controlled LDW comp
 
 The reviewed typed operation surface remains unchanged. Secret storage supports the fixed ID with CurrentUser DPAPI; no new process handoff is implemented. See [Admin Broker documentation](docs/ADMIN_BROKER.md).
 
-## Normal-user tray autostart
+## Normal-user tray package, deployment, and autostart
 
-`deploy/Manage-TrayAutostart.ps1` validates and manages an already-accepted exact user-logon task when one exists; it never creates a new task. When none exists, it delegates to the exact-readback current-user Run-key lifecycle in `deploy/Manage-TrayAutostartRunKey.ps1`. See [normal-user tray autostart](docs/TRAY_AUTOSTART.md). Source validation does not install or mutate startup state on LDW01.
+`deploy/Publish-HostAgentWindowsPackage.ps1` and `deploy/Manage-HostAgentWindowsDeployment.ps1` provide the deterministic package/install/readback/rollback path for the fixed normal-user tray executable under Program Files. Packages bind a clean Git source commit/tree to the exact single-file executable SHA-256 and byte length. Install/rollback require an elevated installer process, refuse to kill a running tray, preserve machine-local configuration, and do not own startup registration. See [Host Agent Windows deployment](docs/HOST_AGENT_WINDOWS_DEPLOYMENT.md).
+
+`deploy/Manage-TrayAutostart.ps1` separately validates and manages an already-accepted exact user-logon task when one exists; it never creates a new task. When none exists, it delegates to the exact-readback current-user Run-key lifecycle in `deploy/Manage-TrayAutostartRunKey.ps1`. See [normal-user tray autostart](docs/TRAY_AUTOSTART.md). Source validation does not install the package or mutate startup state on LDW01.
 
 ## Read-only live-adapter slice
 

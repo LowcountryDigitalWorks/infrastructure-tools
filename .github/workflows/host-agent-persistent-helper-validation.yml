@@ -24,6 +24,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up .NET 10
         uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
@@ -48,6 +49,35 @@ jobs:
       - name: Run deployment contract tests
         shell: pwsh
         run: pwsh ./host-agent/deploy/tests/Test-DeploymentContracts.ps1
+
+      - name: Run Host Agent Windows package/deployment contract tests
+        shell: pwsh
+        run: pwsh ./host-agent/deploy/tests/Test-HostAgentWindowsDeploymentContracts.ps1
+
+      - name: Run Host Agent Windows behavioral deployment tests
+        shell: pwsh
+        run: pwsh ./host-agent/deploy/tests/Test-HostAgentWindowsDeploymentBehavioral.ps1
+
+      - name: Exercise Host Agent Windows immutable-tree package and read-only Plan
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'ldw-host-agent-windows-package'
+          pwsh ./host-agent/deploy/Publish-HostAgentWindowsPackage.ps1 -OutputDirectory $out
+          $commit = (git rev-parse HEAD).Trim()
+          $tree = (git rev-parse 'HEAD^{tree}').Trim()
+          $manifestPath = Join-Path $out 'manifest.json'
+          $exePath = Join-Path $out 'LDW.HostAgent.Windows.exe'
+          $manifestSha = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $exeSha = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $exeBytes = (Get-Item -LiteralPath $exePath).Length
+          pwsh ./host-agent/deploy/Manage-HostAgentWindowsDeployment.ps1 `
+            -Action Plan `
+            -PackageDirectory $out `
+            -ExpectedSourceCommit $commit `
+            -ExpectedSourceTree $tree `
+            -ExpectedManifestSha256 $manifestSha `
+            -ExpectedExecutableSha256 $exeSha `
+            -ExpectedExecutableBytes $exeBytes
 
       - name: Run CI/JIT DISCOVER classification contract tests
         shell: pwsh
