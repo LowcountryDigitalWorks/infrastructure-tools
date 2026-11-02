@@ -8,13 +8,15 @@ Git objects for later separately gated publication/install helpers.
 from __future__ import annotations
 
 import argparse
-import gzip
+import binascii
 import hashlib
+import io
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import struct
 import subprocess
 import tarfile
 import tempfile
@@ -149,30 +151,53 @@ def _safe_name(name: str, package: str) -> PurePosixPath:
     return pure
 
 
+def _deterministic_gzip(data: bytes) -> bytes:
+    # RFC 1951 stored blocks avoid host zlib implementation/version drift.
+    # The package is small enough that byte determinism is more important than compression.
+    header = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff"
+    blocks: list[bytes] = []
+    if not data:
+        blocks.append(b"\x01\x00\x00\xff\xff")
+    else:
+        for offset in range(0, len(data), 0xFFFF):
+            chunk = data[offset:offset + 0xFFFF]
+            final = offset + len(chunk) == len(data)
+            length = len(chunk)
+            blocks.append(bytes((1 if final else 0,)))
+            blocks.append(struct.pack("<HH", length, length ^ 0xFFFF))
+            blocks.append(chunk)
+    trailer = struct.pack(
+        "<II",
+        binascii.crc32(data) & 0xFFFFFFFF,
+        len(data) & 0xFFFFFFFF,
+    )
+    return header + b"".join(blocks) + trailer
+
+
 def _tar(root: Path, archive: Path, epoch: int, file_modes: dict[str, int]) -> None:
-    with archive.open("wb") as raw:
-        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz:
-            with tarfile.open(fileobj=gz, mode="w", format=tarfile.GNU_FORMAT) as tf:
-                paths = [root] + sorted(root.rglob("*"), key=lambda p: p.relative_to(root.parent).as_posix())
-                for path in paths:
-                    info = tf.gettarinfo(str(path), arcname=path.relative_to(root.parent).as_posix())
-                    info.uid = info.gid = 0
-                    info.uname = info.gname = ""
-                    info.mtime = epoch
-                    if info.isdir():
-                        info.mode = 0o755
-                        tf.addfile(info)
-                    elif info.isfile():
-                        # Windows chmod/stat cannot represent POSIX package modes.
-                        # Serialize the pinned inventory contract, not host metadata.
-                        relative = path.relative_to(root).as_posix()
-                        if relative not in file_modes:
-                            raise PublicationError("PACKAGE_INVENTORY_DRIFT")
-                        info.mode = file_modes[relative]
-                        with path.open("rb") as handle:
-                            tf.addfile(info, handle)
-                    else:
-                        raise PublicationError("PACKAGE_MEMBER_TYPE_REFUSED")
+    tar_bytes = io.BytesIO()
+    with tarfile.open(fileobj=tar_bytes, mode="w", format=tarfile.GNU_FORMAT) as tf:
+        paths = [root] + sorted(root.rglob("*"), key=lambda p: p.relative_to(root.parent).as_posix())
+        for path in paths:
+            info = tf.gettarinfo(str(path), arcname=path.relative_to(root.parent).as_posix())
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            info.mtime = epoch
+            if info.isdir():
+                info.mode = 0o755
+                tf.addfile(info)
+            elif info.isfile():
+                # Windows chmod/stat cannot represent POSIX package modes.
+                # Serialize the pinned inventory contract, not host metadata.
+                relative = path.relative_to(root).as_posix()
+                if relative not in file_modes:
+                    raise PublicationError("PACKAGE_INVENTORY_DRIFT")
+                info.mode = file_modes[relative]
+                with path.open("rb") as handle:
+                    tf.addfile(info, handle)
+            else:
+                raise PublicationError("PACKAGE_MEMBER_TYPE_REFUSED")
+    archive.write_bytes(_deterministic_gzip(tar_bytes.getvalue()))
 
 
 def _zip(root: Path, archive: Path, file_modes: dict[str, int]) -> None:

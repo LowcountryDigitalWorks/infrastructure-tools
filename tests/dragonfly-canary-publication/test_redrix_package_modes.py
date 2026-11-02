@@ -19,6 +19,9 @@ pub = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pub)
 
 # Accepted package contract, independent of filesystem permissions or manifest data.
+EXPECTED_ARCHIVE_SHA256 = "a53f73c732a41ae41ffc636b521d08ec3c72073c0c9c81d6692c681ff710a06d"
+EXPECTED_ARCHIVE_SIZE = 102428
+
 MODES = {
     "manifest.json": 0o600,
     "payload/dragonfly-jit/ssh_forced_receiver.py": 0o700,
@@ -38,6 +41,9 @@ class RedrixPackageModeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             archive, checksum = pub.build_redrix(ROOT, Path(td) / "native")
             pub.verify_redrix(ROOT, archive, checksum)
+            archive_bytes = archive.read_bytes()
+            self.assertEqual(len(archive_bytes), EXPECTED_ARCHIVE_SIZE)
+            self.assertEqual(hashlib.sha256(archive_bytes).hexdigest(), EXPECTED_ARCHIVE_SHA256)
             with tarfile.open(archive, "r:gz") as tf:
                 actual = {
                     member.name.split("/", 1)[1]: member.mode
