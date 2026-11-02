@@ -47,7 +47,7 @@ function Get-RunValueSnapshot {
     $value = $null
     if (Test-Path -LiteralPath $path -PathType Container) {
         $item = Get-ItemProperty -LiteralPath $path -ErrorAction Stop
-        if ($item.PSObject.Properties.Name -contains $name) {
+        if ($null -ne $item.PSObject.Properties[$name]) {
             $present = $true
             $value = [string]$item.$name
         }
