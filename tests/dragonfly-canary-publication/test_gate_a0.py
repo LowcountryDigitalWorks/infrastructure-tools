@@ -213,76 +213,121 @@ class GateA0Tests(unittest.TestCase):
             "/usr/bin/python3 /home/eddie/.local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py",
         )
 
-    def test_restrict_doc_accepts_trusted_in_tree_symlink(self):
-        manroot = self.root / "man5"
-        manroot.mkdir(mode=0o755)
-        target = manroot / "sshd_config.5.gz"
+    def _restrict_doc_fixture(self, text="authorized_keys option: restrict\n"):
+        usr = self.root / "usr"
+        share = usr / "share"
+        man = share / "man"
+        man5 = man / "man5"
+        man8 = man / "man8"
+        man5.mkdir(parents=True, mode=0o755)
+        man8.mkdir(mode=0o755)
+        for directory in (usr, share, man, man5, man8):
+            directory.chmod(0o755)
+        target = man8 / "sshd.8.gz"
         with a0.gzip.open(target, "wt", encoding="utf-8") as handle:
-            handle.write("authorized_keys option: restrict\n")
+            handle.write(text)
         target.chmod(0o644)
-        link = manroot / "authorized_keys.5.gz"
-        link.symlink_to(target.name)
+        link = man5 / "authorized_keys.5.gz"
+        link.symlink_to("../man8/sshd.8.gz")
+        return link, target, (usr, share, man, man5, man8)
 
+    def test_restrict_doc_accepts_exact_debian_openssh_symlink(self):
+        link, target, trusted_dirs = self._restrict_doc_fixture()
         doc = a0._read_authorized_keys_restrict_doc(
             manpage=link,
-            trusted_dirs=(manroot,),
+            expected_target=target,
+            trusted_dirs=trusted_dirs,
             trusted_uid=self.uid,
         )
         self.assertIn("restrict", doc)
 
-    def test_restrict_doc_rejects_untrusted_symlink_and_permissions(self):
-        manroot = self.root / "man5"
-        manroot.mkdir(mode=0o755)
-        outside = self.root / "outside.5.gz"
+    def test_restrict_doc_rejects_wrong_or_out_of_tree_symlink_target(self):
+        link, target, trusted_dirs = self._restrict_doc_fixture()
+        other = target.parent / "other.8.gz"
+        with a0.gzip.open(other, "wt", encoding="utf-8") as handle:
+            handle.write("restrict\n")
+        other.chmod(0o644)
+        link.unlink()
+        link.symlink_to("../man8/other.8.gz")
+        with self.assertRaisesRegex(a0.A0Error, "A0_AUTHORIZED_KEYS_RESTRICT_DOC_MISSING"):
+            a0._read_authorized_keys_restrict_doc(
+                manpage=link,
+                expected_target=target,
+                trusted_dirs=trusted_dirs,
+                trusted_uid=self.uid,
+            )
+
+        outside = self.root / "outside.8.gz"
         with a0.gzip.open(outside, "wt", encoding="utf-8") as handle:
             handle.write("restrict\n")
         outside.chmod(0o644)
-        link = manroot / "authorized_keys.5.gz"
+        link.unlink()
         link.symlink_to(outside)
         with self.assertRaisesRegex(a0.A0Error, "A0_AUTHORIZED_KEYS_RESTRICT_DOC_MISSING"):
             a0._read_authorized_keys_restrict_doc(
                 manpage=link,
-                trusted_dirs=(manroot,),
+                expected_target=target,
+                trusted_dirs=trusted_dirs,
                 trusted_uid=self.uid,
             )
 
-        link.unlink()
-        target = manroot / "sshd_config.5.gz"
-        with a0.gzip.open(target, "wt", encoding="utf-8") as handle:
-            handle.write("restrict\n")
+    def test_restrict_doc_rejects_target_or_semantic_drift(self):
+        link, target, trusted_dirs = self._restrict_doc_fixture()
         target.chmod(0o666)
-        link.symlink_to(target.name)
         with self.assertRaisesRegex(a0.A0Error, "A0_AUTHORIZED_KEYS_RESTRICT_DOC_MISSING"):
             a0._read_authorized_keys_restrict_doc(
                 manpage=link,
-                trusted_dirs=(manroot,),
+                expected_target=target,
+                trusted_dirs=trusted_dirs,
                 trusted_uid=self.uid,
             )
 
-    def test_restrict_doc_rejects_writable_trust_root_and_missing_semantics(self):
-        manroot = self.root / "man5"
-        manroot.mkdir(mode=0o755)
-        target = manroot / "sshd_config.5.gz"
+        target.chmod(0o644)
         with a0.gzip.open(target, "wt", encoding="utf-8") as handle:
             handle.write("no forced-key aggregate option here\n")
-        target.chmod(0o644)
-        link = manroot / "authorized_keys.5.gz"
-        link.symlink_to(target.name)
         with self.assertRaisesRegex(a0.A0Error, "A0_AUTHORIZED_KEYS_RESTRICT_DOC_MISSING"):
             a0._read_authorized_keys_restrict_doc(
                 manpage=link,
-                trusted_dirs=(manroot,),
+                expected_target=target,
+                trusted_dirs=trusted_dirs,
                 trusted_uid=self.uid,
             )
 
-        with a0.gzip.open(target, "wt", encoding="utf-8") as handle:
-            handle.write("restrict\n")
-        manroot.chmod(0o777)
+    def test_restrict_doc_rejects_each_writable_trusted_directory(self):
+        link, target, trusted_dirs = self._restrict_doc_fixture()
+        for directory in trusted_dirs:
+            with self.subTest(directory=directory):
+                directory.chmod(0o777)
+                try:
+                    with self.assertRaisesRegex(a0.A0Error, "A0_AUTHORIZED_KEYS_RESTRICT_DOC_MISSING"):
+                        a0._read_authorized_keys_restrict_doc(
+                            manpage=link,
+                            expected_target=target,
+                            trusted_dirs=trusted_dirs,
+                            trusted_uid=self.uid,
+                        )
+                finally:
+                    directory.chmod(0o755)
+
+    def test_restrict_doc_rejects_trusted_directory_symlink_and_owner_mismatch(self):
+        link, target, trusted_dirs = self._restrict_doc_fixture()
+        real = self.root / "real-man-component"
+        real.mkdir(mode=0o755)
+        linked = self.root / "linked-man-component"
+        linked.symlink_to(real, target_is_directory=True)
         with self.assertRaisesRegex(a0.A0Error, "A0_AUTHORIZED_KEYS_RESTRICT_DOC_MISSING"):
             a0._read_authorized_keys_restrict_doc(
                 manpage=link,
-                trusted_dirs=(manroot,),
+                expected_target=target,
+                trusted_dirs=(linked,) + trusted_dirs[1:],
                 trusted_uid=self.uid,
+            )
+        with self.assertRaisesRegex(a0.A0Error, "A0_AUTHORIZED_KEYS_RESTRICT_DOC_MISSING"):
+            a0._read_authorized_keys_restrict_doc(
+                manpage=link,
+                expected_target=target,
+                trusted_dirs=trusted_dirs,
+                trusted_uid=self.uid + 1,
             )
 
     def test_source_is_standalone_read_only_and_has_no_checkout_or_remote_action_surface(self):

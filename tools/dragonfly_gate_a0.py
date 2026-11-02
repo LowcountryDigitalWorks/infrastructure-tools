@@ -491,11 +491,14 @@ def _has_nonloopback_tcp22(text: str) -> bool:
 def _read_authorized_keys_restrict_doc(
     *,
     manpage: Path = Path("/usr/share/man/man5/authorized_keys.5.gz"),
+    expected_link_target: str = "../man8/sshd.8.gz",
+    expected_target: Path = Path("/usr/share/man/man8/sshd.8.gz"),
     trusted_dirs: tuple[Path, ...] = (
         Path("/usr"),
         Path("/usr/share"),
         Path("/usr/share/man"),
         Path("/usr/share/man/man5"),
+        Path("/usr/share/man/man8"),
     ),
     trusted_uid: int = 0,
 ) -> str:
@@ -512,18 +515,24 @@ def _read_authorized_keys_restrict_doc(
                 or stat.S_IMODE(info.st_mode) & 0o022
             ):
                 raise A0Error(classification)
-        trusted_root = trusted_dirs[-1].resolve(strict=True)
-        resolved = manpage.resolve(strict=True)
-        if resolved.parent != trusted_root:
+
+        link_info = manpage.lstat()
+        if not stat.S_ISLNK(link_info.st_mode) or link_info.st_uid != trusted_uid:
             raise A0Error(classification)
-        info = resolved.stat()
+        if os.readlink(manpage) != expected_link_target:
+            raise A0Error(classification)
+        if manpage.resolve(strict=True) != expected_target:
+            raise A0Error(classification)
+
+        target_info = expected_target.lstat()
         if (
-            not stat.S_ISREG(info.st_mode)
-            or info.st_uid != trusted_uid
-            or stat.S_IMODE(info.st_mode) & 0o022
+            not stat.S_ISREG(target_info.st_mode)
+            or expected_target.is_symlink()
+            or target_info.st_uid != trusted_uid
+            or stat.S_IMODE(target_info.st_mode) & 0o022
         ):
             raise A0Error(classification)
-        with gzip.open(manpage, "rt", encoding="utf-8", errors="replace") as handle:
+        with gzip.open(expected_target, "rt", encoding="utf-8", errors="replace") as handle:
             doc = handle.read()
     except (OSError, RuntimeError) as exc:
         raise A0Error(classification) from exc
