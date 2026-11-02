@@ -320,52 +320,51 @@ try {
     $status = Get-ManagedStatus
     Assert-ManagedStatus -Status $status -Installed $packageA -Rollback $packageB -Label 'after lock contention refusal'
 
-    # Force a forward-path failure without obstructing recovery itself. The watcher
-    # observes the production-generated .stage-<token> directory, derives that same
-    # transaction token, and pre-creates the future .rollback-old-<token> destination.
-    # Package C is intentionally large enough to leave a deterministic observation
-    # window while staging/copy/hash validation runs. The later rollback-root Move-Item
-    # must fail, but the prior live A and rollback B bytes remain readable/restorable.
-    $collisionWatcher = Start-Job -ScriptBlock {
-        param([string]$InstallRoot)
-        $deadline = [DateTime]::UtcNow.AddSeconds(20)
-        while ([DateTime]::UtcNow -lt $deadline) {
-            $stage = Get-ChildItem -LiteralPath $InstallRoot -Directory -Force -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -match '^\.stage-[a-f0-9]{32}$' } |
-                Select-Object -First 1
-            if ($null -ne $stage) {
-                $token = $stage.Name.Substring('.stage-'.Length)
-                $collision = Join-Path $InstallRoot ('.rollback-old-' + $token)
-                try {
-                    $null = New-Item -ItemType Directory -Path $collision -ErrorAction Stop
-                    'COLLISION_CREATED=' + $collision
-                    return
-                } catch {
-                    if (Test-Path -LiteralPath $collision -PathType Container) {
-                        'COLLISION_ALREADY_PRESENT=' + $collision
-                        return
-                    }
-                }
-            }
-            Start-Sleep -Milliseconds 5
+    # Force a deterministic mid-transaction failure without corrupting recovery data.
+    # A FileSystemWatcher sees the production-generated .stage-<token> directory and
+    # creates the matching .rollback-old-<token> directory before activation reaches
+    # rollback promotion. That destination denies only child creation. PowerShell then
+    # fails the rollback-root Move-Item before moving any rollback contents, while the
+    # collision directory itself remains safe/deletable by production cleanup.
+    $collisionSource = 'LDW.HostAgent.BehaviorCollision.' + [guid]::NewGuid().ToString('N')
+    $collisionWatcher = [IO.FileSystemWatcher]::new($constants.InstallRoot, '.stage-*')
+    $collisionWatcher.NotifyFilter = [IO.NotifyFilters]::DirectoryName
+    $collisionJob = Register-ObjectEvent -InputObject $collisionWatcher -EventName Created -SourceIdentifier $collisionSource `
+        -MessageData ([pscustomobject]@{ InstallRoot=$constants.InstallRoot; OwnerSid=$ownerSid.Value }) -Action {
+            $stageName = $Event.SourceEventArgs.Name
+            if ($stageName -notmatch '^\.stage-[a-f0-9]{32}$') { return }
+            $token = $stageName.Substring('.stage-'.Length)
+            $destination = Join-Path $Event.MessageData.InstallRoot ('.rollback-old-' + $token)
+            $null = New-Item -ItemType Directory -Path $destination -ErrorAction Stop
+            $acl = Get-Acl -LiteralPath $destination -ErrorAction Stop
+            $sid = [Security.Principal.SecurityIdentifier]::new($Event.MessageData.OwnerSid)
+            $rights = [Security.AccessControl.FileSystemRights]::CreateDirectories -bor [Security.AccessControl.FileSystemRights]::CreateFiles
+            $deny = [Security.AccessControl.FileSystemAccessRule]::new($sid,$rights,[Security.AccessControl.AccessControlType]::Deny)
+            [void]$acl.AddAccessRule($deny)
+            Set-Acl -LiteralPath $destination -AclObject $acl -ErrorAction Stop
+            'COLLISION_READY=' + $destination
         }
-        throw 'HOST_AGENT_WINDOWS_BEHAVIORAL_COLLISION_TIMEOUT'
-    } -ArgumentList $constants.InstallRoot
+    $collisionWatcher.EnableRaisingEvents = $true
 
     $collisionError = $null
-    $watcherOutput = @()
+    $collisionOutput = @()
     try {
         try {
             Invoke-ManagedInstall -Package $packageC | Out-Null
-            throw 'ASSERTION FAILED: mid-transaction install collision must fail'
+            throw 'ASSERTION FAILED: mid-transaction rollback-directory move must fail'
         } catch {
             if ($_.Exception.Message.StartsWith('ASSERTION FAILED:', [StringComparison]::Ordinal)) { throw }
             $collisionError = $_.Exception.Message
         }
     } finally {
-        $watcherOutput = @(Receive-Job -Job $collisionWatcher -Wait -AutoRemoveJob -ErrorAction Stop)
+        Start-Sleep -Milliseconds 100
+        $collisionOutput = @(Receive-Job -Job $collisionJob -Keep -ErrorAction Stop)
+        $collisionWatcher.EnableRaisingEvents = $false
+        Unregister-Event -SourceIdentifier $collisionSource -ErrorAction SilentlyContinue
+        Remove-Job -Job $collisionJob -Force -ErrorAction SilentlyContinue
+        $collisionWatcher.Dispose()
     }
-    Assert-True (@($watcherOutput | Where-Object { [string]$_ -match '^COLLISION_(CREATED|ALREADY_PRESENT)=' }).Count -eq 1) 'collision watcher must create the transaction-specific rollback-old destination'
+    Assert-True (@($collisionOutput | Where-Object { [string]$_ -match '^COLLISION_READY=' }).Count -eq 1) 'collision watcher must prepare exactly one transaction-specific rollback-old destination'
     Assert-True (-not [string]::IsNullOrWhiteSpace($collisionError)) 'mid-transaction failure path must emit an error'
     Assert-True (-not [string]::Equals($collisionError, 'HOST_AGENT_WINDOWS_INSTALL_ROLLBACK_FAILED', [StringComparison]::Ordinal)) 'mid-transaction collision must restore without rollback-failure escalation'
 
