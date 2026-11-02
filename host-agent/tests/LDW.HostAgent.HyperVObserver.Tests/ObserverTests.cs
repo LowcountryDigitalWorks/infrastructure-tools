@@ -4,10 +4,12 @@ using System.Security.Principal;
 using System.Text;
 using LDW.HostAgent.Core;
 using LDW.HostAgent.HyperVObserver;
+using LDW.HostAgent.HyperVObserver.Tests;
 using LDW.HostAgent.Windows;
 
 var assertions = 0;
 CiJitLocalProjectionReaderTests.Run((condition, description) => Assert(condition, description));
+CodyncLoopbackHealthClientTests.Run((condition, description) => Assert(condition, description));
 
 Assert(HyperVObserverContract.TryParseRequest(HyperVObserverContract.CreateRequestJson(), out _),
     "fixed observation request round-trips");
