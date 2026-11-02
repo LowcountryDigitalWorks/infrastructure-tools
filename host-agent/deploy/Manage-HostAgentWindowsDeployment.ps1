@@ -481,6 +481,7 @@ try {
         $rollbackOld = Join-Path $constants.InstallRoot ('.rollback-old-' + $token)
         $failedNewRollback = Join-Path $constants.InstallRoot ('.failed-new-rollback-' + $token)
         $currentBackupReady = $false
+        $currentBackupPromotedToRollback = $false
         $transactionCommitted = $false
         $recoveryProven = $false
         try {
@@ -497,6 +498,7 @@ try {
             Move-Item -LiteralPath $constants.RollbackRoot -Destination $rollbackOld -ErrorAction Stop
             Assert-HostAgentWindowsProtectedDirectory -Path $rollbackOld
             Move-Item -LiteralPath $currentBackup -Destination $constants.RollbackRoot -ErrorAction Stop
+            $currentBackupPromotedToRollback = $true
             $newRollback = Get-HostAgentWindowsRollbackContext
             Assert-ContextEqual -Expected $installed -Actual $newRollback -Code 'HOST_AGENT_WINDOWS_ROLLBACK_SWAP_FAILED'
 
@@ -515,10 +517,16 @@ try {
             $rollbackError = $_
             try {
                 if ($currentBackupReady) {
-                    if (-not (Test-Path -LiteralPath $currentBackup -PathType Container)) { throw 'HOST_AGENT_WINDOWS_ROLLBACK_RECOVERY_SOURCE_MISSING' }
-                    $backupContext = Read-HostAgentWindowsManifest -ManifestPath (Join-Path $currentBackup $constants.InstalledManifestName) -ExecutablePath (Join-Path $currentBackup $constants.ExecutableName)
+                    $restoreSource = if (Test-Path -LiteralPath $currentBackup -PathType Container) {
+                        $currentBackup
+                    } elseif ($currentBackupPromotedToRollback -and (Test-Path -LiteralPath $constants.RollbackRoot -PathType Container)) {
+                        $constants.RollbackRoot
+                    } else {
+                        throw 'HOST_AGENT_WINDOWS_ROLLBACK_RECOVERY_SOURCE_MISSING'
+                    }
+                    $backupContext = Read-HostAgentWindowsManifest -ManifestPath (Join-Path $restoreSource $constants.InstalledManifestName) -ExecutablePath (Join-Path $restoreSource $constants.ExecutableName)
                     Assert-ContextEqual -Expected $installed -Actual $backupContext -Code 'HOST_AGENT_WINDOWS_ROLLBACK_RECOVERY_SOURCE_MISMATCH'
-                    Restore-ManagedState -SourceDirectory $currentBackup
+                    Restore-ManagedState -SourceDirectory $restoreSource
                 } else {
                     $unchangedInstalled = Get-HostAgentWindowsInstalledContext
                     Assert-ContextEqual -Expected $installed -Actual $unchangedInstalled -Code 'HOST_AGENT_WINDOWS_ROLLBACK_RECOVERY_STATE_CHANGED'
