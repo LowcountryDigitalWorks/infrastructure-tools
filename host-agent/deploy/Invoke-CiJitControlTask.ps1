@@ -165,16 +165,23 @@ function Invoke-Child([string]$Path,[string[]]$Arguments) {
     $process = [Diagnostics.Process]::Start($info)
     $null = $process.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
     $safe = [Collections.Generic.List[string]]::new()
+    $classificationInvalid = $false
+    $dispatcherChild = $false
+    if (-not [string]::IsNullOrWhiteSpace($dispatcher)) {
+        $dispatcherChild = [string]::Equals([IO.Path]::GetFullPath($Path),[IO.Path]::GetFullPath($dispatcher),[StringComparison]::OrdinalIgnoreCase)
+    }
     while (-not $process.StandardOutput.EndOfStream) {
         $line = $process.StandardOutput.ReadLine()
         if ($line -cmatch '^(DISPATCHER_RESULT|DISCOVERED_RUN_ID|DISCOVERED_JOB_ID|INTERRUPTED_CLEANUP|CLEANUP_IDEMPOTENT)=([A-Z_]+|[0-9]+|PASS)$' -or
             $line -cmatch ('^CAPACITY_SUBREASON=(' + $script:CapacitySubreasonPattern + ')$')) { $safe.Add($line); continue }
-        if ([string]::Equals([IO.Path]::GetFullPath($Path),[IO.Path]::GetFullPath($dispatcher),[StringComparison]::OrdinalIgnoreCase) -and
-            $line -cmatch '^CLASSIFICATION=[A-Z][A-Z0-9_]{0,63}$') { $safe.Add($line) }
+        if ($dispatcherChild -and $line -imatch '^CLASSIFICATION=') {
+            if ($line -cmatch '^CLASSIFICATION=[A-Z][A-Z0-9_]{0,63}$') { $safe.Add($line) }
+            else { $classificationInvalid = $true }
+        }
     }
     $process.WaitForExit()
     $code=$process.ExitCode; $process.Dispose()
-    [pscustomobject]@{ ExitCode=$code; Lines=@($safe) }
+    [pscustomobject]@{ ExitCode=$code; Lines=@($safe); ClassificationInvalid=$classificationInvalid }
 }
 
 function Get-OutputValue([string[]]$Lines,[string]$Name) {
@@ -212,7 +219,12 @@ function Invoke-DispatcherMode([ValidateSet('Discover','Once','Recover')][string
     $result = Invoke-Child $dispatcher $args
     $code = Get-OutputValue $result.Lines 'DISPATCHER_RESULT'
     if ($result.ExitCode -ne 0 -or $code -ceq 'FAIL' -or -not $code) {
-        $reason = if ($Mode -ceq 'Recover' -and $code -ceq 'FAIL') { Resolve-RecoverFailureReason $result.Lines } else { 'FAILED' }
+        $reason = 'FAILED'
+        if ($Mode -ceq 'Recover' -and $code -ceq 'FAIL') {
+            $invalidProperty = $result.PSObject.Properties['ClassificationInvalid']
+            $classificationInvalid = $null -eq $invalidProperty -or [bool]$invalidProperty.Value
+            if (-not $classificationInvalid) { $reason = Resolve-RecoverFailureReason $result.Lines }
+        }
         return [pscustomobject]@{Success=$false;State='FAILED';Reason=$reason;RunId=0;JobId=0;ProfileId=$null}
     }
     if ($code -ceq 'BUSY') { return [pscustomobject]@{Success=$false;State='BLOCKED';Reason='BUSY';RunId=0;JobId=0;ProfileId=$null} }

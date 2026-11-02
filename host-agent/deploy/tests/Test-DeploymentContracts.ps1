@@ -219,18 +219,21 @@ try {
 
         $child=Invoke-ChildFixture $dispatcher @('UNSAFE_RAW=secret','DISPATCHER_RESULT=FAIL','CLASSIFICATION=RECOVERY_BUSY_OR_UNCERTAIN') @('stderr-secret') 1
         Assert-True ($child.ExitCode -eq 1) 'dispatcher failure fixture must preserve exit code'
+        Assert-True (-not $child.ClassificationInvalid) 'valid trusted dispatcher classification must not set invalid marker'
         Assert-True ($child.Lines.Count -eq 2 -and $child.Lines[0] -ceq 'DISPATCHER_RESULT=FAIL' -and $child.Lines[1] -ceq 'CLASSIFICATION=RECOVERY_BUSY_OR_UNCERTAIN') 'trusted dispatcher classification must be captured with only bounded stdout'
         Assert-True (-not (@($child.Lines) -match 'secret')) 'arbitrary stdout and stderr must remain discarded'
 
         $duplicate=Invoke-ChildFixture $dispatcher @('DISPATCHER_RESULT=FAIL','CLASSIFICATION=RECOVERY_BUSY_OR_UNCERTAIN','CLASSIFICATION=CONTROLLER_GATE_UNCERTAIN') @() 1
         Assert-True ((Resolve-RecoverFailureReason $duplicate.Lines) -ceq 'FAILED') 'duplicate classification must collapse fail closed'
         $lower=Invoke-ChildFixture $dispatcher @('DISPATCHER_RESULT=FAIL','CLASSIFICATION=recovery_busy_or_uncertain') @() 1
-        Assert-True ((Resolve-RecoverFailureReason $lower.Lines) -ceq 'FAILED') 'lowercase classification must be discarded and collapse fail closed'
+        Assert-True ($lower.ClassificationInvalid -and (Resolve-RecoverFailureReason $lower.Lines) -ceq 'FAILED') 'lowercase classification must set invalid marker and collapse fail closed'
         $oversized='CLASSIFICATION=' + ('A'*65)
         $unbounded=Invoke-ChildFixture $dispatcher @('DISPATCHER_RESULT=FAIL',$oversized) @() 1
-        Assert-True ((Resolve-RecoverFailureReason $unbounded.Lines) -ceq 'FAILED') 'unbounded classification must be discarded and collapse fail closed'
-        $foreign=Invoke-ChildFixture $otherChild @('CLASSIFICATION=RECOVERY_BUSY_OR_UNCERTAIN') @() 0
-        Assert-True ($foreign.Lines.Count -eq 0) 'classification from a non-dispatcher child must not be captured'
+        Assert-True ($unbounded.ClassificationInvalid -and (Resolve-RecoverFailureReason $unbounded.Lines) -ceq 'FAILED') 'unbounded classification must set invalid marker and collapse fail closed'
+        $mixed=Invoke-ChildFixture $dispatcher @('DISPATCHER_RESULT=FAIL','CLASSIFICATION=RECOVERY_BUSY_OR_UNCERTAIN','classification=malformed') @() 1
+        Assert-True ($mixed.ClassificationInvalid -and (Get-OutputValue $mixed.Lines 'CLASSIFICATION') -ceq 'RECOVERY_BUSY_OR_UNCERTAIN') 'mixed valid plus malformed classification must retain invalid marker even when one valid token is present'
+        $foreign=Invoke-ChildFixture $otherChild @('CLASSIFICATION=RECOVERY_BUSY_OR_UNCERTAIN','classification=malformed') @() 0
+        Assert-True ($foreign.Lines.Count -eq 0 -and -not $foreign.ClassificationInvalid) 'classification from a non-dispatcher child must not be captured or mark dispatcher classification invalid'
 
         Assert-True ((Resolve-RecoverFailureReason @('CLASSIFICATION=PREFLIGHT_OWNER_UNTRUSTED')) -ceq 'PROVENANCE_MISMATCH') 'trusted provenance classification must map to existing provenance reason'
         Assert-True ((Resolve-RecoverFailureReason @('CLASSIFICATION=BUNDLE_FILE_HASH_DRIFT')) -ceq 'PROVENANCE_MISMATCH') 'known bundle hash drift must map to existing provenance reason'
@@ -246,14 +249,23 @@ try {
         $originalProgramData=$env:ProgramData
         $env:ProgramData=$FixtureRoot
         try {
-            $script:FixtureChildResult=[pscustomobject]@{ExitCode=0;Lines=@('DISPATCHER_RESULT=RECOVERED')}
+            $script:FixtureChildResult=[pscustomobject]@{ExitCode=0;Lines=@('DISPATCHER_RESULT=RECOVERED');ClassificationInvalid=$false}
             $recovered=Invoke-DispatcherMode Recover
             Assert-True ($recovered.Success -and $recovered.State -ceq 'PASS' -and $recovered.Reason -ceq 'NONE') 'RECOVERED must remain PASS/NONE'
 
-            $script:FixtureChildResult=[pscustomobject]@{ExitCode=1;Lines=@('DISPATCHER_RESULT=FAIL','CLASSIFICATION=RECOVERY_BUSY_OR_UNCERTAIN')}
+            $script:FixtureChildResult=[pscustomobject]@{ExitCode=1;Lines=@('DISPATCHER_RESULT=FAIL','CLASSIFICATION=RECOVERY_BUSY_OR_UNCERTAIN');ClassificationInvalid=$false}
             $failedRecover=Invoke-DispatcherMode Recover
             Assert-True (-not $failedRecover.Success -and $failedRecover.State -ceq 'FAILED' -and $failedRecover.Reason -ceq 'LOCK_OR_RESIDUE_UNCERTAIN') 'failed RECOVER must preserve bounded mapped diagnosis'
 
+            $script:FixtureChildResult=[pscustomobject]@{ExitCode=1;Lines=@('DISPATCHER_RESULT=FAIL','CLASSIFICATION=RECOVERY_BUSY_OR_UNCERTAIN');ClassificationInvalid=$true}
+            $invalidRecover=Invoke-DispatcherMode Recover
+            Assert-True (-not $invalidRecover.Success -and $invalidRecover.Reason -ceq 'FAILED') 'valid plus malformed trusted classification must fail closed to generic FAILED'
+
+            $script:FixtureChildResult=[pscustomobject]@{ExitCode=1;Lines=@('DISPATCHER_RESULT=FAIL','CLASSIFICATION=RECOVERY_BUSY_OR_UNCERTAIN')}
+            $missingInvalidMarker=Invoke-DispatcherMode Recover
+            Assert-True (-not $missingInvalidMarker.Success -and $missingInvalidMarker.Reason -ceq 'FAILED') 'missing classification-invalid marker must fail closed to generic FAILED'
+
+            $script:FixtureChildResult=[pscustomobject]@{ExitCode=1;Lines=@('DISPATCHER_RESULT=FAIL','CLASSIFICATION=RECOVERY_BUSY_OR_UNCERTAIN');ClassificationInvalid=$false}
             $failedDiscover=Invoke-DispatcherMode Discover
             Assert-True (-not $failedDiscover.Success -and $failedDiscover.Reason -ceq 'FAILED') 'DISCOVER failure reason contract must not widen from RECOVER diagnosis'
             $failedOnce=Invoke-DispatcherMode Once
@@ -267,7 +279,7 @@ finally {
 $dispatcherSource = Get-Content -LiteralPath (Join-Path (Split-Path (Split-Path $deployRoot -Parent) -Parent) 'ci-dispatch/Invoke-Dispatcher.ps1') -Raw
 Assert-True ($dispatcherSource.Contains("if (`$gate -notin @('READY','CAPACITY'))",[StringComparison]::Ordinal) -and $dispatcherSource.Contains("'DISPATCHER_RESULT=RECOVERED'",[StringComparison]::Ordinal)) 'protected dispatcher Recover must continue accepting READY or CAPACITY without launch semantics'
 
-$candidateRecoverWorkerBlob='168d66a5de097388af22440d478829522b9b9e6d'
+$candidateRecoverWorkerBlob='c45722c8d118d6d81135210b02e3cd7d8bfd1cac'
 $bootstrapSource = Get-Content -LiteralPath (Join-Path $deployRoot 'Bootstrap-CiJitControlTasks.ps1') -Raw
 foreach ($literal in @(
     'ecc801ffbce6d0fca444d6a4ea7b07e404bb9161',

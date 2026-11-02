@@ -7,7 +7,7 @@ $bootstrap = Join-Path $deployRoot 'Bootstrap-CiJitControlTasks.ps1'
 
 $workerRelative = 'host-agent/deploy/Invoke-CiJitControlTask.ps1'
 $expectedAcceptedWorkerBlob = '28e2d52ad1fa48ffacdf9fa69e1e4984f3a5ea38'
-$expectedCandidateWorkerBlob = '168d66a5de097388af22440d478829522b9b9e6d'
+$expectedCandidateWorkerBlob = 'c45722c8d118d6d81135210b02e3cd7d8bfd1cac'
 $expectedPriorAcceptedWorkerBlob = 'a0a79f92d31859dd4a930b358b10c7b4cf11db48'
 
 $script:Assertions = 0
