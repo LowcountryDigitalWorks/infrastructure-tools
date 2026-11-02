@@ -281,9 +281,9 @@ Assert-True ($dispatcherSource.Contains("if (`$gate -notin @('READY','CAPACITY')
 
 $bootstrapSource = Get-Content -LiteralPath (Join-Path $deployRoot 'Bootstrap-CiJitControlTasks.ps1') -Raw
 foreach ($literal in @(
-    'f17f53400b5ba40075709b634a9a30f77b148a29',
+    '57018f1c3bb57ee9032e4b7a194dd2b994de74a8',
     'fd52f44134dda198cb35ed7ef999e166ab143bbe',
-    'c45722c8d118d6d81135210b02e3cd7d8bfd1cac',
+    '47fb3d8a81ca4c8abbae4c691a7fbcfc4c1b7cd6',
     'dabb1083994b635ff7d8f83ed673379276036885',
     'e56412548f58ceed7ae701be1d55526302a7baf9be3bb44b4ed02d45825a8193',
     '6a51968c07e235f4257031ccb127fd4ea5c1e00e',
@@ -314,13 +314,12 @@ foreach ($forbidden in @('Invoke-WebRequest','Invoke-RestMethod','curl.exe','Sta
     Assert-True (-not $bootstrapSource.Contains($forbidden, [StringComparison]::OrdinalIgnoreCase)) "CI/JIT bootstrap must not add network or task-definition primitive $forbidden"
 }
 
-# Verify the bootstrap pins the accepted merged #172 source while the exact
-# #179 worker candidate remains source-review-only until a later provenance refresh.
+# Verify the bootstrap pins the accepted merged #179 source and rejects any
+# installer/worker/status-access drift.
 $bootstrapTokens=$null;$bootstrapErrors=$null
 $bootstrapAst=[Management.Automation.Language.Parser]::ParseInput($bootstrapSource,[ref]$bootstrapTokens,[ref]$bootstrapErrors)
 Assert-True ($bootstrapErrors.Count -eq 0) 'bootstrap must parse'
 & {
-    $expectedCandidateWorkerBlob = '47fb3d8a81ca4c8abbae4c691a7fbcfc4c1b7cd6'
     foreach($name in @('acceptedSourceCommit','acceptedManageBlob','acceptedWorkerBlob','acceptedStatusAccessBlob','manageRelative','workerRelative','statusAccessRelative')){
         $assignment=$bootstrapAst.Find({param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -ceq ('$'+$name)},$false)
         . ([scriptblock]::Create($assignment.Extent.Text))
@@ -328,15 +327,13 @@ Assert-True ($bootstrapErrors.Count -eq 0) 'bootstrap must parse'
     $acceptedManage=(& git -C $deployRoot rev-parse ($acceptedSourceCommit+':'+$manageRelative)).Trim()
     Assert-True ($LASTEXITCODE -eq 0 -and $acceptedManage -ceq $acceptedManageBlob) 'bootstrap manager pin must match accepted merged source'
     $acceptedWorker=(& git -C $deployRoot rev-parse ($acceptedSourceCommit+':'+$workerRelative)).Trim()
-    Assert-True ($LASTEXITCODE -eq 0 -and $acceptedWorker -ceq $acceptedWorkerBlob) 'bootstrap worker pin must match accepted #172 merged worker'
+    Assert-True ($LASTEXITCODE -eq 0 -and $acceptedWorker -ceq $acceptedWorkerBlob) 'bootstrap worker pin must match accepted #179 merged worker'
     $acceptedStatusAccess=(& git -C $deployRoot rev-parse ($acceptedSourceCommit+':'+$statusAccessRelative)).Trim()
     Assert-True ($LASTEXITCODE -eq 0 -and $acceptedStatusAccess -ceq $acceptedStatusAccessBlob) 'bootstrap status-access pin must match accepted source bytes'
     $currentManage=(& git -C $deployRoot rev-parse ('HEAD:'+$manageRelative)).Trim()
     Assert-True ($LASTEXITCODE -eq 0 -and $currentManage -ceq $acceptedManageBlob) 'current manager must match accepted merged manager bytes'
     $currentWorker=(& git -C $deployRoot rev-parse ('HEAD:'+$workerRelative)).Trim()
-    Assert-True ($LASTEXITCODE -eq 0 -and $currentWorker -ceq $expectedCandidateWorkerBlob) 'source-review worker must match exact #179 candidate blob'
-    Assert-True ($acceptedWorkerBlob -cne $currentWorker) 'candidate and accepted runtime worker identities must remain split until post-merge provenance refresh'
-    Assert-True (-not $bootstrapSource.Contains($expectedCandidateWorkerBlob,[StringComparison]::Ordinal)) 'bootstrap must not promote the #179 candidate during source review'
+    Assert-True ($LASTEXITCODE -eq 0 -and $currentWorker -ceq $acceptedWorkerBlob) 'current worker must match accepted #179 merged worker bytes exactly'
     $currentStatusAccess=(& git -C $deployRoot rev-parse ('HEAD:'+$statusAccessRelative)).Trim()
     Assert-True ($LASTEXITCODE -eq 0 -and $currentStatusAccess -ceq $acceptedStatusAccessBlob) 'current status-access helper must match accepted bytes'
     $guard=$bootstrapAst.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-AcceptedCheckout'},$false)
@@ -364,10 +361,11 @@ Assert-True ($bootstrapErrors.Count -eq 0) 'bootstrap must parse'
         $script:LASTEXITCODE=if($fixture.Ancestor){0}else{1}
     }
     $context=Assert-AcceptedCheckout
-    Assert-True ($context.Head -ceq $acceptedSourceCommit) 'accepted #172 merged checkout must pass guard'
+    Assert-True ($context.Head -ceq $acceptedSourceCommit) 'accepted #179 merged checkout must pass guard'
     foreach($case in @(
         @{Field='Manage';Value='622ded670d2805bf163699a77c076454e92f90bc';Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
         @{Field='Manage';Value=('f'*40);Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
+        @{Field='Worker';Value='c45722c8d118d6d81135210b02e3cd7d8bfd1cac';Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
         @{Field='Worker';Value='28e2d52ad1fa48ffacdf9fa69e1e4984f3a5ea38';Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
         @{Field='Worker';Value='a0a79f92d31859dd4a930b358b10c7b4cf11db48';Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},
         @{Field='Worker';Value='1877c993dabe7e9d1e2a712a317a0d935ab74dfd';Code='ACCEPTED_CONTROL_SOURCE_CHANGED'},

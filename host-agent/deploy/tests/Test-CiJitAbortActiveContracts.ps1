@@ -6,10 +6,9 @@ $worker = Join-Path $deployRoot 'Invoke-CiJitControlTask.ps1'
 $bootstrap = Join-Path $deployRoot 'Bootstrap-CiJitControlTasks.ps1'
 
 $workerRelative = 'host-agent/deploy/Invoke-CiJitControlTask.ps1'
-$expectedAcceptedWorkerBlob = 'c45722c8d118d6d81135210b02e3cd7d8bfd1cac'
-$expectedCandidateWorkerBlob = '47fb3d8a81ca4c8abbae4c691a7fbcfc4c1b7cd6'
-$expectedPriorAcceptedWorkerBlob = '28e2d52ad1fa48ffacdf9fa69e1e4984f3a5ea38'
-$expectedHistoricalWorkerBlob = 'a0a79f92d31859dd4a930b358b10c7b4cf11db48'
+$expectedAcceptedWorkerBlob = '47fb3d8a81ca4c8abbae4c691a7fbcfc4c1b7cd6'
+$expectedPriorAcceptedWorkerBlob = 'c45722c8d118d6d81135210b02e3cd7d8bfd1cac'
+$expectedHistoricalWorkerBlob = '28e2d52ad1fa48ffacdf9fa69e1e4984f3a5ea38'
 
 $script:Assertions = 0
 $script:CleanupCalls = [Collections.Generic.List[object]]::new()
@@ -195,26 +194,22 @@ $currentWorkerBlob = (
 
 Assert-True (
     $LASTEXITCODE -eq 0 -and
-    $currentWorkerBlob -ceq $expectedCandidateWorkerBlob
-) 'source-review worker must be exact #179 candidate blob'
+    $currentWorkerBlob -ceq $expectedAcceptedWorkerBlob
+) 'source-review worker must be exact accepted #179 worker blob'
 
 Assert-True (
     $acceptedWorkerBlob -ceq $expectedAcceptedWorkerBlob
-) 'bootstrap must remain pinned to the accepted #172 worker during #179 source review'
+) 'bootstrap must pin the accepted #179 worker after provenance refresh'
 
 Assert-True (
-    $acceptedWorkerBlob -cne $currentWorkerBlob
-) 'candidate and accepted runtime worker identities must remain split until post-merge provenance refresh'
+    $acceptedWorkerBlob -ceq $currentWorkerBlob
+) 'source-review and accepted worker identities must converge after provenance refresh'
 
 $bootstrapSource = Get-Content -LiteralPath $bootstrap -Raw
 
 Assert-True (
     $bootstrapSource.Contains(
         $expectedAcceptedWorkerBlob,
-        [StringComparison]::Ordinal
-    ) -and
-    -not $bootstrapSource.Contains(
-        $expectedCandidateWorkerBlob,
         [StringComparison]::Ordinal
     ) -and
     -not $bootstrapSource.Contains(
@@ -225,7 +220,7 @@ Assert-True (
         $expectedHistoricalWorkerBlob,
         [StringComparison]::Ordinal
     )
-) 'bootstrap must keep only accepted runtime worker provenance and must not promote the #179 candidate during source review'
+) 'bootstrap must promote only the accepted #179 worker provenance and reject stale provenance'
 
 $guard = $bootstrapAst.Find(
     {
