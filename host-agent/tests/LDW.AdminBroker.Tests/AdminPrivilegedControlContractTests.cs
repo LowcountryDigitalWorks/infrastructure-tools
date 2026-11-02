@@ -28,6 +28,7 @@ internal static class AdminPrivilegedControlContractTests
         Assert(AdminBrokerContract.TryParseRequest(runJson, out var runRequest) && runRequest is not null,
             "ADMIN_REVIEWED_OPERATION_RUN parses with operationId");
         Assert(AdminPrivilegedRequestPolicy.IsAllowed(runRequest!), "allowed reviewed operation passes policy");
+        Assert(AdminBrokerRequestPolicy.IsAllowed(runRequest!), "allowed reviewed operation passes broker request policy");
 
         // 2. ADMIN_REVIEWED_OPERATION_RUN with reviewedOperation alternative key rejected
         var runAltJson = "{\"version\":1,\"requestId\":\"11111111-1111-1111-1111-111111111111\",\"operation\":\"ADMIN_REVIEWED_OPERATION_RUN\",\"targetIdentity\":\""
@@ -81,6 +82,7 @@ internal static class AdminPrivilegedControlContractTests
         Assert(AdminBrokerContract.TryParseRequest(getResultJson, out var getResultRequest) && getResultRequest is not null,
             "ADMIN_REVIEWED_OPERATION_GET_RESULT parses with correlationId");
         Assert(AdminPrivilegedRequestPolicy.IsAllowed(getResultRequest!), "valid correlationId passes policy");
+        Assert(AdminBrokerRequestPolicy.IsAllowed(getResultRequest!), "valid correlationId passes broker request policy");
 
         // 8. ADMIN_REVIEWED_OPERATION_GET_RESULT with operationId alternative key rejected
         var getResultAltJson = "{\"version\":1,\"requestId\":\"22222222-2222-2222-2222-222222222222\",\"operation\":\"ADMIN_REVIEWED_OPERATION_GET_RESULT\",\"targetIdentity\":\""
