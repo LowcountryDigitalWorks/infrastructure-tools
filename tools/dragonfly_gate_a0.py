@@ -488,6 +488,50 @@ def _has_nonloopback_tcp22(text: str) -> bool:
     return False
 
 
+def _read_authorized_keys_restrict_doc(
+    *,
+    manpage: Path = Path("/usr/share/man/man5/authorized_keys.5.gz"),
+    trusted_dirs: tuple[Path, ...] = (
+        Path("/usr"),
+        Path("/usr/share"),
+        Path("/usr/share/man"),
+        Path("/usr/share/man/man5"),
+    ),
+    trusted_uid: int = 0,
+) -> str:
+    classification = "A0_AUTHORIZED_KEYS_RESTRICT_DOC_MISSING"
+    try:
+        if not trusted_dirs:
+            raise A0Error(classification)
+        for directory in trusted_dirs:
+            info = directory.lstat()
+            if (
+                directory.is_symlink()
+                or not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != trusted_uid
+                or stat.S_IMODE(info.st_mode) & 0o022
+            ):
+                raise A0Error(classification)
+        trusted_root = trusted_dirs[-1].resolve(strict=True)
+        resolved = manpage.resolve(strict=True)
+        if resolved.parent != trusted_root:
+            raise A0Error(classification)
+        info = resolved.stat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != trusted_uid
+            or stat.S_IMODE(info.st_mode) & 0o022
+        ):
+            raise A0Error(classification)
+        with gzip.open(manpage, "rt", encoding="utf-8", errors="replace") as handle:
+            doc = handle.read()
+    except (OSError, RuntimeError) as exc:
+        raise A0Error(classification) from exc
+    if re.search(r"\brestrict\b", doc) is None:
+        raise A0Error(classification)
+    return doc
+
+
 def _network_snapshot(runner: CommandRunner, expected_host_fingerprint: str) -> dict:
     if not re.fullmatch(r"SHA256:[A-Za-z0-9+/]+={0,2}", expected_host_fingerprint):
         raise A0Error("A0_EXPECTED_HOST_FINGERPRINT_INVALID")
@@ -503,16 +547,7 @@ def _network_snapshot(runner: CommandRunner, expected_host_fingerprint: str) -> 
     if not _has_nonloopback_tcp22(listeners):
         raise A0Error("A0_TCP22_NOT_NONLOOPBACK")
 
-    manpage = Path("/usr/share/man/man5/authorized_keys.5.gz")
-    try:
-        if manpage.is_symlink() or not manpage.is_file():
-            raise A0Error("A0_AUTHORIZED_KEYS_RESTRICT_DOC_MISSING")
-        with gzip.open(manpage, "rt", encoding="utf-8", errors="replace") as handle:
-            doc = handle.read()
-    except OSError as exc:
-        raise A0Error("A0_AUTHORIZED_KEYS_RESTRICT_DOC_MISSING") from exc
-    if re.search(r"\brestrict\b", doc) is None:
-        raise A0Error("A0_AUTHORIZED_KEYS_RESTRICT_DOC_MISSING")
+    _read_authorized_keys_restrict_doc()
 
     host_key = _run(
         runner,
