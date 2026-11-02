@@ -47,7 +47,7 @@ function Get-RunValueSnapshot {
     $value = $null
     if (Test-Path -LiteralPath $path -PathType Container) {
         $item = Get-ItemProperty -LiteralPath $path -ErrorAction Stop
-        if ($item.PSObject.Properties.Name -contains $name) {
+        if ($null -ne $item.PSObject.Properties[$name]) {
             $present = $true
             $value = [string]$item.$name
         }
@@ -286,31 +286,37 @@ try {
     Set-Acl -LiteralPath $constants.ProductRoot -AclObject $broadAcl
     $productAclInjected = $true
 
+    Write-Host 'BEHAVIOR_PHASE=unsafe-acl-refusal'
     Assert-ThrowsCode { Invoke-ManagedInstall -Package $packageA } 'HOST_AGENT_WINDOWS_INSTALL_ACL_REFUSED' 'destination trust violation must fail closed before managed mutation'
     Assert-True (-not (Test-Path -LiteralPath $constants.ExecutablePath -PathType Leaf)) 'destination trust refusal must not create managed executable bytes'
     Assert-True (-not (Test-Path -LiteralPath $constants.InstalledManifestPath -PathType Leaf)) 'destination trust refusal must not create managed manifest bytes'
     Assert-True (-not (Test-Path -LiteralPath $constants.RollbackRoot -PathType Container)) 'destination trust refusal must not create rollback bytes'
 
-    $restoredAcl = [Security.AccessControl.DirectorySecurity]::new()
-    $restoredAcl.SetSecurityDescriptorBinaryForm($productAclBaselineBytes)
-    Set-Acl -LiteralPath $constants.ProductRoot -AclObject $restoredAcl
+    Set-ProtectedDirectoryAcl -Path $constants.ProductRoot -OwnerSid $ownerSid
     $productAclInjected = $false
+    Write-Host 'BEHAVIOR_PHASE=acl-restoration-readback'
+    Assert-HostAgentWindowsProtectedDirectory -Path $constants.ProductRoot
 
+    Write-Host 'BEHAVIOR_PHASE=pre-install-status'
     $status = Get-ManagedStatus
     Assert-AbsentStatus -Status $status -Label 'pre-install'
 
+    Write-Host 'BEHAVIOR_PHASE=install-a'
     $null = Invoke-ManagedInstall -Package $packageA
     $status = Get-ManagedStatus
     Assert-ManagedStatus -Status $status -Installed $packageA -Rollback $null -Label 'after install A'
 
+    Write-Host 'BEHAVIOR_PHASE=install-b'
     $null = Invoke-ManagedInstall -Package $packageB
     $status = Get-ManagedStatus
     Assert-ManagedStatus -Status $status -Installed $packageB -Rollback $packageA -Label 'after install B'
 
+    Write-Host 'BEHAVIOR_PHASE=rollback-to-a'
     $null = Invoke-ManagedRollback -RollbackPackage $packageA
     $status = Get-ManagedStatus
     Assert-ManagedStatus -Status $status -Installed $packageA -Rollback $packageB -Label 'after rollback to A'
 
+    Write-Host 'BEHAVIOR_PHASE=lock-contention'
     $heldLock = Enter-HostAgentWindowsTransactionLock -TimeoutMilliseconds 1000
     try {
         Assert-ThrowsCode { Invoke-ManagedInstall -Package $packageB } 'HOST_AGENT_WINDOWS_TRANSACTION_BUSY' 'second transaction must fail with real lock contention'
@@ -326,6 +332,7 @@ try {
     # rollback promotion. That destination denies only child creation. PowerShell then
     # fails the rollback-root Move-Item before moving any rollback contents, while the
     # collision directory itself remains safe/deletable by production cleanup.
+    Write-Host 'BEHAVIOR_PHASE=forced-install-recovery'
     $collisionSource = 'LDW.HostAgent.BehaviorCollision.' + [guid]::NewGuid().ToString('N')
     $collisionWatcher = [IO.FileSystemWatcher]::new($constants.InstallRoot, '.stage-*')
     $collisionWatcher.NotifyFilter = [IO.NotifyFilters]::DirectoryName
@@ -378,11 +385,9 @@ try {
     Assert-RunSnapshotUnchanged -Before $initialRunSnapshot -After $finalRunSnapshot
     Assert-TrayTaskSnapshotUnchanged -Before $initialTraySnapshot -After $finalTraySnapshot
 } finally {
-    if ($productAclInjected -and $null -ne $constants -and $null -ne $productAclBaselineBytes -and (Test-Path -LiteralPath $constants.ProductRoot -PathType Container)) {
+    if ($productAclInjected -and $null -ne $constants -and (Test-Path -LiteralPath $constants.ProductRoot -PathType Container)) {
         try {
-            $restoreAcl = [Security.AccessControl.DirectorySecurity]::new()
-            $restoreAcl.SetSecurityDescriptorBinaryForm($productAclBaselineBytes)
-            Set-Acl -LiteralPath $constants.ProductRoot -AclObject $restoreAcl
+            Set-ProtectedDirectoryAcl -Path $constants.ProductRoot -OwnerSid $ownerSid
         } catch {
             Write-Warning "ACL restore failed: $($_.Exception.Message)"
         }
