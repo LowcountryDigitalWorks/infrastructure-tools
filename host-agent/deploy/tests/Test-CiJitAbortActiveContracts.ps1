@@ -7,6 +7,7 @@ $bootstrap = Join-Path $deployRoot 'Bootstrap-CiJitControlTasks.ps1'
 
 $workerRelative = 'host-agent/deploy/Invoke-CiJitControlTask.ps1'
 $expectedAcceptedWorkerBlob = 'c45722c8d118d6d81135210b02e3cd7d8bfd1cac'
+$expectedCandidateWorkerBlob = '47fb3d8a81ca4c8abbae4c691a7fbcfc4c1b7cd6'
 $expectedPriorAcceptedWorkerBlob = '28e2d52ad1fa48ffacdf9fa69e1e4984f3a5ea38'
 $expectedHistoricalWorkerBlob = 'a0a79f92d31859dd4a930b358b10c7b4cf11db48'
 
@@ -194,22 +195,26 @@ $currentWorkerBlob = (
 
 Assert-True (
     $LASTEXITCODE -eq 0 -and
-    $currentWorkerBlob -ceq $expectedAcceptedWorkerBlob
-) 'source-review worker must be exact accepted #172 worker blob'
+    $currentWorkerBlob -ceq $expectedCandidateWorkerBlob
+) 'source-review worker must be exact #179 candidate blob'
 
 Assert-True (
     $acceptedWorkerBlob -ceq $expectedAcceptedWorkerBlob
-) 'bootstrap must pin the accepted #172 worker after provenance refresh'
+) 'bootstrap must remain pinned to the accepted #172 worker during #179 source review'
 
 Assert-True (
-    $acceptedWorkerBlob -ceq $currentWorkerBlob
-) 'source-review and accepted worker identities must converge after provenance refresh'
+    $acceptedWorkerBlob -cne $currentWorkerBlob
+) 'candidate and accepted runtime worker identities must remain split until post-merge provenance refresh'
 
 $bootstrapSource = Get-Content -LiteralPath $bootstrap -Raw
 
 Assert-True (
     $bootstrapSource.Contains(
         $expectedAcceptedWorkerBlob,
+        [StringComparison]::Ordinal
+    ) -and
+    -not $bootstrapSource.Contains(
+        $expectedCandidateWorkerBlob,
         [StringComparison]::Ordinal
     ) -and
     -not $bootstrapSource.Contains(
@@ -220,7 +225,7 @@ Assert-True (
         $expectedHistoricalWorkerBlob,
         [StringComparison]::Ordinal
     )
-) 'bootstrap must promote only the accepted #172 worker provenance and reject stale provenance'
+) 'bootstrap must keep only accepted runtime worker provenance and must not promote the #179 candidate during source review'
 
 $guard = $bootstrapAst.Find(
     {
