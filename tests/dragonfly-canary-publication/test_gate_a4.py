@@ -11,7 +11,7 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
-ACCEPTED_MAIN_COMMIT = "d1e73c49b80509eba44170d7b449eab6b269bd70"
+ACCEPTED_MAIN_COMMIT = "d132f7d3b79d33164c1342abd66c8604c4de53fe"
 
 
 def git_tree_blob(commit: str, path: str) -> str:
