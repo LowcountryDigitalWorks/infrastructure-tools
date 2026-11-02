@@ -320,10 +320,40 @@ try {
     $status = Get-ManagedStatus
     Assert-ManagedStatus -Status $status -Installed $packageA -Rollback $packageB -Label 'after lock contention refusal'
 
-    $rollbackExecutable = Join-Path $constants.RollbackRoot $constants.ExecutableName
-    Assert-True (Test-Path -LiteralPath $rollbackExecutable -PathType Leaf) 'rollback payload must exist before forced mid-transaction failure'
-    $rollbackHold = [IO.File]::Open($rollbackExecutable, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    # Force a forward-path failure without obstructing recovery itself. The watcher
+    # observes the production-generated .stage-<token> directory, derives that same
+    # transaction token, and pre-creates the future .rollback-old-<token> destination.
+    # Package C is intentionally large enough to leave a deterministic observation
+    # window while staging/copy/hash validation runs. The later rollback-root Move-Item
+    # must fail, but the prior live A and rollback B bytes remain readable/restorable.
+    $collisionWatcher = Start-Job -ScriptBlock {
+        param([string]$InstallRoot)
+        $deadline = [DateTime]::UtcNow.AddSeconds(20)
+        while ([DateTime]::UtcNow -lt $deadline) {
+            $stage = Get-ChildItem -LiteralPath $InstallRoot -Directory -Force -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '^\.stage-[a-f0-9]{32}$' } |
+                Select-Object -First 1
+            if ($null -ne $stage) {
+                $token = $stage.Name.Substring('.stage-'.Length)
+                $collision = Join-Path $InstallRoot ('.rollback-old-' + $token)
+                try {
+                    $null = New-Item -ItemType Directory -Path $collision -ErrorAction Stop
+                    'COLLISION_CREATED=' + $collision
+                    return
+                } catch {
+                    if (Test-Path -LiteralPath $collision -PathType Container) {
+                        'COLLISION_ALREADY_PRESENT=' + $collision
+                        return
+                    }
+                }
+            }
+            Start-Sleep -Milliseconds 5
+        }
+        throw 'HOST_AGENT_WINDOWS_BEHAVIORAL_COLLISION_TIMEOUT'
+    } -ArgumentList $constants.InstallRoot
+
     $collisionError = $null
+    $watcherOutput = @()
     try {
         try {
             Invoke-ManagedInstall -Package $packageC | Out-Null
@@ -333,9 +363,10 @@ try {
             $collisionError = $_.Exception.Message
         }
     } finally {
-        $rollbackHold.Dispose()
+        $watcherOutput = @(Receive-Job -Job $collisionWatcher -Wait -AutoRemoveJob -ErrorAction Stop)
     }
-    Assert-True (-not [string]::IsNullOrWhiteSpace($collisionError)) 'mid-transaction failure path must emit a bounded refusal'
+    Assert-True (@($watcherOutput | Where-Object { [string]$_ -match '^COLLISION_(CREATED|ALREADY_PRESENT)=' }).Count -eq 1) 'collision watcher must create the transaction-specific rollback-old destination'
+    Assert-True (-not [string]::IsNullOrWhiteSpace($collisionError)) 'mid-transaction failure path must emit an error'
     Assert-True (-not [string]::Equals($collisionError, 'HOST_AGENT_WINDOWS_INSTALL_ROLLBACK_FAILED', [StringComparison]::Ordinal)) 'mid-transaction collision must restore without rollback-failure escalation'
 
     $status = Get-ManagedStatus
