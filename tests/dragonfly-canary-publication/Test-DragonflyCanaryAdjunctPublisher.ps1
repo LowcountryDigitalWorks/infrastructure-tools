@@ -28,6 +28,8 @@ try {
     Assert-True ($first.ManifestSha256 -cmatch '^[a-f0-9]{64}$') 'ADJUNCT_MANIFEST_SHA_INVALID'
 
     $manifestPath = Join-Path $first.ReleaseRoot 'manifest.json'
+    $manifestBytes = [IO.File]::ReadAllBytes($manifestPath)
+    Assert-True (-not ($manifestBytes.Length -ge 3 -and $manifestBytes[0] -eq 0xEF -and $manifestBytes[1] -eq 0xBB -and $manifestBytes[2] -eq 0xBF)) 'ADJUNCT_MANIFEST_UTF8_BOM_PRESENT'
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     Assert-True ($manifest.schema -eq 1) 'ADJUNCT_SCHEMA_INVALID'
     Assert-True ($manifest.artifact -ceq 'ldw-dragonfly-canary-adjunct-v1') 'ADJUNCT_ARTIFACT_INVALID'
