@@ -70,6 +70,10 @@ jobs:
       - name: Verify byte-exact adjunct blob materialization
         shell: pwsh
         run: ./tests/dragonfly-canary-publication/Test-DragonflyAdjunctMaterialization.ps1
+      - name: Verify adjunct materialization under Windows PowerShell 5.1
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: ./tests/dragonfly-canary-publication/Test-DragonflyAdjunctMaterializationPowerShell51.ps1
       - name: Verify Gate A1 operator under Windows PowerShell 5.1
         if: matrix.os == 'windows-latest'
         shell: powershell

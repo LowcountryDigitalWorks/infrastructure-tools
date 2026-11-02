@@ -122,7 +122,11 @@ function Export-LdwAdjunctPinnedFile {
     $psi.FileName = (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
     $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
     $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
-    foreach ($arg in @('-C',$RepositoryRoot,'cat-file','blob',$Source.blob)) { [void]$psi.ArgumentList.Add([string]$arg) }
+    # Windows PowerShell 5.1/.NET Framework lacks ProcessStartInfo.ArgumentList.
+    # Use the already-verified repository as the working directory so the only
+    # arguments are fixed tokens plus the validated 40-hex Git blob identity.
+    $psi.WorkingDirectory = [IO.Path]::GetFullPath($RepositoryRoot)
+    $psi.Arguments = 'cat-file blob ' + [string]$Source.blob
     $process = [Diagnostics.Process]::new(); $process.StartInfo = $psi
     try {
         $output = [IO.File]::Create($sourcePath)
