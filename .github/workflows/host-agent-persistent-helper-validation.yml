@@ -54,6 +54,10 @@ jobs:
         shell: pwsh
         run: pwsh ./host-agent/deploy/tests/Test-HostAgentWindowsDeploymentContracts.ps1
 
+      - name: Run Host Agent Windows behavioral deployment tests
+        shell: pwsh
+        run: pwsh ./host-agent/deploy/tests/Test-HostAgentWindowsDeploymentBehavioral.ps1
+
       - name: Exercise Host Agent Windows immutable-tree package and read-only Plan
         shell: pwsh
         run: |

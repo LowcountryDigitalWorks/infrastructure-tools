@@ -79,6 +79,8 @@ A normal successful rollback swaps the current and prior validated packages so t
 
 Failed install/rollback transactions attempt exact restoration and require positive readback. Temporary staging/previous/rollback evidence is deleted only when the new transaction committed or restoration was positively proven. If restoration is ambiguous or cannot be proven, the helper fails closed and deliberately retains bounded transaction/recovery evidence for later exact reconciliation rather than deleting the only validated recovery copy.
 
+`deploy/tests/Test-HostAgentWindowsDeploymentBehavioral.ps1` executes the production manager/module under a synthetic protected Program Files root and behaviorally proves Absent -> Install A -> Install B -> Rollback to A, real transaction-lock contention (`HOST_AGENT_WINDOWS_TRANSACTION_BUSY`), destination trust refusal before managed mutation, and a deterministic mid-transaction install failure branch that restores both the prior installed identity and the preexisting rollback identity. The behavioral harness intentionally does not force corruption of the final recovery source branch because that branch is designed to preserve bounded evidence for manual reconciliation, and forcing it in CI would make safe automatic cleanup ambiguous.
+
 ## Configuration and boundaries
 
 Machine-local configuration remains outside the package and is not read, copied, overwritten, or removed by deployment. Existing configuration lookup remains:
