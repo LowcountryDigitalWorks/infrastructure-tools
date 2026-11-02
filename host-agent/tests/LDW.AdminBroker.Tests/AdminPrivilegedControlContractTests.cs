@@ -27,7 +27,8 @@ internal static class AdminPrivilegedControlContractTests
             + fixedTarget + "\",\"parameters\":{\"operationId\":\"ELEVATED_IDENTITY_PROOF\"}}";
         Assert(AdminBrokerContract.TryParseRequest(runJson, out var runRequest) && runRequest is not null,
             "ADMIN_REVIEWED_OPERATION_RUN parses with operationId");
-        Assert(AdminPrivilegedRequestPolicy.IsAllowed(runRequest!), "allowed reviewed operation passes policy");
+        Assert(AdminPrivilegedRequestPolicy.IsAllowed(runRequest!), "allowed reviewed operation passes dedicated policy");
+        Assert(AdminBrokerRequestPolicy.IsAllowed(runRequest!), "allowed reviewed operation passes top-level broker policy routing");
 
         // 2. ADMIN_REVIEWED_OPERATION_RUN with reviewedOperation alternative key rejected
         var runAltJson = "{\"version\":1,\"requestId\":\"11111111-1111-1111-1111-111111111111\",\"operation\":\"ADMIN_REVIEWED_OPERATION_RUN\",\"targetIdentity\":\""
@@ -40,7 +41,8 @@ internal static class AdminPrivilegedControlContractTests
             + fixedTarget + "\",\"parameters\":{\"operationId\":\"UNKNOWN_UNREVIEWED_OP\"}}";
         Assert(AdminBrokerContract.TryParseRequest(unknownOpJson, out var unknownOpRequest) && unknownOpRequest is not null,
             "unknown operationId parses at contract level if formatted as identifier");
-        Assert(!AdminPrivilegedRequestPolicy.IsAllowed(unknownOpRequest!), "unknown operationId fails closed in policy");
+        Assert(!AdminPrivilegedRequestPolicy.IsAllowed(unknownOpRequest!), "unknown operationId fails closed in dedicated policy");
+        Assert(!AdminBrokerRequestPolicy.IsAllowed(unknownOpRequest!), "unknown operationId fails closed at top-level broker policy routing");
 
         // 4. Caller-provided command/path/args/url/env rejected
         var injectionAttempts = new[]
@@ -73,14 +75,28 @@ internal static class AdminPrivilegedControlContractTests
 
         // 6. Target identity mismatch rejected
         Assert(!AdminPrivilegedRequestPolicy.IsAllowed(runRequest! with { TargetIdentity = "other-target" }),
-            "target identity mismatch rejected");
+            "target identity mismatch rejected by dedicated policy");
+        Assert(!AdminBrokerRequestPolicy.IsAllowed(runRequest! with { TargetIdentity = "other-target" }),
+            "target identity mismatch rejected by top-level broker policy");
+
+        // The top-level routing exception is privileged-only. Other generic operations keep the empty-parameters rule.
+        var genericWithPrivilegedParameters = runRequest! with
+        {
+            Operation = AdminBrokerContract.Operations.HostAgentRestartReviewedComponent,
+            TargetIdentity = "host-agent"
+        };
+        Assert(!AdminBrokerRequestPolicy.IsAllowed(genericWithPrivilegedParameters),
+            "generic operation with privileged parameters remains rejected");
+        Assert(AdminBrokerRequestPolicy.IsAllowed(genericWithPrivilegedParameters with { Parameters = null }),
+            "generic operation with no parameters retains prior top-level policy behavior");
 
         // 7. ADMIN_REVIEWED_OPERATION_GET_RESULT with correlationId
         var getResultJson = "{\"version\":1,\"requestId\":\"22222222-2222-2222-2222-222222222222\",\"operation\":\"ADMIN_REVIEWED_OPERATION_GET_RESULT\",\"targetIdentity\":\""
             + fixedTarget + "\",\"parameters\":{\"correlationId\":\"11111111-1111-1111-1111-111111111111\"}}";
         Assert(AdminBrokerContract.TryParseRequest(getResultJson, out var getResultRequest) && getResultRequest is not null,
             "ADMIN_REVIEWED_OPERATION_GET_RESULT parses with correlationId");
-        Assert(AdminPrivilegedRequestPolicy.IsAllowed(getResultRequest!), "valid correlationId passes policy");
+        Assert(AdminPrivilegedRequestPolicy.IsAllowed(getResultRequest!), "valid correlationId passes dedicated policy");
+        Assert(AdminBrokerRequestPolicy.IsAllowed(getResultRequest!), "valid correlationId passes top-level broker policy routing");
 
         // 8. ADMIN_REVIEWED_OPERATION_GET_RESULT with operationId alternative key rejected
         var getResultAltJson = "{\"version\":1,\"requestId\":\"22222222-2222-2222-2222-222222222222\",\"operation\":\"ADMIN_REVIEWED_OPERATION_GET_RESULT\",\"targetIdentity\":\""
