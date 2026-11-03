@@ -61,17 +61,26 @@ def _canonical(value: object) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
 
 
-def _accepted_115_preexisting_map(installer: ModuleType) -> dict[str, bool]:
+def _accepted_115_preexisting_matches(installer: ModuleType, preexisting: object) -> bool:
     rollback_targets = {rel.as_posix() for _, _, rel, _ in installer.ROLLBACK}
     accepted_current_only = {
         rel.as_posix()
         for rel in getattr(installer, "ACCEPTED_PREEXISTING_CURRENT_ONLY", frozenset())
     }
-    accepted_targets = rollback_targets | accepted_current_only
-    return {
-        rel.as_posix(): rel.as_posix() in accepted_targets
-        for _, _, rel, _ in installer.CURRENT
-    }
+    expected_keys = {rel.as_posix() for _, _, rel, _ in installer.CURRENT}
+    if not isinstance(preexisting, dict) or set(preexisting) != expected_keys:
+        return False
+    for rel, present in preexisting.items():
+        if type(present) is not bool:
+            return False
+        if rel in rollback_targets:
+            if not present:
+                return False
+        elif rel in accepted_current_only:
+            continue
+        elif present:
+            return False
+    return True
 
 
 def _assert_receipt_validated(
@@ -88,7 +97,7 @@ def _assert_receipt_validated(
         raise A4Error("A4_RECEIPT_SOURCE_TREE_MISMATCH")
     if receipt.get("rollbackBaseline") != "accepted-115":
         raise A4Error("A4_ROLLBACK_BASELINE_NOT_RETAINED")
-    if receipt.get("preexisting") != _accepted_115_preexisting_map(installer):
+    if not _accepted_115_preexisting_matches(installer, receipt.get("preexisting")):
         raise A4Error("A4_RECEIPT_PREEXISTING_MISMATCH")
     bound = dict(receipt)
     bound["preexisting"] = dict(receipt["preexisting"])

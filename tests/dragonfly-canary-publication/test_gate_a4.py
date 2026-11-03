@@ -362,6 +362,15 @@ class GateA4Tests(unittest.TestCase):
         self.assertEqual(self.installer.receipt_reads, 4)
         self.assertEqual(self.installer.calls, 2)
 
+    def test_receipt_accepted_current_only_absent_is_allowed(self):
+        target = self.installer.CURRENT[2][2]
+        self.installer.ACCEPTED_PREEXISTING_CURRENT_ONLY = frozenset({target})
+        self.assertFalse(self.installer.receipt["preexisting"][target.as_posix()])
+        with mock.patch.object(a4.socket, "gethostname", return_value="redrix"):
+            a4.collect_a4(**self.kwargs)
+        self.assertEqual(self.installer.receipt_reads, 4)
+        self.assertEqual(self.installer.calls, 2)
+
     def test_accepted_receipt_package_identity_passes_before_readback(self):
         with mock.patch.object(a4.socket, "gethostname", return_value="redrix"):
             a4.collect_a4(**self.kwargs)
