@@ -71,6 +71,21 @@ The legacy-adoption inputs are intentionally separate from the new package ident
 
 The deployment helper does not create, enable, disable, remove, or rewrite the existing Scheduled Task/HKCU Run startup owner.
 
+## Post-install normal-user relaunch
+
+The package manager intentionally does not start or stop the tray. After a reviewed install/rollback transaction has completed and the owning live gate still requires the tray to be started, use the separate bounded helper:
+
+```powershell
+pwsh ./deploy/Start-HostAgentWindowsTray.ps1 -Action Plan
+pwsh ./deploy/Start-HostAgentWindowsTray.ps1 -Action Start
+```
+
+The relaunch helper has no executable-path, argument, user, or session override. It reuses the fixed managed Program Files identity and requires the installation to validate as `Managed`. `Plan` is read-only and refuses an already-running tray, session 0/non-interactive execution, or the absence of a same-session non-elevated Windows Explorer owner shell.
+
+`Start` delegates the fixed executable to the existing owner Explorer shell rather than directly launching the tray from an elevated deployment shell. It then performs bounded process readback and accepts only exactly one newly launched process at the fixed path, in the expected interactive session, whose token is positively proven non-elevated. An elevated or token-ambiguous exact candidate is stopped and the helper fails closed; multiple exact candidates are cleaned up and refused. Identity/session/path ambiguity is never treated as successful activation.
+
+This helper does not alter HKCU Run, Scheduled Tasks, services, configuration, deployment manifests, rollback state, credentials, or provider state. It is a post-transaction activation/readback helper only. The normal-user tray itself still independently refuses elevated execution.
+
 ## Rollback and recovery evidence
 
 When replacing a validated existing installation, the immediately prior validated executable and deployment manifest become the single rollback package. A deliberate `Rollback` also requires an independently supplied exact rollback identity: source commit/tree, manifest SHA-256, executable SHA-256, and byte length. This prevents a locally substituted rollback directory from becoming privileged merely because it is present.
