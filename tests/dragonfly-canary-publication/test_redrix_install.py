@@ -129,6 +129,19 @@ class RedrixInstallTests(unittest.TestCase):
             self.assertEqual(inst._git_blob(target.read_bytes()), blob)
             self.assertEqual(target.stat().st_mode & 0o777, mode)
 
+    def test_install_with_group_writable_umask_creates_secure_intermediate_parent(self):
+        ci_runner = self.home / ".local/lib/ci-runner"
+        self.assertFalse(ci_runner.exists())
+        old_umask = os.umask(0o002)
+        try:
+            self._install()
+        finally:
+            os.umask(old_umask)
+        self.assertTrue(ci_runner.is_dir())
+        self.assertFalse(ci_runner.is_symlink())
+        self.assertEqual(ci_runner.stat().st_mode & 0o777, 0o700)
+        self.assertEqual((ci_runner / "guest").stat().st_mode & 0o777, 0o700)
+
     def test_install_failure_preserves_accepted_owner_controller(self):
         rel, blob, mode = self._write_accepted_owner_controller()
         with self.assertRaisesRegex(inst.InstallError, "REDRIX_SYNTHETIC_INSTALL_FAULT"):
