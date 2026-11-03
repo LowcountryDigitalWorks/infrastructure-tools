@@ -9,6 +9,8 @@ $deployRoot = Split-Path -Parent $PSScriptRoot
 $modulePath = Join-Path $deployRoot 'HostAgentWindowsDeployment.psm1'
 $publisherPath = Join-Path $deployRoot 'Publish-HostAgentWindowsPackage.ps1'
 $managerPath = Join-Path $deployRoot 'Manage-HostAgentWindowsDeployment.ps1'
+$trayLaunchModulePath = Join-Path $deployRoot 'HostAgentWindowsTrayLaunch.psm1'
+$trayLaunchScriptPath = Join-Path $deployRoot 'Start-HostAgentWindowsTray.ps1'
 Import-Module $modulePath -Force
 
 $script:Assertions = 0
@@ -21,8 +23,18 @@ function Assert-Throws([scriptblock]$Action,[string]$Message) {
     try { & $Action; throw "ASSERTION FAILED: $Message" }
     catch { if ($_.Exception.Message.StartsWith('ASSERTION FAILED:',[StringComparison]::Ordinal)) { throw } }
 }
+function Assert-ThrowsCode([scriptblock]$Action,[string]$ExpectedCode,[string]$Message) {
+    $script:Assertions++
+    try { & $Action | Out-Null; throw "ASSERTION FAILED: $Message" }
+    catch {
+        if ($_.Exception.Message.StartsWith('ASSERTION FAILED:',[StringComparison]::Ordinal)) { throw }
+        if (-not $_.ToString().Contains($ExpectedCode,[StringComparison]::Ordinal)) {
+            throw "ASSERTION FAILED: $Message (expected: $ExpectedCode; actual: $($_.Exception.Message))"
+        }
+    }
+}
 
-foreach ($path in @($modulePath,$publisherPath,$managerPath)) {
+foreach ($path in @($modulePath,$publisherPath,$managerPath,$trayLaunchModulePath,$trayLaunchScriptPath)) {
     $tokens=$null;$errors=$null
     $null=[Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors)
     Assert-True ($errors.Count -eq 0) "PowerShell must parse: $path"
@@ -220,5 +232,141 @@ try {
     }
     if (Test-Path -LiteralPath $hardTarget) { Remove-Item -LiteralPath $hardTarget -Force }
 }
+
+# HOST-AGENT-DEPLOY-002: deterministic normal-user tray relaunch contract.
+$trayModuleSource = Get-Content -LiteralPath $trayLaunchModulePath -Raw
+$trayScriptSource = Get-Content -LiteralPath $trayLaunchScriptPath -Raw
+foreach ($required in @(
+    "ProcessName = 'LDW.HostAgent.Windows'",
+    "ExplorerPath = Join-Path `$env:WINDIR 'explorer.exe'",
+    'Get-HostAgentWindowsInstalledObservation',
+    'Assert-HostAgentWindowsSafeFile',
+    'HOST_AGENT_WINDOWS_TRAY_ALREADY_RUNNING',
+    'HOST_AGENT_WINDOWS_TRAY_EXPLORER_SESSION_REQUIRED',
+    'HOST_AGENT_WINDOWS_TRAY_AMBIGUOUS_RESULT',
+    'HOST_AGENT_WINDOWS_TRAY_TOKEN_PROBE_REFUSED',
+    'HOST_AGENT_WINDOWS_TRAY_ELEVATED_RESULT_REFUSED',
+    'HOST_AGENT_WINDOWS_TRAY_CLEANUP_REFUSED',
+    'Start-Process -FilePath $constants.ExplorerPath',
+    'StartupRegistrationMutation = $false',
+    'IncrementalRuntimeCostUsd = 0'
+)) {
+    Assert-True ($trayModuleSource.Contains($required,[StringComparison]::Ordinal)) "tray launch module must preserve bounded relaunch contract: $required"
+}
+foreach ($forbidden in @(
+    'Set-ItemProperty','New-ItemProperty','Remove-ItemProperty','Register-ScheduledTask','New-ScheduledTask',
+    'Set-ScheduledTask','Unregister-ScheduledTask','New-Service','Set-Service','sc.exe','reg.exe','Invoke-WebRequest','Invoke-RestMethod'
+)) {
+    Assert-True (-not $trayModuleSource.Contains($forbidden,[StringComparison]::OrdinalIgnoreCase)) "tray launch module must not gain startup/service/network mutation: $forbidden"
+}
+Assert-True ($trayScriptSource.Contains("[ValidateSet('Plan','Start')]",[StringComparison]::Ordinal)) 'public relaunch wrapper exposes only Plan/Start actions'
+Assert-True (-not $trayScriptSource.Contains('ExecutablePath',[StringComparison]::Ordinal)) 'public relaunch wrapper must not accept caller-controlled executable paths'
+Assert-True (-not $trayScriptSource.Contains('SessionId',[StringComparison]::Ordinal)) 'public relaunch wrapper must not accept caller-controlled session IDs'
+
+$trayModule = Import-Module $trayLaunchModulePath -Force -PassThru
+$trayConstants = Get-HostAgentWindowsTrayLaunchConstants
+Assert-True ($trayConstants.ExecutablePath -ceq $constants.ExecutablePath) 'tray relaunch target must reuse the fixed managed deployment executable'
+Assert-True ($trayConstants.ExplorerPath -ceq (Join-Path $env:WINDIR 'explorer.exe')) 'tray relaunch must delegate only through Windows Explorer'
+
+Assert-ThrowsCode { & $trayModule { Assert-HostAgentWindowsTrayLaunchState -InstalledState 'Absent' -RunningCount 0 -SessionId 1 -ExplorerCandidateCount 1 } } 'HOST_AGENT_WINDOWS_TRAY_MANAGED_INSTALL_REQUIRED' 'unmanaged install state must fail closed'
+Assert-ThrowsCode { & $trayModule { Assert-HostAgentWindowsTrayLaunchState -InstalledState 'Managed' -RunningCount 1 -SessionId 1 -ExplorerCandidateCount 1 } } 'HOST_AGENT_WINDOWS_TRAY_ALREADY_RUNNING' 'already-running tray must fail closed'
+Assert-ThrowsCode { & $trayModule { Assert-HostAgentWindowsTrayLaunchState -InstalledState 'Managed' -RunningCount 0 -SessionId 0 -ExplorerCandidateCount 1 } } 'HOST_AGENT_WINDOWS_TRAY_INTERACTIVE_SESSION_REQUIRED' 'session zero must fail closed'
+Assert-ThrowsCode { & $trayModule { Assert-HostAgentWindowsTrayLaunchState -InstalledState 'Managed' -RunningCount 0 -SessionId 1 -ExplorerCandidateCount 0 } } 'HOST_AGENT_WINDOWS_TRAY_EXPLORER_SESSION_REQUIRED' 'missing normal-user Explorer shell must fail closed'
+
+$syntheticExe = Join-Path $env:TEMP 'LDW.HostAgent.Windows.exe'
+$success = & $trayModule {
+    param($exe)
+    $state = [pscustomobject]@{ LaunchCount=0; Stopped=[Collections.Generic.List[int]]::new() }
+    $launch = { param($path,$session) $state.LaunchCount++; if ($session -ne 7 -or $path -cne [IO.Path]::GetFullPath($exe)) { throw 'bad-launch-input' } }.GetNewClosure()
+    $observe = { [pscustomobject]@{ Id=101; SessionId=7; Path=[IO.Path]::GetFullPath($exe) } }.GetNewClosure()
+    $elevation = { param($id) if ($id -ne 101) { throw 'bad-id' }; $false }
+    $stop = { param($id) $state.Stopped.Add($id) }.GetNewClosure()
+    $sleep = { param($ms) }
+    $result = Invoke-HostAgentWindowsTrayLaunchCore -ExecutablePath $exe -SessionId 7 -BeforeProcessIds @() -LaunchAction $launch -ObserveAction $observe -ElevationProbe $elevation -StopAction $stop -SleepAction $sleep -PollAttempts 1
+    [pscustomobject]@{ Result=$result; LaunchCount=$state.LaunchCount; Stopped=@($state.Stopped) }
+} $syntheticExe
+Assert-True ($success.Result.Started -and -not $success.Result.Elevated -and $success.Result.ProcessId -eq 101) 'single exact normal-user result must pass'
+Assert-True ($success.LaunchCount -eq 1 -and $success.Stopped.Count -eq 0) 'successful relaunch must launch once and not clean up the accepted process'
+
+$elevated = & $trayModule {
+    param($exe)
+    $script:stopped = @()
+    try {
+        Invoke-HostAgentWindowsTrayLaunchCore -ExecutablePath $exe -SessionId 7 -BeforeProcessIds @() `
+            -LaunchAction { param($path,$session) } `
+            -ObserveAction { [pscustomobject]@{ Id=202; SessionId=7; Path=[IO.Path]::GetFullPath($exe) } }.GetNewClosure() `
+            -ElevationProbe { param($id) $true } `
+            -StopAction { param($id) $script:stopped += $id } `
+            -SleepAction { param($ms) } -PollAttempts 1 | Out-Null
+        [pscustomobject]@{ Error=$null; Stopped=@($script:stopped) }
+    } catch { [pscustomobject]@{ Error=$_.Exception.Message; Stopped=@($script:stopped) } }
+} $syntheticExe
+Assert-True ($elevated.Error -ceq 'HOST_AGENT_WINDOWS_TRAY_ELEVATED_RESULT_REFUSED') 'elevated relaunch result must fail closed'
+Assert-True (($elevated.Stopped -join ',') -ceq '202') 'elevated newly launched exact tray must be stopped'
+
+$tokenFailure = & $trayModule {
+    param($exe)
+    $script:stopped = @()
+    try {
+        Invoke-HostAgentWindowsTrayLaunchCore -ExecutablePath $exe -SessionId 7 -BeforeProcessIds @() `
+            -LaunchAction { param($path,$session) } `
+            -ObserveAction { [pscustomobject]@{ Id=303; SessionId=7; Path=[IO.Path]::GetFullPath($exe) } }.GetNewClosure() `
+            -ElevationProbe { param($id) throw 'synthetic-token-failure' } `
+            -StopAction { param($id) $script:stopped += $id } `
+            -SleepAction { param($ms) } -PollAttempts 1 | Out-Null
+        [pscustomobject]@{ Error=$null; Stopped=@($script:stopped) }
+    } catch { [pscustomobject]@{ Error=$_.Exception.Message; Stopped=@($script:stopped) } }
+} $syntheticExe
+Assert-True ($tokenFailure.Error -ceq 'HOST_AGENT_WINDOWS_TRAY_TOKEN_PROBE_REFUSED') 'ambiguous token state must fail closed'
+Assert-True (($tokenFailure.Stopped -join ',') -ceq '303') 'token-probe failure must stop the newly launched exact tray'
+
+$ambiguous = & $trayModule {
+    param($exe)
+    $script:stopped = @()
+    try {
+        Invoke-HostAgentWindowsTrayLaunchCore -ExecutablePath $exe -SessionId 7 -BeforeProcessIds @() `
+            -LaunchAction { param($path,$session) } `
+            -ObserveAction { @([pscustomobject]@{ Id=401; SessionId=7; Path=[IO.Path]::GetFullPath($exe) },[pscustomobject]@{ Id=402; SessionId=7; Path=[IO.Path]::GetFullPath($exe) }) }.GetNewClosure() `
+            -ElevationProbe { param($id) $false } `
+            -StopAction { param($id) $script:stopped += $id } `
+            -SleepAction { param($ms) } -PollAttempts 1 | Out-Null
+        [pscustomobject]@{ Error=$null; Stopped=@($script:stopped) }
+    } catch { [pscustomobject]@{ Error=$_.Exception.Message; Stopped=@($script:stopped | Sort-Object) } }
+} $syntheticExe
+Assert-True ($ambiguous.Error -ceq 'HOST_AGENT_WINDOWS_TRAY_AMBIGUOUS_RESULT') 'multiple newly launched tray results must fail closed'
+Assert-True (($ambiguous.Stopped -join ',') -ceq '401,402') 'ambiguous exact candidates must both be cleaned up'
+
+$cleanup = & $trayModule {
+    param($exe)
+    $script:stopped = @()
+    $candidates = @(
+        [pscustomobject]@{ Id=500; SessionId=7; Path=[IO.Path]::GetFullPath($exe) },
+        [pscustomobject]@{ Id=501; SessionId=8; Path=[IO.Path]::GetFullPath($exe) },
+        [pscustomobject]@{ Id=502; SessionId=7; Path='C:\\Windows\\notepad.exe' },
+        [pscustomobject]@{ Id=503; SessionId=7; Path=[IO.Path]::GetFullPath($exe) }
+    )
+    Stop-HostAgentWindowsNewTrayCandidates -Candidates $candidates -BeforeProcessIds @(500) -ExecutablePath $exe -SessionId 7 -StopAction { param($id) $script:stopped += $id }
+    @($script:stopped)
+} $syntheticExe
+Assert-True (($cleanup -join ',') -ceq '503') 'cleanup must stop only a newly launched exact-path exact-session tray candidate'
+
+Assert-ThrowsCode {
+    & $trayModule {
+        param($exe)
+        Stop-HostAgentWindowsNewTrayCandidates `
+            -Candidates @([pscustomobject]@{ Id=601; SessionId=7; Path=[IO.Path]::GetFullPath($exe) }) `
+            -BeforeProcessIds @() -ExecutablePath $exe -SessionId 7 `
+            -StopAction { param($id) throw 'synthetic-stop-failure' }
+    } $syntheticExe
+} 'HOST_AGENT_WINDOWS_TRAY_CLEANUP_REFUSED' 'cleanup failure must remain visible and fail closed'
+
+Assert-ThrowsCode {
+    & $trayModule {
+        param($exe)
+        Invoke-HostAgentWindowsTrayLaunchCore -ExecutablePath $exe -SessionId 7 -BeforeProcessIds @() `
+            -LaunchAction { param($path,$session) } -ObserveAction { @() } -ElevationProbe { param($id) $false } `
+            -StopAction { param($id) } -SleepAction { param($ms) } -PollAttempts 1 | Out-Null
+    } $syntheticExe
+} 'HOST_AGENT_WINDOWS_TRAY_LAUNCH_TIMEOUT' 'missing result must terminate at a bounded timeout'
 
 Write-Host "Host Agent Windows deployment contract assertions PASS: $script:Assertions"
