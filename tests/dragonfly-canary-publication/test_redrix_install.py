@@ -88,6 +88,14 @@ class RedrixInstallTests(unittest.TestCase):
             self.assertEqual(inst._git_blob(data), blob)
             self._write(rel, data, mode)
 
+    def _write_accepted_owner_controller(self):
+        rel = next(iter(inst.ACCEPTED_PREEXISTING_CURRENT_ONLY))
+        source_path, blob, _rel, mode = next(item for item in inst.CURRENT if item[2] == rel)
+        data = (self.package_root / "payload" / source_path).read_bytes()
+        self.assertEqual(inst._git_blob(data), blob)
+        self._write(rel, data, mode)
+        return rel, blob, mode
+
     def _auth_digest(self):
         return hashlib.sha256(self.authorized.read_bytes()).hexdigest()
 
@@ -120,6 +128,33 @@ class RedrixInstallTests(unittest.TestCase):
             target = self.home / rel
             self.assertEqual(inst._git_blob(target.read_bytes()), blob)
             self.assertEqual(target.stat().st_mode & 0o777, mode)
+
+    def test_install_failure_preserves_accepted_owner_controller(self):
+        rel, blob, mode = self._write_accepted_owner_controller()
+        with self.assertRaisesRegex(inst.InstallError, "REDRIX_SYNTHETIC_INSTALL_FAULT"):
+            self._install(fault_after=3)
+        target = self.home / rel
+        self.assertTrue(target.is_file())
+        self.assertFalse(target.is_symlink())
+        self.assertEqual(inst._git_blob(target.read_bytes()), blob)
+        self.assertEqual(target.stat().st_mode & 0o777, mode)
+        self.assertFalse((self.home / inst.TRANSACTION_REL).exists())
+        self.assertFalse((self.home / inst.RECEIPT_REL).exists())
+
+    def test_restore_refuses_mode_drift_on_preexisting_owner_controller(self):
+        rel, _blob, _mode = self._write_accepted_owner_controller()
+        target = self.home / rel
+        target.chmod(0o644)
+        rollback_rels = {item[2] for item in inst.ROLLBACK}
+        record = {
+            "baseline": "accepted-115",
+            "preexisting": {
+                item[2].as_posix(): item[2] in rollback_rels or item[2] == rel
+                for item in inst.CURRENT
+            },
+        }
+        with self.assertRaisesRegex(inst.InstallError, "REDRIX_ROLLBACK_TARGET_UNRECOGNIZED"):
+            inst._restore(self.home, self.package_root, record, self.uid)
 
     def test_reinstall_of_current_receipted_state_is_idempotent(self):
         first = self._install()
