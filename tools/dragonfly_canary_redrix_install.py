@@ -575,50 +575,222 @@ def _ensure_private_directory_chain(home: Path, directory: Path, uid: int) -> No
         _fsync_dir(cursor.parent)
 
 
-def _remove_legacy_ci_runner_parent_residue(home: Path, uid: int, transaction: Path, record: dict[str, Any]) -> None:
+def _directory_identity(info: os.stat_result) -> tuple[int, int]:
+    return (int(info.st_dev), int(info.st_ino))
+
+
+def _normalize_expected_directory_identity(
+    value: tuple[int, int] | None,
+    *,
+    required_code: str,
+    invalid_code: str,
+) -> tuple[int, int]:
+    if value is None:
+        raise InstallError(required_code)
+    if (
+        not isinstance(value, tuple)
+        or len(value) != 2
+        or any(not isinstance(item, int) or isinstance(item, bool) for item in value)
+        or value[0] < 0
+        or value[1] <= 0
+    ):
+        raise InstallError(invalid_code)
+    return value
+
+
+def _parse_directory_identity(value: str | None, *, invalid_code: str) -> tuple[int, int] | None:
+    if value is None:
+        return None
+    match = re.fullmatch(r"([0-9]+):([1-9][0-9]*)", value)
+    if match is None:
+        raise InstallError(invalid_code)
+    return (int(match.group(1)), int(match.group(2)))
+
+
+def _open_directory_fd(path: Path, uid: int, allowed_modes: set[int], classification: str) -> tuple[int, os.stat_result]:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise InstallError(classification) from exc
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != uid
+            or stat.S_IMODE(info.st_mode) not in allowed_modes
+        ):
+            raise InstallError(classification)
+        path_info = path.lstat()
+        if (
+            not stat.S_ISDIR(path_info.st_mode)
+            or stat.S_ISLNK(path_info.st_mode)
+            or _directory_identity(path_info) != _directory_identity(info)
+        ):
+            raise InstallError(classification)
+        return fd, info
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _assert_open_directory_still_at_path(fd: int, path: Path, classification: str) -> os.stat_result:
+    try:
+        fd_info = os.fstat(fd)
+        path_info = path.lstat()
+    except OSError as exc:
+        raise InstallError(classification) from exc
+    if (
+        not stat.S_ISDIR(fd_info.st_mode)
+        or not stat.S_ISDIR(path_info.st_mode)
+        or stat.S_ISLNK(path_info.st_mode)
+        or _directory_identity(path_info) != _directory_identity(fd_info)
+    ):
+        raise InstallError(classification)
+    return fd_info
+
+
+def _assert_open_child_still_bound(
+    parent_fd: int,
+    name: str,
+    child_fd: int,
+    classification: str,
+) -> os.stat_result:
+    try:
+        fd_info = os.fstat(child_fd)
+        path_info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise InstallError(classification) from exc
+    if (
+        not stat.S_ISDIR(fd_info.st_mode)
+        or not stat.S_ISDIR(path_info.st_mode)
+        or stat.S_ISLNK(path_info.st_mode)
+        or _directory_identity(path_info) != _directory_identity(fd_info)
+    ):
+        raise InstallError(classification)
+    return fd_info
+
+
+def _repair_legacy_ci_runner_parent_residue(
+    home: Path,
+    uid: int,
+    record: dict[str, Any],
+    *,
+    expected_parent_identity: tuple[int, int] | None,
+    expected_guest_identity: tuple[int, int] | None,
+) -> None:
     if record.get("operation") != "install" or record.get("baseline") != "accepted-115":
         return
     preexisting = record.get("preexisting")
-    if not isinstance(preexisting, dict) or any(preexisting.get(rel.as_posix()) is not False for rel in LEGACY_CI_RUNNER_TARGETS):
+    if not isinstance(preexisting, dict) or any(
+        preexisting.get(rel.as_posix()) is not False for rel in LEGACY_CI_RUNNER_TARGETS
+    ):
         return
+
     parent = home / LEGACY_CI_RUNNER_PARENT_REL
-    guest = home / LEGACY_CI_RUNNER_GUEST_REL
     _assert_path_chain(home, parent, uid)
     if not parent.exists() and not parent.is_symlink():
         return
-    transaction_info = transaction.lstat()
-    info = parent.lstat()
-    if (
-        not stat.S_ISDIR(info.st_mode)
-        or stat.S_ISLNK(info.st_mode)
-        or info.st_uid != uid
-        or stat.S_IMODE(info.st_mode) != 0o775
-        or info.st_ctime_ns < transaction_info.st_mtime_ns
-    ):
-        raise InstallError("REDRIX_RECOVERY_PARENT_RESIDUE_INVALID")
-    entries = list(parent.iterdir())
-    if not entries:
-        parent.rmdir()
-        _fsync_dir(parent.parent)
-        return
-    if len(entries) != 1 or entries[0].name != guest.name:
-        raise InstallError("REDRIX_RECOVERY_PARENT_RESIDUE_INVALID")
-    guest_info = guest.lstat()
-    if (
-        not stat.S_ISDIR(guest_info.st_mode)
-        or stat.S_ISLNK(guest_info.st_mode)
-        or guest_info.st_uid != uid
-        or stat.S_IMODE(guest_info.st_mode) != 0o700
-        or guest_info.st_ctime_ns < transaction_info.st_mtime_ns
-        or any(guest.iterdir())
-    ):
-        raise InstallError("REDRIX_RECOVERY_PARENT_RESIDUE_INVALID")
-    guest.rmdir()
-    _fsync_dir(parent)
-    if any(parent.iterdir()):
-        raise InstallError("REDRIX_RECOVERY_PARENT_RESIDUE_INVALID")
-    parent.rmdir()
-    _fsync_dir(parent.parent)
+
+    parent_fd, parent_info = _open_directory_fd(
+        parent,
+        uid,
+        {0o700, 0o775},
+        "REDRIX_RECOVERY_PARENT_RESIDUE_INVALID",
+    )
+    guest_fd: int | None = None
+    try:
+        # Private mode is already compatible with normal recovery. The legacy
+        # remediation is needed only for the exact broad intermediate created
+        # by the pre-#200 parents=True behavior.
+        if stat.S_IMODE(parent_info.st_mode) == 0o700:
+            return
+
+        expected_parent = _normalize_expected_directory_identity(
+            expected_parent_identity,
+            required_code="REDRIX_RECOVERY_PARENT_IDENTITY_REQUIRED",
+            invalid_code="REDRIX_RECOVERY_PARENT_IDENTITY_INVALID",
+        )
+        if _directory_identity(parent_info) != expected_parent:
+            raise InstallError("REDRIX_RECOVERY_PARENT_IDENTITY_MISMATCH")
+
+        try:
+            entries = sorted(os.listdir(parent_fd))
+        except OSError as exc:
+            raise InstallError("REDRIX_RECOVERY_PARENT_RESIDUE_INVALID") from exc
+        if entries not in ([], [LEGACY_CI_RUNNER_GUEST_REL.name]):
+            raise InstallError("REDRIX_RECOVERY_PARENT_RESIDUE_INVALID")
+
+        if entries:
+            expected_guest = _normalize_expected_directory_identity(
+                expected_guest_identity,
+                required_code="REDRIX_RECOVERY_GUEST_IDENTITY_REQUIRED",
+                invalid_code="REDRIX_RECOVERY_GUEST_IDENTITY_INVALID",
+            )
+            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+            try:
+                guest_fd = os.open(LEGACY_CI_RUNNER_GUEST_REL.name, flags, dir_fd=parent_fd)
+            except OSError as exc:
+                raise InstallError("REDRIX_RECOVERY_PARENT_RESIDUE_INVALID") from exc
+            guest_info = _assert_open_child_still_bound(
+                parent_fd,
+                LEGACY_CI_RUNNER_GUEST_REL.name,
+                guest_fd,
+                "REDRIX_RECOVERY_PARENT_RESIDUE_INVALID",
+            )
+            if (
+                guest_info.st_uid != uid
+                or stat.S_IMODE(guest_info.st_mode) != 0o700
+                or _directory_identity(guest_info) != expected_guest
+            ):
+                raise InstallError("REDRIX_RECOVERY_GUEST_IDENTITY_MISMATCH")
+            try:
+                if os.listdir(guest_fd):
+                    raise InstallError("REDRIX_RECOVERY_PARENT_RESIDUE_INVALID")
+            except OSError as exc:
+                raise InstallError("REDRIX_RECOVERY_PARENT_RESIDUE_INVALID") from exc
+        elif expected_guest_identity is not None:
+            raise InstallError("REDRIX_RECOVERY_GUEST_IDENTITY_MISMATCH")
+
+        _assert_open_directory_still_at_path(
+            parent_fd,
+            parent,
+            "REDRIX_RECOVERY_PARENT_RESIDUE_INVALID",
+        )
+        if guest_fd is not None:
+            _assert_open_child_still_bound(
+                parent_fd,
+                LEGACY_CI_RUNNER_GUEST_REL.name,
+                guest_fd,
+                "REDRIX_RECOVERY_PARENT_RESIDUE_INVALID",
+            )
+
+        # Tighten only the verified open directory object. No pathname delete,
+        # rename, or recursive chmod is permitted by this legacy repair.
+        os.fchmod(parent_fd, 0o700)
+        os.fsync(parent_fd)
+        repaired_info = _assert_open_directory_still_at_path(
+            parent_fd,
+            parent,
+            "REDRIX_RECOVERY_PARENT_RESIDUE_INVALID",
+        )
+        if repaired_info.st_uid != uid or stat.S_IMODE(repaired_info.st_mode) != 0o700:
+            raise InstallError("REDRIX_RECOVERY_PARENT_RESIDUE_INVALID")
+        if _directory_identity(repaired_info) != expected_parent:
+            raise InstallError("REDRIX_RECOVERY_PARENT_IDENTITY_MISMATCH")
+        if guest_fd is not None:
+            guest_info = _assert_open_child_still_bound(
+                parent_fd,
+                LEGACY_CI_RUNNER_GUEST_REL.name,
+                guest_fd,
+                "REDRIX_RECOVERY_PARENT_RESIDUE_INVALID",
+            )
+            if _directory_identity(guest_info) != expected_guest or os.listdir(guest_fd):
+                raise InstallError("REDRIX_RECOVERY_PARENT_RESIDUE_INVALID")
+    finally:
+        if guest_fd is not None:
+            os.close(guest_fd)
+        os.close(parent_fd)
 
 
 def _install_one(home: Path, source: Path, target: Path, mode: int, uid: int) -> None:
@@ -819,7 +991,16 @@ def install_fixture(
             raise original
 
 
-def recover_fixture(archive: Path, checksum: Path, home: Path, uid: int, forced_command: str) -> None:
+def recover_fixture(
+    archive: Path,
+    checksum: Path,
+    home: Path,
+    uid: int,
+    forced_command: str,
+    *,
+    expected_legacy_parent_identity: tuple[int, int] | None = None,
+    expected_legacy_guest_identity: tuple[int, int] | None = None,
+) -> None:
     home = _assert_home(home, uid)
     transaction = home / TRANSACTION_REL
     _assert_path_chain(home, transaction, uid)
@@ -835,8 +1016,21 @@ def recover_fixture(archive: Path, checksum: Path, home: Path, uid: int, forced_
         package_root, _, archive_digest = _extract_verified_package(archive, checksum, Path(td))
         if archive_digest != record["packageSha256"]:
             raise InstallError("REDRIX_RECOVERY_PACKAGE_MISMATCH")
-        _remove_legacy_ci_runner_parent_residue(home, uid, transaction, record)
+        _repair_legacy_ci_runner_parent_residue(
+            home,
+            uid,
+            record,
+            expected_parent_identity=expected_legacy_parent_identity,
+            expected_guest_identity=expected_legacy_guest_identity,
+        )
         _restore(home, package_root, record, uid)
+        _repair_legacy_ci_runner_parent_residue(
+            home,
+            uid,
+            record,
+            expected_parent_identity=expected_legacy_parent_identity,
+            expected_guest_identity=expected_legacy_guest_identity,
+        )
         assert_authorized_keys_marker_matches(home, uid, forced_command, record["authorizedKeysSha256"])
         if record["baseline"] == "accepted-115":
             _remove_matching_receipt(home, uid, archive_digest, record["authorizedKeysSha256"])
@@ -919,10 +1113,14 @@ def main() -> int:
     install_parser.add_argument("archive", type=Path)
     install_parser.add_argument("checksum", type=Path)
     install_parser.add_argument("--expected-transport-key-sha256", required=True)
-    for name in ("recover", "rollback"):
-        child = sub.add_parser(name)
-        child.add_argument("archive", type=Path)
-        child.add_argument("checksum", type=Path)
+    recover_parser = sub.add_parser("recover")
+    recover_parser.add_argument("archive", type=Path)
+    recover_parser.add_argument("checksum", type=Path)
+    recover_parser.add_argument("--expected-legacy-parent-identity")
+    recover_parser.add_argument("--expected-legacy-guest-identity")
+    rollback_parser = sub.add_parser("rollback")
+    rollback_parser.add_argument("archive", type=Path)
+    rollback_parser.add_argument("checksum", type=Path)
     sub.add_parser("readback")
     args = parser.parse_args()
     try:
@@ -939,7 +1137,23 @@ def main() -> int:
             print("REDRIX_CANARY_INSTALL=PASS")
             print("SOURCE_COMMIT=" + result["sourceCommit"])
         elif args.command == "recover":
-            recover_fixture(args.archive, args.checksum, PRODUCTION_HOME, PRODUCTION_UID, FORCED_COMMAND)
+            parent_identity = _parse_directory_identity(
+                args.expected_legacy_parent_identity,
+                invalid_code="REDRIX_RECOVERY_PARENT_IDENTITY_INVALID",
+            )
+            guest_identity = _parse_directory_identity(
+                args.expected_legacy_guest_identity,
+                invalid_code="REDRIX_RECOVERY_GUEST_IDENTITY_INVALID",
+            )
+            recover_fixture(
+                args.archive,
+                args.checksum,
+                PRODUCTION_HOME,
+                PRODUCTION_UID,
+                FORCED_COMMAND,
+                expected_legacy_parent_identity=parent_identity,
+                expected_legacy_guest_identity=guest_identity,
+            )
             print("REDRIX_CANARY_RECOVERY=PASS")
         elif args.command == "rollback":
             rollback_fixture(args.archive, args.checksum, PRODUCTION_HOME, PRODUCTION_UID, FORCED_COMMAND)
