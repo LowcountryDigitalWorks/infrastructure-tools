@@ -192,6 +192,13 @@ function Invoke-HostAgentWindowsTrayLaunchCore {
         }
         & $SleepAction $script:PollMilliseconds
     }
+    # Final readback closes the last-poll race without accepting a late result.
+    # Cleanup is limited to new fixed-path processes in the expected session.
+    $finalObserved = @(& $ObserveAction)
+    $finalNew = @($finalObserved | Where-Object { $BeforeProcessIds -notcontains [int]$_.Id })
+    if ($finalNew.Count -gt 0) {
+        Stop-HostAgentWindowsNewTrayCandidates -Candidates $finalNew -BeforeProcessIds $BeforeProcessIds -ExecutablePath $expected -SessionId $SessionId -StopAction $StopAction
+    }
     throw 'HOST_AGENT_WINDOWS_TRAY_LAUNCH_TIMEOUT'
 }
 

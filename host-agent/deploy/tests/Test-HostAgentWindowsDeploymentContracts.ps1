@@ -369,4 +369,37 @@ Assert-ThrowsCode {
     } $syntheticExe
 } 'HOST_AGENT_WINDOWS_TRAY_LAUNCH_TIMEOUT' 'missing result must terminate at a bounded timeout'
 
+
+$late = & $trayModule {
+    param($exe)
+    $state = [pscustomobject]@{ Observations=0 }
+    $script:stopped = @()
+    $expected = [IO.Path]::GetFullPath($exe)
+    $observe = {
+        $state.Observations++
+        if ($state.Observations -eq 1) {
+            return [pscustomobject]@{ Id=700; SessionId=7; Path=$expected }
+        }
+        @(
+            [pscustomobject]@{ Id=700; SessionId=7; Path=$expected },
+            [pscustomobject]@{ Id=701; SessionId=7; Path=$expected },
+            [pscustomobject]@{ Id=702; SessionId=8; Path=$expected },
+            [pscustomobject]@{ Id=703; SessionId=7; Path='C:\\Windows\\notepad.exe' }
+        )
+    }.GetNewClosure()
+    try {
+        Invoke-HostAgentWindowsTrayLaunchCore -ExecutablePath $exe -SessionId 7 -BeforeProcessIds @(700) `
+            -LaunchAction { param($path,$session) } -ObserveAction $observe `
+            -ElevationProbe { param($id) $false } `
+            -StopAction { param($id) $script:stopped += $id } `
+            -SleepAction { param($ms) } -PollAttempts 1 | Out-Null
+        [pscustomobject]@{ Error=$null; Stopped=@($script:stopped); Observations=$state.Observations }
+    } catch {
+        [pscustomobject]@{ Error=$_.Exception.Message; Stopped=@($script:stopped); Observations=$state.Observations }
+    }
+} $syntheticExe
+Assert-True ($late.Error -ceq 'HOST_AGENT_WINDOWS_TRAY_LAUNCH_TIMEOUT') 'late tray result must remain a timeout refusal'
+Assert-True ($late.Observations -eq 2) 'timeout must perform final observation'
+Assert-True (($late.Stopped -join ',') -ceq '701') 'timeout cleanup must stop only late new exact-session tray, preserving preexisting and unrelated processes'
+
 Write-Host "Host Agent Windows deployment contract assertions PASS: $script:Assertions"
