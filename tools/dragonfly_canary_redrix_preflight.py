@@ -16,7 +16,7 @@ import re
 import sys
 from types import ModuleType
 
-INSTALLER_BLOB = "77d64a6922d14975263b4bcf6912f0a4842fe9bf"
+INSTALLER_BLOB = "6018c2560b955c3225c5301dadda8f8c502ffa45"
 INSTALLER_PATH = Path(__file__).resolve().with_name("dragonfly_canary_redrix_install.py")
 _VERIFIED_INSTALLER_GLOBAL = "__LDW_VERIFIED_INSTALLER_BYTES__"
 PRODUCTION_HOME = Path("/home/eddie")

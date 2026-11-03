@@ -332,6 +332,41 @@ def _assert_path_chain(home: Path, target: Path, uid: int) -> None:
                 raise InstallError("REDRIX_TARGET_PARENT_INVALID")
 
 
+def _ensure_secure_target_parents(home: Path, target: Path, uid: int) -> None:
+    home = _assert_home(home, uid)
+    candidate = target.absolute()
+    try:
+        relative = candidate.relative_to(home)
+    except ValueError as exc:
+        raise InstallError("REDRIX_TARGET_OUTSIDE_HOME") from exc
+    cursor = home
+    for part in relative.parts[:-1]:
+        cursor = cursor / part
+        if cursor.exists() or cursor.is_symlink():
+            _assert_path_chain(home, cursor / ".sentinel", uid)
+            info = cursor.lstat()
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != uid
+                or stat.S_IMODE(info.st_mode) & 0o022
+            ):
+                raise InstallError("REDRIX_TARGET_PARENT_INVALID")
+            continue
+        try:
+            cursor.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        info = cursor.lstat()
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != uid
+            or stat.S_IMODE(info.st_mode) != 0o700
+        ):
+            raise InstallError("REDRIX_TARGET_PARENT_INVALID")
+
+
 def _expected_map(specs) -> dict[Path, tuple[str, int]]:
     return {rel: (blob, mode) for _, blob, rel, mode in specs}
 
@@ -539,7 +574,7 @@ def _remove_matching_receipt(home: Path, uid: int, package_sha: str, auth_sha: s
 
 def _install_one(home: Path, source: Path, target: Path, mode: int, uid: int) -> None:
     _assert_path_chain(home, target, uid)
-    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _ensure_secure_target_parents(home, target, uid)
     _assert_path_chain(home, target, uid)
     _atomic_write(target, source.read_bytes(), mode)
     info = target.lstat()
@@ -636,7 +671,7 @@ def install_fixture(
     baseline, preexisting = _recognize_baseline(home, uid)
     if baseline == "accepted-115" and (receipt.exists() or receipt.is_symlink()):
         raise InstallError("REDRIX_RECEIPT_STATE_INVALID")
-    transaction.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _ensure_secure_target_parents(home, transaction, uid)
     _assert_path_chain(home, transaction, uid)
     with tempfile.TemporaryDirectory(dir=transaction.parent, prefix="stage-") as td:
         package_root, _, archive_digest = _extract_verified_package(archive, checksum, Path(td))
@@ -771,7 +806,7 @@ def rollback_fixture(archive: Path, checksum: Path, home: Path, uid: int, forced
     assert_authorized_keys_marker_matches(home, uid, forced_command, receipt["authorizedKeysSha256"])
     auth = receipt["authorizedKeysSha256"]
     _verify_current_files(home, uid)
-    transaction.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _ensure_secure_target_parents(home, transaction, uid)
     _assert_path_chain(home, transaction, uid)
     with tempfile.TemporaryDirectory(dir=transaction.parent, prefix="rollback-") as td:
         package_root, _, archive_digest = _extract_verified_package(archive, checksum, Path(td))
