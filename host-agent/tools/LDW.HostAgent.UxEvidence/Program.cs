@@ -31,6 +31,21 @@ var environments = new[]
 };
 var device = new DeviceDefinition("fixture", "LDW01", DevicePlatform.Windows, environments);
 var systemTelemetry = new SystemTelemetry(DateTimeOffset.UtcNow, 16UL * 1024 * 1024 * 1024, 8UL * 1024 * 1024 * 1024, 12.5, [], new MemoryPressureTelemetry(50, 0, 0, 0, 0, TimeSpan.Zero, "Normal"));
+var ciJitStatus = new CiJitStatusSnapshot(
+    DateTimeOffset.UtcNow,
+    "fixture-v1",
+    CiJitOwnerState.Idle,
+    StatusColor.Green,
+    null,
+    true,
+    CiJitQueueState.Fresh,
+    0,
+    0,
+    null,
+    null,
+    null,
+    null,
+    CiJitCapacityState.Ready);
 var snapshots = new[]
 {
     ("healthy", StatusColor.Green, HealthState.Healthy, "Your system is ready to use.", StatusColor.Green),
@@ -52,7 +67,7 @@ foreach (var (file, overallColor, health, summary, exceptionColor) in snapshots)
         return new ComponentObservation(component.Id, color == StatusColor.Green ? ObservedState.Running : color == StatusColor.Gray ? ObservedState.Unknown : ObservedState.Unavailable, componentHealth, DateTimeOffset.UtcNow, componentHealth switch { HealthState.Failed => "Required service is unavailable.", HealthState.Degraded => "Service is running with a reported issue.", HealthState.Unknown => "No trustworthy observation is available.", _ => component.Kind == ComponentKind.WslUbuntu ? "Available on demand." : "Ready." }, Activity: color == StatusColor.Blue ? ActivityState.ActiveCiJob : ActivityState.None);
     }).ToArray();
     var snapshot = new DeviceSnapshot("fixture", DateTimeOffset.Now, observations, health, overallColor, summary);
-    var live = new HostAgentLiveSnapshot(device, snapshot, systemTelemetry, new RuntimeContext(OwnerSessionState.Active), new HostAgentSettingsLoadResult(new HostAgentSettings(), false, true, "Synthetic fixture."), null, null);
+    var live = new HostAgentLiveSnapshot(device, snapshot, systemTelemetry, new RuntimeContext(OwnerSessionState.Active), new HostAgentSettingsLoadResult(new HostAgentSettings(), false, true, "Synthetic fixture."), null, null, ciJitStatus);
     if (file == "healthy") priorHealthySnapshot = live;
     using var form = new StatusForm(() => { }, () => { });
     form.UpdateSnapshot(live);
