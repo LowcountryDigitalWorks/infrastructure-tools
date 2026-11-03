@@ -73,9 +73,28 @@ foreach (var (file, overallColor, health, summary, exceptionColor) in snapshots)
     form.UpdateSnapshot(live);
     form.Show();
     Application.DoEvents();
+
+    var refreshButton = Descendants(form).OfType<Button>().Single(x => x.Text.Contains("Refresh", StringComparison.OrdinalIgnoreCase));
+    if (!refreshButton.Focused)
+        throw new InvalidOperationException("The owner window must place initial keyboard focus on Refresh.");
+    foreach (var button in Descendants(form).OfType<Button>())
+    {
+        if (string.IsNullOrWhiteSpace(button.AccessibleName))
+            throw new InvalidOperationException($"Action button is missing an accessible name: {button.Text}");
+    }
+
     using var image = new Bitmap(form.Width, form.Height);
     form.DrawToBitmap(image, new Rectangle(Point.Empty, image.Size));
     image.Save(Path.Combine(args[0], $"{file}.png"));
+
+    form.Size = form.MinimumSize;
+    Application.DoEvents();
+    var horizontalScroll = Descendants(form)
+        .OfType<ScrollableControl>()
+        .FirstOrDefault(x => x.HorizontalScroll.Visible);
+    if (horizontalScroll is not null)
+        throw new InvalidOperationException($"Horizontal scrolling is not allowed at the minimum supported size: {horizontalScroll.GetType().Name}");
+
     form.Hide();
 }
 
@@ -101,3 +120,13 @@ using (var font = new Font("Segoe UI", 9))
 }
 Console.WriteLine($"Fixture evidence saved to {Path.GetFullPath(args[0])}");
 return 0;
+
+static IEnumerable<Control> Descendants(Control root)
+{
+    foreach (Control child in root.Controls)
+    {
+        yield return child;
+        foreach (var descendant in Descendants(child))
+            yield return descendant;
+    }
+}
