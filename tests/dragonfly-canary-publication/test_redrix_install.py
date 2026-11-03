@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -128,6 +129,101 @@ class RedrixInstallTests(unittest.TestCase):
             target = self.home / rel
             self.assertEqual(inst._git_blob(target.read_bytes()), blob)
             self.assertEqual(target.stat().st_mode & 0o777, mode)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX mode semantics required")
+    def test_umask_0002_keeps_new_intermediate_package_parents_private(self):
+        ci_runner = self.home / inst.LEGACY_CI_RUNNER_PARENT_REL
+        self.assertFalse(ci_runner.exists())
+        previous = os.umask(0o002)
+        try:
+            self._install()
+        finally:
+            os.umask(previous)
+        guest = self.home / inst.LEGACY_CI_RUNNER_GUEST_REL
+        self.assertEqual(ci_runner.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(guest.stat().st_mode & 0o777, 0o700)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX mode semantics required")
+    def test_recovery_removes_exact_legacy_ci_runner_parent_residue(self):
+        rel, blob, mode = self._write_accepted_owner_controller()
+        auth = self._auth_digest()
+        archive_digest = hashlib.sha256(self.archive.read_bytes()).hexdigest()
+        rollback_rels = {item[2] for item in inst.ROLLBACK}
+        preexisting = {
+            item[2].as_posix(): item[2] in rollback_rels or item[2] == rel
+            for item in inst.CURRENT
+        }
+        marker = {
+            "schema": 2, "operation": "install", "sourceCommit": inst.SOURCE_COMMIT,
+            "packageSha256": archive_digest, "authorizedKeysSha256": auth,
+            "baseline": "accepted-115", "preexisting": preexisting,
+        }
+        transaction = self.home / inst.TRANSACTION_REL
+        transaction.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        inst._write_transaction(transaction, marker)
+        parent = self.home / inst.LEGACY_CI_RUNNER_PARENT_REL
+        guest = self.home / inst.LEGACY_CI_RUNNER_GUEST_REL
+        guest.mkdir(parents=True, mode=0o700)
+        parent.chmod(0o775)
+        inst.recover_fixture(self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND)
+        self.assertFalse(transaction.exists())
+        self.assertFalse(parent.exists())
+        target = self.home / rel
+        self.assertEqual(inst._git_blob(target.read_bytes()), blob)
+        self.assertEqual(target.stat().st_mode & 0o777, mode)
+        self.assertEqual(self._auth_digest(), auth)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX mode semantics required")
+    def test_recovery_refuses_legacy_parent_that_predates_transaction(self):
+        auth = self._auth_digest()
+        archive_digest = hashlib.sha256(self.archive.read_bytes()).hexdigest()
+        rollback_rels = {item[2] for item in inst.ROLLBACK}
+        parent = self.home / inst.LEGACY_CI_RUNNER_PARENT_REL
+        guest = self.home / inst.LEGACY_CI_RUNNER_GUEST_REL
+        guest.mkdir(parents=True, mode=0o700)
+        parent.chmod(0o775)
+        time.sleep(0.02)
+        marker = {
+            "schema": 2, "operation": "install", "sourceCommit": inst.SOURCE_COMMIT,
+            "packageSha256": archive_digest, "authorizedKeysSha256": auth,
+            "baseline": "accepted-115",
+            "preexisting": {item[2].as_posix(): item[2] in rollback_rels for item in inst.CURRENT},
+        }
+        transaction = self.home / inst.TRANSACTION_REL
+        transaction.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        inst._write_transaction(transaction, marker)
+        with self.assertRaisesRegex(inst.InstallError, "REDRIX_RECOVERY_PARENT_RESIDUE_INVALID"):
+            inst.recover_fixture(self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND)
+        self.assertTrue(transaction.exists())
+        self.assertTrue(parent.exists())
+        self.assertTrue(guest.exists())
+        self.assertEqual(parent.stat().st_mode & 0o777, 0o775)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX mode semantics required")
+    def test_recovery_refuses_nonexact_legacy_ci_runner_parent_residue(self):
+        auth = self._auth_digest()
+        archive_digest = hashlib.sha256(self.archive.read_bytes()).hexdigest()
+        rollback_rels = {item[2] for item in inst.ROLLBACK}
+        marker = {
+            "schema": 2, "operation": "install", "sourceCommit": inst.SOURCE_COMMIT,
+            "packageSha256": archive_digest, "authorizedKeysSha256": auth,
+            "baseline": "accepted-115",
+            "preexisting": {item[2].as_posix(): item[2] in rollback_rels for item in inst.CURRENT},
+        }
+        transaction = self.home / inst.TRANSACTION_REL
+        transaction.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        inst._write_transaction(transaction, marker)
+        parent = self.home / inst.LEGACY_CI_RUNNER_PARENT_REL
+        guest = self.home / inst.LEGACY_CI_RUNNER_GUEST_REL
+        guest.mkdir(parents=True, mode=0o700)
+        parent.chmod(0o775)
+        unexpected = guest / "unexpected"
+        unexpected.write_text("x", encoding="utf-8")
+        with self.assertRaisesRegex(inst.InstallError, "REDRIX_RECOVERY_PARENT_RESIDUE_INVALID"):
+            inst.recover_fixture(self.archive, self.checksum, self.home, self.uid, inst.FORCED_COMMAND)
+        self.assertTrue(transaction.exists())
+        self.assertTrue(unexpected.exists())
+        self.assertEqual(parent.stat().st_mode & 0o777, 0o775)
 
     def test_install_failure_preserves_accepted_owner_controller(self):
         rel, blob, mode = self._write_accepted_owner_controller()

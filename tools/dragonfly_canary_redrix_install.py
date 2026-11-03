@@ -55,6 +55,12 @@ PREEXISTING_KEYS = {rel.as_posix() for _, _, rel, _ in CURRENT}
 ACCEPTED_PREEXISTING_CURRENT_ONLY = frozenset({
     Path(".local/lib/ldw-dragonfly-jit/dragonfly_jit.py"),
 })
+LEGACY_CI_RUNNER_PARENT_REL = Path(".local/lib/ci-runner")
+LEGACY_CI_RUNNER_GUEST_REL = LEGACY_CI_RUNNER_PARENT_REL / "guest"
+LEGACY_CI_RUNNER_TARGETS = frozenset({
+    Path(".local/lib/ci-runner/guest/run-one.sh"),
+    Path(".local/lib/ci-runner/guest/ci7-runner.service"),
+})
 
 
 def _assert_exact_ssh_directory(home: Path, uid: int, error_cls: type[Exception]) -> None:
@@ -537,9 +543,87 @@ def _remove_matching_receipt(home: Path, uid: int, package_sha: str, auth_sha: s
     _fsync_dir(receipt.parent)
 
 
+def _ensure_private_directory_chain(home: Path, directory: Path, uid: int) -> None:
+    home = _assert_home(home, uid)
+    candidate = directory.absolute()
+    try:
+        relative = candidate.relative_to(home)
+    except ValueError as exc:
+        raise InstallError("REDRIX_TARGET_OUTSIDE_HOME") from exc
+    cursor = home
+    for part in relative.parts:
+        cursor = cursor / part
+        if cursor.exists() or cursor.is_symlink():
+            info = cursor.lstat()
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != uid
+                or stat.S_IMODE(info.st_mode) & 0o022
+            ):
+                raise InstallError("REDRIX_TARGET_PARENT_INVALID")
+            continue
+        cursor.mkdir(mode=0o700)
+        info = cursor.lstat()
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != uid
+            or stat.S_IMODE(info.st_mode) != 0o700
+        ):
+            raise InstallError("REDRIX_TARGET_PARENT_INVALID")
+        _fsync_dir(cursor.parent)
+
+
+def _remove_legacy_ci_runner_parent_residue(home: Path, uid: int, transaction: Path, record: dict[str, Any]) -> None:
+    if record.get("operation") != "install" or record.get("baseline") != "accepted-115":
+        return
+    preexisting = record.get("preexisting")
+    if not isinstance(preexisting, dict) or any(preexisting.get(rel.as_posix()) is not False for rel in LEGACY_CI_RUNNER_TARGETS):
+        return
+    parent = home / LEGACY_CI_RUNNER_PARENT_REL
+    guest = home / LEGACY_CI_RUNNER_GUEST_REL
+    _assert_path_chain(home, parent, uid)
+    if not parent.exists() and not parent.is_symlink():
+        return
+    transaction_info = transaction.lstat()
+    info = parent.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != uid
+        or stat.S_IMODE(info.st_mode) != 0o775
+        or info.st_ctime_ns < transaction_info.st_mtime_ns
+    ):
+        raise InstallError("REDRIX_RECOVERY_PARENT_RESIDUE_INVALID")
+    entries = list(parent.iterdir())
+    if not entries:
+        parent.rmdir()
+        _fsync_dir(parent.parent)
+        return
+    if len(entries) != 1 or entries[0].name != guest.name:
+        raise InstallError("REDRIX_RECOVERY_PARENT_RESIDUE_INVALID")
+    guest_info = guest.lstat()
+    if (
+        not stat.S_ISDIR(guest_info.st_mode)
+        or stat.S_ISLNK(guest_info.st_mode)
+        or guest_info.st_uid != uid
+        or stat.S_IMODE(guest_info.st_mode) != 0o700
+        or guest_info.st_ctime_ns < transaction_info.st_mtime_ns
+        or any(guest.iterdir())
+    ):
+        raise InstallError("REDRIX_RECOVERY_PARENT_RESIDUE_INVALID")
+    guest.rmdir()
+    _fsync_dir(parent)
+    if any(parent.iterdir()):
+        raise InstallError("REDRIX_RECOVERY_PARENT_RESIDUE_INVALID")
+    parent.rmdir()
+    _fsync_dir(parent.parent)
+
+
 def _install_one(home: Path, source: Path, target: Path, mode: int, uid: int) -> None:
     _assert_path_chain(home, target, uid)
-    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _ensure_private_directory_chain(home, target.parent, uid)
     _assert_path_chain(home, target, uid)
     _atomic_write(target, source.read_bytes(), mode)
     info = target.lstat()
@@ -636,7 +720,7 @@ def install_fixture(
     baseline, preexisting = _recognize_baseline(home, uid)
     if baseline == "accepted-115" and (receipt.exists() or receipt.is_symlink()):
         raise InstallError("REDRIX_RECEIPT_STATE_INVALID")
-    transaction.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _ensure_private_directory_chain(home, transaction.parent, uid)
     _assert_path_chain(home, transaction, uid)
     with tempfile.TemporaryDirectory(dir=transaction.parent, prefix="stage-") as td:
         package_root, _, archive_digest = _extract_verified_package(archive, checksum, Path(td))
@@ -751,6 +835,7 @@ def recover_fixture(archive: Path, checksum: Path, home: Path, uid: int, forced_
         package_root, _, archive_digest = _extract_verified_package(archive, checksum, Path(td))
         if archive_digest != record["packageSha256"]:
             raise InstallError("REDRIX_RECOVERY_PACKAGE_MISMATCH")
+        _remove_legacy_ci_runner_parent_residue(home, uid, transaction, record)
         _restore(home, package_root, record, uid)
         assert_authorized_keys_marker_matches(home, uid, forced_command, record["authorizedKeysSha256"])
         if record["baseline"] == "accepted-115":
@@ -771,7 +856,7 @@ def rollback_fixture(archive: Path, checksum: Path, home: Path, uid: int, forced
     assert_authorized_keys_marker_matches(home, uid, forced_command, receipt["authorizedKeysSha256"])
     auth = receipt["authorizedKeysSha256"]
     _verify_current_files(home, uid)
-    transaction.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _ensure_private_directory_chain(home, transaction.parent, uid)
     _assert_path_chain(home, transaction, uid)
     with tempfile.TemporaryDirectory(dir=transaction.parent, prefix="rollback-") as td:
         package_root, _, archive_digest = _extract_verified_package(archive, checksum, Path(td))
