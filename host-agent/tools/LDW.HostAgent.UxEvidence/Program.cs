@@ -89,11 +89,14 @@ foreach (var (file, overallColor, health, summary, exceptionColor) in snapshots)
 
     form.Size = form.MinimumSize;
     Application.DoEvents();
-    var horizontalScroll = Descendants(form)
-        .OfType<ScrollableControl>()
-        .FirstOrDefault(x => x.HorizontalScroll.Visible);
-    if (horizontalScroll is not null)
-        throw new InvalidOperationException($"Horizontal scrolling is not allowed at the minimum supported size: {horizontalScroll.GetType().Name}");
+    AssertNoHorizontalScroll(form, "minimum supported size");
+
+    // LDW01 currently renders at 96 DPI, so exercise a deterministic 200% scale pass
+    // as a layout smoke rather than claiming the local monitor proves high-DPI behavior.
+    form.Scale(new SizeF(2f, 2f));
+    form.PerformLayout();
+    Application.DoEvents();
+    AssertNoHorizontalScroll(form, "simulated 200% scale");
 
     form.Hide();
 }
@@ -120,6 +123,15 @@ using (var font = new Font("Segoe UI", 9))
 }
 Console.WriteLine($"Fixture evidence saved to {Path.GetFullPath(args[0])}");
 return 0;
+
+static void AssertNoHorizontalScroll(Control root, string context)
+{
+    var horizontalScroll = Descendants(root)
+        .OfType<ScrollableControl>()
+        .FirstOrDefault(x => x.HorizontalScroll.Visible);
+    if (horizontalScroll is not null)
+        throw new InvalidOperationException($"Horizontal scrolling is not allowed at {context}: {horizontalScroll.GetType().Name}");
+}
 
 static IEnumerable<Control> Descendants(Control root)
 {
