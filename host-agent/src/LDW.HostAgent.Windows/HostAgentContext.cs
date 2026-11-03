@@ -25,9 +25,9 @@ internal sealed class HostAgentContext : ApplicationContext
         _uiContext = SynchronizationContext.Current;
         _provider = new HostAgentLiveSnapshotProvider(HostAgentSettingsLoader.Load());
         var menu = new ContextMenuStrip();
-        menu.Items.Add("Open Status", null, (_, _) => ShowStatus());
-        menu.Items.Add("Refresh Now", null, async (_, _) => await RefreshAsync());
-        menu.Items.Add("Copy Diagnostics", null, (_, _) => CopyDiagnostics());
+        menu.Items.Add("Open Host Agent", null, (_, _) => ShowStatus());
+        menu.Items.Add("Refresh status", null, async (_, _) => await RefreshAsync());
+        menu.Items.Add("Copy diagnostics", null, (_, _) => CopyDiagnostics());
         _brokerStatusItem = new ToolStripMenuItem("Admin Broker: starting") { Enabled = false };
         menu.Items.Add(_brokerStatusItem);
         menu.Items.Add(new ToolStripSeparator());
@@ -118,7 +118,7 @@ internal sealed class HostAgentContext : ApplicationContext
         {
             _lastSnapshot = await _provider.ObserveAsync(CancellationToken.None);
             var state = StatusPresentation.For(_lastSnapshot.Snapshot.Color);
-            _summaryItem.Text = $"{state.Word}: {_lastSnapshot.Snapshot.Summary}";
+            _summaryItem.Text = $"Overall: {state.Word}";
             _trayIcon.Text = LimitTrayText($"LDW Host Agent — {state.Word}");
             ReplaceTrayIcon(_lastSnapshot.Snapshot.Color);
             _statusForm?.UpdateSnapshot(_lastSnapshot);

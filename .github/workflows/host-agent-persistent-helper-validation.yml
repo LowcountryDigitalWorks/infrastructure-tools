@@ -119,6 +119,17 @@ jobs:
         shell: pwsh
         run: dotnet build ./host-agent/LDW.HostAgent.sln -c Release --no-restore
 
+      - name: Render Host Agent UX evidence smoke
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'host-agent-ux-evidence'
+          dotnet run --project ./host-agent/tools/LDW.HostAgent.UxEvidence/LDW.HostAgent.UxEvidence.csproj -c Release -- $out
+          foreach ($name in @('healthy.png','attention-unknown.png','failed.png','tray-icon-sizes.png')) {
+            $path = Join-Path $out $name
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "UX evidence missing: $name" }
+            if ((Get-Item -LiteralPath $path).Length -lt 1024) { throw "UX evidence unexpectedly small: $name" }
+          }
+
       - name: Run Host Agent core contract tests
         shell: pwsh
         run: dotnet run --project ./host-agent/tests/LDW.HostAgent.Core.Tests/LDW.HostAgent.Core.Tests.csproj -c Release --no-build

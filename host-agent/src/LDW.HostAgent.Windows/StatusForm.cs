@@ -5,132 +5,478 @@ namespace LDW.HostAgent.Windows;
 
 internal sealed class StatusForm : Form
 {
+    private static readonly Color EstuaryNavy = Color.FromArgb(16, 42, 58);
+    private static readonly Color CypressTeal = Color.FromArgb(47, 118, 111);
+    private static readonly Color WarmOyster = Color.FromArgb(243, 239, 230);
+    private static readonly Color SoftWhite = Color.FromArgb(247, 248, 246);
+    private static readonly Color Border = Color.FromArgb(218, 224, 226);
+    private static readonly Color BodyText = Color.FromArgb(37, 54, 67);
+    private static readonly Color MutedText = Color.FromArgb(91, 105, 116);
+
     private readonly Action _refresh;
     private readonly Action _copyDiagnostics;
-    private readonly FlowLayoutPanel _content = new() { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true, Padding = new Padding(22) };
-    private readonly Label _name = new() { AutoSize = true, Font = new Font("Segoe UI", 17, FontStyle.Bold), ForeColor = Color.FromArgb(22, 44, 68) };
-    private readonly Label _overall = new() { AutoSize = true, Font = new Font("Segoe UI", 12, FontStyle.Bold), Padding = new Padding(0, 8, 0, 2) };
-    private readonly Label _summary = new() { AutoSize = true, MaximumSize = new Size(720, 0), ForeColor = Color.FromArgb(57, 72, 86) };
-    private readonly Label _refreshed = new() { AutoSize = true, ForeColor = Color.FromArgb(85, 101, 116), Padding = new Padding(0, 4, 0, 10) };
-    private readonly FlowLayoutPanel _groups = new() { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, FlowDirection = FlowDirection.TopDown, WrapContents = false, MaximumSize = new Size(760, 0) };
-    private readonly Button _details = new() { Text = "Details and diagnostics", AutoSize = true, AccessibleName = "Show detailed telemetry and diagnostics", Margin = new Padding(0, 12, 8, 0), MinimumSize = new Size(150, 36) };
+    private readonly TableLayoutPanel _sections = new()
+    {
+        Dock = DockStyle.Top,
+        AutoSize = true,
+        AutoSizeMode = AutoSizeMode.GrowAndShrink,
+        ColumnCount = 1,
+        RowCount = 0,
+        Margin = Padding.Empty,
+        Padding = Padding.Empty
+    };
+    private readonly PictureBox _brand = new()
+    {
+        Size = new Size(44, 44),
+        SizeMode = PictureBoxSizeMode.Zoom,
+        Margin = new Padding(0, 0, 12, 0),
+        TabStop = false,
+        AccessibleName = "LDW Host Agent mark"
+    };
+    private readonly Label _title = new()
+    {
+        AutoSize = true,
+        Font = new Font("Segoe UI", 17, FontStyle.Bold),
+        ForeColor = EstuaryNavy,
+        Text = "LDW Host Agent"
+    };
+    private readonly Label _machine = new()
+    {
+        AutoSize = true,
+        Font = new Font("Segoe UI", 9.5f, FontStyle.Regular),
+        ForeColor = MutedText,
+        Padding = new Padding(0, 1, 0, 0)
+    };
+    private readonly Label _overallChip = new()
+    {
+        AutoSize = false,
+        Size = new Size(132, 34),
+        TextAlign = ContentAlignment.MiddleCenter,
+        Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+        BorderStyle = BorderStyle.FixedSingle,
+        Margin = new Padding(12, 2, 0, 0),
+        AccessibleName = "Overall Host Agent state"
+    };
+    private readonly Label _summary = new()
+    {
+        AutoSize = true,
+        Dock = DockStyle.Fill,
+        MaximumSize = new Size(760, 0),
+        ForeColor = BodyText,
+        Font = new Font("Segoe UI", 10f, FontStyle.Regular),
+        Padding = new Padding(0, 7, 0, 0)
+    };
+    private readonly Label _refreshed = new()
+    {
+        AutoSize = true,
+        ForeColor = MutedText,
+        Font = new Font("Segoe UI", 8.75f),
+        TextAlign = ContentAlignment.MiddleLeft,
+        Anchor = AnchorStyles.Left
+    };
+    private readonly Button _refreshButton;
+    private readonly Button _copyButton;
+    private readonly Button _detailsButton;
+    private readonly Bitmap _brandImage;
+    private Icon? _windowIcon;
     private HostAgentLiveSnapshot? _live;
 
     public StatusForm(Action refresh, Action copyDiagnostics)
     {
         _refresh = refresh;
         _copyDiagnostics = copyDiagnostics;
+
         Text = "LDW Host Agent";
         StartPosition = FormStartPosition.CenterScreen;
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(760, 680);
-        MinimumSize = new Size(520, 500);
-        BackColor = Color.FromArgb(246, 248, 249);
-        Font = new Font("Segoe UI", 9.5f);
+        ClientSize = new Size(820, 620);
+        MinimumSize = new Size(620, 500);
+        BackColor = SoftWhite;
+        Font = new Font("Segoe UI", 9.25f);
         KeyPreview = true;
-        var header = new Panel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, BackColor = Color.White, Padding = new Padding(16), MinimumSize = new Size(700, 0), MaximumSize = new Size(760, 0), Margin = new Padding(0, 12, 0, 14) };
-        header.Width = 700;
-        var headerLayout = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Dock = DockStyle.Fill };
-        headerLayout.Controls.AddRange([_name, _overall, _summary, _refreshed]);
-        var actions = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = true, Margin = new Padding(0, 10, 0, 0) };
-        var refreshButton = new Button { Text = "Refresh", AutoSize = true, MinimumSize = new Size(108, 38), AccessibleName = "Refresh Host Agent status" };
-        var copyButton = new Button { Text = "Copy diagnostics", AutoSize = true, MinimumSize = new Size(145, 38) };
-        refreshButton.Click += (_, _) => _refresh();
-        copyButton.Click += (_, _) => _copyDiagnostics();
-        _details.Click += (_, _) => ShowDetails();
-        actions.Controls.AddRange([refreshButton, copyButton, _details]);
-        headerLayout.Controls.Add(actions);
-        header.Controls.Add(headerLayout);
-        _content.Controls.Add(header);
-        _content.Controls.Add(_groups);
-        Controls.Add(_content);
-        AcceptButton = refreshButton;
-        Shown += (_, _) => refreshButton.Focus();
+
+        _brandImage = TrayIconFactory.CreateBrandBitmap(44);
+        _brand.Image = _brandImage;
+        SetWindowIcon(StatusColor.Gray);
+
+        _refreshButton = CreateActionButton("&Refresh", primary: true);
+        _refreshButton.AccessibleName = "Refresh Host Agent status";
+        _copyButton = CreateActionButton("&Copy diagnostics");
+        _copyButton.AccessibleName = "Copy sanitized Host Agent diagnostics";
+        _detailsButton = CreateActionButton("&Technical details");
+        _detailsButton.AccessibleName = "Show technical Host Agent details";
+
+        _refreshButton.Click += (_, _) => _refresh();
+        _copyButton.Click += (_, _) => _copyDiagnostics();
+        _detailsButton.Click += (_, _) => ShowDetails();
+
+        var root = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            BackColor = SoftWhite
+        };
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        root.Controls.Add(CreateHeader(), 0, 0);
+
+        var scrollHost = new Panel
+        {
+            Dock = DockStyle.Fill,
+            AutoScroll = true,
+            BackColor = SoftWhite,
+            Padding = new Padding(18, 14, 18, 18),
+            Margin = Padding.Empty
+        };
+        _sections.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        scrollHost.Controls.Add(_sections);
+        root.Controls.Add(scrollHost, 0, 1);
+        Controls.Add(root);
+
+        AcceptButton = _refreshButton;
+        Shown += (_, _) => _refreshButton.Focus();
+        KeyDown += (_, e) =>
+        {
+            if (e.KeyCode != Keys.Escape) return;
+            Close();
+            e.Handled = true;
+        };
+        FormClosed += (_, _) =>
+        {
+            _brandImage.Dispose();
+            _windowIcon?.Dispose();
+        };
+
         UpdateSnapshot(null);
     }
 
     public void UpdateSnapshot(HostAgentLiveSnapshot? live)
     {
         _live = live;
-        _groups.SuspendLayout();
-        _groups.Controls.Clear();
+        _sections.SuspendLayout();
+        _sections.Controls.Clear();
+        _sections.RowStyles.Clear();
+        _sections.RowCount = 0;
+
         if (live is null)
         {
-            SetOverall(StatusColor.Gray, "Status is starting. Waiting for the first observation.");
-            _name.Text = "Host Agent";
-            _refreshed.Text = "Last refreshed: Waiting";
-            _groups.ResumeLayout();
+            _machine.Text = "Waiting for first observation";
+            SetOverall(StatusColor.Gray, "Collecting the first trustworthy status sample.");
+            _refreshed.Text = "Updated: waiting";
+            AddSection(CreateNoticeCard("Collecting status", "The owner dashboard will populate as soon as a sanitized observation is available."));
+            _sections.ResumeLayout();
             return;
         }
 
-        _name.Text = $"{live.Definition.Name}  ·  LDW Host Agent";
+        _machine.Text = live.Definition.Name;
         SetOverall(live.Snapshot.Color, live.Snapshot.Summary);
-        _refreshed.Text = $"Last refreshed {live.Snapshot.ObservedAt.ToLocalTime():g}";
+        _refreshed.Text = $"Updated {live.Snapshot.ObservedAt.ToLocalTime():g}";
+
         var observations = live.Snapshot.Components.ToDictionary(x => x.ComponentId, StringComparer.OrdinalIgnoreCase);
         foreach (var environment in live.Definition.Environments)
         {
-            var card = new Panel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, BackColor = Color.White, Padding = new Padding(15), Margin = new Padding(0, 0, 0, 12), MinimumSize = new Size(700, 0), MaximumSize = new Size(760, 0), Width = 700 };
-            var rows = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, FlowDirection = FlowDirection.TopDown, WrapContents = false, Dock = DockStyle.Fill, MaximumSize = new Size(720, 0) };
-            rows.Controls.Add(new Label { AutoSize = true, Font = new Font("Segoe UI", 11, FontStyle.Bold), ForeColor = Color.FromArgb(22, 44, 68), Text = environment.Id == "development-automation" ? "Development && Automation" : environment.Name, Padding = new Padding(0, 0, 0, 7) });
+            var rows = new List<Control>();
             foreach (var component in environment.Components)
             {
                 observations.TryGetValue(component.Id, out var observation);
-                var color = observation?.Color ?? StatusColor.Gray;
-                var state = StatusPresentation.For(color);
-                var row = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 2, RowCount = 2, Margin = new Padding(0, 3, 0, 7), MaximumSize = new Size(700, 0) };
-                row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 122));
-                row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-                row.Controls.Add(new Label { AutoSize = true, Text = $"{state.Glyph}  {state.Word}", ForeColor = ColorFor(color), Font = new Font("Segoe UI", 9.5f, FontStyle.Bold), AccessibleName = $"State: {state.Word}" }, 0, 0);
-                row.Controls.Add(new Label { AutoSize = true, Text = component.Name, Font = new Font("Segoe UI", 9.5f, FontStyle.Bold), ForeColor = Color.FromArgb(30, 48, 65), MaximumSize = new Size(550, 0) }, 1, 0);
-                row.SetColumnSpan(row.Controls[0], 1);
-                row.Controls.Add(new Label { AutoSize = true, Text = observation?.Summary ?? "No observation available yet.", ForeColor = Color.FromArgb(70, 86, 101), MaximumSize = new Size(550, 0), Margin = new Padding(0, 1, 0, 0) }, 1, 1);
-                rows.Controls.Add(row);
+                rows.Add(CreateComponentRow(component, observation));
             }
-            card.Controls.Add(rows);
-            _groups.Controls.Add(card);
+
             if (environment.Id == "development-automation")
-                _groups.Controls.Add(CreateCiJitCard(live.CiJitStatus));
+                rows.Add(CreateCiJitRow(live.CiJitStatus));
+
+            var title = environment.Id == "development-automation"
+                ? "Development & Automation"
+                : environment.Name;
+            AddSection(CreateSectionCard(title, rows));
         }
-        _groups.ResumeLayout();
+
+        _sections.ResumeLayout();
     }
 
     public void ShowError(string message)
     {
         _live = StatusPresentation.SampleForDisplay(_live, observationSucceeded: false);
-        _groups.Controls.Clear();
-        SetOverall(StatusColor.Gray, string.IsNullOrWhiteSpace(message) ? "Status is unavailable." : "Status refresh failed; sensitive details are suppressed.");
-        _refreshed.Text = "Last refreshed: unavailable";
+        _sections.SuspendLayout();
+        _sections.Controls.Clear();
+        _sections.RowStyles.Clear();
+        _sections.RowCount = 0;
+        _machine.Text = "Status unavailable";
+        SetOverall(StatusColor.Gray, string.IsNullOrWhiteSpace(message)
+            ? "Status is unavailable."
+            : "Status refresh failed; sensitive details are suppressed.");
+        _refreshed.Text = "Updated: unavailable";
+        AddSection(CreateNoticeCard("Status unavailable", "The last observation was not trustworthy, so prior health is not being displayed as current."));
+        _sections.ResumeLayout();
     }
 
-    private static Panel CreateCiJitCard(CiJitStatusSnapshot status)
+    private Control CreateHeader()
     {
-        var state = StatusPresentation.For(status.Color);
+        var header = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 3,
+            RowCount = 3,
+            BackColor = Color.White,
+            Padding = new Padding(20, 17, 20, 15),
+            Margin = Padding.Empty
+        };
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 56));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        header.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        header.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        header.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        header.Controls.Add(_brand, 0, 0);
+        header.SetRowSpan(_brand, 2);
+
+        var identity = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            Dock = DockStyle.Fill
+        };
+        identity.Controls.Add(_title);
+        identity.Controls.Add(_machine);
+        header.Controls.Add(identity, 1, 0);
+        header.Controls.Add(_overallChip, 2, 0);
+
+        header.Controls.Add(_summary, 1, 1);
+        header.SetColumnSpan(_summary, 2);
+
+        var metaActions = new TableLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 2,
+            RowCount = 1,
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 11, 0, 0),
+            Padding = Padding.Empty
+        };
+        metaActions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        metaActions.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        metaActions.Controls.Add(_refreshed, 0, 0);
+
+        var actions = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            Anchor = AnchorStyles.Right
+        };
+        actions.Controls.Add(_refreshButton);
+        actions.Controls.Add(_copyButton);
+        actions.Controls.Add(_detailsButton);
+        metaActions.Controls.Add(actions, 1, 0);
+
+        header.Controls.Add(metaActions, 1, 2);
+        header.SetColumnSpan(metaActions, 2);
+        return header;
+    }
+
+    private void AddSection(Control section)
+    {
+        var row = _sections.RowCount++;
+        _sections.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        section.Dock = DockStyle.Top;
+        _sections.Controls.Add(section, 0, row);
+    }
+
+    private static Control CreateSectionCard(string title, IReadOnlyList<Control> rows)
+    {
+        var card = new TableLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1,
+            RowCount = 0,
+            Dock = DockStyle.Top,
+            BackColor = Color.White,
+            BorderStyle = BorderStyle.FixedSingle,
+            Margin = new Padding(0, 0, 0, 12),
+            Padding = Padding.Empty,
+            AccessibleName = $"{title} status group"
+        };
+        card.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+        var heading = new Label
+        {
+            Text = title,
+            AutoSize = false,
+            Dock = DockStyle.Top,
+            Height = 37,
+            Padding = new Padding(13, 9, 12, 0),
+            Font = new Font("Segoe UI", 10.25f, FontStyle.Bold),
+            ForeColor = EstuaryNavy,
+            BackColor = SoftWhite,
+            UseMnemonic = false
+        };
+        AddCardControl(card, heading);
+
+        for (var i = 0; i < rows.Count; i++)
+        {
+            AddCardControl(card, rows[i]);
+            if (i < rows.Count - 1)
+                AddCardControl(card, new Panel { Height = 1, Dock = DockStyle.Top, BackColor = Border, Margin = new Padding(12, 0, 12, 0) });
+        }
+
+        return card;
+    }
+
+    private static Control CreateComponentRow(ComponentDefinition component, ComponentObservation? observation)
+    {
+        var color = observation?.Color ?? StatusColor.Gray;
+        var state = StatusPresentation.For(color);
+        var summary = observation?.Summary ?? "No trustworthy observation is available yet.";
+        return CreateStatusRow(state.Glyph, state.Word, color, component.Name, summary, $"{component.Name}: {state.Word}");
+    }
+
+    private static Control CreateCiJitRow(CiJitStatusSnapshot status)
+    {
+        var presentation = StatusPresentation.For(status.Color);
+        var stateWord = status.State.ToString();
         var reason = string.IsNullOrWhiteSpace(status.ReasonCode)
             ? null
             : status.ReasonCode.Replace('_', ' ').ToLowerInvariant();
-        var detail = reason is null ? status.QueueSummary : $"{status.QueueSummary} · {reason}";
+        var summary = reason is null ? status.QueueSummary : $"{status.QueueSummary} · {reason}";
+        return CreateStatusRow(presentation.Glyph, stateWord, status.Color, "CI / JIT", summary, $"CI JIT: {stateWord}");
+    }
 
-        var card = new Panel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, BackColor = Color.White, Padding = new Padding(15), Margin = new Padding(0, 0, 0, 12), MinimumSize = new Size(700, 0), MaximumSize = new Size(760, 0), Width = 700 };
-        var rows = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, FlowDirection = FlowDirection.TopDown, WrapContents = false, Dock = DockStyle.Fill, MaximumSize = new Size(720, 0) };
-        rows.Controls.Add(new Label { AutoSize = true, Font = new Font("Segoe UI", 11, FontStyle.Bold), ForeColor = Color.FromArgb(22, 44, 68), Text = "CI / JIT", Padding = new Padding(0, 0, 0, 7) });
-        rows.Controls.Add(new Label { AutoSize = true, Text = $"{state.Glyph}  {status.State}", ForeColor = ColorFor(status.Color), Font = new Font("Segoe UI", 9.5f, FontStyle.Bold), AccessibleName = $"CI JIT state: {status.State}" });
-        rows.Controls.Add(new Label { AutoSize = true, Text = detail, ForeColor = Color.FromArgb(70, 86, 101), MaximumSize = new Size(650, 0), Margin = new Padding(0, 2, 0, 0) });
-        card.Controls.Add(rows);
+    private static Control CreateStatusRow(string glyph, string stateWord, StatusColor color, string name, string summary, string accessibleName)
+    {
+        var row = new TableLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 4,
+            RowCount = 1,
+            Dock = DockStyle.Top,
+            Margin = Padding.Empty,
+            Padding = new Padding(12, 8, 12, 8),
+            AccessibleName = accessibleName
+        };
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 34));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 180));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 108));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+        var glyphLabel = new Label
+        {
+            Text = glyph,
+            AutoSize = false,
+            Size = new Size(24, 24),
+            TextAlign = ContentAlignment.MiddleCenter,
+            Font = new Font("Segoe UI Symbol", 9.5f, FontStyle.Bold),
+            ForeColor = ColorFor(color),
+            BackColor = TintFor(color),
+            BorderStyle = BorderStyle.FixedSingle,
+            Margin = new Padding(0, 0, 8, 0),
+            AccessibleName = $"State symbol: {stateWord}"
+        };
+        var nameLabel = new Label
+        {
+            Text = name,
+            AutoSize = true,
+            Anchor = AnchorStyles.Left,
+            Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+            ForeColor = BodyText,
+            Margin = new Padding(0, 3, 10, 0)
+        };
+        var stateLabel = new Label
+        {
+            Text = stateWord,
+            AutoSize = true,
+            Anchor = AnchorStyles.Left,
+            Font = new Font("Segoe UI", 9.25f, FontStyle.Bold),
+            ForeColor = ColorFor(color),
+            Margin = new Padding(0, 3, 10, 0),
+            AccessibleName = $"State: {stateWord}"
+        };
+        var summaryLabel = new Label
+        {
+            Text = summary,
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Font = new Font("Segoe UI", 9f),
+            ForeColor = MutedText,
+            Margin = new Padding(0, 3, 0, 0),
+            MaximumSize = new Size(420, 0)
+        };
+
+        row.Controls.Add(glyphLabel, 0, 0);
+        row.Controls.Add(nameLabel, 1, 0);
+        row.Controls.Add(stateLabel, 2, 0);
+        row.Controls.Add(summaryLabel, 3, 0);
+        return row;
+    }
+
+    private static Control CreateNoticeCard(string title, string message)
+    {
+        var card = new TableLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1,
+            RowCount = 2,
+            Dock = DockStyle.Top,
+            BackColor = Color.White,
+            BorderStyle = BorderStyle.FixedSingle,
+            Margin = new Padding(0, 0, 0, 12),
+            Padding = new Padding(14)
+        };
+        card.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        card.Controls.Add(new Label { AutoSize = true, Text = title, Font = new Font("Segoe UI", 10.25f, FontStyle.Bold), ForeColor = EstuaryNavy }, 0, 0);
+        card.Controls.Add(new Label { AutoSize = true, Text = message, MaximumSize = new Size(720, 0), ForeColor = MutedText, Margin = new Padding(0, 5, 0, 0) }, 0, 1);
         return card;
+    }
+
+    private static void AddCardControl(TableLayoutPanel card, Control control)
+    {
+        var row = card.RowCount++;
+        card.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        card.Controls.Add(control, 0, row);
     }
 
     private void SetOverall(StatusColor color, string summary)
     {
         var state = StatusPresentation.For(color);
-        _overall.Text = $"{state.Glyph}  {state.Word}";
-        _overall.ForeColor = ColorFor(color);
+        _overallChip.Text = $"{state.Glyph}  {state.Word}";
+        _overallChip.ForeColor = ColorFor(color);
+        _overallChip.BackColor = TintFor(color);
         _summary.Text = summary;
+        SetWindowIcon(color);
+    }
+
+    private void SetWindowIcon(StatusColor color)
+    {
+        var previous = _windowIcon;
+        _windowIcon = TrayIconFactory.Create(color);
+        Icon = _windowIcon;
+        previous?.Dispose();
     }
 
     private void ShowDetails()
     {
         var text = new StringBuilder();
-        if (_live is null) text.AppendLine("No telemetry sample is available yet.");
+        if (_live is null)
+        {
+            text.AppendLine("No telemetry sample is available yet.");
+        }
         else
         {
             text.AppendLine($"Observed (UTC): {_live.Snapshot.ObservedAt:O}");
@@ -144,31 +490,109 @@ internal sealed class StatusForm : Form
                 var rootFree = root is { TotalBytes: > 0 } ? $"{root.AvailableBytes * 100d / root.TotalBytes:F1}%" : "unknown";
                 text.AppendLine($"Linux: kernel {linux.Kernel}; uptime {linux.Uptime.TotalHours:F1} h; load1 {linux.Load1:F2}; memory available {FormatBytes(linux.MemoryAvailableBytes)}; swap used {FormatBytes(linux.SwapUsedBytes)}; root free {rootFree}; CPU PSI {FormatNullable(linux.CpuPsiSomeAverage10)}; memory PSI some/full {FormatNullable(linux.MemoryPsiSomeAverage10)}/{FormatNullable(linux.MemoryPsiFullAverage10)}; reboot required {linux.RebootRequired}; updates {(linux.UpdatesAvailable?.ToString() ?? "unknown")}.");
             }
-            text.AppendLine($"System: physical memory {_live.SystemTelemetry.AvailablePercent:F1}% available; CPU sample {_live.SystemTelemetry.CpuBusyPercent?.ToString("F1") ?? "unknown"}%; { _live.SystemTelemetry.Disks.Count} disk(s); memory pressure {_live.SystemTelemetry.MemoryPressure.Summary}.");
+            text.AppendLine($"System: physical memory {_live.SystemTelemetry.AvailablePercent:F1}% available; CPU sample {_live.SystemTelemetry.CpuBusyPercent?.ToString("F1") ?? "unknown"}%; {_live.SystemTelemetry.Disks.Count} disk(s); memory pressure {_live.SystemTelemetry.MemoryPressure.Summary}.");
             if (_live.GitHubRunnerTelemetry is { } runner)
                 text.AppendLine($"Runner: ID present {runner.Id > 0}; online {runner.Online}; busy {runner.Busy}; label count {runner.Labels.Count}.");
             foreach (var observation in _live.Snapshot.Components)
                 text.AppendLine($"{observation.ComponentId}: {observation.Color} / {observation.Health} — {observation.Summary}");
         }
-        using var dialog = new Form { Text = "Host Agent details", StartPosition = FormStartPosition.CenterParent, ClientSize = new Size(680, 460), MinimumSize = new Size(500, 350), AutoScaleMode = AutoScaleMode.Dpi };
-        var details = new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, WordWrap = true, AccessibleName = "Detailed Host Agent telemetry", Text = text.ToString(), Font = new Font("Consolas", 9) };
-        var copy = new Button { Text = "Copy diagnostics", Dock = DockStyle.Bottom, Height = 42, MinimumSize = new Size(0, 38) };
+
+        using var dialog = new Form
+        {
+            Text = "LDW Host Agent — Technical details",
+            StartPosition = FormStartPosition.CenterParent,
+            ClientSize = new Size(720, 500),
+            MinimumSize = new Size(520, 360),
+            AutoScaleMode = AutoScaleMode.Dpi,
+            BackColor = SoftWhite,
+            Font = new Font("Segoe UI", 9.25f)
+        };
+        using var dialogIcon = TrayIconFactory.Create(_live?.Snapshot.Color ?? StatusColor.Gray);
+        dialog.Icon = dialogIcon;
+
+        var shell = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(16), BackColor = SoftWhite };
+        shell.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        shell.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        shell.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        shell.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        shell.Controls.Add(new Label
+        {
+            AutoSize = true,
+            Text = "Sanitized technical telemetry",
+            Font = new Font("Segoe UI", 11, FontStyle.Bold),
+            ForeColor = EstuaryNavy,
+            Margin = new Padding(0, 0, 0, 9)
+        }, 0, 0);
+
+        var details = new TextBox
+        {
+            Dock = DockStyle.Fill,
+            Multiline = true,
+            ReadOnly = true,
+            ScrollBars = ScrollBars.Vertical,
+            WordWrap = true,
+            AccessibleName = "Detailed Host Agent telemetry",
+            Text = text.ToString(),
+            Font = new Font("Consolas", 9),
+            BackColor = Color.White,
+            ForeColor = BodyText,
+            BorderStyle = BorderStyle.FixedSingle
+        };
+        shell.Controls.Add(details, 0, 1);
+
+        var copy = CreateActionButton("&Copy diagnostics", primary: true);
+        copy.AccessibleName = "Copy sanitized Host Agent diagnostics";
+        copy.Margin = new Padding(0, 10, 0, 0);
         copy.Click += (_, _) => _copyDiagnostics();
-        dialog.Controls.Add(details);
-        dialog.Controls.Add(copy);
+        shell.Controls.Add(copy, 0, 2);
+        dialog.Controls.Add(shell);
         dialog.ShowDialog(this);
     }
 
-    private static string FormatBytes(ulong bytes) => bytes >= 1024UL * 1024 * 1024 ? $"{bytes / 1024d / 1024 / 1024:F2} GiB" : $"{bytes / 1024d / 1024:F1} MiB";
+    private static Button CreateActionButton(string text, bool primary = false)
+    {
+        var button = new Button
+        {
+            Text = text,
+            AutoSize = true,
+            MinimumSize = new Size(0, 34),
+            Padding = new Padding(10, 3, 10, 3),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = primary ? CypressTeal : Color.White,
+            ForeColor = primary ? Color.White : EstuaryNavy,
+            UseVisualStyleBackColor = false,
+            Margin = new Padding(6, 0, 0, 0)
+        };
+        button.FlatAppearance.BorderColor = primary ? CypressTeal : Border;
+        button.FlatAppearance.BorderSize = 1;
+        button.FlatAppearance.MouseOverBackColor = primary ? Color.FromArgb(40, 105, 99) : WarmOyster;
+        button.FlatAppearance.MouseDownBackColor = primary ? Color.FromArgb(34, 91, 86) : Color.FromArgb(234, 230, 222);
+        return button;
+    }
+
+    private static string FormatBytes(ulong bytes) => bytes >= 1024UL * 1024 * 1024
+        ? $"{bytes / 1024d / 1024 / 1024:F2} GiB"
+        : $"{bytes / 1024d / 1024:F1} MiB";
+
     private static string FormatNullable(double? value) => value?.ToString("F2") ?? "unknown";
 
     private static Color ColorFor(StatusColor color) => color switch
     {
-        StatusColor.Green => Color.FromArgb(0, 112, 96),
+        StatusColor.Green => Color.FromArgb(0, 108, 82),
         StatusColor.Blue => Color.FromArgb(35, 91, 153),
         StatusColor.Purple => Color.FromArgb(110, 64, 139),
-        StatusColor.Yellow => Color.FromArgb(142, 91, 0),
-        StatusColor.Red => Color.FromArgb(173, 45, 49),
-        _ => Color.FromArgb(91, 105, 119),
+        StatusColor.Yellow => Color.FromArgb(137, 86, 0),
+        StatusColor.Red => Color.FromArgb(166, 42, 47),
+        _ => Color.FromArgb(82, 96, 107),
+    };
+
+    private static Color TintFor(StatusColor color) => color switch
+    {
+        StatusColor.Green => Color.FromArgb(232, 246, 241),
+        StatusColor.Blue => Color.FromArgb(232, 240, 249),
+        StatusColor.Purple => Color.FromArgb(243, 237, 247),
+        StatusColor.Yellow => Color.FromArgb(255, 246, 226),
+        StatusColor.Red => Color.FromArgb(253, 237, 238),
+        _ => Color.FromArgb(239, 242, 244),
     };
 }
