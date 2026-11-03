@@ -19,8 +19,8 @@ import socket
 import sys
 from types import ModuleType
 
-ACCEPTED_MAIN_COMMIT = "dfc7640d7f572595f4b883dd17260a35aa329257"
-INSTALLER_BLOB = "03d149fab192f01c9d2c5cffd08541b095b8384c"
+ACCEPTED_MAIN_COMMIT = "b5a80ead6642ec499219b8218b8f59b4a758477e"
+INSTALLER_BLOB = "6018c2560b955c3225c5301dadda8f8c502ffa45"
 A0_BLOB = "0d674f6a5686b53d6c86b4f54b8cc8ca69fa9a49"
 PRODUCTION_HOME = Path("/home/eddie")
 PRODUCTION_UID = 1000
@@ -63,8 +63,13 @@ def _canonical(value: object) -> bytes:
 
 def _accepted_115_preexisting_map(installer: ModuleType) -> dict[str, bool]:
     rollback_targets = {rel.as_posix() for _, _, rel, _ in installer.ROLLBACK}
+    accepted_current_only = {
+        rel.as_posix()
+        for rel in getattr(installer, "ACCEPTED_PREEXISTING_CURRENT_ONLY", frozenset())
+    }
+    accepted_targets = rollback_targets | accepted_current_only
     return {
-        rel.as_posix(): rel.as_posix() in rollback_targets
+        rel.as_posix(): rel.as_posix() in accepted_targets
         for _, _, rel, _ in installer.CURRENT
     }
 

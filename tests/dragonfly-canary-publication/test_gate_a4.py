@@ -11,7 +11,7 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
-ACCEPTED_MAIN_COMMIT = "dfc7640d7f572595f4b883dd17260a35aa329257"
+ACCEPTED_MAIN_COMMIT = "b5a80ead6642ec499219b8218b8f59b4a758477e"
 
 
 def git_tree_blob(commit: str, path: str) -> str:
@@ -352,6 +352,15 @@ class GateA4Tests(unittest.TestCase):
         with mock.patch.object(a4.socket, "gethostname", return_value="redrix"):
             with self.assertRaisesRegex(a4.A4Error, "A4_RECEIPT_PREEXISTING_MISMATCH"):
                 a4.collect_a4(**self.kwargs)
+
+    def test_receipt_accepted_current_only_preexisting_is_allowed(self):
+        target = self.installer.CURRENT[2][2]
+        self.installer.ACCEPTED_PREEXISTING_CURRENT_ONLY = frozenset({target})
+        self.installer.receipt["preexisting"][target.as_posix()] = True
+        with mock.patch.object(a4.socket, "gethostname", return_value="redrix"):
+            a4.collect_a4(**self.kwargs)
+        self.assertEqual(self.installer.receipt_reads, 4)
+        self.assertEqual(self.installer.calls, 2)
 
     def test_accepted_receipt_package_identity_passes_before_readback(self):
         with mock.patch.object(a4.socket, "gethostname", return_value="redrix"):
