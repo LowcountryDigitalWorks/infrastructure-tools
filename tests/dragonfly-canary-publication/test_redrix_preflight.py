@@ -93,6 +93,20 @@ class RedrixPreflightTests(unittest.TestCase):
         self.assertFalse(result["packageOwnedResidue"])
         self.assertEqual(result["installerBlob"], pre.INSTALLER_BLOB)
 
+    def test_accepted_owner_controller_preexisting_is_allowed_and_read_only(self):
+        rel = next(iter(inst.ACCEPTED_PREEXISTING_CURRENT_ONLY))
+        source_path, blob, _rel, mode = next(item for item in inst.CURRENT if item[2] == rel)
+        target = self.home / rel
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        target.write_bytes(git_blob_bytes(blob))
+        target.chmod(mode)
+        before = snapshot(self.home)
+        result = self.collect()
+        after = snapshot(self.home)
+        self.assertEqual(before, after)
+        self.assertEqual(result["baseline"], "accepted-115")
+        self.assertFalse(result["packageOwnedResidue"])
+
     def test_installer_identity_is_pinned_to_accepted_blob(self):
         installer = pre._load_installer()
         self.assertEqual(installer.SOURCE_COMMIT, inst.SOURCE_COMMIT)
@@ -120,7 +134,12 @@ class RedrixPreflightTests(unittest.TestCase):
             self.collect()
 
     def test_package_owned_residue_is_refused_even_with_accepted_115_transport(self):
-        current_only = next(item for item in inst.CURRENT if item[2] not in {r[2] for r in inst.ROLLBACK})
+        current_only = next(
+            item
+            for item in inst.CURRENT
+            if item[2] not in {r[2] for r in inst.ROLLBACK}
+            and item[2] not in inst.ACCEPTED_PREEXISTING_CURRENT_ONLY
+        )
         _source, blob, rel, mode = current_only
         target = self.home / rel
         target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)

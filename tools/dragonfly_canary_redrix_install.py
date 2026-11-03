@@ -49,6 +49,12 @@ ROLLBACK = (
     ("dragonfly-jit/handoff_contract.py", "2f7892275bacd9f56abaa0cdf204f46f79c046c0", Path(".local/lib/ldw-dragonfly-jit/handoff_contract.py"), 0o600),
 )
 PREEXISTING_KEYS = {rel.as_posix() for _, _, rel, _ in CURRENT}
+# Accepted #96 owner-control installation intentionally leaves this exact current
+# controller in place before Gate A3. _recognize_baseline already verifies any
+# present current-only target by owner, mode, regular-file type, and Git blob.
+ACCEPTED_PREEXISTING_CURRENT_ONLY = frozenset({
+    Path(".local/lib/ldw-dragonfly-jit/dragonfly_jit.py"),
+})
 
 
 def _assert_exact_ssh_directory(home: Path, uid: int, error_cls: type[Exception]) -> None:
@@ -151,11 +157,13 @@ def assert_gate_a3_pre_install_state(
 
     if require_accepted_115:
         rollback_targets = {rel.as_posix() for _, _, rel, _ in ROLLBACK}
-        expected_preexisting = {
-            rel.as_posix(): rel.as_posix() in rollback_targets
-            for _, _, rel, _ in CURRENT
+        accepted_current_only = {rel.as_posix() for rel in ACCEPTED_PREEXISTING_CURRENT_ONLY}
+        unexpected_preexisting = {
+            rel
+            for rel, present in preexisting.items()
+            if present and rel not in rollback_targets and rel not in accepted_current_only
         }
-        if preexisting != expected_preexisting:
+        if unexpected_preexisting:
             raise error_cls("REDRIX_PREFLIGHT_RESIDUE_PRESENT")
     else:
         if baseline != "accepted-133":
@@ -559,7 +567,12 @@ def _restore(home: Path, package_root: Path, record: dict[str, Any], uid: int) -
                 target.unlink()
                 _fsync_dir(target.parent)
         else:
-            if not target.exists() or target.is_symlink() or _git_blob(target.read_bytes()) != current[rel][1]:
+            _, current_blob, current_mode = current[rel]
+            try:
+                data = _assert_owned_regular(target, uid, current_mode)
+            except InstallError as exc:
+                raise InstallError("REDRIX_ROLLBACK_TARGET_UNRECOGNIZED") from exc
+            if _git_blob(data) != current_blob:
                 raise InstallError("REDRIX_ROLLBACK_TARGET_UNRECOGNIZED")
 
 
