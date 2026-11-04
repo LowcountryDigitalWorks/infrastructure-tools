@@ -196,9 +196,14 @@ if ($ProtectedPublication) {
     }
     # The accepted immutable publisher calls bare git from PATH. It must
     # resolve to exactly the previously signature-checked fixed executable.
-    $publisherGit = (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
-    if (-not [string]::Equals([IO.Path]::GetFullPath($publisherGit),
-        [IO.Path]::GetFullPath($script:GitExecutable),$comparison)) {
+    # The publisher invokes bare 'git', so PATH resolution alone is not enough:
+    # an alias or function wins PowerShell command precedence over git.exe.
+    # Verify the effective first command in the exact current session on BOTH
+    # protected phases, refusing any non-application shadow before Publish.
+    $publisherGit = Get-Command git -ErrorAction Stop | Select-Object -First 1
+    if ($publisherGit.CommandType -ne [Management.Automation.CommandTypes]::Application -or
+        -not [string]::Equals([IO.Path]::GetFullPath([string]$publisherGit.Source),
+            [IO.Path]::GetFullPath($script:GitExecutable),$comparison)) {
         throw 'V2_PROVENANCE_PUBLISHER_GIT_UNTRUSTED'
     }
 }
