@@ -20,6 +20,25 @@ $acceptedBlob = 'e322a071e5e6e31a909447823e737252770fafef'
 $publisherRelativePath = 'ci-dispatch/DragonflyCanaryAdjunctV2Publisher.psm1'
 $publisherModuleName = 'DragonflyCanaryAdjunctV2Publisher'
 
+# Resolve the actual application, never a PowerShell alias/function named git.
+# Privileged publication accepts only the fixed signed Program Files Git.exe.
+$script:GitExecutable = if ($ProtectedPublication) {
+    if ([string]::IsNullOrWhiteSpace($env:ProgramFiles)) { throw 'V2_PROVENANCE_TRUSTED_GIT_MISSING' }
+    Join-Path $env:ProgramFiles 'Git\cmd\git.exe'
+} else {
+    (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+}
+if (-not (Test-Path -LiteralPath $script:GitExecutable -PathType Leaf)) {
+    throw 'V2_PROVENANCE_TRUSTED_GIT_MISSING'
+}
+if ($ProtectedPublication) {
+    $gitItem = Get-Item -LiteralPath $script:GitExecutable -Force
+    if ($gitItem.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'V2_PROVENANCE_TRUSTED_GIT_REPARSE' }
+    if ((Get-AuthenticodeSignature -LiteralPath $script:GitExecutable).Status -ne 'Valid') {
+        throw 'V2_PROVENANCE_TRUSTED_GIT_SIGNATURE_INVALID'
+    }
+}
+
 
 # A protected publication guard is intentionally process-local, never persisted
 # to disk or passed to another process. Do not weaken this for test convenience.
@@ -94,7 +113,7 @@ function Assert-LdwV2ProtectedStaging {
 
 function Read-LdwV2GitValue {
     param([string]$Root,[string[]]$Arguments)
-    $values = @(& git -C $Root @Arguments 2>$null)
+    $values = @(& $script:GitExecutable -C $Root @Arguments 2>$null)
     if ($LASTEXITCODE -ne 0 -or $values.Count -ne 1) { throw 'V2_PROVENANCE_GIT_QUERY_FAILED' }
     ([string]$values[0]).Trim()
 }
@@ -147,7 +166,7 @@ if ((Read-LdwV2GitValue $root @('rev-parse','HEAD^{tree}')) -cne $acceptedTree) 
 if ((Read-LdwV2GitValue $root @('rev-parse',('HEAD:' + $publisherRelativePath))) -cne $acceptedBlob) {
     throw 'V2_PROVENANCE_COMMITTED_BLOB_MISMATCH'
 }
-$status = @(& git -C $root status --porcelain --untracked-files=all 2>$null)
+$status = @(& $script:GitExecutable -C $root status --porcelain --untracked-files=all 2>$null)
 if ($LASTEXITCODE -ne 0 -or $status.Count -gt 0) { throw 'V2_PROVENANCE_WORKTREE_DIRTY' }
 
 $folder = Join-Path $root 'ci-dispatch'
@@ -181,7 +200,7 @@ if ($Phase -ceq 'BeforeImport') {
             if ((Get-LdwV2GitBlobSha1 $file) -cne $acceptedBlob) {
                 throw 'V2_PROVENANCE_ON_DISK_BLOB_MISMATCH'
             }
-            $freshStatus = @(& git -C $root status --porcelain --untracked-files=all 2>$null)
+            $freshStatus = @(& $script:GitExecutable -C $root status --porcelain --untracked-files=all 2>$null)
             if ($LASTEXITCODE -ne 0 -or $freshStatus.Count -gt 0) {
                 throw 'V2_PROVENANCE_WORKTREE_DIRTY'
             }
