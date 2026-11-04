@@ -4,8 +4,10 @@ import json
 import base64
 
 from session import OwnerPolicy, SessionIssuer, SyntheticAgent, SessionRefused, MAX_COMMANDS
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-SECRET = b"synthetic-commander-test-key-NOT-A-REAL-SECRET-000000"
+TEST_PRIVATE_KEY = Ed25519PrivateKey.from_private_bytes(b"\x11" * 32)
+TEST_PUBLIC_KEY = TEST_PRIVATE_KEY.public_key()
 POLICY = OwnerPolicy(
     policy_id="synthetic-owner-policy-001", operator="owner", host="canary-win-01",
     max_privilege="FULL_ADMIN", max_ttl_seconds=60
@@ -19,8 +21,8 @@ def new_id():
 class SyntheticSessionTests(unittest.TestCase):
     def setUp(self):
         self.now = [1000.0]
-        self.issuer = SessionIssuer(SECRET, POLICY, clock=lambda: self.now[0])
-        self.agent = SyntheticAgent(SECRET, POLICY, "canary-win-01", clock=lambda: self.now[0])
+        self.issuer = SessionIssuer(TEST_PRIVATE_KEY, POLICY, clock=lambda: self.now[0])
+        self.agent = SyntheticAgent(TEST_PUBLIC_KEY, POLICY, "canary-win-01", clock=lambda: self.now[0])
         self.token = self.issuer.issue("owner", "canary-win-01", "FULL_ADMIN", 20)
 
     def assert_refused(self, reason, thunk):
@@ -68,7 +70,7 @@ class SyntheticSessionTests(unittest.TestCase):
         ))
 
     def test_host_bound_not_reusable_on_other_host(self):
-        other = SyntheticAgent(SECRET, POLICY, "other-host", clock=lambda: self.now[0])
+        other = SyntheticAgent(TEST_PUBLIC_KEY, POLICY, "other-host", clock=lambda: self.now[0])
         self.assert_refused("WRONG_HOST", lambda: other.open(self.token, "owner"))
 
     def test_tampered_token_refused(self):
@@ -86,7 +88,7 @@ class SyntheticSessionTests(unittest.TestCase):
         ))
 
     def test_future_grant_rejected(self):
-        future_issuer = SessionIssuer(SECRET, POLICY, clock=lambda: 1500)
+        future_issuer = SessionIssuer(TEST_PRIVATE_KEY, POLICY, clock=lambda: 1500)
         future = future_issuer.issue("owner", "canary-win-01", "OBSERVE", 10)
         self.assert_refused("EXPIRED_OR_NOT_YET_VALID", lambda: self.agent.open(future, "owner"))
 
@@ -103,6 +105,14 @@ class SyntheticSessionTests(unittest.TestCase):
         self.agent.set_epoch(2)
         self.assert_refused("REVOKED_EPOCH", lambda: self.agent.open(self.token, "owner"))
 
+    def test_public_key_agent_cannot_mint_a_forged_grant(self):
+        self.assertFalse(hasattr(self.agent, "_private_key"))
+        self.assertFalse(hasattr(self.agent, "_secret"))
+        attacker_key = Ed25519PrivateKey.from_private_bytes(b"\\x22" * 32)
+        forged_issuer = SessionIssuer(attacker_key, POLICY, clock=lambda: self.now[0])
+        forged = forged_issuer.issue("owner", "canary-win-01", "FULL_ADMIN", 20)
+        self.assert_refused("INVALID_SIGNATURE", lambda: self.agent.open(forged, "owner"))
+
     def test_no_overlong_grant_issued(self):
         self.assert_refused("POLICY_REFUSED", lambda: self.issuer.issue(
             "owner", "canary-win-01", "FULL_ADMIN", 120
@@ -113,14 +123,14 @@ class SyntheticSessionTests(unittest.TestCase):
 
     def test_privilege_max_protects_owner_policy(self):
         limited = OwnerPolicy("observe-only", "owner", "canary-win-01", "OBSERVE", 30)
-        issuer = SessionIssuer(SECRET, limited, clock=lambda: self.now[0])
+        issuer = SessionIssuer(TEST_PRIVATE_KEY, limited, clock=lambda: self.now[0])
         self.assert_refused("POLICY_REFUSED", lambda: issuer.issue(
             "owner", "canary-win-01", "FULL_ADMIN", 20
         ))
 
     def test_open_requires_signature_and_matching_policy(self):
         other = OwnerPolicy("other-policy", "owner", "canary-win-01", "FULL_ADMIN", 60)
-        host = SyntheticAgent(SECRET, other, "canary-win-01", clock=lambda: self.now[0])
+        host = SyntheticAgent(TEST_PUBLIC_KEY, other, "canary-win-01", clock=lambda: self.now[0])
         self.assert_refused("WRONG_ISSUER_POLICY", lambda: host.open(self.token, "owner"))
 
     def test_unsupported_operation_not_exposed(self):
