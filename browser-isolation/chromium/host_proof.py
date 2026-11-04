@@ -24,22 +24,46 @@ IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 CONTAINER_ID = re.compile(r"^[0-9a-f]{64}$")
 NONCE = re.compile(r"^[0-9a-f]{24}$")
 SECCOMP_GIT_BLOB_SHA = "fddc05fb520affb145404e6f6f647ca96af8087d"
+CHROOT_DIAGNOSTIC_GIT_BLOB_SHA = "d1d0d0ee6db1fcc28855e9714af3c288f3dd1760"
 
 
-def verified_seccomp_path() -> str:
-    # Pin the EXACT official Playwright seccomp file to upstream git blob.
-    # No insecure fallback to --security-opt seccomp=unconfined or default.
-    profile = pathlib.Path(__file__).resolve().parent / "seccomp_profile.json"
+def verified_seccomp_path(chroot_diagnostic: bool = False) -> str:
+    # The strict/default profile is exactly the immutable upstream Playwright
+    # Git blob. The separately pinned CHROOT-only variant is synthetic CI-only,
+    # and must differ in precisely one source-reviewed syscall rule.
+    if not isinstance(chroot_diagnostic, bool):
+        raise BoundaryError("SECCOMP_MODE_INVALID")
+    root = pathlib.Path(__file__).resolve().parent
+    upstream = root / "seccomp_profile.json"
+    selected = root / ("seccomp_chroot_diagnostic.json" if chroot_diagnostic
+                       else "seccomp_profile.json")
     try:
-        data = profile.read_bytes()
+        data = upstream.read_bytes()
+        chosen = selected.read_bytes()
     except OSError:
         raise BoundaryError("SECCOMP_PROFILE_MISSING") from None
-    fingerprint = hashlib.sha1(
-        b"blob " + str(len(data)).encode("ascii") + b"\x00" + data
+    fingerprint = lambda raw: hashlib.sha1(
+        b"blob " + str(len(raw)).encode("ascii") + b"\x00" + raw
     ).hexdigest()
-    if fingerprint != SECCOMP_GIT_BLOB_SHA:
+    if fingerprint(data) != SECCOMP_GIT_BLOB_SHA:
         raise BoundaryError("SECCOMP_PROFILE_MISMATCH")
-    return str(profile)
+    if chroot_diagnostic:
+        if fingerprint(chosen) != CHROOT_DIAGNOSTIC_GIT_BLOB_SHA:
+            raise BoundaryError("CHROOT_DIAGNOSTIC_PROFILE_MISMATCH")
+        try:
+            expected = json.loads(data)
+            actual = json.loads(chosen)
+            chroot_rules = [rule for rule in expected["syscalls"]
+                            if rule.get("names") == ["chroot"]]
+            if len(chroot_rules) != 1 or chroot_rules[0].get("includes") != {
+                    "caps": ["CAP_SYS_CHROOT"]}:
+                raise BoundaryError("CHROOT_UPSTREAM_RULE_CHANGED")
+            chroot_rules[0]["includes"] = {}
+            if actual != expected:
+                raise BoundaryError("CHROOT_DIAGNOSTIC_WIDENED")
+        except (ValueError, TypeError, KeyError, AttributeError):
+            raise BoundaryError("CHROOT_DIAGNOSTIC_MALFORMED") from None
+    return str(selected)
 
 
 VECTORS = [
@@ -49,7 +73,8 @@ VECTORS = [
 
 
 def command(docker: str, image_id: str, gateway: str, port: int,
-            trusted_synthetic: bool = False, *, nonce: str) -> list[str]:
+            trusted_synthetic: bool = False, *, nonce: str,
+            chroot_diagnostic: bool = False) -> list[str]:
     if not isinstance(image_id, str) or not IMAGE_ID.fullmatch(image_id):
         raise BoundaryError("IMAGE_NOT_PINNED")
     if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
@@ -58,7 +83,11 @@ def command(docker: str, image_id: str, gateway: str, port: int,
         raise BoundaryError("GATEWAY_NOT_VERIFIED")
     if not isinstance(docker, str) or not docker.startswith("/"):
         raise BoundaryError("DOCKER_PATH_NOT_PINNED")
-    seccomp = verified_seccomp_path()
+    if not isinstance(chroot_diagnostic, bool):
+        raise BoundaryError("MODE_INVALID")
+    if chroot_diagnostic and trusted_synthetic:
+        raise BoundaryError("CHROOT_DIAGNOSTIC_MUST_BE_STRICT")
+    seccomp = verified_seccomp_path(chroot_diagnostic)
     if not isinstance(trusted_synthetic, bool):
         raise BoundaryError("MODE_INVALID")
     if not isinstance(nonce, str) or not NONCE.fullmatch(nonce):
@@ -187,12 +216,13 @@ def guarded_container_cleanup(docker: str, name: str, nonce: str,
 
 
 def run_bound_guest(docker: str, image_id: str, gateway: str, port: int,
-                    trusted_synthetic: bool) -> subprocess.CompletedProcess:
+                    trusted_synthetic: bool, chroot_diagnostic: bool = False
+                    ) -> subprocess.CompletedProcess:
     """Create, verify, attach and deterministically tear down one named guest."""
     nonce = secrets.token_hex(12)
     name = "ldw-chromium-proof-" + nonce
     args = command(docker, image_id, gateway, port, trusted_synthetic,
-                   nonce=nonce)
+                   nonce=nonce, chroot_diagnostic=chroot_diagnostic)
     if inspect_container(docker, name) is not None:
         raise BoundaryError("PROOF_CONTAINER_NAME_COLLISION")
     try:
@@ -219,7 +249,8 @@ def run_bound_guest(docker: str, image_id: str, gateway: str, port: int,
         guarded_container_cleanup(docker, name, nonce, image_id)
 
 
-def proof(image_id: str, trusted_synthetic: bool = False) -> None:
+def proof(image_id: str, trusted_synthetic: bool = False,
+          chroot_diagnostic: bool = False) -> None:
     docker = shutil.which("docker")
     if not docker:
         raise BoundaryError("DOCKER_NOT_AVAILABLE")
@@ -259,7 +290,7 @@ def proof(image_id: str, trusted_synthetic: bool = False) -> None:
         if count[0] != 1:
             raise BoundaryError("HOST_FIXTURE_POSITIVE_CONTROL_FAILED")
         output = run_bound_guest(docker, image_id, gateway, port,
-                                 trusted_synthetic)
+                                 trusted_synthetic, chroot_diagnostic)
         # Allow async browser network effects and late descendant exits to be
         # visible before readback. Any host connect is a test failure.
         time.sleep(0.5)
@@ -275,10 +306,15 @@ def proof(image_id: str, trusted_synthetic: bool = False) -> None:
         # terminal Docker residue readback, including on guest failure.
         print("LDW_BROWSER_CONTAINER_CLEANUP_VERIFIED=PASS")
         verify_guest(parsed, output.returncode, trusted_synthetic)
-        print("LDW_TRUSTED_SYNTHETIC_CHROMIUM_NETWORK_NONE=PASS" if trusted_synthetic
-              else "LDW_REAL_CHROMIUM_NETWORK_NONE=PASS")
-        print("SOURCE=TRUSTED_SYNTHETIC_NO_CHROMIUM_SANDBOX" if trusted_synthetic
-              else "SOURCE=SYNTHETIC_OFFLINE_GUEST_ONLY")
+        if chroot_diagnostic:
+            print("LDW_CHROOT_ONLY_STRICT_DIAGNOSTIC=PASS")
+            print("SOURCE=SYNTHETIC_STRICT_CHROOT_DIAGNOSTIC_NOT_ACCEPTED")
+        elif trusted_synthetic:
+            print("LDW_TRUSTED_SYNTHETIC_CHROMIUM_NETWORK_NONE=PASS")
+            print("SOURCE=TRUSTED_SYNTHETIC_NO_CHROMIUM_SANDBOX")
+        else:
+            print("LDW_REAL_CHROMIUM_NETWORK_NONE=PASS")
+            print("SOURCE=SYNTHETIC_OFFLINE_GUEST_ONLY")
     finally:
         halt.set()
         host.close()
@@ -463,6 +499,7 @@ def main(argv: list[str]) -> int:
     if len(argv) not in (2, 3) or (len(argv) == 3 and argv[2] not in (
         "--trusted-synthetic-only", "--userns-check", "--host-policy-readback",
         "--clone3-null-check", "--clone-newuser-check",
+        "--strict-chroot-diagnostic",
     )):
         print("NO_START: EXACT_IMAGE_ID_REQUIRED", file=sys.stderr)
         return 2
@@ -478,6 +515,8 @@ def main(argv: list[str]) -> int:
             clone3_invalid_argument_precheck(argv[1])
         elif mode == "--clone-newuser-check":
             clone_newuser_precheck(argv[1])
+        elif mode == "--strict-chroot-diagnostic":
+            proof(argv[1], trusted_synthetic=False, chroot_diagnostic=True)
         else:
             proof(argv[1], mode == "--trusted-synthetic-only")
     except BoundaryError as exc:
