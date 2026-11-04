@@ -25,13 +25,14 @@ admission control. It does not connect to GitHub or other remote peers.
 
 Only category and static reason codes are printed. No raw Tailscale status,
 peer addresses, key material, health warning strings, PIDs, job IDs, or
-controller state JSON are echoed.
+controller state JSON are echoed. A missing or malformed Tailscale `Health`
+field fails closed to `DEGRADED_NETWORK` rather than claiming no warnings.
 
 ## Truthful outcomes
 
 - `LOCAL_SERVICES_HEALTHY_UNVERIFIED`: three local observations show the daemon
   active/enabled, Tailscale backend `Running` and `Self.Online=true` with
-  no health warnings, SSH active/enabled, /dev/kvm accessible, QEMU absent,
+  a present empty `Health` warning list, SSH active/enabled, /dev/kvm accessible, QEMU absent,
   accepted existing JIT state STOPPED/AVAILABLE and zero run residue.
   **Still no CI admission, full-process visibility, or proof that LDW01 sees the peer.**
 - `DEGRADED_NETWORK`: any sample has Tailscale offline, control backend
@@ -61,6 +62,20 @@ to output `ci_dispatch_authorized=false` and
 `peer_side_corrob=UNVERIFIED`, and
 `process_visibility=UNVERIFIED` in every branch.
 
+The observer's **exit code is 0 only for `LOCAL_SERVICES_HEALTHY_UNVERIFIED`**;
+`HOLD`, degraded classifications and sampling failures return nonzero.
+This success exit code is strictly local-diagnostic, **never CI/JIT permission**.
+Malformed CLI arguments return the parser's exit code 2 without structured
+JSON; consumers must treat any absent/malformed JSON as HOLD. Unexpected
+sampling exceptions emit one bounded, sanitized `HOLD/SAMPLE_FAILED` JSON
+record without printing exception detail.
+
+The state reader refuses symlinks in ancestor paths and uses Linux no-follow,
+non-blocking file-descriptor reads with a 16 KiB cap. If the Linux no-follow
+primitive is unavailable, it fails closed. This is a read-only diagnostic;
+it does not establish full privileged process visibility or protect against
+concurrent user-controlled controller state modifications.
+
 This proof does not install any systemd unit, restart tailscaled, disable
 the ChromeOS Android Tailscale node, write a credential, alter routing,
 open a listener, register a runner, modify network/firewall/SSH settings,
@@ -79,8 +94,11 @@ python3 -m unittest discover -s dragonfly-jit/tests -p 'test_redrix_continuity_h
 ```
 
 Unit tests use synthetic data and disposable temporary directories.
-They assert fail-closed stale-control-map, jitter/offline, missing state,
-residue, contaminated symlink, absent service, KVM and live QEMU cases.
+They assert fail-closed stale-control-map, jitter/offline, each controller
+state/schema/marker/job-ownership field, missing or oversized/nonregular
+state, run-entry contamination, parent symlinks, missing Tailscale health,
+minimum samples, subprocess timeout, sanitized error output, absent service,
+KVM, and live QEMU cases.
 The regular Dragonfly hosted workflow already runs the Dragonfly test
 directory; no new workflow trigger/permission or schedule is needed.
 
