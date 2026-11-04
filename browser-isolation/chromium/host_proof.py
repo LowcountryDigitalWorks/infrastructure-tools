@@ -4,6 +4,7 @@ No model-selected URLs, profiles, mounts, Docker options or host credentials.
 Source-only proof, never a production browser service.
 """
 from __future__ import annotations
+import hashlib
 import json
 import pathlib
 import re
@@ -18,6 +19,25 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from run_canary import BoundaryError, gateway_address  # parent PR #224 source
 
 IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
+SECCOMP_GIT_BLOB_SHA = "fddc05fb520affb145404e6f6f647ca96af8087d"
+
+
+def verified_seccomp_path() -> str:
+    # Pin the EXACT official Playwright seccomp file to upstream git blob.
+    # No insecure fallback to --security-opt seccomp=unconfined or default.
+    profile = pathlib.Path(__file__).resolve().parent / "seccomp_profile.json"
+    try:
+        data = profile.read_bytes()
+    except OSError:
+        raise BoundaryError("SECCOMP_PROFILE_MISSING") from None
+    fingerprint = hashlib.sha1(
+        b"blob " + str(len(data)).encode("ascii") + b"\x00" + data
+    ).hexdigest()
+    if fingerprint != SECCOMP_GIT_BLOB_SHA:
+        raise BoundaryError("SECCOMP_PROFILE_MISMATCH")
+    return str(profile)
+
+
 VECTORS = [
     "beacon", "keepalive", "ping", "websocket", "resource",
     "service_worker", "redirect", "direct_tcp",
@@ -33,12 +53,14 @@ def command(docker: str, image_id: str, gateway: str, port: int) -> list[str]:
         raise BoundaryError("GATEWAY_NOT_VERIFIED")
     if not isinstance(docker, str) or not docker.startswith("/"):
         raise BoundaryError("DOCKER_PATH_NOT_PINNED")
+    seccomp = verified_seccomp_path()
     # Guest has no network device beyond internal loopback, no sockets/volumes,
     # no host PID/IPC, no owner profile and no model-provided Docker switches.
     return [
         docker, "run", "--rm", "--pull=never", "--network=none",
         "--read-only", "--cap-drop=ALL",
         "--security-opt=no-new-privileges=true",
+        "--security-opt=seccomp=" + seccomp,
         "--pids-limit=192", "--memory=1g", "--cpus=1.0",
         "--ipc=private", "--shm-size=256m",
         "--user=10001:10001", "--tmpfs=/tmp:rw,nosuid,size=256m",
