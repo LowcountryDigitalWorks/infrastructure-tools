@@ -5,14 +5,12 @@ Membership is provisioned in trusted local startup config only.
 """
 from __future__ import annotations
 
-import hmac
 import json
 import os
 import re
 import time
 from dataclasses import dataclass, field
 from http.server import ThreadingHTTPServer
-from threading import RLock
 from urllib.parse import parse_qs, urlsplit
 
 from relay import (Handler, Mailbox, RelayError, canonical_id, role_name,
@@ -92,8 +90,12 @@ class GroupMailbox(Mailbox):
         with self._lock:
             self._gc()
             if isinstance(data, dict) and "message_id" in data:
-                if canonical_id(data["message_id"]) in self._group_messages:
+                message_id = canonical_id(data["message_id"])
+                if message_id in self._group_messages:
                     raise RelayError(409, "MESSAGE_ID_CONFLICT")
+                if (message_id not in self._messages
+                        and len(self._messages) + len(self._group_messages) >= MAX_MESSAGES):
+                    raise RelayError(429, "MAILBOX_FULL")
             return super().send(actor, data)
 
     def groups_for(self, actor: str) -> dict:
