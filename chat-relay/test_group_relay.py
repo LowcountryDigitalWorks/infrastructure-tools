@@ -257,6 +257,43 @@ class GroupHTTPTests(unittest.TestCase):
         status, error = self.request("POST", "/v1/groups/ack", "gm17", {"message_id": uid()})
         self.assertEqual((status, error["error"]), (400, "INVALID_ENVELOPE"))
 
+    def test_direct_receive_rejects_blank_or_duplicate_limits(self):
+        for path in ("/v1/receive?limit=", "/v1/receive?limit=1&limit=2",
+                     "/v1/receive?limit=1&extra=2"):
+            status, error = self.request("GET", path, "ir02")
+            self.assertEqual((status, error["error"]), (400, "INVALID_QUERY"))
+
+    def test_legacy_direct_missing_required_field_is_bounded_error(self):
+        status, error = self.request("POST", "/v1/send", "gm17", {
+            "message_id": uid(), "sender": "gm17", "body": "fixture",
+            "reply_to": uid()
+        })
+        self.assertEqual((status, error["error"]), (400, "INVALID_ENVELOPE"))
+
+    def test_recursive_json_and_oversized_integer_return_json_error(self):
+        # The client inputs are deliberately invalid and never executed.
+        for payload in (
+            b"[" * 1100 + b"0" + b"]" * 1100,
+            b'{"number":' + b"9" * 5000 + b"}",
+        ):
+            for path in ("/v1/send", "/v1/groups/send"):
+                with self.subTest(path=path, length=len(payload)):
+                    conn = http.client.HTTPConnection(
+                        "127.0.0.1", self.server.server_port, timeout=3)
+                    try:
+                        conn.request("POST", path, body=payload,
+                                     headers={
+                                        "X-LDW-Role": "gm17",
+                                        "Authorization": "Bearer " + self.box.token_for_role("gm17"),
+                                        "Content-Type": "application/json",
+                                     })
+                        response = conn.getresponse()
+                        status = response.status
+                        reply = json.loads(response.read())
+                        self.assertEqual((status, reply["error"]), (400, "INVALID_JSON"))
+                    finally:
+                        conn.close()
+
     def test_group_http_bounded_connection_admission(self):
         self.assertTrue(issubclass(GroupLocalRelay, LocalRelay))
         holders = []
