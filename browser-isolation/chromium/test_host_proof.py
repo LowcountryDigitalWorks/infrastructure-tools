@@ -72,7 +72,8 @@ class RealBrowserGuestGateTests(unittest.TestCase):
         synthetic = {
             "result":"PASS", "local_chromium":"PASS", "interactions":"PASS",
             "vectors": VECTORS, "redirect":"BLOCKED", "direct_tcp":"BLOCKED",
-            "sandbox_requested":False, "source":"TRUSTED_SYNTHETIC_NO_CHROMIUM_SANDBOX",
+            "sandbox_requested":False, "sandbox_details":"NOT_REQUESTED",
+            "source":"TRUSTED_SYNTHETIC_NO_CHROMIUM_SANDBOX",
         }
         verify_guest(synthetic, 0, True)
         with self.assertRaises(BoundaryError):
@@ -230,7 +231,8 @@ class RealBrowserGuestGateTests(unittest.TestCase):
         valid = {
             "result":"PASS", "local_chromium":"PASS", "interactions":"PASS",
             "vectors": VECTORS, "redirect":"BLOCKED", "direct_tcp":"BLOCKED",
-            "sandbox_requested":True, "source":"SYNTHETIC_GUEST_ONLY",
+            "sandbox_requested":True, "sandbox_details":"NAMESPACE_SECCOMP_ACTIVE",
+            "source":"SYNTHETIC_GUEST_ONLY",
         }
         verify_guest(valid, 0)
         for altered in (
@@ -238,6 +240,8 @@ class RealBrowserGuestGateTests(unittest.TestCase):
             {**valid, "vectors": []},
             {**valid, "redirect": "ALLOWED"},
             {**valid, "sandbox_requested": False},
+            {**valid, "sandbox_details": "UNVERIFIED"},
+            {**valid, "sandbox_details": "LAYER_NOT_ACTIVE"},
             {**valid, "extra": "attacker"},
             {**valid, "local_chromium": "SKIPPED"},
         ):
