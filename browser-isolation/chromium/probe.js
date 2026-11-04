@@ -78,7 +78,8 @@ async function main() {
     // non-sandboxed mode is a TRUSTED SYNTHETIC CI DIAGNOSTIC, never a
     // fallback and never a production/untrusted-page acceptance.
     phase = "BROWSER_LAUNCH";
-    browser = await chromium.launch({ headless:true, chromiumSandbox:!trustedSynthetic, timeout:25000 });
+    browser = await chromium.launch({ channel:"chromium", headless:true,
+      chromiumSandbox:!trustedSynthetic, timeout:25000 });
     const context = await browser.newContext({ acceptDownloads:false, serviceWorkers:"allow" });
     const page = await context.newPage();
     phase = "LOCAL_NAVIGATION";
