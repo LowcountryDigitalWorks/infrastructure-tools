@@ -13,6 +13,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from threading import RLock
+from owner_decision import OwnerDecisionRefused, verify_decision
 
 PRIVILEGES = ("OBSERVE", "MAINTAIN", "FULL_ADMIN")
 MAX_TTL_SECONDS = 90
@@ -58,7 +59,8 @@ class OwnerPolicy:
 
 class SessionIssuer:
     """Trusted local issuer only; not an HTTP endpoint or model-callable action."""
-    def __init__(self, private_key: Ed25519PrivateKey, policy: OwnerPolicy, clock=time.time, epoch: int = 1):
+    def __init__(self, private_key: Ed25519PrivateKey, policy: OwnerPolicy, clock=time.time,
+                 epoch: int = 1, owner_public_key: Ed25519PublicKey | None = None):
         if not isinstance(private_key, Ed25519PrivateKey):
             raise ValueError("ISSUER_PRIVATE_KEY_REQUIRED")
         if policy.max_privilege not in PRIVILEGES:
@@ -68,11 +70,14 @@ class SessionIssuer:
         if not isinstance(epoch, int) or epoch < 1:
             raise ValueError("INVALID_EPOCH")
         self._private_key = private_key
+        self._owner_public_key = owner_public_key
+        self._used_decision_ids: set[str] = set()
         self._policy = policy
         self._clock = clock
         self._epoch = epoch
 
-    def issue(self, operator: str, host: str, privilege: str, ttl_seconds: int) -> str:
+    def issue(self, operator: str, host: str, privilege: str, ttl_seconds: int,
+              owner_decision: str | None = None) -> str:
         p = self._policy
         if operator != p.operator or host != p.host or privilege not in PRIVILEGES:
             raise SessionRefused("POLICY_REFUSED")
@@ -81,25 +86,45 @@ class SessionIssuer:
         if not isinstance(ttl_seconds, int) or not 1 <= ttl_seconds <= p.max_ttl_seconds:
             raise SessionRefused("POLICY_REFUSED")
         issued = int(self._clock())
+        if privilege == "FULL_ADMIN":
+            try:
+                decision = verify_decision(
+                    owner_decision, self._owner_public_key,
+                    policy=p.policy_id, host=host, operator=operator,
+                    epoch=self._epoch, requested_ttl=ttl_seconds, now=issued,
+                )
+            except OwnerDecisionRefused:
+                raise SessionRefused("OWNER_AUTH_NOT_PROVEN") from None
+            if decision["decision_id"] in self._used_decision_ids:
+                raise SessionRefused("OWNER_DECISION_REPLAY")
+        elif owner_decision is not None:
+            raise SessionRefused("UNEXPECTED_OWNER_DECISION")
         grant = {
             "issuer": ISSUER_ID, "policy": p.policy_id, "operator": operator,
             "host": host, "privilege": privilege, "session_id": str(uuid.uuid4()),
             "issued": issued, "expires": issued + ttl_seconds,
             "epoch": self._epoch, "max_commands": MAX_COMMANDS,
+            "owner_decision": owner_decision,
         }
         payload = json.dumps(grant, separators=(",", ":"), sort_keys=True).encode("utf-8")
         signature = self._private_key.sign(payload)
-        return b64(payload) + "." + b64(signature)
+        token = b64(payload) + "." + b64(signature)
+        if privilege == "FULL_ADMIN":
+            self._used_decision_ids.add(decision["decision_id"])
+        return token
 
 
 class SyntheticAgent:
     """Disconnected proof. Operations intentionally cannot execute OS commands."""
     def __init__(self, public_key: Ed25519PublicKey, policy: OwnerPolicy, host: str,
-                 clock=time.time, epoch: int = 1):
+                 clock=time.time, epoch: int = 1,
+                 owner_public_key: Ed25519PublicKey | None = None):
         if not isinstance(public_key, Ed25519PublicKey):
             raise ValueError("AGENT_PUBLIC_KEY_REQUIRED")
         # The agent never holds the issuer private signing key.
         self._public_key = public_key
+        self._owner_public_key = owner_public_key
+        self._decision_sessions: dict[str, str] = {}
         self._policy = policy
         self._host = host
         self._clock = clock
@@ -110,7 +135,7 @@ class SyntheticAgent:
 
     def _decode(self, token: str) -> dict:
         try:
-            if not isinstance(token, str) or len(token) > 2048:
+            if not isinstance(token, str) or len(token) > 4096:
                 raise ValueError()
             raw, sig = token.split(".")
             payload = unb64(raw)
@@ -125,7 +150,8 @@ class SyntheticAgent:
             result = json.loads(payload)
             if not isinstance(result, dict) or set(result) != {
                 "issuer", "policy", "operator", "host", "privilege",
-                "session_id", "issued", "expires", "epoch", "max_commands"
+                "session_id", "issued", "expires", "epoch", "max_commands",
+                "owner_decision"
             }:
                 raise ValueError()
         except (ValueError, TypeError):
@@ -151,7 +177,24 @@ class SyntheticAgent:
         now = int(self._clock())
         if g["issued"] > now or now >= g["expires"]:
             raise SessionRefused("EXPIRED_OR_NOT_YET_VALID")
-        return uid(g["session_id"])
+        sid = uid(g["session_id"])
+        if g["privilege"] == "FULL_ADMIN":
+            try:
+                decision = verify_decision(
+                    g["owner_decision"], self._owner_public_key,
+                    policy=p.policy_id, host=self._host, operator=operator,
+                    epoch=self._epoch, requested_ttl=g["expires"] - g["issued"],
+                    now=now,
+                )
+            except OwnerDecisionRefused:
+                raise SessionRefused("OWNER_AUTH_NOT_PROVEN") from None
+            # Even a signed *issuer* grant cannot widen an independently signed
+            # owner decision. No model-provided consent or role is accepted.
+            if decision["issued"] > g["issued"]:
+                raise SessionRefused("OWNER_AUTH_NOT_PROVEN")
+        elif g["owner_decision"] is not None:
+            raise SessionRefused("UNEXPECTED_OWNER_DECISION")
+        return sid
 
     def open(self, token: str, operator: str) -> dict:
         with self._lock:
@@ -159,6 +202,17 @@ class SyntheticAgent:
             sid = self._check(grant, operator)
             if sid in self._revoked:
                 raise SessionRefused("REVOKED_SESSION")
+            if grant["privilege"] == "FULL_ADMIN":
+                decision = verify_decision(
+                    grant["owner_decision"], self._owner_public_key,
+                    policy=self._policy.policy_id, host=self._host,
+                    operator=operator, epoch=self._epoch,
+                    requested_ttl=grant["expires"]-grant["issued"],
+                    now=int(self._clock()),
+                )
+                prior = self._decision_sessions.get(decision["decision_id"])
+                if prior is not None and prior != sid:
+                    raise SessionRefused("OWNER_DECISION_REPLAY")
             for old_sid, old_state in list(self._active.items()):
                 if old_state["grant"]["expires"] <= int(self._clock()):
                     self._active.pop(old_sid, None)
@@ -166,6 +220,8 @@ class SyntheticAgent:
                 raise SessionRefused("HOST_BUSY")
             if sid not in self._active:
                 self._active[sid] = {"grant": grant, "commands": {}}
+                if grant["privilege"] == "FULL_ADMIN":
+                    self._decision_sessions[decision["decision_id"]] = sid
             elif self._active[sid]["grant"] != grant:
                 raise SessionRefused("SESSION_CONFLICT")
             return {"session_id": sid, "state": "SYNTHETIC_OPEN", "host": self._host}
