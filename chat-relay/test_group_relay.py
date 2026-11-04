@@ -290,7 +290,14 @@ class GroupHTTPTests(unittest.TestCase):
                         response = conn.getresponse()
                         status = response.status
                         reply = json.loads(response.read())
-                        self.assertEqual((status, reply["error"]), (400, "INVALID_JSON"))
+                        self.assertEqual(status, 400)
+                        if payload.startswith(b"["):
+                            # A deeply nested but parseable JSON list is a
+                            # bad envelope; parser-dependent recursion refusal
+                            # is likewise a bounded JSON error.
+                            self.assertIn(reply["error"], ("INVALID_JSON", "INVALID_ENVELOPE"))
+                        else:
+                            self.assertEqual(reply["error"], "INVALID_JSON")
                     finally:
                         conn.close()
 
