@@ -9,20 +9,28 @@ const { chromium } = require("playwright");
 let phase = "INIT";
 
 async function inspectBrowserSandbox(context) {
-  // Chrome's internal sandbox diagnostic page, fixed local chrome: scheme.
-  // Never serialize page HTML/text, paths, command-line or instance IDs.
-  // Chromium self-report is additional evidence, NOT host-kernel attestation.
+  // Chrome's internal status table is populated after DOMContentLoaded.
+  // Wait for the real named rows; do not copy arbitrary page text to outputs.
+  // This is Chromium's self-report, NOT independent kernel attestation.
   let tab = null;
   try {
     tab = await context.newPage();
-    await tab.goto("chrome://sandbox/", {waitUntil:"domcontentloaded", timeout:7000});
-    const body = String(await tab.locator("body").innerText({timeout:3500})).slice(0,14000);
-    const namespace = /Namespace Sandbox\s*:?\s*(Yes|No)\b/i.exec(body)?.[1];
-    const seccomp = /Seccomp-BPF Sandbox\s*:?\s*(Yes|No)\b/i.exec(body)?.[1];
-    if (!namespace || !seccomp) return "UNVERIFIED";
-    return (namespace.toLowerCase() === "yes" && seccomp.toLowerCase() === "yes") ?
-      "NAMESPACE_SECCOMP_ACTIVE" : "LAYER_NOT_ACTIVE";
-  } catch { return "UNVERIFIED"; }
+    await tab.goto("chrome://sandbox/", {waitUntil:"domcontentloaded", timeout:8000});
+    try { await tab.locator("#sandbox-status tr").first().waitFor({state:"attached",timeout:6000}); }
+    catch {return "ROWS_NOT_FOUND";}
+    const values = await tab.locator("#sandbox-status tr").evaluateAll(nodes =>
+      nodes.map(n => [...n.querySelectorAll("td")].map(td => String(td.textContent||"").trim()))
+    );
+    const lookup = name => values.find(row => row.length === 2 &&
+      row[0].toLowerCase() === name.toLowerCase())?.[1];
+    const namespace = lookup("Namespace Sandbox");
+    const seccomp = lookup("Seccomp-BPF sandbox");
+    const evaluation = await tab.locator("#evaluation").innerText({timeout:2000}).catch(()=>"");
+    if (!namespace || !seccomp) return "LABELS_MISSING";
+    if (namespace !== "Yes" || seccomp !== "Yes") return "LAYER_NOT_ACTIVE";
+    if (!/You are adequately sandboxed\./i.test(evaluation)) return "OVERALL_NOT_VERIFIED";
+    return "NAMESPACE_SECCOMP_ACTIVE";
+  } catch { return "PAGE_UNAVAILABLE"; }
   finally {if (tab) await tab.close().catch(()=>{});}
 }
 
@@ -114,7 +122,7 @@ async function main() {
     const sandboxDetails = trustedSynthetic ? "NOT_REQUESTED" :
       await inspectBrowserSandbox(context);
     if (!trustedSynthetic && sandboxDetails !== "NAMESPACE_SECCOMP_ACTIVE") {
-      throw Error("CHROMIUM_SANDBOX_LAYER_UNVERIFIED");
+      throw Error("CHROMIUM_SANDBOX_LAYER_" + sandboxDetails);
     }
     // Generate actual Chromium-originated operations, not Playwright route mocks.
     phase = "PAGE_VECTOR";
@@ -176,7 +184,7 @@ const timer=setTimeout(()=>{fail("GUEST_WATCHDOG");process.exit(1)},55000);
 main().catch(err=>{
   const known = new Set(["INVALID_ARGS","INVALID_TARGET","LOCAL_BROWSER_NAVIGATION",
     "LOCAL_INTERACTION","SCREENSHOT","BROWSER_VECTOR_NOT_INVOKED",
-    "SERVICE_WORKER_NOT_INVOKED","OFF_GUEST_REDIRECT_WAS_ALLOWED","DIRECT_TCP_REACHED_HOST","CHROMIUM_SANDBOX_LAYER_UNVERIFIED"]);
+    "SERVICE_WORKER_NOT_INVOKED","OFF_GUEST_REDIRECT_WAS_ALLOWED","DIRECT_TCP_REACHED_HOST","CHROMIUM_SANDBOX_LAYER_UNVERIFIED","CHROMIUM_SANDBOX_LAYER_ROWS_NOT_FOUND","CHROMIUM_SANDBOX_LAYER_LABELS_MISSING","CHROMIUM_SANDBOX_LAYER_LAYER_NOT_ACTIVE","CHROMIUM_SANDBOX_LAYER_OVERALL_NOT_VERIFIED","CHROMIUM_SANDBOX_LAYER_PAGE_UNAVAILABLE"]);
   let reason = known.has(err.message) ? err.message : "GUEST_" + phase + "_ERROR";
   if (phase === "BROWSER_LAUNCH" && !known.has(err.message)) {
     // Parse the ACTUAL Playwright chromium.launch({channel:"chromium",
