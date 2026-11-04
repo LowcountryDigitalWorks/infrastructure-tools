@@ -175,15 +175,48 @@ def proof(image_id: str, trusted_synthetic: bool = False) -> None:
         host.close()
 
 
+def userns_precheck(image_id: str) -> None:
+    # Read-only capability probe in an unprivileged, network-none *guest*.
+    # Does not change host sysctl, AppArmor, seccomp, Docker daemon or account.
+    # This is diagnosis, not acceptance of a Chromium sandbox.
+    if not IMAGE_ID.fullmatch(image_id):
+        raise BoundaryError("IMAGE_NOT_PINNED")
+    docker = shutil.which("docker")
+    if not docker:
+        raise BoundaryError("DOCKER_NOT_AVAILABLE")
+    seccomp = verified_seccomp_path()
+    args = [docker, "run", "--rm", "--pull=never", "--network=none",
+            "--read-only", "--cap-drop=ALL",
+            "--security-opt=no-new-privileges=true",
+            "--security-opt=seccomp=" + seccomp,
+            "--pids-limit=32", "--memory=256m", "--ipc=private",
+            "--user=10001:10001", "--entrypoint=/usr/bin/unshare",
+            image_id, "--user", "--map-root-user", "true"]
+    try:
+        result = subprocess.run(args, capture_output=True, text=True,
+                                timeout=12, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        raise BoundaryError("USERNS_PRECHECK_NO_START") from None
+    # The only permitted output is a fixed result; NEVER echo stderr/raw data.
+    print("GUEST_UNPRIV_USERNS_PRECHECK=" +
+          ("AVAILABLE" if result.returncode == 0 else "UNAVAILABLE"))
+    print("USERNS_PRECHECK_NOT_BROWSER_SANDBOX_ATTESTATION")
+
+
 def main(argv: list[str]) -> int:
-    if len(argv) not in (2, 3) or (len(argv) == 3 and argv[2] != "--trusted-synthetic-only"):
+    if len(argv) not in (2, 3) or (len(argv) == 3 and argv[2] not in (
+        "--trusted-synthetic-only", "--userns-check",
+    )):
         print("NO_START: EXACT_IMAGE_ID_REQUIRED", file=sys.stderr)
         return 2
-    synthetic = len(argv) == 3
+    mode = argv[2] if len(argv) == 3 else "strict"
     try:
-        if synthetic and os.environ.get("GITHUB_ACTIONS") != "true":
-            raise BoundaryError("TRUSTED_SYNTHETIC_DIAGNOSTIC_CI_ONLY")
-        proof(argv[1], synthetic)
+        if mode != "strict" and os.environ.get("GITHUB_ACTIONS") != "true":
+            raise BoundaryError("DIAGNOSTIC_CI_ONLY")
+        if mode == "--userns-check":
+            userns_precheck(argv[1])
+        else:
+            proof(argv[1], mode == "--trusted-synthetic-only")
     except BoundaryError as exc:
         print("NO_START: " + str(exc), file=sys.stderr)
         return 1
