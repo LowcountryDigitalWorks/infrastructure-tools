@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+import ntpath
 import os
 from pathlib import Path
 import signal
@@ -51,6 +52,26 @@ class ContainmentRefused(ValueError):
     def __init__(self, code: str):
         super().__init__(code)
         self.code = code
+
+
+def _trusted_windows_root() -> str:
+    """Get Windows startup root from the OS, not mutable SystemRoot/PATH."""
+    if os.name != "nt":
+        raise ContainmentRefused("WINDOWS_OS_API_UNAVAILABLE")
+    try:
+        api = ctypes.WinDLL("kernel32", use_last_error=True).GetSystemDirectoryW
+        api.argtypes = [wintypes.LPWSTR, wintypes.UINT]
+        api.restype = wintypes.UINT
+        buf = ctypes.create_unicode_buffer(32768)
+        size = api(buf, len(buf))
+        system_dir = ntpath.normpath(buf.value)
+        if not 0 < size < len(buf) or not ntpath.isabs(system_dir):
+            raise ContainmentRefused("WINDOWS_SYSTEM_DIR_UNVERIFIED")
+        if ntpath.basename(system_dir).casefold() not in ("system32", "syswow64"):
+            raise ContainmentRefused("WINDOWS_SYSTEM_DIR_UNVERIFIED")
+        return ntpath.dirname(system_dir)
+    except (OSError, AttributeError, TypeError, ValueError):
+        raise ContainmentRefused("WINDOWS_SYSTEM_DIR_UNVERIFIED") from None
 
 
 if os.name == "nt":
@@ -161,10 +182,7 @@ class FixedProcessCanary:
                 self._job = _WindowsJob() if os.name == "nt" else None
                 proc_env = {"PYTHONNOUSERSITE":"1"}
                 if os.name == "nt":
-                    root = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
-                    if not root:
-                        raise ContainmentRefused("WINDOWS_PYTHON_STARTUP_UNAVAILABLE")
-                    proc_env["SystemRoot"] = root
+                    proc_env["SystemRoot"] = _trusted_windows_root()
                 self._proc = subprocess.Popen(
                     [sys.executable,"-I","-u","-c",_CANARY_SCRIPT,marker],
                     stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,
