@@ -33,7 +33,17 @@ An off-site host that cannot presently be reached returns HOST_UNAVAILABLE. The 
 - MAINTAIN: only owner-delegated recurring maintenance categories with reviewed operation policy and bounded parameters. May be auto-issued for already-approved LDW tasks without Eddie clicking UAC.
 - FULL_ADMIN: intentionally supports arbitrary owner-authorized Windows Administrator / Linux root terminal and associated file/process/service operations **within one accepted short-lived session**. Broad capability is an explicit feature, not a fixed-command-only substitute. Requesting FULL_ADMIN is a separate high-trust policy action, not inferred from general chat authority.
 
-A session grant is minted by a protected Session Authority using an accepted owner-backed policy or a fresh owner consent step for previously unapproved consequential work. The request body from a ChatGPT model is **not** itself approval. Routine pre-authorized maintenance does not require Eddie on each action; novel destructive, customer, identity/MFA, billing, legal, DNS, public-exposure, production/risk or recovery actions preserve their existing decision gates.
+A session grant is minted by the protected Session Authority **only after verification of a separately authenticated owner decision record or an existing signed scoped delegation**. A chat message, prompt, GitHub comment, browser page, relay tool call or role label is never owner consent. Routine pre-authorized MAINTAIN operations do not require Eddie on each action; novel destructive, customer, identity/MFA, billing, legal, DNS, public-exposure, production/risk or recovery actions preserve their existing gates. A FULL_ADMIN grant does not erase those per-action risk gates.
+
+### Gate A1 — independently authenticated owner decision and issuance (fixes independent M1)
+
+1. The owner decision is captured in a **separate trusted local authorization UI/CLI**, not by an agent reading a chat transcript or a checkbox in tool arguments. The trusted flow authenticates the owner with existing accepted OS/device-bound identity (a concrete platform-backed authentication decision, optionally local presence). A model can request authorization but cannot satisfy it or generate its signature.
+2. The authorization is a **signed canonical decision record** binding operator identity, issuer/key generation, immutable host identity and enrolled host key, approved privilege, decision type (one-time FULL_ADMIN or narrowly delegated MAINTAIN), approved command/activity class or exact batch digest, allowed sensitive-data/network/egress classes, unique nonce, issue/expiry times, absolute duration, maximum commands and the recorded human-visible risk wording. A signed MAINTAIN delegation must explicitly enumerate reviewed classes, parameters, host and lifetime; "owner broadly approves everything" is not a standing unrestricted delegated policy.
+3. The protected issuer verifies the independent signer/public trust root, identity, scope, nonce uniqueness, version, TTL and current revocation epoch **before** minting the host-audience grant. The host agent independently verifies the resulting grant, its decision-record digest and its *local protected policy* on every command; there is no optional trust in the chat plugin or relay.
+4. An **unrestricted FULL_ADMIN shell** can be opened only with a fresh, owner-authenticated risk acceptance for the exact named host/session. Within that accepted session, arbitrary commands are functionally possible, but genuinely new consequential intents or egress/sensitive-data classes beyond the signed session decision need a **new out-of-model signed decision**. A batch explicitly accepted in that signed decision can run without repeated UAC or repetitive approval for every command.
+5. If an owner decision is absent, forged, stale, replayed, broadened, from a wrong host, from a model/tool argument or revoked, the result is `OWNER_AUTH_NOT_PROVEN`; no FULL_ADMIN session opens and no degraded implicit alternative is allowed.
+
+**Required negative proof:** a forged "Eddie approved" text inside Slack, a repository file, an MCP tool argument or a browser page must not mint FULL_ADMIN; an already accepted MAINTAIN grant must not widen to FULL_ADMIN or a different host; a new destructive command outside an accepted FULL_ADMIN decision scope must be refused pending fresh trusted consent. Distinguish one-time owner decision from a durable delegated maintenance policy so already accepted routine tasks remain UAC-free.
 
 The existing Windows protected helper cannot be silently repurposed or modified to accept arbitrary commands. Design and install a distinct, independently reviewed privileged implementation.
 
@@ -53,7 +63,7 @@ The protected host agent independently checks signature/MAC, audience, clock win
 
 Proposed initial bounds for an isolated synthetic canary: at most one FULL_ADMIN session per host, at most 5 minutes, at most one active command in that session, bounded streams, and no renewal. These are candidate limits for security review, not arbitrary permanent product limits.
 
-Grant expiry, revocation, disconnect or conflicting session MUST refuse new commands. An already-started process may require an OS-specific job-object/process-group termination or explicit typed drain. Do not claim an irreversible system mutation can always be undone, and do not call a forced kill a graceful rollback.
+Grant expiry, revocation, disconnect or conflicting session MUST refuse new commands and trigger host-owned process containment/drain verification. A mere shell exit or command timeout is not completion: enforce and inspect descendants, services and scheduled jobs as described in Gate A3 below. Block new privileged grants until the host proves the previous session clean or enters quarantine. Do not claim irreversible system mutations can always be undone or call a forced kill a graceful rollback.
 
 ## 5. Real operations inside the admitted session
 
@@ -68,7 +78,7 @@ FULL_ADMIN means the operator can request arbitrary administrative commands **af
 
 However, a model can be induced by untrusted page/tool/agent text to issue a dangerous command. Any command offered by a ChatGPT model is an untrusted proposal until the owner/delegated action policy permits it. Model-driven full-admin use requires a reviewed confirmation/allowance policy for high-impact targets and cannot silently override existing consequential gates.
 
-A command that timed out or lost connection has an AMBIGUOUS execution result, not safe-to-retry. No automatic replay of a potentially mutating shell command. Each command uses a single unique idempotency identity with protected local readback.
+A command that timed out or lost connection has an AMBIGUOUS execution result, not safe-to-retry. No automatic replay of a potentially mutating shell command. Each command uses a single unique idempotency identity with protected local readback. The command admission gate matches the signed owner activity/egress class **before** a command starts; never infer safety from its stdout, exit code or model rationale.
 
 ## 6. Secret and sensitive-output boundary
 
@@ -81,6 +91,30 @@ Arbitrary Administrator/root commands **can** read private secrets and send them
 - treat raw shell output from untrusted programs/web pages as data, never as authorization instructions.
 
 A command that itself exports files/secrets or changes a production system is still consequential. Explicit owner/accepted delegated authority and appropriate data boundary apply even inside a full-admin session.
+
+### Gate A2 — pre-execution data/egress authorization (fixes independent M2)
+
+- The host's **protected admission service** classifies each proposed command (including arguments, execution context, file targets, child-process/network capability and requested outbound destination) against the signed owner decision and protected local allow/deny policy *before* privileged execution. A chat model's classification or "safe" label is untrusted. A command that is impossible to classify reliably is `UNKNOWN_HIGH_RISK` and is refused unless the owner freshly authorized its full blast radius.
+- First live proof runs on a **disposable, secret-free host/VM image with external egress blocked outside the command process's authority** and no real credentials, customer data, host SSH keys or connected production mounts. Deny network, outbound file transfers and sensitive path reads by default; only a named test fixture and fixed harmless canary may be accessed.
+- Concrete **negative acceptance test**: proposed admin command attempting to read a synthetic secret fixture and send it via curl/HTTP/DNS (or encoded variant) is refused **before process start**, with a redacted denial record and no outbound packet/file copy. Test direct commands and delegated child-process attempt. An exfiltration test that merely hides stdout is a failure.
+- On an actual owner machine, **full host Administrator/root can alter firewall policy, read protected files, launch services or egress through other processes**. A same-privilege pre-command parser, stdout redactor or environment variable restriction **cannot guarantee confinement** of arbitrary FULL_ADMIN. If no stronger OS/hypervisor boundary exists, require the owner to explicitly accept the named host/session's *unrestricted* egress/secrets risk, or refuse live FULL_ADMIN and use a disposable isolated VM or a narrower MAINTAIN operation. Never advertise complete exfil prevention on an unrestricted production root/admin shell.
+- For allowed operations, use enforcement outside the process privilege boundary where possible (dedicated network namespace/host firewalls on a separate trusted control plane, private overlay policy, no production mounts). The first privileged proof must verify **actual network denial**, not merely an expected policy string. Persist only minimal security audit results in approved protected local state; do not capture synthetic secret content into chat/GitHub.
+
+### Gate A3 — privileged descendants, session drainage and quarantine (fixes independent M3)
+
+- The privileged host agent creates a protected **per-session process containment identity**. Windows uses a non-breakaway Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, verifies direct child and descendant membership, denies unapproved service/Task Scheduler creation and audits child handles. Linux uses a protected cgroup v2/systemd scope or proven equivalent with process-group tracking, kill/drain of all descendants, and no escape from the session boundary by an untrusted command.
+- On expiry, revoke, disconnect or owner stop: stop admitting commands; signal/drain all tracked descendants; read back process count, job/scope identity, services/jobs and any file/side-effect ledger; then mark terminal `DRAINED_VERIFIED` **only if** no privileged descendants or detached jobs remain. A child still alive, missing audit/agent, unknown detached service or failed cleanup is `AMBIGUOUS_PRIVILEGED_RESIDUE`, not PASS.
+- An ambiguous/failed drain puts that host in **QUARANTINED** and rejects new FULL_ADMIN sessions; a separate trusted owner recovery or independently accepted repair step must inspect the affected processes/services and restore a verified clean state. No blind retry or silent reap that hides evidence.
+- **Hard limit:** unrestricted root/Administrator on a normal host can intentionally evade OS containment or create durable services. These protections are provable for the **restricted canary workload**. Broad non-bypassable containment requires a stronger isolation boundary (e.g. a disposable VM/microVM) outside the privileged workload's authority, or an explicit owner risk acceptance; do not promise otherwise.
+- Required tests: canary spawns a child then expires; child must be demonstrably gone and host verified clean; deliberate disconnected/failed-drain case must become QUARANTINED; Windows Job Object breakout/service creation and Linux daemon/cgroup escape attempts must be rejected or explicitly reported UNCONTAINED. Persistence outside the process graph is a separately documented recovery/owner gate.
+
+### Gate A4 — issuer key rotation and clock recovery (fixes independent L1)
+
+- Issuer private signing key is generated/stored only in an approved protected OS/TPM-backed key store; signed public verification keys are pinned by enrolled host with issuer/key ID, validity and rotation generation. No plaintext shared signing secret on the host; no issuer private key in a ChatGPT plugin or agent.
+- The agent keeps a **protected monotonic revocation epoch and command nonce journal** with atomic integrity-checked updates, independent from the untrusted chat/relay. A failed journal write, state rollback, cloned node or stale enrolled host key fails closed.
+- Require a monotonic local time source where available and **at most 30 seconds** measured wall-clock skew versus a trusted signed time authority. A detected wall-clock rollback, failed attestation, time-source uncertainty or expired signer key means `CLOCK_UNTRUSTED` / no session or command until authenticated time reconciliation.
+- Rotate: stage next pinned issuer public key with owner-authenticated policy, increment protected generation/epoch, confirm exact host readback, only then retire old verifier and revoke old grants. Compromise: freeze new sessions, revoke epoch, quarantine affected hosts, re-enroll with out-of-band owner trust, rotate signing and transport keys independently, and require negative tests proving old grants fail even after restart or key rollback.
+- A bootstrap/demo may generate ephemeral software-only signing keys **only on a disposable synthetic host**. It is not evidence of production key recovery, secure clock, or physical owner presence.
 
 ## 7. Failure and attacker matrix
 
@@ -96,6 +130,10 @@ A command that itself exports files/secrets or changes a production system is st
 | Process still running after timeout | AMBIGUOUS / track and drain or report unresolved; no false success |
 | Separate sessions race on service/files | One writer/host or explicit lock; deny untracked conflict |
 | Captured admin stdout contains credentials | Output blocked/sanitized; never emitted raw by default |
+| Prompt-injection claims owner consent or widens a delegated scope | No out-of-model signed decision: OWNER_AUTH_NOT_PROVEN, no admin grant |
+| Privileged command calls DNS/HTTP to leak fixture secrets | Host pre-admission denies before execution + external egress boundary blocks packets |
+| Detached privileged child survives revocation/disconnect | Host QUARANTINED until descendant/job/service drain is independently verified |
+| Issuer signer key compromised, clock rolled back, or epoch journal missing | Freeze sessions and require trusted owner recovery/re-enrollment |
 | Malicious local normal-user process | Cannot modify protected agent, trust root, credential store or privileged policy |
 | Revoked node later reappears | Re-enrollment required; no replayed enrollment with same stale key |
 | Failed install/upgrade | Exact artifact provenance and rollback, no unrelated host/service mutation |
@@ -110,11 +148,11 @@ The custom ChatGPT plugin/MCP write-action and idle-chat wake capabilities are *
 
 **Gate A — architecture:** this contract and an independent security/architecture challenge, including threat-model findings and a frozen trust decision. The GM17 author is not eligible to terminally accept its own design.
 
-**Gate B — synthetic user-mode source:** a stand-alone disposable local CLI + session state machine and harmless file/process/command proof, with protected identity, expiry/revoke/replay/collision tests. It must not install a privileged service.
+**Gate B — synthetic user-mode source:** a stand-alone disposable local CLI + session state machine and harmless file/process/command proof, with protected identity, expiry/revoke/replay/collision tests. Also require fake-owner-consent refusal, unapproved command/network-exfil refusal **before spawn**, forged issuer, epoch/clock rollback, expired grant, and child-process revoke/drain/quarantine demonstrations. It must not install a privileged service or claim protected production isolation. Current #215/#217 source tests do not yet satisfy all of these new Gate B requirements.
 
-**Gate C — Windows protected proof:** new reviewed protected service/session helper installed only under a separate consequential owner/security gate, authorized FULL_ADMIN on an isolated owner-controlled Windows target, one harmless elevated command with identity readback and clean revoke, no per-command UAC and no external remote-control dependency.
+**Gate C — Windows protected proof:** new reviewed protected service/session helper installed only under a separate consequential owner/security gate, authorized FULL_ADMIN on an isolated **secret-free disposable Windows target**, one harmless elevated command with identity readback, verified non-breakaway Job Object descendants, owner-signed session scope, bounded external egress and clean revoke/drain/quarantine behavior, no per-command UAC and no external remote-control dependency. Do not install on the owner's production workstation merely because a synthetic source PR passes.
 
-**Gate D — Linux protected proof:** distinct OS-specific root-capable source and disposable proof; preserve ChromeOS verified boot, owner login and existing REDRIX isolation boundaries.
+**Gate D — Linux protected proof:** distinct OS-specific root-capable source and disposable **secret-free** proof with protected cgroup/process drain, network-egress denial, clock/revocation recovery and quarantine negative cases; preserve ChromeOS verified boot, owner login and existing REDRIX isolation boundaries. No assumption that ChromeOS penguin containers can safely prove root host control.
 
 **Gate E — normal ChatGPT Chat connector:** two separately enrolled hosts reachable from an actually supported private plugin/tool connection in ordinary Chat mode; verify authenticated command/result and account/plan controls without Work or Desktop Commander. Must still work locally through CLI during remote outage.
 

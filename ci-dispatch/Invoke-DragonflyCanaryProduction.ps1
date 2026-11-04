@@ -100,9 +100,27 @@ try {
         throw 'DRAGONFLY_CANARY_PROGRAMDATA_INVALID'
     }
 
-    Import-Module (Join-Path $PSScriptRoot 'Dispatch.psm1') -Force
     Import-Module (Join-Path $PSScriptRoot 'DragonflyCanary.psm1') -Force
     Import-Module (Join-Path $PSScriptRoot 'DragonflyCanaryRuntime.psm1') -Force
+    # Runtime's nested -Force import can hide Dispatch from this script scope.
+    # Bind the already reviewed #10 read/lock module last, in this one-shot process.
+    Import-Module (Join-Path $PSScriptRoot 'Dispatch.psm1') -Global -Force
+    $ci10Read = Get-Command Invoke-Ci10Read -CommandType Function -ErrorAction SilentlyContinue
+    if ($null -eq $ci10Read -or $ci10Read.ModuleName -cne 'Dispatch') {
+        throw 'DRAGONFLY_CANARY_CI10_READ_NOT_BOUND'
+    }
+
+    # Fail before any provider read/write unless Runtime sees the same trusted
+    # Dispatch lock. The caller-level read binding alone is insufficient.
+    $runtimeModule = Get-Module -Name DragonflyCanaryRuntime -ErrorAction SilentlyContinue
+    $ci10Lock = if ($null -ne $runtimeModule) {
+        & $runtimeModule {
+            Get-Command Enter-Ci10DispatcherLock -CommandType Function -ErrorAction SilentlyContinue
+        }
+    } else { $null }
+    if ($null -eq $ci10Lock -or $ci10Lock.ModuleName -cne 'Dispatch') {
+        throw 'DRAGONFLY_CANARY_CI10_LOCK_NOT_BOUND'
+    }
 
     $runPath = 'repos/' + $script:Repository + '/actions/runs/' + $RunId
     $jobsPath = $runPath + '/attempts/' + $RunAttempt + '/jobs?per_page=100'
