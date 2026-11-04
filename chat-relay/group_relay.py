@@ -18,6 +18,8 @@ from relay import (Handler, LocalRelay, Mailbox, RelayError, canonical_id, role_
 GROUP = re.compile(r"^[a-z][a-z0-9_-]{1,47}$")
 MAX_GROUPS = 16
 MAX_MEMBERS = 12
+MAX_PER_SENDER = 16
+MAX_PER_GROUP = 32
 
 
 @dataclass
@@ -94,10 +96,19 @@ class GroupMailbox(Mailbox):
                 message_id = canonical_id(data["message_id"])
                 if message_id in self._group_messages:
                     raise RelayError(409, "MESSAGE_ID_CONFLICT")
-                if (message_id not in self._messages
-                        and len(self._messages) + len(self._group_messages) >= MAX_MESSAGES):
-                    raise RelayError(429, "MAILBOX_FULL")
+                if message_id not in self._messages:
+                    self._check_sender_quota(actor)
+                    if len(self._messages) + len(self._group_messages) >= MAX_MESSAGES:
+                        raise RelayError(429, "MAILBOX_FULL")
             return super().send(actor, data)
+
+    def _check_sender_quota(self, actor: str) -> None:
+        # A sender's DMs and group messages share ONE fixed allowance. Retained
+        # ACK tombstones still count, preserving single-use UUID semantics.
+        sender_count = sum(msg.sender == actor for msg in self._messages.values())
+        sender_count += sum(msg.sender == actor for msg in self._group_messages.values())
+        if sender_count >= MAX_PER_SENDER:
+            raise RelayError(429, "SENDER_QUOTA_EXCEEDED")
 
     def groups_for(self, actor: str) -> dict:
         with self._lock:
@@ -145,6 +156,9 @@ class GroupMailbox(Mailbox):
                 parent = self._group_messages.get(reply_to)
                 if parent is None or parent.group_id != group_id:
                     raise RelayError(400, "INVALID_GROUP_REPLY")
+            self._check_sender_quota(actor)
+            if sum(msg.group_id == group_id for msg in self._group_messages.values()) >= MAX_PER_GROUP:
+                raise RelayError(429, "GROUP_QUOTA_EXCEEDED")
             if len(self._messages) + len(self._group_messages) >= MAX_MESSAGES:
                 raise RelayError(429, "MAILBOX_FULL")
             now = self._clock()
