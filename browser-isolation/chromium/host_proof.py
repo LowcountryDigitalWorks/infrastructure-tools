@@ -66,7 +66,7 @@ def command(docker: str, image_id: str, gateway: str, port: int,
     # Guest has no network device beyond internal loopback, no sockets/volumes,
     # no host PID/IPC, no owner profile and no model-provided Docker switches.
     args = [
-        docker, "container", "create",
+        docker, "container", "create", "--init",
         "--name=ldw-chromium-proof-" + nonce,
         "--label=ldw.proof.nonce=" + nonce,
         "--pull=never", "--network=none",
