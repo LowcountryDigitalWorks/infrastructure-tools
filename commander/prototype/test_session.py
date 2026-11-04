@@ -73,8 +73,8 @@ class SyntheticSessionTests(unittest.TestCase):
 
     def test_tampered_token_refused(self):
         p, sig = self.token.split(".")
-        tail = "A" if sig[-1] != "A" else "B"
-        tampered = p + "." + sig[:-1] + tail
+        first = "A" if sig[0] != "A" else "B"
+        tampered = p + "." + first + sig[1:]
         self.assert_refused("INVALID_SIGNATURE", lambda: self.agent.open(tampered, "owner"))
 
     def test_expired_grant_cannot_open_or_execute(self):
