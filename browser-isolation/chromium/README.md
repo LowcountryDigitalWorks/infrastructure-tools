@@ -15,6 +15,14 @@
 
 ## Exact code boundaries
 
+### Synthetic-only chroot seccomp hypothesis (not a security approval)
+
+The exact official Playwright seccomp_profile.json (Git blob fddc05fb520affb145404e6f6f647ca96af8087d) unconditionally admits clone/unshare/setns but **admits chroot only when the container initially carries CAP_SYS_CHROOT**. This fixture deliberately starts with --cap-drop=ALL. Docker assembles seccomp filters at container creation, so capabilities subsequently available inside nested namespaces may not affect which capability-qualified syscalls are included. Chromium's zygote namespace sandbox can use chroot; this is a specific hypothesis and does not establish the actual cause.
+
+A separately pinned seccomp_chroot_diagnostic.json (Git blob d1d0d0ee6db1fcc28855e9714af3c288f3dd1760) changes precisely the chroot rule's includes from a CAP_SYS_CHROOT requirement to an empty unrestricted rule. **No other syscall allowlist, default action, network, mount, IPC, user, capability, provenance or process-control change** is permitted. The host verifies both exact Git blob hashes AND their parsed structural equivalence except that one rule. Any mismatch or extra expansion returns NO_START. Under the CI-only --strict-chroot-diagnostic mode, Chromium still requests its internal sandbox, with the same network-none, read-only, no-new-privileges, nonroot and cap-drop controls. Its result is explicitly PASS_DIAGNOSTIC_ONLY_NOT_ACCEPTED or NO_START_DIAGNOSTIC_ONLY_NOT_ACCEPTED, and **cannot satisfy the required original strict-profile job or release gate**.
+
+Even a one-syscall seccomp change expands the container's syscall surface. Independent security review and explicit accepted policy are mandatory before any production use. Real websites, customer data and owner browsers remain forbidden in both synthetic variants.
+
 - `probe.js`: only synthetic local pages, ephemeral guest-side HTTP service and fixed off-guest attempt vectors; no owner login, profile, credentials, real target URLs, persistent listener or model-supplied command.
 - **Diagnostic provenance correction:** earlier direct subprocess `GUEST_BROWSER_LAUNCH_DIRECT_ZYGOTE` categories were generated from `chromium.executablePath()`, which is not guaranteed to be the same full-Chromium executable selected by `chromium.launch({channel:"chromium"})`. Those earlier zygote labels therefore do **not** establish the actual strict-launch cause. The separate direct subprocess has been removed. New fixed error categories are parsed only from the actual Playwright launch exception. Raw browser logs/command lines are never published.
 - **Syscall readback evidence:** exact-head hosted run `41901615869` showed `GUEST_CLONE3_NULL_PROBE=UNSUPPORTED_ENOSYS`; this is the compatibility errno used by Docker and Chromium to permit fallback to `clone`, **not evidence of a `clone3` seccomp denial**. No `clone3` allowlist expansion or seccomp policy relaxation is authorized.
