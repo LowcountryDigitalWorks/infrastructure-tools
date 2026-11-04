@@ -1,6 +1,6 @@
 """Static admission negatives. These are NOT a live Docker/packet proof."""
 import unittest
-from run_canary import BoundaryError, command, validate_guest_result
+from run_canary import BoundaryError, command, validate_guest_result, classify_guest_start_failure
 
 
 class GuestAdmissionTests(unittest.TestCase):
@@ -48,6 +48,14 @@ class GuestAdmissionTests(unittest.TestCase):
                 validate_guest_result(bad, 0)
         with self.assertRaises(BoundaryError):
             validate_guest_result(correct, 1)
+
+    def test_guest_error_classification_never_returns_raw_stderr(self):
+        diagnostic = "OCI runtime create failed: permission denied /home/runner/private/secret"
+        result = classify_guest_start_failure(diagnostic, 125)
+        self.assertEqual(result, "GUEST_NO_STRUCTURED_RESULT_EXIT_125_PERMISSION_REFUSED")
+        self.assertNotIn("/home/", result)
+        self.assertEqual(classify_guest_start_failure("irrelevant", 2),
+                         "GUEST_NO_STRUCTURED_RESULT_EXIT_2_UNKNOWN")
 
     def test_no_model_supplied_docker_options(self):
         with self.assertRaises(TypeError):
