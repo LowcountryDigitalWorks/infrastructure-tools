@@ -1,0 +1,38 @@
+name: Auto Browser real Chromium isolated guest (synthetic only)
+on:
+  pull_request:
+    paths:
+      - 'browser-isolation/chromium/**'
+      - '.github/workflows/browser-chromium-isolated.yml'
+permissions:
+  contents: read
+jobs:
+  genuine-chromium-offline-negative-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Static syntax and host gate assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check browser-isolation/chromium/probe.js
+          python3 -m unittest discover -s browser-isolation/chromium -p 'test_*.py' -v
+      - name: Pull the immutable official test image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull mcr.microsoft.com/playwright:v1.64.1-noble@sha256:2f05f8a734509a7b3f26a912639488ee08f58a7b292d14d62271bcff9038768f
+      - name: Build synthetic-only version-matched Playwright probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --pull=false -f browser-isolation/chromium/Dockerfile -t ldw-chromium-guest-probe:local browser-isolation/chromium
+      - name: Prove actual Chromium loopback positive and off-guest negative
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_id="$(docker image inspect --format '{{.Id}}' ldw-chromium-guest-probe:local)"
+          python3 browser-isolation/chromium/host_proof.py "$image_id"
