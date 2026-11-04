@@ -6,6 +6,7 @@ const http = require("node:http");
 const net = require("node:net");
 const crypto = require("node:crypto");
 const { chromium } = require("playwright");
+let phase = "INIT";
 
 function fail(reason) {
   process.stdout.write(JSON.stringify({ result: "NO_START", reason }) + "\n");
@@ -73,18 +74,22 @@ async function main() {
     });
     const localPort = server.address().port;
     // Never disable Chromium sandbox or silently fall back to a root browser.
+    phase = "BROWSER_LAUNCH";
     browser = await chromium.launch({ headless:true, chromiumSandbox:true, timeout:25000 });
     const context = await browser.newContext({ acceptDownloads:false, serviceWorkers:"allow" });
     const page = await context.newPage();
+    phase = "LOCAL_NAVIGATION";
     await page.goto("http://127.0.0.1:" + localPort + "/start",
                     {waitUntil:"domcontentloaded", timeout:10000});
     if (await page.title() !== "LDW_SYNTHETIC_BROWSER") throw Error("LOCAL_BROWSER_NAVIGATION");
+    phase = "LOCAL_ACTIONS";
     await page.locator("#sample").fill("LDW_OK");
     await page.locator("#action").click();
     if (await page.locator("#result").textContent() !== "LDW_OK") throw Error("LOCAL_INTERACTION");
     const digest = crypto.createHash("sha256").update(await page.screenshot()).digest("hex");
     if (!/^[0-9a-f]{64}$/.test(digest)) throw Error("SCREENSHOT");
     // Generate actual Chromium-originated operations, not Playwright route mocks.
+    phase = "PAGE_VECTOR";
     const methods = await page.evaluate(({host,port}) => {
       const t = "http://" + host + ":" + port;
       const attempts = [];
@@ -108,6 +113,7 @@ async function main() {
     const mustAttempt = ["beacon","keepalive","ping","websocket","resource"];
     if (mustAttempt.some(x=>!methods.includes(x))) throw Error("BROWSER_VECTOR_NOT_INVOKED");
     // A real Service Worker can evade in-page HTTP routing.
+    phase = "SERVICE_WORKER";
     const sw = await page.evaluate(async () => {
       if (!("serviceWorker" in navigator)) return false;
       try {
@@ -117,11 +123,13 @@ async function main() {
       } catch {return false;}
     });
     if (!sw) throw Error("SERVICE_WORKER_NOT_INVOKED");
+    phase = "REDIRECT";
     let redirectFailed = false;
     try {await page.goto("http://127.0.0.1:" + localPort + "/redirect",
                          {waitUntil:"domcontentloaded",timeout:5000});}
     catch {redirectFailed=true;}
     if (!redirectFailed) throw Error("OFF_GUEST_REDIRECT_WAS_ALLOWED");
+    phase = "DIRECT_TCP";
     if (!(await directSocketBlocked(host,port))) throw Error("DIRECT_TCP_REACHED_HOST");
     await new Promise(resolve=>setTimeout(resolve,1000));
     process.stdout.write(JSON.stringify({
@@ -140,5 +148,5 @@ main().catch(err=>{
   const known = new Set(["INVALID_ARGS","INVALID_TARGET","LOCAL_BROWSER_NAVIGATION",
     "LOCAL_INTERACTION","SCREENSHOT","BROWSER_VECTOR_NOT_INVOKED",
     "SERVICE_WORKER_NOT_INVOKED","OFF_GUEST_REDIRECT_WAS_ALLOWED","DIRECT_TCP_REACHED_HOST"]);
-  fail(known.has(err.message)?err.message:"BROWSER_GUEST_ERROR");
+  fail(known.has(err.message)?err.message:"GUEST_" + phase + "_ERROR");
 }).finally(()=>clearTimeout(timer));
