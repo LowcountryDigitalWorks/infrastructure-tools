@@ -28,7 +28,7 @@ if sys.stdin.buffer.readline() != b"START\n":
 child = subprocess.Popen([sys.executable,"-I","-c","import time;time.sleep(40)"],
     stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 with open(sys.argv[1],"x",encoding="ascii") as stream:
-    stream.write(str(child.pid))
+    stream.write(str(child.pid) + "\n")
 def finish(signum,frame):
     try:
         if child.poll() is None:
@@ -182,14 +182,17 @@ class FixedProcessCanary:
                 while time.monotonic()<until:
                     if Path(marker).is_file():
                         pid_text = Path(marker).read_text(encoding="ascii")
-                        if not pid_text.isdecimal():
-                            raise ContainmentRefused("CANARY_MARKER_INVALID")
-                        self._child_pid = int(pid_text)
-                        if self._proc.poll() is not None:
-                            raise ContainmentRefused("CANARY_EXITED_EARLY")
-                        self._started = self._clock()
-                        self._state = "RUNNING"
-                        return self.status()
+                        # Windows can expose a newly-created marker before
+                        # the writer has flushed/closed it. A trailing newline
+                        # proves completion; an empty/partial read keeps
+                        # waiting until the fixed readiness timeout.
+                        if pid_text.endswith("\n") and pid_text[:-1].isdecimal():
+                            self._child_pid = int(pid_text[:-1])
+                            if self._proc.poll() is not None:
+                                raise ContainmentRefused("CANARY_EXITED_EARLY")
+                            self._started = self._clock()
+                            self._state = "RUNNING"
+                            return self.status()
                     if self._proc.poll() is not None:
                         raise ContainmentRefused("CANARY_EXITED_EARLY")
                     time.sleep(.03)
