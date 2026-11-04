@@ -8,6 +8,24 @@ const crypto = require("node:crypto");
 const { chromium } = require("playwright");
 let phase = "INIT";
 
+async function inspectBrowserSandbox(context) {
+  // Chrome's internal sandbox diagnostic page, fixed local chrome: scheme.
+  // Never serialize page HTML/text, paths, command-line or instance IDs.
+  // Chromium self-report is additional evidence, NOT host-kernel attestation.
+  let tab = null;
+  try {
+    tab = await context.newPage();
+    await tab.goto("chrome://sandbox/", {waitUntil:"domcontentloaded", timeout:7000});
+    const body = String(await tab.locator("body").innerText({timeout:3500})).slice(0,14000);
+    const namespace = /Namespace Sandbox\s*:?\s*(Yes|No)\b/i.exec(body)?.[1];
+    const seccomp = /Seccomp-BPF Sandbox\s*:?\s*(Yes|No)\b/i.exec(body)?.[1];
+    if (!namespace || !seccomp) return "UNVERIFIED";
+    return (namespace.toLowerCase() === "yes" && seccomp.toLowerCase() === "yes") ?
+      "NAMESPACE_SECCOMP_ACTIVE" : "LAYER_NOT_ACTIVE";
+  } catch { return "UNVERIFIED"; }
+  finally {if (tab) await tab.close().catch(()=>{});}
+}
+
 function fail(reason) {
   process.stdout.write(JSON.stringify({ result: "NO_START", reason }) + "\n");
   process.exitCode = 1;
@@ -92,6 +110,12 @@ async function main() {
     if (await page.locator("#result").textContent() !== "LDW_OK") throw Error("LOCAL_INTERACTION");
     const digest = crypto.createHash("sha256").update(await page.screenshot()).digest("hex");
     if (!/^[0-9a-f]{64}$/.test(digest)) throw Error("SCREENSHOT");
+    phase = "SANDBOX_STATUS";
+    const sandboxDetails = trustedSynthetic ? "NOT_REQUESTED" :
+      await inspectBrowserSandbox(context);
+    if (!trustedSynthetic && sandboxDetails !== "NAMESPACE_SECCOMP_ACTIVE") {
+      throw Error("CHROMIUM_SANDBOX_LAYER_UNVERIFIED");
+    }
     // Generate actual Chromium-originated operations, not Playwright route mocks.
     phase = "PAGE_VECTOR";
     const methods = await page.evaluate(({host,port}) => {
@@ -140,7 +164,7 @@ async function main() {
       result:"PASS", local_chromium:"PASS", interactions:"PASS",
       vectors:mustAttempt.concat(["service_worker","redirect","direct_tcp"]),
       redirect:"BLOCKED", direct_tcp:"BLOCKED",
-      sandbox_requested:!trustedSynthetic,
+      sandbox_requested:!trustedSynthetic, sandbox_details:sandboxDetails,
       source:trustedSynthetic ? "TRUSTED_SYNTHETIC_NO_CHROMIUM_SANDBOX" : "SYNTHETIC_GUEST_ONLY"
     }) + "\n");
   } finally {
@@ -152,7 +176,7 @@ const timer=setTimeout(()=>{fail("GUEST_WATCHDOG");process.exit(1)},55000);
 main().catch(err=>{
   const known = new Set(["INVALID_ARGS","INVALID_TARGET","LOCAL_BROWSER_NAVIGATION",
     "LOCAL_INTERACTION","SCREENSHOT","BROWSER_VECTOR_NOT_INVOKED",
-    "SERVICE_WORKER_NOT_INVOKED","OFF_GUEST_REDIRECT_WAS_ALLOWED","DIRECT_TCP_REACHED_HOST"]);
+    "SERVICE_WORKER_NOT_INVOKED","OFF_GUEST_REDIRECT_WAS_ALLOWED","DIRECT_TCP_REACHED_HOST","CHROMIUM_SANDBOX_LAYER_UNVERIFIED"]);
   let reason = known.has(err.message) ? err.message : "GUEST_" + phase + "_ERROR";
   if (phase === "BROWSER_LAUNCH" && !known.has(err.message)) {
     // Parse the ACTUAL Playwright chromium.launch({channel:"chromium",
