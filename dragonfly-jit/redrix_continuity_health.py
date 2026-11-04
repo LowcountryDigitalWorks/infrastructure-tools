@@ -35,16 +35,56 @@ def _systemctl(action: str, service: str) -> bool:
     return _command(["systemctl", action, "--quiet", service]) == ""
 
 
+def _has_symlink_component(path: Path) -> bool:
+    """Reject a symlink in ANY path component, not only the leaf."""
+    return any(component.is_symlink() for component in (path, *path.parents))
+
+
 def _safe_json_file(path: Path) -> dict | None:
+    """Bounded Linux-only read through no-follow directory/file descriptors.
+
+    Opening each path component with O_DIRECTORY|O_NOFOLLOW prevents a
+    TOCTOU substitution of a parent directory with a symlink. O_NONBLOCK
+    prevents blocking on a swapped-in FIFO. No writable file is opened.
+    """
+    if os.name != "posix" or not path.is_absolute():
+        return None
+    needed = ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK")
+    if any(not hasattr(os, name) for name in needed):
+        return None
+    directory_fd = None
+    file_fd = None
     try:
-        entry = path.lstat()
-        if not stat.S_ISREG(entry.st_mode) or entry.st_size > 16_384:
+        parts = path.parts
+        if len(parts) < 2 or parts[0] != os.sep or any(
+            part in ("", ".", "..") for part in parts[1:]
+        ):
             return None
-        with path.open("r", encoding="utf-8") as stream:
-            payload = json.load(stream)
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+        directory_fd = os.open(os.sep, directory_flags)
+        for component in parts[1:-1]:
+            child_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = child_fd
+        file_fd = os.open(parts[-1], file_flags, dir_fd=directory_fd)
+        entry = os.fstat(file_fd)
+        if not stat.S_ISREG(entry.st_mode) or not 0 < entry.st_size <= 16_384:
+            return None
+        with os.fdopen(file_fd, "rb") as stream:
+            file_fd = None
+            raw = stream.read(16_385)
+        if len(raw) > 16_384:
+            return None
+        payload = json.loads(raw.decode("utf-8"))
         return payload if isinstance(payload, dict) else None
     except (OSError, UnicodeError, ValueError):
         return None
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        if directory_fd is not None:
+            os.close(directory_fd)
 
 
 def _jit_state() -> dict:
@@ -56,7 +96,7 @@ def _jit_state() -> dict:
     base_file = base_data / "ldw-jit/base/debian-13-genericcloud-amd64.qcow2"
     # Fail closed on links in critical state paths; do not traverse owned run content.
     try:
-        if any(x.is_symlink() for x in (state_root, runs, state_file, base_file)):
+        if any(_has_symlink_component(x) for x in (state_root, runs, state_file, base_file)):
             return {"clean": False}
         record = _safe_json_file(state_file)
         if record is None or record.get("schema") != 1 or record.get("marker") != MARKER:
@@ -100,7 +140,7 @@ def sample() -> dict:
         except ValueError:
             pass
     health = ts.get("Health")
-    health_ok = health in (None, [], {}) if ts else False
+    health_ok = isinstance(health, list) and len(health) == 0 if ts else False
     qemu_absent = _qemu_absent()
     return {
         "tailscaled_active": _systemctl("is-active", "tailscaled"),
@@ -126,7 +166,7 @@ def classify(samples: list[dict]) -> dict:
         "process_visibility": "UNVERIFIED",
         "ci_dispatch_authorized": False,
     }
-    if len(samples) < DEFAULT_SAMPLES or any(not isinstance(s, dict) for s in samples):
+    if not DEFAULT_SAMPLES <= len(samples) <= 6 or any(not isinstance(s, dict) for s in samples):
         result["reasons"] = ["INSUFFICIENT_SAMPLES"]
         return result
     if any(not (s.get("jit_clean") is True and s.get("qemu_absent") is True)
@@ -161,12 +201,25 @@ def main() -> int:
     if args.samples < DEFAULT_SAMPLES or args.samples > 6 or not (0.0 <= args.interval_seconds <= 5.0):
         parser.error("samples must be 3..6 and interval 0..5 seconds")
     records = []
-    for i in range(args.samples):
-        records.append(sample())
-        if i + 1 < args.samples:
-            time.sleep(args.interval_seconds)
-    print(json.dumps(classify(records), sort_keys=True, separators=(",", ":")))
-    return 0
+    try:
+        for i in range(args.samples):
+            records.append(sample())
+            if i + 1 < args.samples:
+                time.sleep(args.interval_seconds)
+        result = classify(records)
+    except (Exception, KeyboardInterrupt):
+        # Never print raw subprocess, path, tailnet or exception data.
+        result = {
+            "classification": "HOLD",
+            "reasons": ["SAMPLE_FAILED"],
+            "sample_count": len(records),
+            "peer_side_corrob": "UNVERIFIED",
+            "process_visibility": "UNVERIFIED",
+            "ci_dispatch_authorized": False,
+        }
+    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    # Manual diagnostic only; even local-healthy does not authorize CI/JIT.
+    return 0 if result["classification"] == "LOCAL_SERVICES_HEALTHY_UNVERIFIED" else 1
 
 
 if __name__ == "__main__":
