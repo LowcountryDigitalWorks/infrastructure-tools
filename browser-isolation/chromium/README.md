@@ -4,6 +4,8 @@
 
 ## What it proves when hosted CI passes
 
+**Comparative, NOT a downgrade:** PR CI now repeats this exact proof on both `ubuntu-24.04` (current security-policy target) and `ubuntu-22.04` (deprecated, disposable comparator). `fail-fast: false` gathers both results; **both strict sandbox jobs must pass**, so an older OS with more permissive AppArmor cannot silently replace a failure on the current OS. This matrix does not install or modify a host AppArmor profile, kernel sysctl, Docker daemon or owner hardware. GitHub plans to retire the 22.04 runner in April 2027; do not make it a product runtime dependency. A comparative PASS alone does not certify the browser sandbox.
+
 - Runs **real full Chromium (Playwright `channel: 'chromium'` new-headless mode)**, not a headless-shell route mock, inside Docker `--network=none` with immutable image-ID admission, non-root user, read-only rootfs, no mount/host profile/Docker socket, no external ports, no host IPC, no capabilities and bounded resources.
 - Browser uses an embedded `127.0.0.1` standard-library HTTP fixture. Positive proof must navigate, fill, click, read DOM and generate screenshot digest with an actual browser.
 - The same browser attempts `navigator.sendBeacon`, link `ping`, `fetch(keepalive)`, WebSocket, image resource and Service Worker fetch to a synthetic private **host-side** listener. It also tries a 302 redirect off-guest. A direct Node TCP attempt inside the same guest is a baseline; failed host TCP is mandatory.
