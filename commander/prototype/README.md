@@ -9,18 +9,19 @@ The finished owner product remains a first-party Desktop Commander replacement w
 ## Proofed mechanisms
 
 - Trusted local issuer applies fixed operator, exact host, privilege and duration owner policy. This issuer is not an HTTP endpoint or model-approvable action.
-- A short-lived grant is HMAC SHA-256 signed canonical JSON binding host, operator, scope, policy, session UUID, issuer, command budget, revocation epoch and validity.
+- A short-lived grant is signed with Ed25519 over canonical JSON binding host, operator, scope, policy, session UUID, issuer, command budget, revocation epoch and validity. Only the trusted issuer has the private key; the synthetic host agent holds the verifier's public key only.
 - The synthetic agent rechecks signature, target/actor identity and policy, and refuses occupied hosts, stale grants and invalid identity.
 - The ONLY operation is an in-memory bounded uppercase CANARY_ECHO. It does not start a process, read/write a file, elevate privileges or contact a host.
 - Command IDs are idempotent only for identical inputs; changes conflict. Three distinct synthetic commands per grant; expiry and revoke fail closed.
 
 ## Test
 
-From repo root, Python 3.11+ stdlib:
+From repo root, Python 3.11+ and pinned cryptography==46.0.4 dependency (for Ed25519 signatures):
 
+    python3 -m pip install -r commander/prototype/requirements.txt
     python3 -m unittest discover -s commander/prototype -p test_session.py -v
 
-No installed packages, credentials, network listener, OS process/privilege changes, provider API, GitHub runtime transport or Desktop Commander required.
+Only the pinned cryptography dependency is required; no live keys, credentials, network listener, OS process/privilege changes, provider API, GitHub runtime transport or Desktop Commander required. Test signing keys are disposable synthetic fixtures and are not security credentials.
 
 ## Next gates
 
