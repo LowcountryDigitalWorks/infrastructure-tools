@@ -114,17 +114,17 @@ class SyntheticAgent:
             raw, sig = token.split(".")
             payload = unb64(raw)
             provided = unb64(sig)
-            expected = hmac.digest(self._secret, payload, hashlib.sha256)
-            if not hmac.compare_digest(expected, provided):
-                raise SessionRefused("INVALID_SIGNATURE")
             result = json.loads(payload)
             if not isinstance(result, dict) or set(result) != {
                 "issuer", "policy", "operator", "host", "privilege",
                 "session_id", "issued", "expires", "epoch", "max_commands"
             }:
                 raise ValueError()
-        except (ValueError, json.JSONDecodeError):
+        except (ValueError, TypeError):
             raise SessionRefused("INVALID_GRANT") from None
+        expected = hmac.digest(self._secret, payload, hashlib.sha256)
+        if not hmac.compare_digest(expected, provided):
+            raise SessionRefused("INVALID_SIGNATURE")
         return result
 
     def _check(self, g: dict, operator: str) -> str:
@@ -154,6 +154,9 @@ class SyntheticAgent:
             sid = self._check(grant, operator)
             if sid in self._revoked:
                 raise SessionRefused("REVOKED_SESSION")
+            for old_sid, old_state in list(self._active.items()):
+                if old_state["grant"]["expires"] <= int(self._clock()):
+                    self._active.pop(old_sid, None)
             if sid not in self._active and self._active:
                 raise SessionRefused("HOST_BUSY")
             if sid not in self._active:
