@@ -183,7 +183,10 @@ class JournalBoundSyntheticAgent(SyntheticAgent):
                 self._host_journal.reserve(sid, token)
             except HostJournalError:
                 raise SessionRefused("HOST_JOURNAL_UNAVAILABLE") from None
-            return super().open(token, operator)
+            result = super().open(token, operator)
+            # Retained only inside this isolated test process, never emitted.
+            self._active[sid]["token"] = token
+            return result
 
     def revoke(self, session_id: str) -> dict:
         with self._lock:
