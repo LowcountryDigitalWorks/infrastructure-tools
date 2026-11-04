@@ -152,5 +152,16 @@ main().catch(err=>{
   const known = new Set(["INVALID_ARGS","INVALID_TARGET","LOCAL_BROWSER_NAVIGATION",
     "LOCAL_INTERACTION","SCREENSHOT","BROWSER_VECTOR_NOT_INVOKED",
     "SERVICE_WORKER_NOT_INVOKED","OFF_GUEST_REDIRECT_WAS_ALLOWED","DIRECT_TCP_REACHED_HOST"]);
-  fail(known.has(err.message)?err.message:"GUEST_" + phase + "_ERROR");
+  let reason = known.has(err.message) ? err.message : "GUEST_" + phase + "_ERROR";
+  if (phase === "BROWSER_LAUNCH" && !known.has(err.message)) {
+    const raw = String(err && err.message || "").toLowerCase();
+    // Output ONLY fixed labels; do not echo browser process logs, paths, URLs
+    // or environment/configuration details into ChatGPT/GitHub.
+    if (raw.includes("no usable sandbox")) reason = "GUEST_BROWSER_LAUNCH_NO_USABLE_SANDBOX";
+    else if (raw.includes("failed to move to new namespace")) reason = "GUEST_BROWSER_LAUNCH_NAMESPACE_DENIED";
+    else if (raw.includes("operation not permitted")) reason = "GUEST_BROWSER_LAUNCH_OPERATION_DENIED";
+    else if (raw.includes("error while loading shared libraries")) reason = "GUEST_BROWSER_LAUNCH_SHARED_LIBRARY";
+    else if (raw.includes("target page, context or browser has been closed")) reason = "GUEST_BROWSER_LAUNCH_PROCESS_EXITED";
+  }
+  fail(reason);
 }).finally(()=>clearTimeout(timer));
