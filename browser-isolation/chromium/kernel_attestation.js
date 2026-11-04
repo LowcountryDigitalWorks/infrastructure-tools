@@ -61,7 +61,7 @@ function inspectRendererKernel() {
     const self = snapshot(proc, "self");
     if (!self.status || !self.ns) return "KERNEL_STATUS_UNAVAILABLE";
     const snapshotSelf = { ...self.status, ns:self.ns };
-    const pids = fs.readdirSync(proc).filter(name => /^\\d{1,7}$/.test(name));
+    const pids = fs.readdirSync(proc).filter(name => /^\d{1,7}$/.test(name));
     if (pids.length > 1024) return "KERNEL_STATUS_UNAVAILABLE";
     const renderers = [];
     for (const pid of pids) {
@@ -71,7 +71,7 @@ function inspectRendererKernel() {
         const exe = fs.readlinkSync(proc + "/" + pid + "/exe");
         if (!exe.endsWith("/chrome")) continue;
         const argv = fs.readFileSync(proc + "/" + pid + "/cmdline", "utf8");
-        if (!argv.split("\\u0000").includes("--type=renderer")) continue;
+        if (!argv.split(String.fromCharCode(0)).includes("--type=renderer")) continue;
         renderers.push(snapshot(proc,pid));
       } catch (e) {
         if (e && (e.code==="ENOENT" || e.code==="ESRCH")) continue;
