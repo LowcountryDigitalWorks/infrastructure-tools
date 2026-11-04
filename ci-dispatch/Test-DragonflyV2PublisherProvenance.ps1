@@ -86,11 +86,19 @@ function Assert-LdwV2ProtectedStaging {
         [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
         [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
         [Security.AccessControl.FileSystemRights]::TakeOwnership
-    $write = $replace -bor [Security.AccessControl.FileSystemRights]::Write -bor
+    $write = $replace -bor [Security.AccessControl.FileSystemRights]::FullControl -bor
+        [Security.AccessControl.FileSystemRights]::Write -bor
         [Security.AccessControl.FileSystemRights]::WriteData -bor
         [Security.AccessControl.FileSystemRights]::CreateFiles -bor
         [Security.AccessControl.FileSystemRights]::CreateDirectories
-    foreach ($target in @($Root,$Folder,$File)) {
+    # Examine the whole trusted checkout, particularly .git/config, hooks,
+    # attributes and object storage, before executing a single Git command.
+    # A non-admin-writable descendant can inject core.fsmonitor execution.
+    $objects = @($Root) + @(
+        Get-ChildItem -LiteralPath $Root -Recurse -Force -ErrorAction Stop |
+        ForEach-Object { $_.FullName }
+    )
+    foreach ($target in $objects) {
         $item = Get-Item -LiteralPath $target -Force -ErrorAction Stop
         if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'V2_PROVENANCE_PROTECTED_REPARSE_REFUSED' }
         $acl = Get-Acl -LiteralPath $target
@@ -98,7 +106,9 @@ function Assert-LdwV2ProtectedStaging {
             throw 'V2_PROVENANCE_PROTECTED_OWNER_UNTRUSTED'
         }
         foreach ($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
-            if ($rule.AccessControlType -eq 'Allow' -and ($rule.FileSystemRights -band $write) -and
+            if ($rule.AccessControlType -eq 'Allow' -and
+                -not ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -and
+                ($rule.FileSystemRights -band $write) -and
                 $rule.IdentityReference.Value -notin $allowed) {
                 throw 'V2_PROVENANCE_PROTECTED_WRITE_UNTRUSTED'
             }
@@ -158,6 +168,40 @@ $comparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
     [StringComparison]::Ordinal
 }
 Assert-LdwV2NoReparse $root
+$folder = Join-Path $root 'ci-dispatch'
+$file = Join-Path $folder 'DragonflyCanaryAdjunctV2Publisher.psm1'
+if ($ProtectedPublication) {
+    # Non-negotiable ordering: the entire tree is trusted BEFORE Git is
+    # invoked, not merely before the publisher module is imported.
+    Assert-LdwV2ProtectedStaging -Root $root -Folder $folder -File $file -Comparison $comparison
+    $gitConfiguration = @{
+        GIT_CONFIG_COUNT='2'
+        GIT_CONFIG_KEY_0='core.fsmonitor'
+        GIT_CONFIG_VALUE_0='false'
+        GIT_CONFIG_KEY_1='core.hooksPath'
+        GIT_CONFIG_VALUE_1='NUL'
+        GIT_OPTIONAL_LOCKS='0'
+        GIT_TERMINAL_PROMPT='0'
+    }
+    foreach ($pair in $gitConfiguration.GetEnumerator()) {
+        if ([Environment]::GetEnvironmentVariable($pair.Key) -cne $pair.Value) {
+            throw 'V2_PROVENANCE_GIT_ENVIRONMENT_UNSAFE'
+        }
+    }
+    foreach ($name in [Environment]::GetEnvironmentVariables().Keys) {
+        $textName = [string]$name
+        if ($textName -clike 'GIT_*' -and -not $gitConfiguration.ContainsKey($textName)) {
+            throw 'V2_PROVENANCE_GIT_ENVIRONMENT_UNSAFE'
+        }
+    }
+    # The accepted immutable publisher calls bare git from PATH. It must
+    # resolve to exactly the previously signature-checked fixed executable.
+    $publisherGit = (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+    if (-not [string]::Equals([IO.Path]::GetFullPath($publisherGit),
+        [IO.Path]::GetFullPath($script:GitExecutable),$comparison)) {
+        throw 'V2_PROVENANCE_PUBLISHER_GIT_UNTRUSTED'
+    }
+}
 $top = Read-LdwV2GitValue $root @('rev-parse','--show-toplevel')
 $top = [IO.Path]::GetFullPath($top).TrimEnd(
     [IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar
@@ -179,8 +223,6 @@ if ((Read-LdwV2GitValue $root @('rev-parse',('HEAD:' + $publisherRelativePath)))
 $status = @(& $script:GitExecutable -C $root status --porcelain --untracked-files=all 2>$null)
 if ($LASTEXITCODE -ne 0 -or $status.Count -gt 0) { throw 'V2_PROVENANCE_WORKTREE_DIRTY' }
 
-$folder = Join-Path $root 'ci-dispatch'
-$file = Join-Path $folder 'DragonflyCanaryAdjunctV2Publisher.psm1'
 Assert-LdwV2NoReparse $folder
 Assert-LdwV2NoReparse $file
 if ((Get-LdwV2GitBlobSha1 $file) -cne $acceptedBlob) {
@@ -190,7 +232,9 @@ if ((Get-LdwV2GitBlobSha1 $file) -cne $acceptedBlob) {
 if ($ProtectedPublication -and $Phase -ceq 'AfterImport') {
     if ($null -eq $priorGuard -or $priorGuard.OwnerPid -ne $PID -or
         $priorGuard.Stream.SafeFileHandle.IsClosed -or
-        -not [string]::Equals($priorGuard.Root,$root,$comparison)) {
+        -not [string]::Equals($priorGuard.Root,$root,$comparison) -or
+        -not [string]::Equals([IO.Path]::GetFullPath([string]$priorGuard.Stream.Name),
+            [IO.Path]::GetFullPath($file),$comparison)) {
         throw 'V2_PROVENANCE_PROTECTED_GUARD_MISSING'
     }
 }
@@ -244,7 +288,9 @@ if (-not $ProtectedPublication) {
     # even if malicious bytes were restored before this second disk hash check.
     throw 'V2_PROVENANCE_LOADED_CODE_UNVERIFIED'
 }
-if ($null -eq $priorGuard -or $priorGuard.Stream.SafeFileHandle.IsClosed) {
+if ($null -eq $priorGuard -or $priorGuard.Stream.SafeFileHandle.IsClosed -or
+    -not [string]::Equals([IO.Path]::GetFullPath([string]$priorGuard.Stream.Name),
+        [IO.Path]::GetFullPath($file),$comparison)) {
     throw 'V2_PROVENANCE_PROTECTED_GUARD_MISSING'
 }
 'DRAGONFLY_V2_PUBLISHER_PROVENANCE_AFTER_IMPORT=PASS_PROTECTED'
