@@ -1,9 +1,12 @@
 """Static contract only. Hosted Docker+Chromium is the actual network proof."""
 import unittest
+import contextlib
+import io
 from unittest.mock import patch
 import subprocess
 from host_proof import (command, verify_guest, verified_seccomp_path,
-    BoundaryError, VECTORS, guarded_container_cleanup, run_bound_guest)
+    BoundaryError, VECTORS, guarded_container_cleanup, run_bound_guest,
+    host_policy_readback)
 
 
 class RealBrowserGuestGateTests(unittest.TestCase):
@@ -49,6 +52,25 @@ class RealBrowserGuestGateTests(unittest.TestCase):
         verify_guest(synthetic, 0, True)
         with self.assertRaises(BoundaryError):
             verify_guest(synthetic, 0, False)
+
+    def test_host_security_readback_only_fixed_statuses(self):
+        sink = io.StringIO()
+        with patch("host_proof.pathlib.Path.read_text",
+                   side_effect=["Y", "1", "0"]):
+            with contextlib.redirect_stdout(sink):
+                host_policy_readback()
+        value = sink.getvalue()
+        self.assertIn("HOST_APPARMOR_MODULE=ENABLED", value)
+        self.assertIn("HOST_APPARMOR_RESTRICT_UNPRIV_USERNS=ENABLED", value)
+        self.assertIn("HOST_UNPRIV_USERNS_CLONE=DISABLED", value)
+        self.assertNotIn("/proc/", value)
+        unknown = io.StringIO()
+        with patch("host_proof.pathlib.Path.read_text",
+                   side_effect=OSError("secret hidden path")):
+            with contextlib.redirect_stdout(unknown):
+                host_policy_readback()
+        self.assertEqual(unknown.getvalue().count("UNAVAILABLE"), 3)
+        self.assertNotIn("secret", unknown.getvalue())
 
     def test_named_container_and_label_are_fixed(self):
         args = command("/usr/bin/docker", self.image, "172.17.0.1",
