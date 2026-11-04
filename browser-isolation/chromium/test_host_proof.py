@@ -28,6 +28,23 @@ class RealBrowserGuestGateTests(unittest.TestCase):
             with self.subTest(port=port), self.assertRaises(BoundaryError):
                 command("/usr/bin/docker", self.image, "172.17.0.1", port)
 
+    def test_trusted_synthetic_is_explicit_not_strict_acceptance(self):
+        args = command("/usr/bin/docker", self.image, "172.17.0.1", 32001, True)
+        self.assertEqual(args[-5:], [self.image, "--probe", "172.17.0.1", "32001",
+                                     "--trusted-synthetic-only"])
+        self.assertIn("--network=none", args)
+        self.assertIn("--cap-drop=ALL", args)
+        with self.assertRaises(BoundaryError):
+            command("/usr/bin/docker", self.image, "172.17.0.1", 32001, "true")
+        synthetic = {
+            "result":"PASS", "local_chromium":"PASS", "interactions":"PASS",
+            "vectors": VECTORS, "redirect":"BLOCKED", "direct_tcp":"BLOCKED",
+            "sandbox_requested":False, "source":"TRUSTED_SYNTHETIC_NO_CHROMIUM_SANDBOX",
+        }
+        verify_guest(synthetic, 0, True)
+        with self.assertRaises(BoundaryError):
+            verify_guest(synthetic, 0, False)
+
     def test_no_start_phase_is_sanitized(self):
         for phase in ("GUEST_BROWSER_LAUNCH_ERROR", "GUEST_LOCAL_NAVIGATION_ERROR",
                       "GUEST_SERVICE_WORKER_ERROR"):
