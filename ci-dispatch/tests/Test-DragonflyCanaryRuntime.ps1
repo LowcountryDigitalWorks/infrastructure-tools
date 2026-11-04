@@ -6,6 +6,18 @@ Import-Module (Join-Path $dispatchRoot 'DragonflyCanaryRuntime.psm1') -Force
 function Assert-True { param([bool]$Condition,[string]$Message) if (-not $Condition) { throw $Message } }
 function Assert-ThrowsMessage { param([scriptblock]$Action,[string]$Expected,[string]$Message) $ok=$false; try { & $Action } catch { $ok = $_.Exception.Message -ceq $Expected }; Assert-True $ok $Message }
 
+# Gate B regression: nested -Force importing Dispatch through Runtime removed
+# Invoke-Ci10Read from the production script scope before any GitHub JIT POST.
+$productionText = [IO.File]::ReadAllText((Join-Path $dispatchRoot 'Invoke-DragonflyCanaryProduction.ps1'))
+$runtimeImport = "Import-Module (Join-Path `$PSScriptRoot 'DragonflyCanaryRuntime.psm1') -Force"
+$globalDispatchImport = "Import-Module (Join-Path `$PSScriptRoot 'Dispatch.psm1') -Global -Force"
+$runtimeIndex = $productionText.IndexOf($runtimeImport, [StringComparison]::Ordinal)
+$dispatchIndex = $productionText.IndexOf($globalDispatchImport, [StringComparison]::Ordinal)
+Assert-True ($runtimeIndex -ge 0 -and $dispatchIndex -gt $runtimeIndex) 'PRODUCTION_CI10_MODULE_ORDER_INVALID'
+Import-Module (Join-Path $dispatchRoot 'Dispatch.psm1') -Global -Force
+$ci10Read = Get-Command Invoke-Ci10Read -CommandType Function -ErrorAction SilentlyContinue
+Assert-True ($null -ne $ci10Read -and $ci10Read.ModuleName -ceq 'Dispatch') 'PRODUCTION_CI10_READ_BINDING_MISSING'
+
 $runId=123456789; $runAttempt=2; $jobId=987654321; $head='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 $labels=@('self-hosted','Linux','X64','dragonfly','jit','ldw-ephemeral','synthetic-only',('dragonfly-run-'+$runId),('dragonfly-attempt-'+$runAttempt))
 $run=[pscustomobject]@{id=$runId;run_attempt=$runAttempt;head_sha=$head;path='.github/workflows/dragonfly-jit-canary.yml';event='workflow_dispatch';status='queued';conclusion=$null;repository=[pscustomobject]@{full_name='LowcountryDigitalWorks/infrastructure-tools'};head_repository=[pscustomobject]@{full_name='LowcountryDigitalWorks/infrastructure-tools'}}

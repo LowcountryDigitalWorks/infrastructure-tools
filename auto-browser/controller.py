@@ -30,6 +30,9 @@ class SyntheticBrowser:
         self._browser = None
         self._context = None
         self._page = None
+        self._blocked_http = 0
+        self._blocked_websocket = 0
+        self._pending_websockets = []
 
     def __enter__(self):
         self._playwright = sync_playwright().start()
@@ -39,8 +42,14 @@ class SyntheticBrowser:
             if os.path.isfile("/usr/bin/chromium"):
                 browser_kwargs["executable_path"] = "/usr/bin/chromium"
             self._browser = self._playwright.chromium.launch(**browser_kwargs)
-            self._context = self._browser.new_context(accept_downloads=False)
-            self._context.route("**/*", lambda route: route.continue_() if self._is_synthetic_url(route.request.url) else route.abort())
+            # Service Workers can otherwise bypass HTTP route interception.
+            self._context = self._browser.new_context(
+                accept_downloads=False, service_workers="block",
+            )
+            self._context.route("**/*", self._route_http)
+            # HTTP interception does NOT cover WebSockets. Block every WS,
+            # including local endpoints, before any page is created.
+            self._context.route_web_socket("**/*", self._route_websocket)
             self._page = self._context.new_page()
             return self
         except BaseException:
@@ -49,12 +58,42 @@ class SyntheticBrowser:
 
     def __exit__(self, *_):
         if self._context:
+            self._drain_websockets()
+        if self._context:
             self._context.close()
         if self._browser:
             self._browser.close()
         if self._playwright:
             self._playwright.stop()
         self._page = self._context = self._browser = self._playwright = None
+
+    def _route_http(self, route) -> None:
+        if self._is_synthetic_url(route.request.url):
+            route.continue_()
+        else:
+            self._blocked_http += 1
+            route.abort()
+
+    def _route_websocket(self, route) -> None:
+        # No connect() call: the upstream WS server is NEVER contacted.
+        # Playwright sync callbacks deadlock if route.close() is called here.
+        # Defer close until the current page operation returns to the caller.
+        self._blocked_websocket += 1
+        self._pending_websockets.append(route)
+
+    def _drain_websockets(self) -> None:
+        # Called outside the sync WebSocket callback. Route.close() here
+        # genuinely closes the synthetic client socket without any upstream
+        # connection or sync-event-loop reentrancy.
+        pending, self._pending_websockets = self._pending_websockets, []
+        for route in pending:
+            route.close(code=1008)
+
+    def denied_network_counts(self) -> dict:
+        self._drain_websockets()
+        # Safe diagnostics: never emit attempted URLs or request bodies.
+        return {"http": self._blocked_http,
+                "websocket": self._blocked_websocket}
 
     def _is_synthetic_url(self, url: str) -> bool:
         try:
@@ -83,11 +122,13 @@ class SyntheticBrowser:
         if not isinstance(html, str) or not html or len(html.encode("utf-8")) > 8192:
             raise BrowserGateError("INVALID_FIXTURE")
         self._page.set_content(html, wait_until="domcontentloaded")
+        self._drain_websockets()
         return self.snapshot()
 
     def navigate(self, url: str) -> dict:
         self._local_only(url)
         self._page.goto(url, wait_until="domcontentloaded", timeout=5000)
+        self._drain_websockets()
         return self.snapshot()
 
     @staticmethod
@@ -111,6 +152,7 @@ class SyntheticBrowser:
         return self._page.locator(selector).inner_text(timeout=3000)[:2048]
 
     def snapshot(self) -> dict:
+        self._drain_websockets()
         return {"title": self._page.title()[:128], "url": self._page.url}
 
     def screenshot_digest(self) -> str:
