@@ -19,13 +19,25 @@ Run (after the inherited test dependency is installed):
 
 The existing Commander synthetic workflow runs this on Windows and Ubuntu. Tests prove normal parent+child drain, denied reuse, expiry-triggered cleanup, deliberately failed verification forcing quarantine, clock rollback refusal, and no arbitrary shell interface.
 
+## Coupled host-journal evidence (same synthetic source stack)
+
+`session_process_canary.py` links the existing signed `JournalBoundSyntheticAgent` to this real fixed-process supervisor, **without granting the agent arbitrary command or OS privilege**. The integration now demonstrates the required ordering:
+
+1. Verify the signed synthetic owner decision/session and record the host's one-use `OPEN` tombstone **before** launching the fixed child.
+2. Launch one nonprivileged parent/child fixture; Host Agent or a ChatGPT tool cannot directly choose its commands.
+3. On explicit revoke or session expiry, wait for **actual OS-backed** `DRAINED_VERIFIED` from the process supervisor.
+4. **Only then** call the host journal's synthetic verified revoke, transitioning its status to `NO_UNVERIFIED_SESSIONS`.
+5. If process exit cannot be verified, or the journal update fails, return `HOST_QUARANTINED`; the OPEN tombstone remains, and no other grant may be admitted on the same synthetic host.
+
+Additional cross-platform tests cover normal drain-before-release, expiration, forged grant refusing process spawn, deliberately ambiguous cleanup, and host-journal write failure. This is a useful proof of **cross-layer ordering**. It does *not* demonstrate OS-protected integrity of either Python process or SQLite file, durable service task tracking, or real Administrator/root containment.
+
 ## Explicitly NOT proven
 
 - No Administrator/root, protected Windows service, protected Linux cgroup, remote command or connected ChatGPT plugin.
 - **Windows Job assignment after worker process creation** is safe for this fixed worker only because it blocks on a private stdin gate before launching its child. This is not atomic admission for untrusted code. Actual arbitrary privileged executables need protected OS creation/admission and an independently reviewed service architecture.
 - A normal-user POSIX process group can be escaped by arbitrary/privileged code, and Windows Administrator/SYSTEM processes can create detached services/jobs or break out of ordinary process containment. These tests use trusted fixed code only; do not call the mechanisms non-bypassable for general administration.
 - Process group readback and Job accounting do not audit irreversible files, scheduled tasks or services. Production `DRAINED_VERIFIED` must include independent process, service, task, side-effect and host-journal readback, protected from the privileged payload.
-- No host-side state persistence or coupling to PR #219's synthetic journal in this slice; it is an independent bounded OS-process demonstration. Do not assume a passing process test releases a previously quarantined host journal.
+- The new synthetic ordering integration links PR #219's host journal to this fixed process and only releases after positive OS drain. It still does not implement a protected durable runtime ledger or a recovery path for a genuinely privileged host.
 - Windows runner's job nesting and OS policy must be validated in hosted CI. Failure to assign must fail closed, not skip Windows or fall back to uncontained process start.
 
 Future integration requires protecting session/owner consent, external egress isolation, encrypted authenticated transport, OS-specific job/cgroup helpers, trusted owner-authenticated recovery, and Host Agent read-only status only through the existing business-operations #554 owning lane. No second dashboard, restart manager or unauthorized host mutation.
