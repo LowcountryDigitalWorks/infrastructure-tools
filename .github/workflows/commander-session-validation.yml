@@ -1,0 +1,21 @@
+name: Commander session synthetic proof
+
+on:
+  pull_request:
+    paths:
+      - 'commander/prototype/**'
+      - '.github/workflows/commander-session-validation.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-session:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Run no-OS-mutation session tests
+        run: python3 -m unittest discover -s commander/prototype -p test_session.py -v
