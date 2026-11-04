@@ -53,7 +53,7 @@ class LoopbackNavigationTests(unittest.TestCase):
         cls.worker.join(timeout=2)
 
     def test_real_local_navigation_input_click_and_next_page(self):
-        with SyntheticBrowser() as browser:
+        with SyntheticBrowser(allowed_port=self.server.server_port) as browser:
             snap = browser.navigate(self.origin + "/")
             self.assertEqual(snap["title"], "LDW Local Site")
             self.assertEqual(snap["url"], self.origin + "/")
@@ -66,14 +66,20 @@ class LoopbackNavigationTests(unittest.TestCase):
             self.assertEqual(browser.text("#done"), "Local navigation complete")
 
     def test_cross_origin_redirect_is_blocked(self):
-        with SyntheticBrowser() as browser:
+        with SyntheticBrowser(allowed_port=self.server.server_port) as browser:
             # A valid local entry point must not allow an external redirect.
             # The context route refuses any non-127.0.0.1 URL before network I/O.
             with self.assertRaises(Exception):
                 browser.navigate(self.origin + "/offhost")
 
+    def test_other_loopback_service_is_not_approved(self):
+        other_port = self.server.server_port + 1 if self.server.server_port < 65535 else 1
+        with SyntheticBrowser(allowed_port=self.server.server_port) as browser:
+            with self.assertRaises(BrowserGateError):
+                browser.navigate("http://127.0.0.1:" + str(other_port) + "/")
+
     def test_nonlocal_initial_url_is_rejected(self):
-        with SyntheticBrowser() as browser:
+        with SyntheticBrowser(allowed_port=self.server.server_port) as browser:
             for url in ("https://example.com", "http://localhost:9090",
                         "http://127.0.0.2:9090", "file:///etc/passwd",
                         "http://127.0.0.1/"):
