@@ -6,6 +6,7 @@ Source-only proof, never a production browser service.
 from __future__ import annotations
 import hashlib
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -44,7 +45,8 @@ VECTORS = [
 ]
 
 
-def command(docker: str, image_id: str, gateway: str, port: int) -> list[str]:
+def command(docker: str, image_id: str, gateway: str, port: int,
+            trusted_synthetic: bool = False) -> list[str]:
     if not isinstance(image_id, str) or not IMAGE_ID.fullmatch(image_id):
         raise BoundaryError("IMAGE_NOT_PINNED")
     if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
@@ -54,9 +56,11 @@ def command(docker: str, image_id: str, gateway: str, port: int) -> list[str]:
     if not isinstance(docker, str) or not docker.startswith("/"):
         raise BoundaryError("DOCKER_PATH_NOT_PINNED")
     seccomp = verified_seccomp_path()
+    if not isinstance(trusted_synthetic, bool):
+        raise BoundaryError("MODE_INVALID")
     # Guest has no network device beyond internal loopback, no sockets/volumes,
     # no host PID/IPC, no owner profile and no model-provided Docker switches.
-    return [
+    args = [
         docker, "run", "--rm", "--pull=never", "--network=none",
         "--read-only", "--cap-drop=ALL",
         "--security-opt=no-new-privileges=true",
@@ -66,9 +70,13 @@ def command(docker: str, image_id: str, gateway: str, port: int) -> list[str]:
         "--user=10001:10001", "--tmpfs=/tmp:rw,nosuid,size=256m",
         image_id, "--probe", gateway, str(port),
     ]
+    if trusted_synthetic:
+        args.append("--trusted-synthetic-only")
+    return args
 
 
-def verify_guest(result: object, rc: int) -> None:
+def verify_guest(result: object, rc: int,
+                 trusted_synthetic: bool = False) -> None:
     # The actual browser process may refuse to start under strict userns /
     # seccomp. Display only a fixed phase classification; never raw stderr.
     if isinstance(result, dict) and set(result) == {"result", "reason"} and result["result"] == "NO_START":
@@ -93,13 +101,15 @@ def verify_guest(result: object, rc: int) -> None:
         raise BoundaryError("CHROMIUM_GUEST_NOT_PASS")
     if result["vectors"] != VECTORS or result["redirect"] != "BLOCKED" or result["direct_tcp"] != "BLOCKED":
         raise BoundaryError("CHROMIUM_VECTOR_NOT_BLOCKED")
-    if result["sandbox_requested"] is not True or result["source"] != "SYNTHETIC_GUEST_ONLY":
+    expected_source = ("TRUSTED_SYNTHETIC_NO_CHROMIUM_SANDBOX"
+                       if trusted_synthetic else "SYNTHETIC_GUEST_ONLY")
+    if result["sandbox_requested"] is not (not trusted_synthetic) or result["source"] != expected_source:
         raise BoundaryError("CHROMIUM_SCOPE_INVALID")
     if rc != 0:
         raise BoundaryError("CHROMIUM_GUEST_EXIT_NONZERO")
 
 
-def proof(image_id: str) -> None:
+def proof(image_id: str, trusted_synthetic: bool = False) -> None:
     docker = shutil.which("docker")
     if not docker:
         raise BoundaryError("DOCKER_NOT_AVAILABLE")
@@ -138,7 +148,7 @@ def proof(image_id: str) -> None:
             time.sleep(0.02)
         if count[0] != 1:
             raise BoundaryError("HOST_FIXTURE_POSITIVE_CONTROL_FAILED")
-        args = command(docker, image_id, gateway, port)
+        args = command(docker, image_id, gateway, port, trusted_synthetic)
         try:
             output = subprocess.run(args, text=True, capture_output=True,
                                     timeout=100, check=False)
@@ -155,20 +165,25 @@ def proof(image_id: str) -> None:
             # Never expose stderr or browser traces; these may contain URLs
             # and become sensitive in a future integrated source.
             raise BoundaryError("CHROMIUM_NO_STRUCTURED_RESULT") from None
-        verify_guest(parsed, output.returncode)
-        print("LDW_REAL_CHROMIUM_NETWORK_NONE=PASS")
-        print("SOURCE=SYNTHETIC_OFFLINE_GUEST_ONLY")
+        verify_guest(parsed, output.returncode, trusted_synthetic)
+        print("LDW_TRUSTED_SYNTHETIC_CHROMIUM_NETWORK_NONE=PASS" if trusted_synthetic
+              else "LDW_REAL_CHROMIUM_NETWORK_NONE=PASS")
+        print("SOURCE=TRUSTED_SYNTHETIC_NO_CHROMIUM_SANDBOX" if trusted_synthetic
+              else "SOURCE=SYNTHETIC_OFFLINE_GUEST_ONLY")
     finally:
         halt.set()
         host.close()
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 2:
+    if len(argv) not in (2, 3) or (len(argv) == 3 and argv[2] != "--trusted-synthetic-only"):
         print("NO_START: EXACT_IMAGE_ID_REQUIRED", file=sys.stderr)
         return 2
+    synthetic = len(argv) == 3
     try:
-        proof(argv[1])
+        if synthetic and os.environ.get("GITHUB_ACTIONS") != "true":
+            raise BoundaryError("TRUSTED_SYNTHETIC_DIAGNOSTIC_CI_ONLY")
+        proof(argv[1], synthetic)
     except BoundaryError as exc:
         print("NO_START: " + str(exc), file=sys.stderr)
         return 1
