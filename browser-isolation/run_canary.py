@@ -66,6 +66,19 @@ def gateway_address(docker: str) -> str:
     return str(ip)
 
 
+def validate_guest_result(result: object, exit_code: int) -> None:
+    expected = {"guest_fixture": "PASS", "host_gateway": "BLOCKED", "off_guest": "BLOCKED"}
+    if not isinstance(result, dict) or set(result) != set(expected):
+        raise BoundaryError("GUEST_RESULT_INVALID")
+    for key, expected_value in expected.items():
+        if result[key] != expected_value:
+            # Fixed, non-sensitive statuses only; never print Docker stderr,
+            # guest stdout, host IPs or page/application response content.
+            raise BoundaryError("GUEST_" + key.upper() + "_NOT_PROVEN")
+    if exit_code != 0:
+        raise BoundaryError("GUEST_EXIT_NONZERO_WITH_PASS_RESULT")
+
+
 def proof(image_id: str) -> None:
     docker = shutil.which("docker")
     if docker is None:
@@ -120,14 +133,13 @@ def proof(image_id: str) -> None:
         time.sleep(0.2)
         if count[0] != 1:
             raise BoundaryError("HOST_GATEWAY_REACHED_FROM_GUEST")
-        if run.returncode != 0:
-            raise BoundaryError("GUEST_NEGATIVE_TEST_FAILED")
         try:
             result = json.loads(run.stdout)
         except (json.JSONDecodeError, TypeError):
-            raise BoundaryError("GUEST_RESULT_INVALID") from None
-        if result != {"guest_fixture": "PASS", "host_gateway": "BLOCKED", "off_guest": "BLOCKED"}:
-            raise BoundaryError("GUEST_RESULT_NOT_PASS")
+            # No guest-emitted result indicates a Docker/OCI start or runtime
+            # problem, NOT evidence of an OS network block.
+            raise BoundaryError("GUEST_NO_STRUCTURED_RESULT") from None
+        validate_guest_result(result, run.returncode)
         print("LDW_BROWSER_NETWORK_NONE_CANARY=PASS")
         print("SCOPE=OFFLINE_SYNTHETIC_GUEST_ONLY")
     finally:
