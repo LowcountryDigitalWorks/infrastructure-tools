@@ -36,7 +36,7 @@ test("shared namespaces, missing security filter, inherited-only filter fail clo
   assert.equal(evaluate(self,[renderer(),r]),"RENDERER_PROCESS_AMBIGUOUS");
 });
 test("read-only status parser accepts kernel fields but rejects overlong text",()=>{
-  assert.deepEqual(parseStatus("Name:\\tchrome\\nSeccomp:\\t2\\nSeccomp_filters:\\t3\\nNoNewPrivs:\\t1\\n"),{
+  assert.deepEqual(parseStatus("Name:\tchrome\nSeccomp:\t2\nSeccomp_filters:\t3\nNoNewPrivs:\t1\n"),{
     seccomp:2,filters:3,noNewPrivs:1
   });
   assert.equal(parseStatus("x".repeat(20000)),null);
