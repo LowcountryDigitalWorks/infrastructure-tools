@@ -47,6 +47,21 @@ def command(docker: str, image_id: str, gateway: str, port: int) -> list[str]:
 
 
 def verify_guest(result: object, rc: int) -> None:
+    # The actual browser process may refuse to start under strict userns /
+    # seccomp. Display only a fixed phase classification; never raw stderr.
+    if isinstance(result, dict) and set(result) == {"result", "reason"} and result["result"] == "NO_START":
+        allowed = {
+            "INVALID_ARGS", "INVALID_TARGET", "LOCAL_BROWSER_NAVIGATION",
+            "LOCAL_INTERACTION", "SCREENSHOT", "BROWSER_VECTOR_NOT_INVOKED",
+            "SERVICE_WORKER_NOT_INVOKED", "OFF_GUEST_REDIRECT_WAS_ALLOWED",
+            "DIRECT_TCP_REACHED_HOST", "GUEST_WATCHDOG",
+            "GUEST_INIT_ERROR", "GUEST_BROWSER_LAUNCH_ERROR",
+            "GUEST_LOCAL_NAVIGATION_ERROR", "GUEST_LOCAL_ACTIONS_ERROR",
+            "GUEST_PAGE_VECTOR_ERROR", "GUEST_SERVICE_WORKER_ERROR",
+            "GUEST_REDIRECT_ERROR", "GUEST_DIRECT_TCP_ERROR",
+        }
+        raise BoundaryError("CHROMIUM_NO_START_" +
+                            (result["reason"] if result["reason"] in allowed else "UNCLASSIFIED")) from None
     if not isinstance(result, dict) or set(result) != {
         "result", "local_chromium", "interactions", "vectors", "redirect",
         "direct_tcp", "sandbox_requested", "source",
