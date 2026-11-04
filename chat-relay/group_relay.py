@@ -10,10 +10,9 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
-from http.server import ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-from relay import (Handler, Mailbox, RelayError, canonical_id, role_name,
+from relay import (Handler, LocalRelay, Mailbox, RelayError, canonical_id, role_name,
                    MAX_BODY, MAX_MESSAGES, TTL_SECONDS)
 
 GROUP = re.compile(r"^[a-z][a-z0-9_-]{1,47}$")
@@ -236,14 +235,14 @@ class GroupHandler(Handler):
             self._json(exc.status, {"error": exc.code})
 
 
-class GroupLocalRelay(ThreadingHTTPServer):
-    allow_reuse_address = True
+class GroupLocalRelay(LocalRelay):
+    """Group routes share the parent relay's bounded unauthenticated HTTP admission."""
 
     def __init__(self, address: tuple[str, int], mailbox: GroupMailbox):
-        if address[0] != "127.0.0.1":
-            raise ValueError("proof relay must be loopback-only")
-        self.mailbox = mailbox
-        super().__init__(address, GroupHandler)
+        super().__init__(address, mailbox)
+        # No serving occurs until after constructor returns, so the handler
+        # swap inherits the protected LocalRelay socket/thread lifecycle.
+        self.RequestHandlerClass = GroupHandler
 
 
 def main() -> None:
