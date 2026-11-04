@@ -108,7 +108,7 @@ class SyntheticSessionTests(unittest.TestCase):
     def test_public_key_agent_cannot_mint_a_forged_grant(self):
         self.assertFalse(hasattr(self.agent, "_private_key"))
         self.assertFalse(hasattr(self.agent, "_secret"))
-        attacker_key = Ed25519PrivateKey.from_private_bytes(b"\\x22" * 32)
+        attacker_key = Ed25519PrivateKey.from_private_bytes(bytes([0x22]) * 32)
         forged_issuer = SessionIssuer(attacker_key, POLICY, clock=lambda: self.now[0])
         forged = forged_issuer.issue("owner", "canary-win-01", "FULL_ADMIN", 20)
         self.assert_refused("INVALID_SIGNATURE", lambda: self.agent.open(forged, "owner"))
