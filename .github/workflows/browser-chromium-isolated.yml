@@ -30,7 +30,13 @@ jobs:
         run: |
           set -euo pipefail
           docker build --pull=false -f browser-isolation/chromium/Dockerfile -t ldw-chromium-guest-probe:local browser-isolation/chromium
-      - name: Prove actual Chromium loopback positive and off-guest negative
+      - name: Run CI-only trusted synthetic real-browser outer network diagnostic
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_id="$(docker image inspect --format '{{.Id}}' ldw-chromium-guest-probe:local)"
+          python3 browser-isolation/chromium/host_proof.py "$image_id" --trusted-synthetic-only
+      - name: Require strict sandboxed Chromium loopback and off-guest negatives
         shell: bash
         run: |
           set -euo pipefail
