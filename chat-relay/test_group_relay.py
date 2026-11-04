@@ -7,7 +7,7 @@ import time
 import unittest
 import uuid
 
-from group_relay import GroupMailbox, GroupLocalRelay, MAX_PER_SENDER, MAX_PER_GROUP
+from group_relay import GroupMailbox, GroupLocalRelay, MAX_PER_SENDER, MAX_PER_GROUP, parse_room_config
 from relay import RelayError, LocalRelay, MAX_MESSAGES, MAX_CLIENT_THREADS
 
 SECRET = b"synthetic-only-LDW-group-mailbox-test-secret-1234567890"
@@ -71,11 +71,11 @@ class GroupMailboxTests(unittest.TestCase):
 
     def test_nonmember_cannot_access_or_send(self):
         self.send()
-        self.expect("NOT_GROUP_MEMBER", lambda: self.box.group_receive("ir02", "ldw-ops"))
-        self.expect("NOT_GROUP_MEMBER", lambda: self.box.group_send("ir02", {
+        self.expect("GROUP_NOT_FOUND", lambda: self.box.group_receive("ir02", "ldw-ops"))
+        self.expect("GROUP_NOT_FOUND", lambda: self.box.group_send("ir02", {
             "message_id": uid(), "group_id": "ldw-ops", "sender": "ir02", "body": "intrusion"
         }))
-        self.expect("NOT_GROUP_MEMBER", lambda: self.box.group_acknowledge("ir02", "ldw-ops", self.id))
+        self.expect("GROUP_NOT_FOUND", lambda: self.box.group_acknowledge("ir02", "ldw-ops", self.id))
 
     def test_role_impersonation_and_sender_ack_refused(self):
         self.expect("ROLE_MISMATCH", lambda: self.send(sender="ops04"))
@@ -180,6 +180,18 @@ class GroupMailboxTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 GroupMailbox(SECRET, groups)
 
+    def test_room_config_rejects_duplicate_names(self):
+        self.assertRaises(ValueError, parse_room_config,
+            '{"ldw-ir":["gm17","ir02"],"ldw-ir":["gm17","ops04"]}')
+        parsed = parse_room_config(
+            '{"ldw-ir":["gm17","ir02"],"ldw-ops":["gm17","ops04"]}')
+        self.assertEqual(len(parsed), 2)
+
+    def test_nonmember_room_exists_and_absent_are_indistinguishable(self):
+        for group_id in ("ldw-ops", "not-a-room"):
+            self.expect("GROUP_NOT_FOUND", lambda group_id=group_id:
+                        self.box.group_receive("ir02", group_id))
+
     def test_refuse_public_binding(self):
         with self.assertRaises(ValueError):
             GroupLocalRelay(("0.0.0.0", 0), self.box)
@@ -247,7 +259,7 @@ class GroupHTTPTests(unittest.TestCase):
         status, failure = self.request("GET", "/v1/groups", "gm17", token="wrong")
         self.assertEqual((status, failure["error"]), (401, "UNAUTHORIZED"))
         status, failure = self.request("GET", "/v1/groups/receive?group_id=ldw-ops", "ir02")
-        self.assertEqual((status, failure["error"]), (403, "NOT_GROUP_MEMBER"))
+        self.assertEqual((status, failure["error"]), (404, "GROUP_NOT_FOUND"))
 
     def test_http_query_and_scope_fail_closed(self):
         status, error = self.request("GET", "/v1/groups/receive?group_id=ldw-ir&group_id=ldw-ops", "gm17")
