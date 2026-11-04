@@ -2,6 +2,9 @@ import unittest
 import uuid
 import json
 import base64
+import tempfile
+from pathlib import Path
+from approval_journal import ApprovalJournal
 
 from session import OwnerPolicy, SessionIssuer, SyntheticAgent, SessionRefused, MAX_COMMANDS
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -25,9 +28,12 @@ class SyntheticSessionTests(unittest.TestCase):
     def setUp(self):
         self.now = [1000.0]
         self.owner_signer = SyntheticOwnerDecisionSigner(OWNER_PRIVATE_KEY)
+        self.private_dir = tempfile.TemporaryDirectory(prefix='ldw-session-journal-')
+        self.addCleanup(self.private_dir.cleanup)
+        self.journal = ApprovalJournal(Path(self.private_dir.name) / 'decisions.db', initialize=True)
         self.issuer = SessionIssuer(
             TEST_PRIVATE_KEY, POLICY, clock=lambda: self.now[0],
-            owner_public_key=OWNER_PUBLIC_KEY,
+            owner_public_key=OWNER_PUBLIC_KEY, approval_journal=self.journal,
         )
         self.agent = SyntheticAgent(
             TEST_PUBLIC_KEY, POLICY, "canary-win-01",
@@ -137,7 +143,7 @@ class SyntheticSessionTests(unittest.TestCase):
         attacker_key = Ed25519PrivateKey.from_private_bytes(bytes([0x22]) * 32)
         forged_issuer = SessionIssuer(
             attacker_key, POLICY, clock=lambda: self.now[0],
-            owner_public_key=OWNER_PUBLIC_KEY,
+            owner_public_key=OWNER_PUBLIC_KEY, approval_journal=self.journal,
         )
         forged = forged_issuer.issue(
             "owner", "canary-win-01", "FULL_ADMIN", 20,
