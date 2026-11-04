@@ -6,8 +6,8 @@ NOT a deployed remote-admin agent. Model messages are not session approval.
 from __future__ import annotations
 
 import base64
-import hashlib
-import hmac
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 import json
 import time
 import uuid
@@ -58,16 +58,16 @@ class OwnerPolicy:
 
 class SessionIssuer:
     """Trusted local issuer only; not an HTTP endpoint or model-callable action."""
-    def __init__(self, secret: bytes, policy: OwnerPolicy, clock=time.time, epoch: int = 1):
-        if not isinstance(secret, bytes) or len(secret) < 32:
-            raise ValueError("trusted issuer secret too short")
+    def __init__(self, private_key: Ed25519PrivateKey, policy: OwnerPolicy, clock=time.time, epoch: int = 1):
+        if not isinstance(private_key, Ed25519PrivateKey):
+            raise ValueError("ISSUER_PRIVATE_KEY_REQUIRED")
         if policy.max_privilege not in PRIVILEGES:
             raise ValueError("INVALID_POLICY_PRIVILEGE")
         if not 1 <= policy.max_ttl_seconds <= MAX_TTL_SECONDS:
             raise ValueError("INVALID_POLICY_TTL")
         if not isinstance(epoch, int) or epoch < 1:
             raise ValueError("INVALID_EPOCH")
-        self._secret = secret
+        self._private_key = private_key
         self._policy = policy
         self._clock = clock
         self._epoch = epoch
@@ -88,17 +88,18 @@ class SessionIssuer:
             "epoch": self._epoch, "max_commands": MAX_COMMANDS,
         }
         payload = json.dumps(grant, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        signature = hmac.digest(self._secret, payload, hashlib.sha256)
+        signature = self._private_key.sign(payload)
         return b64(payload) + "." + b64(signature)
 
 
 class SyntheticAgent:
     """Disconnected proof. Operations intentionally cannot execute OS commands."""
-    def __init__(self, secret: bytes, policy: OwnerPolicy, host: str,
+    def __init__(self, public_key: Ed25519PublicKey, policy: OwnerPolicy, host: str,
                  clock=time.time, epoch: int = 1):
-        if len(secret) < 32:
-            raise ValueError("agent secret too short")
-        self._secret = secret
+        if not isinstance(public_key, Ed25519PublicKey):
+            raise ValueError("AGENT_PUBLIC_KEY_REQUIRED")
+        # The agent never holds the issuer private signing key.
+        self._public_key = public_key
         self._policy = policy
         self._host = host
         self._clock = clock
@@ -114,6 +115,13 @@ class SyntheticAgent:
             raw, sig = token.split(".")
             payload = unb64(raw)
             provided = unb64(sig)
+        except (ValueError, TypeError):
+            raise SessionRefused("INVALID_GRANT") from None
+        try:
+            self._public_key.verify(provided, payload)
+        except InvalidSignature:
+            raise SessionRefused("INVALID_SIGNATURE") from None
+        try:
             result = json.loads(payload)
             if not isinstance(result, dict) or set(result) != {
                 "issuer", "policy", "operator", "host", "privilege",
@@ -122,9 +130,6 @@ class SyntheticAgent:
                 raise ValueError()
         except (ValueError, TypeError):
             raise SessionRefused("INVALID_GRANT") from None
-        expected = hmac.digest(self._secret, payload, hashlib.sha256)
-        if not hmac.compare_digest(expected, provided):
-            raise SessionRefused("INVALID_SIGNATURE")
         return result
 
     def _check(self, g: dict, operator: str) -> str:
