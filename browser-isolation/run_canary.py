@@ -66,6 +66,27 @@ def gateway_address(docker: str) -> str:
     return str(ip)
 
 
+def classify_guest_start_failure(stderr: str, exit_code: int) -> str:
+    # Never return raw OCI stderr: may contain host paths, runtime details or
+    # eventually untrusted guest data. Emit only fixed diagnostic categories.
+    source = stderr.lower() if isinstance(stderr, str) else ""
+    reason = "UNKNOWN"
+    for marker, label in (
+        ("no such image", "IMAGE_MISSING"),
+        ("unknown flag", "DOCKER_FLAG_UNSUPPORTED"),
+        ("invalid argument", "DOCKER_ARGUMENT_INVALID"),
+        ("permission denied", "PERMISSION_REFUSED"),
+        ("exec /canary", "CANARY_EXEC_FAILED"),
+        ("no such file or directory", "MISSING_RUNTIME_PATH"),
+        ("oci runtime", "OCI_START_FAILED"),
+    ):
+        if marker in source:
+            reason = label
+            break
+    code = exit_code if isinstance(exit_code, int) and 0 <= exit_code <= 255 else "OTHER"
+    return f"GUEST_NO_STRUCTURED_RESULT_EXIT_{code}_{reason}"
+
+
 def validate_guest_result(result: object, exit_code: int) -> None:
     expected = {"guest_fixture": "PASS", "host_gateway": "BLOCKED", "off_guest": "BLOCKED"}
     if not isinstance(result, dict) or set(result) != set(expected):
@@ -136,9 +157,8 @@ def proof(image_id: str) -> None:
         try:
             result = json.loads(run.stdout)
         except (json.JSONDecodeError, TypeError):
-            # No guest-emitted result indicates a Docker/OCI start or runtime
-            # problem, NOT evidence of an OS network block.
-            raise BoundaryError("GUEST_NO_STRUCTURED_RESULT") from None
+            # No structured guest result is NOT proof of a network block.
+            raise BoundaryError(classify_guest_start_failure(run.stderr, run.returncode)) from None
         validate_guest_result(result, run.returncode)
         print("LDW_BROWSER_NETWORK_NONE_CANARY=PASS")
         print("SCOPE=OFFLINE_SYNTHETIC_GUEST_ONLY")
