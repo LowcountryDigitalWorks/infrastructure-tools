@@ -9,6 +9,7 @@ import json
 import os
 import pathlib
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -20,6 +21,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from run_canary import BoundaryError, gateway_address  # parent PR #224 source
 
 IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
+CONTAINER_ID = re.compile(r"^[0-9a-f]{64}$")
+NONCE = re.compile(r"^[0-9a-f]{24}$")
 SECCOMP_GIT_BLOB_SHA = "fddc05fb520affb145404e6f6f647ca96af8087d"
 
 
@@ -46,7 +49,7 @@ VECTORS = [
 
 
 def command(docker: str, image_id: str, gateway: str, port: int,
-            trusted_synthetic: bool = False) -> list[str]:
+            trusted_synthetic: bool = False, *, nonce: str) -> list[str]:
     if not isinstance(image_id, str) or not IMAGE_ID.fullmatch(image_id):
         raise BoundaryError("IMAGE_NOT_PINNED")
     if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
@@ -58,10 +61,15 @@ def command(docker: str, image_id: str, gateway: str, port: int,
     seccomp = verified_seccomp_path()
     if not isinstance(trusted_synthetic, bool):
         raise BoundaryError("MODE_INVALID")
+    if not isinstance(nonce, str) or not NONCE.fullmatch(nonce):
+        raise BoundaryError("PROOF_NONCE_INVALID")
     # Guest has no network device beyond internal loopback, no sockets/volumes,
     # no host PID/IPC, no owner profile and no model-provided Docker switches.
     args = [
-        docker, "run", "--rm", "--pull=never", "--network=none",
+        docker, "container", "create",
+        "--name=ldw-chromium-proof-" + nonce,
+        "--label=ldw.proof.nonce=" + nonce,
+        "--pull=never", "--network=none",
         "--read-only", "--cap-drop=ALL",
         "--security-opt=no-new-privileges=true",
         "--security-opt=seccomp=" + seccomp,
@@ -114,6 +122,91 @@ def verify_guest(result: object, rc: int,
         raise BoundaryError("CHROMIUM_GUEST_EXIT_NONZERO")
 
 
+def inspect_container(docker: str, name: str) -> tuple[str, str, str] | None:
+    """Inspect only the exact randomly named guest; fail if daemon is unhealthy."""
+    try:
+        read = subprocess.run(
+            [docker, "container", "inspect", "--format",
+             '{{.Id}}|{{.Image}}|{{index .Config.Labels "ldw.proof.nonce"}}',
+             name], capture_output=True, text=True, timeout=8, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise BoundaryError("PROOF_DOCKER_INSPECT_AMBIGUOUS") from None
+    if read.returncode == 0:
+        parts = read.stdout.strip().split("|")
+        if (len(parts) != 3 or not CONTAINER_ID.fullmatch(parts[0])
+                or not IMAGE_ID.fullmatch(parts[1])
+                or not NONCE.fullmatch(parts[2])):
+            raise BoundaryError("PROOF_CONTAINER_IDENTITY_INVALID")
+        return parts[0], parts[1], parts[2]
+    # Nonzero inspect is NOT automatically equivalent to absent. Verify the
+    # Docker daemon can still answer a separate read-only health command.
+    try:
+        ping = subprocess.run([docker, "info", "--format", "{{.ID}}"],
+                              capture_output=True, text=True, timeout=8)
+    except (OSError, subprocess.TimeoutExpired):
+        raise BoundaryError("PROOF_DOCKER_HEALTH_AMBIGUOUS") from None
+    if ping.returncode != 0:
+        raise BoundaryError("PROOF_DOCKER_HEALTH_AMBIGUOUS")
+    return None
+
+
+def guarded_container_cleanup(docker: str, name: str, nonce: str,
+                              image_id: str) -> None:
+    """Remove only the exact labeled guest created for this proof."""
+    state = inspect_container(docker, name)
+    if state is not None:
+        _id, inspected_image, inspected_nonce = state
+        if inspected_image != image_id or inspected_nonce != nonce:
+            raise BoundaryError("PROOF_CONTAINER_PROVENANCE_MISMATCH")
+        try:
+            result = subprocess.run(
+                [docker, "container", "rm", "--force", name],
+                capture_output=True, text=True, timeout=20, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise BoundaryError("PROOF_CONTAINER_CLEANUP_AMBIGUOUS") from None
+        if result.returncode != 0:
+            raise BoundaryError("PROOF_CONTAINER_CLEANUP_FAILED")
+    if inspect_container(docker, name) is not None:
+        raise BoundaryError("PROOF_CONTAINER_RESIDUE")
+    # Host runner's Docker daemon answered both readbacks. Do not silently
+    # treat a failed rm or opaque daemon state as successful cleanup.
+
+
+def run_bound_guest(docker: str, image_id: str, gateway: str, port: int,
+                    trusted_synthetic: bool) -> subprocess.CompletedProcess:
+    """Create, verify, attach and deterministically tear down one named guest."""
+    nonce = secrets.token_hex(12)
+    name = "ldw-chromium-proof-" + nonce
+    args = command(docker, image_id, gateway, port, trusted_synthetic,
+                   nonce=nonce)
+    if inspect_container(docker, name) is not None:
+        raise BoundaryError("PROOF_CONTAINER_NAME_COLLISION")
+    try:
+        try:
+            made = subprocess.run(args, capture_output=True, text=True,
+                                  timeout=20, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            raise BoundaryError("PROOF_CONTAINER_CREATE_AMBIGUOUS") from None
+        if made.returncode != 0 or not CONTAINER_ID.fullmatch(made.stdout.strip()):
+            raise BoundaryError("PROOF_CONTAINER_CREATE_FAILED")
+        state = inspect_container(docker, name)
+        if state != (made.stdout.strip(), image_id, nonce):
+            raise BoundaryError("PROOF_CONTAINER_PROVENANCE_MISMATCH")
+        try:
+            return subprocess.run(
+                [docker, "container", "start", "--attach", name],
+                capture_output=True, text=True, timeout=100, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise BoundaryError("CHROMIUM_GUEST_START_OR_TIMEOUT") from None
+    finally:
+        # Even if the CLI crashes/exits ambiguously, never abandon a
+        # long-running Chromium container to continue after this return.
+        guarded_container_cleanup(docker, name, nonce, image_id)
+
+
 def proof(image_id: str, trusted_synthetic: bool = False) -> None:
     docker = shutil.which("docker")
     if not docker:
@@ -153,12 +246,8 @@ def proof(image_id: str, trusted_synthetic: bool = False) -> None:
             time.sleep(0.02)
         if count[0] != 1:
             raise BoundaryError("HOST_FIXTURE_POSITIVE_CONTROL_FAILED")
-        args = command(docker, image_id, gateway, port, trusted_synthetic)
-        try:
-            output = subprocess.run(args, text=True, capture_output=True,
-                                    timeout=100, check=False)
-        except (OSError, subprocess.TimeoutExpired):
-            raise BoundaryError("CHROMIUM_GUEST_START_OR_TIMEOUT") from None
+        output = run_bound_guest(docker, image_id, gateway, port,
+                                 trusted_synthetic)
         # Allow async browser network effects and late descendant exits to be
         # visible before readback. Any host connect is a test failure.
         time.sleep(0.5)
@@ -171,6 +260,7 @@ def proof(image_id: str, trusted_synthetic: bool = False) -> None:
             # and become sensitive in a future integrated source.
             raise BoundaryError("CHROMIUM_NO_STRUCTURED_RESULT") from None
         verify_guest(parsed, output.returncode, trusted_synthetic)
+        print("LDW_BROWSER_CONTAINER_CLEANUP_VERIFIED=PASS")
         print("LDW_TRUSTED_SYNTHETIC_CHROMIUM_NETWORK_NONE=PASS" if trusted_synthetic
               else "LDW_REAL_CHROMIUM_NETWORK_NONE=PASS")
         print("SOURCE=TRUSTED_SYNTHETIC_NO_CHROMIUM_SANDBOX" if trusted_synthetic
