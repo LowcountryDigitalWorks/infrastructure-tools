@@ -32,6 +32,7 @@ class SyntheticBrowser:
         self._page = None
         self._blocked_http = 0
         self._blocked_websocket = 0
+        self._pending_websockets = []
 
     def __enter__(self):
         self._playwright = sync_playwright().start()
@@ -57,6 +58,8 @@ class SyntheticBrowser:
 
     def __exit__(self, *_):
         if self._context:
+            self._drain_websockets()
+        if self._context:
             self._context.close()
         if self._browser:
             self._browser.close()
@@ -72,11 +75,22 @@ class SyntheticBrowser:
             route.abort()
 
     def _route_websocket(self, route) -> None:
-        # No server connection is made; even localhost WS is prohibited in V0.
+        # No connect() call: the upstream WS server is NEVER contacted.
+        # Playwright sync callbacks deadlock if route.close() is called here.
+        # Defer close until the current page operation returns to the caller.
         self._blocked_websocket += 1
-        route.close(code=1008)
+        self._pending_websockets.append(route)
+
+    def _drain_websockets(self) -> None:
+        # Called outside the sync WebSocket callback. Route.close() here
+        # genuinely closes the synthetic client socket without any upstream
+        # connection or sync-event-loop reentrancy.
+        pending, self._pending_websockets = self._pending_websockets, []
+        for route in pending:
+            route.close(code=1008)
 
     def denied_network_counts(self) -> dict:
+        self._drain_websockets()
         # Safe diagnostics: never emit attempted URLs or request bodies.
         return {"http": self._blocked_http,
                 "websocket": self._blocked_websocket}
@@ -108,11 +122,13 @@ class SyntheticBrowser:
         if not isinstance(html, str) or not html or len(html.encode("utf-8")) > 8192:
             raise BrowserGateError("INVALID_FIXTURE")
         self._page.set_content(html, wait_until="domcontentloaded")
+        self._drain_websockets()
         return self.snapshot()
 
     def navigate(self, url: str) -> dict:
         self._local_only(url)
         self._page.goto(url, wait_until="domcontentloaded", timeout=5000)
+        self._drain_websockets()
         return self.snapshot()
 
     @staticmethod
@@ -136,6 +152,7 @@ class SyntheticBrowser:
         return self._page.locator(selector).inner_text(timeout=3000)[:2048]
 
     def snapshot(self) -> dict:
+        self._drain_websockets()
         return {"title": self._page.title()[:128], "url": self._page.url}
 
     def screenshot_digest(self) -> str:
