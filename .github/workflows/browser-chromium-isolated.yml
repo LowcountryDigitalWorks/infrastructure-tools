@@ -30,6 +30,12 @@ jobs:
         run: |
           set -euo pipefail
           docker build --pull=false -f browser-isolation/chromium/Dockerfile -t ldw-chromium-guest-probe:local browser-isolation/chromium
+      - name: Check unprivileged guest user namespace without changing host policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_id="$(docker image inspect --format '{{.Id}}' ldw-chromium-guest-probe:local)"
+          python3 browser-isolation/chromium/host_proof.py "$image_id" --userns-check
       - name: Run CI-only trusted synthetic real-browser outer network diagnostic
         shell: bash
         run: |
