@@ -54,6 +54,7 @@ class RealBrowserGuestGateTests(unittest.TestCase):
         args = command("/usr/bin/docker", self.image, "172.17.0.1",
                        32001, nonce=self.nonce)
         self.assertEqual(args[:3], ["/usr/bin/docker", "container", "create"])
+        self.assertIn("--init", args)
         self.assertIn("--name=" + self.name, args)
         self.assertIn("--label=ldw.proof.nonce=" + self.nonce, args)
         self.assertNotIn("--rm", args)
