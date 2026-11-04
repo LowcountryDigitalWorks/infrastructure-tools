@@ -60,6 +60,16 @@ jobs:
           set -euo pipefail
           image_id="$(docker image inspect --format '{{.Id}}' ldw-chromium-guest-probe:local)"
           python3 browser-isolation/chromium/host_proof.py "$image_id" --trusted-synthetic-only
+      - name: Diagnostic only - strict Chromium with exactly one chroot seccomp difference
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_id="$(docker image inspect --format '{{.Id}}' ldw-chromium-guest-probe:local)"
+          if python3 browser-isolation/chromium/host_proof.py "$image_id" --strict-chroot-diagnostic; then
+            echo "LDW_CHROOT_VARIANT=PASS_DIAGNOSTIC_ONLY_NOT_ACCEPTED"
+          else
+            echo "LDW_CHROOT_VARIANT=NO_START_DIAGNOSTIC_ONLY_NOT_ACCEPTED"
+          fi
       - name: Require strict sandboxed Chromium loopback and off-guest negatives
         shell: bash
         run: |
