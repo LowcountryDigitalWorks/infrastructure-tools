@@ -6,7 +6,8 @@ from unittest.mock import patch
 import subprocess
 from host_proof import (command, verify_guest, verified_seccomp_path,
     BoundaryError, VECTORS, guarded_container_cleanup, run_bound_guest,
-    host_policy_readback, clone3_invalid_argument_precheck)
+    host_policy_readback, clone3_invalid_argument_precheck,
+    clone_newuser_precheck)
 
 
 class RealBrowserGuestGateTests(unittest.TestCase):
@@ -99,6 +100,36 @@ class RealBrowserGuestGateTests(unittest.TestCase):
                         clone3_invalid_argument_precheck(self.image)
         self.assertIn("GUEST_CLONE3_NULL_PROBE=UNAVAILABLE", sink.getvalue())
         self.assertNotIn("secret", sink.getvalue())
+
+    def test_clone_newuser_matches_chrome_flag_and_redacts_outputs(self):
+        result = subprocess.CompletedProcess([], 0, stdout="ALLOWED\n",
+                                             stderr="private user host detail")
+        sink = io.StringIO()
+        with patch("host_proof.shutil.which", return_value="/usr/bin/docker"), \
+             patch("host_proof.verified_seccomp_path", return_value="/tmp/synthetic"), \
+             patch("host_proof.subprocess.run", return_value=result) as runner:
+            with contextlib.redirect_stdout(sink):
+                clone_newuser_precheck(self.image)
+        argv = runner.call_args.args[0]
+        self.assertIn("--network=none", argv)
+        self.assertIn("--cap-drop=ALL", argv)
+        self.assertIn("--security-opt=no-new-privileges=true", argv)
+        self.assertIn("--user=10001:10001", argv)
+        self.assertIn("--entrypoint=/usr/bin/python3", argv)
+        self.assertNotIn("--privileged", argv)
+        self.assertNotIn("--network=host", argv)
+        self.assertIn("0x10000000 | signal.SIGCHLD", argv[-1])
+        self.assertIn("GUEST_CLONE_NEWUSER_PROBE=ALLOWED", sink.getvalue())
+        self.assertNotIn("private", sink.getvalue())
+        raw = subprocess.CompletedProcess([], 0, stdout="private credentials")
+        sink = io.StringIO()
+        with patch("host_proof.shutil.which", return_value="/usr/bin/docker"), \
+             patch("host_proof.verified_seccomp_path", return_value="/tmp/synthetic"), \
+             patch("host_proof.subprocess.run", return_value=raw):
+            with contextlib.redirect_stdout(sink):
+                clone_newuser_precheck(self.image)
+        self.assertIn("GUEST_CLONE_NEWUSER_PROBE=UNAVAILABLE", sink.getvalue())
+        self.assertNotIn("credentials", sink.getvalue())
 
     def test_named_container_and_label_are_fixed(self):
         args = command("/usr/bin/docker", self.image, "172.17.0.1",
