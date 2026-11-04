@@ -152,7 +152,7 @@ def _default_run(args: list[str], timeout: int) -> subprocess.CompletedProcess:
 
 
 def parse_systemd(result: subprocess.CompletedProcess) -> tuple[Observed, str]:
-    out = result.stdout[:256].decode("utf-8", errors="replace").strip().lower()
+    out = (result.stdout or b"")[:256].decode("utf-8", errors="replace").strip()
     if result.returncode == 0 and out == "active":
         return Observed.RUNNING, "SYSTEMD_ACTIVE"
     if result.returncode == 3 and out in ("inactive", "failed", "deactivating"):
