@@ -17,7 +17,15 @@ class BrowserGateError(ValueError):
 
 
 class SyntheticBrowser:
-    def __init__(self):
+    def __init__(self, allowed_port: int | None = None):
+        # The model must never select this port through a browser tool call.
+        # It is fixed by trusted local test-fixture bootstrap only.
+        if allowed_port is not None and (
+            isinstance(allowed_port, bool) or not isinstance(allowed_port, int)
+            or not 1 <= allowed_port <= 65535
+        ):
+            raise BrowserGateError("INVALID_ALLOWED_PORT")
+        self._allowed_port = allowed_port
         self._playwright = None
         self._browser = None
         self._context = None
@@ -48,21 +56,25 @@ class SyntheticBrowser:
             self._playwright.stop()
         self._page = self._context = self._browser = self._playwright = None
 
-    @staticmethod
-    def _is_synthetic_url(url: str) -> bool:
+    def _is_synthetic_url(self, url: str) -> bool:
         try:
-            SyntheticBrowser._local_only(url)
+            self._local_only(url)
             return True
         except (BrowserGateError, ValueError):
             return False
 
-    @staticmethod
-    def _local_only(url: str) -> None:
+    def _local_only(self, url: str) -> None:
         parsed = urlsplit(url)
         if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or parsed.username or parsed.password:
             raise BrowserGateError("SYNTHETIC_LOCAL_ONLY")
-        if not parsed.port or not 1 <= parsed.port <= 65535:
+        try:
+            port = parsed.port
+        except ValueError:
+            raise BrowserGateError("INVALID_LOCAL_PORT") from None
+        if not port or not 1 <= port <= 65535:
             raise BrowserGateError("INVALID_LOCAL_PORT")
+        if self._allowed_port is None or port != self._allowed_port:
+            raise BrowserGateError("UNAPPROVED_LOCAL_PORT")
         if parsed.fragment:
             raise BrowserGateError("NO_FRAGMENT")
 
