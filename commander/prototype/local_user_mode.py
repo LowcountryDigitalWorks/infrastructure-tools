@@ -100,18 +100,29 @@ class LocalUserModeProbe(SyntheticAgent):
                           "text": content.decode("utf-8", errors="replace")}
             else:
                 # NO shell=True, arbitrary argv, environment secrets or owner data.
+                # Minimal Windows Python startup requires SystemRoot. Do not
+                # forward the rest of the owner's environment/credentials.
+                process_env = {"PYTHONNOUSERSITE": "1"}
+                if os.name == "nt":
+                    system_root = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
+                    if not system_root:
+                        raise SessionRefused("PROCESS_STARTUP_ENV_MISSING")
+                    process_env["SystemRoot"] = system_root
                 try:
                     completed = subprocess.run(
                         [sys.executable, "-I", "-c", PROBE_CODE],
                         cwd=str(self._root),
-                        env={"PYTHONNOUSERSITE": "1"},
+                        env=process_env,
                         stdin=subprocess.DEVNULL,
                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                         timeout=3, check=False,
                     )
                 except subprocess.TimeoutExpired:
                     raise SessionRefused("PROCESS_TIMEOUT_AMBIGUOUS") from None
-                if completed.returncode != 0 or completed.stdout != b"LDW_LOCAL_PROCESS_PROOF\n":
+                # Windows stdout uses CRLF. Accept only this exact fixed output.
+                expected = (b"LDW_LOCAL_PROCESS_PROOF\n",
+                            b"LDW_LOCAL_PROCESS_PROOF\r\n")
+                if completed.returncode != 0 or completed.stdout not in expected:
                     raise SessionRefused("FIXED_PROCESS_FAILED")
                 result = {"exit_code": 0, "output": "LDW_LOCAL_PROCESS_PROOF"}
             response = {
