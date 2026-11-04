@@ -20,6 +20,20 @@ class BrowserTests(unittest.TestCase):
                 with self.assertRaises(BrowserGateError):
                     browser.navigate(url)
 
+    def test_navigation_port_must_be_trusted_not_selected_by_page(self):
+        with self.assertRaises(BrowserGateError):
+            SyntheticBrowser(allowed_port=0)
+        with self.assertRaises(BrowserGateError):
+            SyntheticBrowser(allowed_port=True)
+        with SyntheticBrowser(allowed_port=18080) as browser:
+            for url in (
+                "http://127.0.0.1:18081/",
+                "http://127.0.0.1:65535/",
+                "http://127.0.0.1:bogus/"
+            ):
+                with self.assertRaises(BrowserGateError):
+                    browser.navigate(url)
+
     def test_oversized_text_and_selector_refused(self):
         with SyntheticBrowser() as browser:
             browser.load_fixture(PAGE)
