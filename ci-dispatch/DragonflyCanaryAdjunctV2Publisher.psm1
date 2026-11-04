@@ -208,12 +208,24 @@ function Test-LdwDragonflyCanaryAdjunctV2Core {
         throw 'ADJUNCT_MANIFEST_INVALID'
     }
     $expectedPaths = @($script:Files.path)
-    $actualPaths = @(Get-ChildItem -LiteralPath $ReleaseRoot -Recurse -Force -File | ForEach-Object {
+    $expectedDirectories = @()
+    foreach ($sourcePath in $expectedPaths) {
+        $parent = Split-Path $sourcePath -Parent
+        while ($parent) {
+            $expectedDirectories += $parent.Replace('\','/')
+            $parent = Split-Path $parent -Parent
+        }
+    }
+    $expectedDirectories = @($expectedDirectories | Sort-Object -Unique)
+    # Check the complete tree, not just files. An unexpected empty directory
+    # or reparse-only directory is not an immutable, byte-exact release.
+    $actualPaths = @(Get-ChildItem -LiteralPath $ReleaseRoot -Recurse -Force | ForEach-Object {
+        if ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'ADJUNCT_REPARSE_PATH_REFUSED' }
         Get-LdwAdjunctRelativePath -Root $ReleaseRoot -Path $_.FullName
     })
     if (@($manifest.files).Count -ne $script:Files.Count -or
         @(Compare-Object $expectedPaths @($manifest.files.path) -CaseSensitive).Count -or
-        @(Compare-Object (@($expectedPaths) + @('manifest.json')) $actualPaths -CaseSensitive).Count) {
+        @(Compare-Object (@($expectedPaths) + @('manifest.json') + $expectedDirectories) $actualPaths -CaseSensitive).Count) {
         throw 'ADJUNCT_FILE_SET_DRIFT'
     }
     foreach ($source in $script:Files) {

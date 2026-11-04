@@ -96,6 +96,19 @@ try {
         } 'ADJUNCT_FILE_SET_DRIFT'
     } finally { Remove-Item -LiteralPath $unexpected -Force }
 
+    # An unexpected EMPTY directory must also be refused; file-only listing
+    # misses this case and could falsely validate a modified release tree.
+    $unexpectedDir = Join-Path $new.ReleaseRoot 'synthetic-unexpected-empty-directory'
+    $null = New-Item -ItemType Directory -Path $unexpectedDir
+    try {
+        Assert-ThrowsExact {
+            & $v2 {
+                param($release,$sha)
+                Test-LdwDragonflyCanaryAdjunctV2Core -ReleaseRoot $release -ManifestSha256 $sha
+            } $new.ReleaseRoot $new.ManifestSha256
+        } 'ADJUNCT_FILE_SET_DRIFT'
+    } finally { Remove-Item -LiteralPath $unexpectedDir -Recurse -Force }
+
     # The manifest must be byte-exact, even when its parsed JSON remains well-formed.
     $v2ManifestPath = Join-Path $new.ReleaseRoot 'manifest.json'
     $v2ManifestBytes = [IO.File]::ReadAllBytes($v2ManifestPath)
