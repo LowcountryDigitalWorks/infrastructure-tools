@@ -8,12 +8,14 @@ from __future__ import annotations
 import base64
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+import hashlib
 import json
 import time
 import uuid
 from dataclasses import dataclass
 from threading import RLock
 from owner_decision import OwnerDecisionRefused, verify_decision
+from approval_journal import ApprovalJournal, ApprovalJournalError
 
 PRIVILEGES = ("OBSERVE", "MAINTAIN", "FULL_ADMIN")
 MAX_TTL_SECONDS = 90
@@ -60,7 +62,8 @@ class OwnerPolicy:
 class SessionIssuer:
     """Trusted local issuer only; not an HTTP endpoint or model-callable action."""
     def __init__(self, private_key: Ed25519PrivateKey, policy: OwnerPolicy, clock=time.time,
-                 epoch: int = 1, owner_public_key: Ed25519PublicKey | None = None):
+                 epoch: int = 1, owner_public_key: Ed25519PublicKey | None = None,
+                 approval_journal: ApprovalJournal | None = None):
         if not isinstance(private_key, Ed25519PrivateKey):
             raise ValueError("ISSUER_PRIVATE_KEY_REQUIRED")
         if policy.max_privilege not in PRIVILEGES:
@@ -71,13 +74,21 @@ class SessionIssuer:
             raise ValueError("INVALID_EPOCH")
         self._private_key = private_key
         self._owner_public_key = owner_public_key
-        self._used_decision_ids: set[str] = set()
+        self._approval_journal = approval_journal
+        self._issuance_lock = RLock()
         self._policy = policy
         self._clock = clock
         self._epoch = epoch
 
     def issue(self, operator: str, host: str, privilege: str, ttl_seconds: int,
               owner_decision: str | None = None) -> str:
+        # The local lock protects concurrent calls on one issuer; SQLite
+        # BEGIN IMMEDIATE protects distinct issuers using the same journal.
+        with self._issuance_lock:
+            return self._issue_locked(operator, host, privilege, ttl_seconds, owner_decision)
+
+    def _issue_locked(self, operator: str, host: str, privilege: str,
+                      ttl_seconds: int, owner_decision: str | None) -> str:
         p = self._policy
         if operator != p.operator or host != p.host or privilege not in PRIVILEGES:
             raise SessionRefused("POLICY_REFUSED")
@@ -95,8 +106,8 @@ class SessionIssuer:
                 )
             except OwnerDecisionRefused:
                 raise SessionRefused("OWNER_AUTH_NOT_PROVEN") from None
-            if decision["decision_id"] in self._used_decision_ids:
-                raise SessionRefused("OWNER_DECISION_REPLAY")
+            if self._approval_journal is None:
+                raise SessionRefused("APPROVAL_JOURNAL_UNAVAILABLE")
         elif owner_decision is not None:
             raise SessionRefused("UNEXPECTED_OWNER_DECISION")
         grant = {
@@ -110,7 +121,16 @@ class SessionIssuer:
         signature = self._private_key.sign(payload)
         token = b64(payload) + "." + b64(signature)
         if privilege == "FULL_ADMIN":
-            self._used_decision_ids.add(decision["decision_id"])
+            try:
+                fresh = self._approval_journal.consume(
+                    decision["decision_id"], hashlib.sha256(payload).hexdigest()
+                )
+            except ApprovalJournalError:
+                # Never issue a privileged session when replay state is missing,
+                # unreadable, or ambiguously committed.
+                raise SessionRefused("APPROVAL_JOURNAL_UNAVAILABLE") from None
+            if not fresh:
+                raise SessionRefused("OWNER_DECISION_REPLAY")
         return token
 
 

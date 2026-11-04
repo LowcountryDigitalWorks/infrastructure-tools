@@ -1,6 +1,9 @@
 """Gate A1 negative tests: an LLM assertion is not a signed owner decision."""
 import unittest
 import uuid
+import tempfile
+from pathlib import Path
+from approval_journal import ApprovalJournal
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from owner_decision import SyntheticOwnerDecisionSigner, OwnerDecisionRefused, verify_decision
 from session import OwnerPolicy, SessionIssuer, SyntheticAgent, SessionRefused
@@ -15,8 +18,12 @@ class OwnerDecisionTests(unittest.TestCase):
     def setUp(self):
         self.now = [1000.0]
         self.signer = SyntheticOwnerDecisionSigner(OWNER_PRIVATE)
+        self.private_dir = tempfile.TemporaryDirectory(prefix='ldw-owner-decision-')
+        self.addCleanup(self.private_dir.cleanup)
+        self.journal = ApprovalJournal(Path(self.private_dir.name) / 'approvals.db', initialize=True)
         self.issuer = SessionIssuer(ISSUER_PRIVATE, POLICY, clock=lambda: self.now[0],
-                                    owner_public_key=OWNER_PUBLIC)
+                                    owner_public_key=OWNER_PUBLIC,
+                                    approval_journal=self.journal)
         self.agent = SyntheticAgent(ISSUER_PRIVATE.public_key(), POLICY,
                                     "canary-win-01", clock=lambda: self.now[0],
                                     owner_public_key=OWNER_PUBLIC)
