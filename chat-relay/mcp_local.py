@@ -54,7 +54,7 @@ class GroupTransportClient:
     @staticmethod
     def _validate_tool(tool: str, args: object) -> None:
         definitions = {name: (props, required) for name, _, props, required in TOOLS}
-        if tool not in definitions:
+        if not isinstance(tool, str) or tool not in definitions:
             raise BridgeError("UNKNOWN_TOOL")
         if not isinstance(args, dict):
             raise BridgeError("INVALID_ARGUMENTS")
