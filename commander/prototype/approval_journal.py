@@ -78,9 +78,15 @@ class ApprovalJournal:
         # mode=rw must never create missing state; fail closed after deletion.
         uri = self.path.as_uri() + "?mode=rw"
         db = sqlite3.connect(uri, uri=True, isolation_level=None, timeout=3.0)
-        db.execute("PRAGMA busy_timeout=3000")
-        db.execute("PRAGMA synchronous=FULL")
-        return db
+        try:
+            db.execute("PRAGMA busy_timeout=3000")
+            db.execute("PRAGMA synchronous=FULL")
+            return db
+        except BaseException:
+            # Crucial on Windows: an exception during PRAGMA on a corrupt DB
+            # must release the OS file handle before fixture cleanup/recovery.
+            db.close()
+            raise
 
     def consume(self, decision_id: str, grant_sha256: str) -> bool:
         """Atomically consume once. Returns False only on confirmed replay."""
