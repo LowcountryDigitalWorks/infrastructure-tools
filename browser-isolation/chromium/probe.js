@@ -16,17 +16,34 @@ async function inspectBrowserSandbox(context) {
   try {
     tab = await context.newPage();
     await tab.goto("chrome://sandbox/", {waitUntil:"domcontentloaded", timeout:8000});
+    // Chromium's own C++ sandbox status values are injected into the WebUI
+    // as fixed booleans. Read only known names, never raw page content.
+    const status = await tab.evaluate(() => {
+      const data = typeof loadTimeData !== "undefined" ? loadTimeData : null;
+      if (!data || typeof data.getBoolean !== "function") return null;
+      try {
+        return {userNs:data.getBoolean("userNs"), pidNs:data.getBoolean("pidNs"),
+          netNs:data.getBoolean("netNs"), seccompBpf:data.getBoolean("seccompBpf"),
+          sandboxGood:data.getBoolean("sandboxGood")};
+      } catch {return null;}
+    }).catch(() => null);
+    if (status && Object.values(status).every(v=>typeof v==="boolean")) {
+      return Object.values(status).every(v=>v===true) ?
+        "NAMESPACE_SECCOMP_ACTIVE" : "LAYER_NOT_ACTIVE";
+    }
     try { await tab.locator("#sandbox-status tr").first().waitFor({state:"attached",timeout:6000}); }
     catch {return "ROWS_NOT_FOUND";}
     const values = await tab.locator("#sandbox-status tr").evaluateAll(nodes =>
       nodes.map(n => [...n.querySelectorAll("td")].map(td => String(td.textContent||"").trim()))
     );
     const lookup = name => values.find(row => row.length === 2 &&
-      row[0].toLowerCase() === name.toLowerCase())?.[1];
+      row[0].replace(/\s+/g," ").trim().toLowerCase() === name.toLowerCase())?.[1];
     const namespace = lookup("Namespace Sandbox");
     const seccomp = lookup("Seccomp-BPF sandbox");
     const evaluation = await tab.locator("#evaluation").innerText({timeout:2000}).catch(()=>"");
-    if (!namespace || !seccomp) return "LABELS_MISSING";
+    if (!namespace && !seccomp) return "BOTH_LABELS_MISSING";
+    if (!namespace) return "NAMESPACE_LABEL_MISSING";
+    if (!seccomp) return "SECCOMP_LABEL_MISSING";
     if (namespace !== "Yes" || seccomp !== "Yes") return "LAYER_NOT_ACTIVE";
     if (!/You are adequately sandboxed\./i.test(evaluation)) return "OVERALL_NOT_VERIFIED";
     return "NAMESPACE_SECCOMP_ACTIVE";
@@ -184,7 +201,7 @@ const timer=setTimeout(()=>{fail("GUEST_WATCHDOG");process.exit(1)},55000);
 main().catch(err=>{
   const known = new Set(["INVALID_ARGS","INVALID_TARGET","LOCAL_BROWSER_NAVIGATION",
     "LOCAL_INTERACTION","SCREENSHOT","BROWSER_VECTOR_NOT_INVOKED",
-    "SERVICE_WORKER_NOT_INVOKED","OFF_GUEST_REDIRECT_WAS_ALLOWED","DIRECT_TCP_REACHED_HOST","CHROMIUM_SANDBOX_LAYER_UNVERIFIED","CHROMIUM_SANDBOX_LAYER_ROWS_NOT_FOUND","CHROMIUM_SANDBOX_LAYER_LABELS_MISSING","CHROMIUM_SANDBOX_LAYER_LAYER_NOT_ACTIVE","CHROMIUM_SANDBOX_LAYER_OVERALL_NOT_VERIFIED","CHROMIUM_SANDBOX_LAYER_PAGE_UNAVAILABLE"]);
+    "SERVICE_WORKER_NOT_INVOKED","OFF_GUEST_REDIRECT_WAS_ALLOWED","DIRECT_TCP_REACHED_HOST","CHROMIUM_SANDBOX_LAYER_UNVERIFIED","CHROMIUM_SANDBOX_LAYER_ROWS_NOT_FOUND","CHROMIUM_SANDBOX_LAYER_LABELS_MISSING","CHROMIUM_SANDBOX_LAYER_LAYER_NOT_ACTIVE","CHROMIUM_SANDBOX_LAYER_OVERALL_NOT_VERIFIED","CHROMIUM_SANDBOX_LAYER_PAGE_UNAVAILABLE","CHROMIUM_SANDBOX_LAYER_BOTH_LABELS_MISSING","CHROMIUM_SANDBOX_LAYER_NAMESPACE_LABEL_MISSING","CHROMIUM_SANDBOX_LAYER_SECCOMP_LABEL_MISSING"]);
   let reason = known.has(err.message) ? err.message : "GUEST_" + phase + "_ERROR";
   if (phase === "BROWSER_LAUNCH" && !known.has(err.message)) {
     // Parse the ACTUAL Playwright chromium.launch({channel:"chromium",
