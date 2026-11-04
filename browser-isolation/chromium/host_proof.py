@@ -259,8 +259,10 @@ def proof(image_id: str, trusted_synthetic: bool = False) -> None:
             # Never expose stderr or browser traces; these may contain URLs
             # and become sensitive in a future integrated source.
             raise BoundaryError("CHROMIUM_NO_STRUCTURED_RESULT") from None
-        verify_guest(parsed, output.returncode, trusted_synthetic)
+        # run_bound_guest returned only AFTER verified provenance and
+        # terminal Docker residue readback, including on guest failure.
         print("LDW_BROWSER_CONTAINER_CLEANUP_VERIFIED=PASS")
+        verify_guest(parsed, output.returncode, trusted_synthetic)
         print("LDW_TRUSTED_SYNTHETIC_CHROMIUM_NETWORK_NONE=PASS" if trusted_synthetic
               else "LDW_REAL_CHROMIUM_NETWORK_NONE=PASS")
         print("SOURCE=TRUSTED_SYNTHETIC_NO_CHROMIUM_SANDBOX" if trusted_synthetic
