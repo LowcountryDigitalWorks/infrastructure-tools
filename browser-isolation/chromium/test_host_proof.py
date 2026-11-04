@@ -46,7 +46,8 @@ class RealBrowserGuestGateTests(unittest.TestCase):
             verify_guest(synthetic, 0, False)
 
     def test_no_start_phase_is_sanitized(self):
-        for phase in ("GUEST_BROWSER_LAUNCH_ERROR", "GUEST_LOCAL_NAVIGATION_ERROR",
+        for phase in ("GUEST_BROWSER_LAUNCH_ERROR", "GUEST_BROWSER_LAUNCH_NO_USABLE_SANDBOX",
+                      "GUEST_BROWSER_LAUNCH_NAMESPACE_DENIED", "GUEST_LOCAL_NAVIGATION_ERROR",
                       "GUEST_SERVICE_WORKER_ERROR"):
             with self.assertRaises(BoundaryError) as caught:
                 verify_guest({"result": "NO_START", "reason": phase}, 1)
