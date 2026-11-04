@@ -79,6 +79,7 @@ def _jit_state() -> dict:
 
 
 def _qemu_absent() -> bool:
+    # Normal-user visibility is limited in Crostini; absence is NOT A4 proof.
     # Exit 1 with stdout "0" is the normal pgrep no-match result.
     try:
         result = subprocess.run(["pgrep", "-fc", "[q]emu-system"],
@@ -122,6 +123,7 @@ def classify(samples: list[dict]) -> dict:
         "reasons": [],
         "sample_count": len(samples),
         "peer_side_corrob": "UNVERIFIED",
+        "process_visibility": "UNVERIFIED",
         "ci_dispatch_authorized": False,
     }
     if len(samples) < DEFAULT_SAMPLES or any(not isinstance(s, dict) for s in samples):
@@ -146,8 +148,8 @@ def classify(samples: list[dict]) -> dict:
         result["classification"] = "DEGRADED_NETWORK"
         result["reasons"] = ["TAILSCALE_SELF_OR_HEALTH_NOT_STABLE"]
         return result
-    result["classification"] = "LOCAL_READY_PEER_UNVERIFIED"
-    result["reasons"] = ["EXTERNAL_PEER_PROOF_REQUIRED"]
+    result["classification"] = "LOCAL_SERVICES_HEALTHY_UNVERIFIED"
+    result["reasons"] = ["EXTERNAL_PEER_AND_PRIVILEGED_PROCESS_PROOF_REQUIRED"]
     return result
 
 

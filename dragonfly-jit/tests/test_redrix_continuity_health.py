@@ -35,10 +35,11 @@ def good() -> dict:
 class TestClassification(unittest.TestCase):
     def test_stable_local_ready_never_claims_remote_ready_or_authorization(self):
         result = health.classify([good() for _ in range(3)])
-        self.assertEqual(result["classification"], "LOCAL_READY_PEER_UNVERIFIED")
+        self.assertEqual(result["classification"], "LOCAL_SERVICES_HEALTHY_UNVERIFIED")
         self.assertEqual(result["peer_side_corrob"], "UNVERIFIED")
         self.assertIs(result["ci_dispatch_authorized"], False)
-        self.assertEqual(result["reasons"], ["EXTERNAL_PEER_PROOF_REQUIRED"])
+        self.assertEqual(result["process_visibility"], "UNVERIFIED")
+        self.assertEqual(result["reasons"], ["EXTERNAL_PEER_AND_PRIVILEGED_PROCESS_PROOF_REQUIRED"])
 
     def test_stale_control_map_with_running_daemon_is_degraded(self):
         rows = [good() for _ in range(3)]

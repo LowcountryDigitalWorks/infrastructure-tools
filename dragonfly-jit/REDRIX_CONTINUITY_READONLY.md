@@ -29,11 +29,11 @@ controller state JSON are echoed.
 
 ## Truthful outcomes
 
-- `LOCAL_READY_PEER_UNVERIFIED`: three local observations show the daemon
+- `LOCAL_SERVICES_HEALTHY_UNVERIFIED`: three local observations show the daemon
   active/enabled, Tailscale backend `Running` and `Self.Online=true` with
   no health warnings, SSH active/enabled, /dev/kvm accessible, QEMU absent,
   accepted existing JIT state STOPPED/AVAILABLE and zero run residue.
-  **Still no CI admission or proof that LDW01 sees the peer.**
+  **Still no CI admission, full-process visibility, or proof that LDW01 sees the peer.**
 - `DEGRADED_NETWORK`: any sample has Tailscale offline, control backend
   not Running, or warnings, even if `tailscaled.service` is active or a
   previous TSMP ping succeeded.
@@ -51,12 +51,15 @@ pre-login autorun is assumed. There is no sampling cron/timer/watchdog.
 
 ## Acceptance still separate
 
-For #139 Gate B, the trusted LDW01 dispatcher must independently verify
+For #139 Gate B, a trusted A4 process/FD visibility proof is still
+mandatory: normal-user pgrep can miss other-user processes. The trusted
+LDW01 dispatcher must independently verify
 the exact queue/run/job/runner identity and current REDRIX peer reachability
 under its accepted controls. A local health readback cannot authorize JIT
 minting, guest launch or live GitHub execution. It is intentionally hard-coded
 to output `ci_dispatch_authorized=false` and
-`peer_side_corrob=UNVERIFIED` in every branch.
+`peer_side_corrob=UNVERIFIED`, and
+`process_visibility=UNVERIFIED` in every branch.
 
 This proof does not install any systemd unit, restart tailscaled, disable
 the ChromeOS Android Tailscale node, write a credential, alter routing,
