@@ -151,12 +151,12 @@ class RealBrowserGuestGateTests(unittest.TestCase):
                                         self.nonce, self.image)
 
     def test_no_start_phase_is_sanitized(self):
-        for phase in ("GUEST_BROWSER_LAUNCH_ERROR", "GUEST_BROWSER_LAUNCH_NO_USABLE_SANDBOX",
-                      "GUEST_BROWSER_LAUNCH_NAMESPACE_DENIED",
-                      "GUEST_BROWSER_LAUNCH_DIRECT_NAMESPACE_MOVE_DENIED",
-                      "GUEST_BROWSER_LAUNCH_DIRECT_NO_USABLE_SANDBOX",
-                      "GUEST_BROWSER_LAUNCH_DIRECT_SUCCESS_PLAYWRIGHT_FAILED",
-                      "GUEST_BROWSER_LAUNCH_DIRECT_UNKNOWN",
+        for phase in ("GUEST_BROWSER_LAUNCH_ERROR",
+                      "GUEST_BROWSER_LAUNCH_ACTUAL_NO_USABLE_SANDBOX",
+                      "GUEST_BROWSER_LAUNCH_ACTUAL_NAMESPACE_DENIED",
+                      "GUEST_BROWSER_LAUNCH_ACTUAL_ZYGOTE_HOST",
+                      "GUEST_BROWSER_LAUNCH_ACTUAL_ZYGOTE",
+                      "GUEST_BROWSER_LAUNCH_ACTUAL_UNKNOWN",
                       "GUEST_LOCAL_NAVIGATION_ERROR", "GUEST_SERVICE_WORKER_ERROR"):
             with self.assertRaises(BoundaryError) as caught:
                 verify_guest({"result": "NO_START", "reason": phase}, 1)
@@ -164,6 +164,9 @@ class RealBrowserGuestGateTests(unittest.TestCase):
         with self.assertRaises(BoundaryError) as caught:
             verify_guest({"result": "NO_START", "reason": "secret /home/runner/.env"}, 1)
         self.assertEqual(str(caught.exception), "CHROMIUM_NO_START_UNCLASSIFIED")
+        with self.assertRaisesRegex(BoundaryError, "UNCLASSIFIED"):
+            verify_guest({"result":"NO_START",
+                          "reason":"GUEST_BROWSER_LAUNCH_DIRECT_ZYGOTE"},1)
 
     def test_guest_proof_must_reject_skipped_vectors(self):
         valid = {
