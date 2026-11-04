@@ -111,7 +111,8 @@ def verify_guest(result: object, rc: int,
             "GUEST_LOCAL_NAVIGATION_ERROR", "GUEST_LOCAL_ACTIONS_ERROR",
             "GUEST_PAGE_VECTOR_ERROR", "GUEST_SERVICE_WORKER_ERROR",
             "GUEST_REDIRECT_ERROR", "GUEST_DIRECT_TCP_ERROR",
-        }        raise BoundaryError("CHROMIUM_NO_START_" +
+        }
+        raise BoundaryError("CHROMIUM_NO_START_" +
                             (result["reason"] if result["reason"] in allowed else "UNCLASSIFIED")) from None
     if not isinstance(result, dict) or set(result) != {
         "result", "local_chromium", "interactions", "vectors", "redirect",
