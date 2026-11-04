@@ -51,6 +51,33 @@ class BrowserTests(unittest.TestCase):
             self.assertFalse(browser._page.evaluate("window.connected"))
             self.assertEqual(browser._context.service_workers, [])
 
+    def test_page_external_websocket_denied_by_websocket_route(self):
+        with SyntheticBrowser() as browser:
+            browser.load_fixture('''<title>External socket fixture</title><script>
+            window.connected = false;
+            const socket = new WebSocket("wss://example.invalid/test");
+            socket.addEventListener("open", () => window.connected = true);
+            </script>''')
+            for _ in range(20):
+                if browser.denied_network_counts()["websocket"]:
+                    break
+                browser._page.wait_for_timeout(50)
+            self.assertGreater(browser.denied_network_counts()["websocket"], 0)
+            self.assertFalse(browser._page.evaluate("window.connected"))
+
+    def test_page_external_http_resource_denied_by_http_route(self):
+        with SyntheticBrowser() as browser:
+            browser.load_fixture('''<title>External image fixture</title>
+            <img id="untrusted" src="https://example.invalid/resource.png">''')
+            for _ in range(20):
+                if browser.denied_network_counts()["http"]:
+                    break
+                browser._page.wait_for_timeout(50)
+            self.assertGreater(browser.denied_network_counts()["http"], 0)
+            self.assertEqual(
+                browser._page.locator("#untrusted").evaluate(
+                    "(element) => element.naturalWidth"), 0)
+
     def test_oversized_text_and_selector_refused(self):
         with SyntheticBrowser() as browser:
             browser.load_fixture(PAGE)
