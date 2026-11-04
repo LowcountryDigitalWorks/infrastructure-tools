@@ -15,6 +15,7 @@ class GuestAdmissionTests(unittest.TestCase):
         self.assertIn("--read-only", args)
         self.assertIn("--security-opt=no-new-privileges=true", args)
         self.assertIn("--user=65532:65532", args)
+        self.assertFalse(any(x.startswith("--pid=") for x in args))
         self.assertEqual(args[-4:], [self.image, "--probe", "172.17.0.1", "23456"])
         self.assertFalse(any(x.startswith("--mount") or x.startswith("--volume") for x in args))
         for unsafe in ("--privileged", "--network=host", "--ipc=host", "--pid=host", "--cap-add"):
