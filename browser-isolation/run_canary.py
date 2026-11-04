@@ -40,7 +40,9 @@ def command(docker: str, image_id: str, gateway: str, port: int) -> list[str]:
         docker, "run", "--rm", "--pull=never", "--network=none",
         "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges=true",
         "--pids-limit=32", "--memory=128m", "--cpus=0.5", "--ipc=private",
-        "--pid=private", "--user=65532:65532",
+        # Docker's default PID namespace is private. '--pid=private' is NOT
+        # a valid Docker PID mode; do not specify --pid or permit --pid=host.
+        "--user=65532:65532",
         "--tmpfs=/tmp:rw,nosuid,noexec,size=8m",
         image_id, "--probe", str(ip), str(port),
     ]
