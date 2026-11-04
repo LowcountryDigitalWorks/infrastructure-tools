@@ -7,7 +7,7 @@ import time
 import unittest
 import uuid
 
-from group_relay import GroupMailbox, GroupLocalRelay
+from group_relay import GroupMailbox, GroupLocalRelay, MAX_PER_SENDER, MAX_PER_GROUP
 from relay import RelayError, LocalRelay, MAX_MESSAGES, MAX_CLIENT_THREADS
 
 SECRET = b"synthetic-only-LDW-group-mailbox-test-secret-1234567890"
@@ -114,13 +114,63 @@ class GroupMailboxTests(unittest.TestCase):
         self.expect("INVALID_LIMIT", lambda: self.box.group_receive("gm17", "ldw-ir", 100))
         self.expect("GROUP_NOT_FOUND", lambda: self.send(group_id="unknown-room"))
 
-    def test_capacity_shared_with_direct(self):
-        for _ in range(MAX_MESSAGES):
+    def test_sender_quota_cannot_starve_unrelated_group_or_direct(self):
+        first = uid()
+        self.send(message_id=first)
+        for _ in range(MAX_PER_SENDER - 1):
             self.send(message_id=uid())
-        self.expect("MAILBOX_FULL", lambda: self.send())
-        self.expect("MAILBOX_FULL", lambda: self.box.send("gm17", {
-            "message_id": uid(), "sender": "gm17", "recipient": "ir02", "body": "direct"
+        self.expect("SENDER_QUOTA_EXCEEDED", lambda: self.send(message_id=uid()))
+        self.assertTrue(self.send(message_id=first)["duplicate"])
+        # Another sender in another room still has capacity even though
+        # gm17 reached its sender limit.
+        self.assertEqual(self.box.group_send("ops04", {
+            "message_id": uid(), "sender": "ops04",
+            "group_id": "ldw-ops", "body": "unrelated group"
+        })["state"], "GROUP_IN_MAILBOX")
+        self.assertEqual(self.box.send("ir02", {
+            "message_id": uid(), "sender": "ir02",
+            "recipient": "gm17", "body": "direct still usable"
+        })["state"], "IN_MAILBOX")
+        self.expect("SENDER_QUOTA_EXCEEDED", lambda: self.box.send("gm17", {
+            "message_id": uid(), "sender": "gm17",
+            "recipient": "ir02", "body": "quota applied across modes"
         }))
+
+    def test_direct_sender_cannot_starve_group_mailboxes(self):
+        for _ in range(MAX_PER_SENDER):
+            self.box.send("gm17", {
+                "message_id": uid(), "sender": "gm17",
+                "recipient": "ir02", "body": "bounded direct message"
+            })
+        self.expect("SENDER_QUOTA_EXCEEDED", lambda: self.send(message_id=uid()))
+        self.assertEqual(self.box.group_send("ir02", {
+            "message_id": uid(), "sender": "ir02",
+            "group_id": "ldw-ir", "body": "other member can still send"
+        })["state"], "GROUP_IN_MAILBOX")
+
+    def test_room_quota_preserves_other_room_capacity(self):
+        for sender in ("gm17", "ir02"):
+            for _ in range(MAX_PER_SENDER):
+                self.send(actor=sender, message_id=uid())
+        self.assertEqual(MAX_PER_GROUP, 2 * MAX_PER_SENDER)
+        self.expect("GROUP_QUOTA_EXCEEDED", lambda: self.send(
+            actor="ops04", message_id=uid()))
+        self.assertEqual(self.box.group_send("ops04", {
+            "message_id": uid(), "sender": "ops04",
+            "group_id": "ldw-ops", "body": "other room not starved"
+        })["state"], "GROUP_IN_MAILBOX")
+
+    def test_member_cannot_read_or_ack_other_room_message(self):
+        ir_id, ops_id = uid(), uid()
+        self.send(message_id=ir_id)
+        self.send(message_id=ops_id, group_id="ldw-ops")
+        ir_view = self.box.group_receive("ops04", "ldw-ir")["messages"]
+        ops_view = self.box.group_receive("ops04", "ldw-ops")["messages"]
+        self.assertEqual([x["message_id"] for x in ir_view], [ir_id])
+        self.assertEqual([x["message_id"] for x in ops_view], [ops_id])
+        self.expect("NOT_FOUND", lambda: self.box.group_acknowledge(
+            "ops04", "ldw-ops", ir_id))
+        self.assertEqual(len(self.box.group_receive("ops04", "ldw-ir")["messages"]), 1)
 
     def test_reject_bad_membership_config(self):
         for groups in ({"ldw-ir": ["gm17", "gm17"]},
