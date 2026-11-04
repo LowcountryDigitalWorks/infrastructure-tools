@@ -30,7 +30,7 @@ function Protect-Fixture([string]$Path) {
     Set-Acl -LiteralPath $Path -AclObject $acl
 }
 try {
-    $null=New-Item -ItemType Directory -LiteralPath $ldw
+    $null=New-Item -ItemType Directory -Path $ldw
     $started=$true
     Protect-Fixture $ldw
     & $git -c core.autocrlf=false clone --quiet --no-hardlinks $repo $stage
