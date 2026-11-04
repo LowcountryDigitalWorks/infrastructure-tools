@@ -20,6 +20,10 @@ $acceptedBlob = 'e322a071e5e6e31a909447823e737252770fafef'
 $publisherRelativePath = 'ci-dispatch/DragonflyCanaryAdjunctV2Publisher.psm1'
 $publisherModuleName = 'DragonflyCanaryAdjunctV2Publisher'
 
+if ($ProtectedPublication -and [Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+    throw 'V2_PROVENANCE_PROTECTED_WINDOWS_REQUIRED'
+}
+
 # Resolve the actual application, never a PowerShell alias/function named git.
 # Privileged publication accepts only the fixed signed Program Files Git.exe.
 $script:GitExecutable = if ($ProtectedPublication) {
