@@ -14,11 +14,15 @@ import time
 import uuid
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from threading import RLock
+import socket
+from threading import BoundedSemaphore, RLock, Timer
 from urllib.parse import parse_qs, urlsplit
 
 ROLE = re.compile(r"^[a-z][a-z0-9_-]{1,31}$")
 MAX_BODY = 8192
+MAX_ROLES = 16
+MAX_CLIENT_THREADS = 8
+MAX_CONNECTION_SECONDS = 4.0
 MAX_MESSAGES = 128
 TTL_SECONDS = 900
 
@@ -69,9 +73,17 @@ class Message:
 
 
 class Mailbox:
-    def __init__(self, master_secret: bytes, clock=time.time):
+    def __init__(self, master_secret: bytes, clock=time.time, allowed_roles: tuple[str, ...] = ()):
         if len(master_secret) < 32:
             raise ValueError("relay master secret must be at least 32 bytes")
+        if not isinstance(allowed_roles, (list, tuple)) or not 2 <= len(allowed_roles) <= MAX_ROLES:
+            raise ValueError("INVALID_ROLE_ROSTER")
+        try:
+            self._roles = frozenset(role_name(x) for x in allowed_roles)
+        except RelayError:
+            raise ValueError("INVALID_ROLE_ROSTER") from None
+        if len(self._roles) != len(allowed_roles):
+            raise ValueError("INVALID_ROLE_ROSTER")
         self._secret = master_secret
         self._clock = clock
         self._messages: dict[str, Message] = {}
@@ -80,10 +92,17 @@ class Mailbox:
     def token_for_role(self, role: str) -> str:
         """For trusted local provisioning only. Never expose as an HTTP endpoint."""
         role_name(role)
+        if role not in self._roles:
+            raise RelayError(403, "ROLE_NOT_REGISTERED")
         return hmac.new(self._secret, b"ldw-relay-v1:" + role.encode(), hashlib.sha256).hexdigest()
 
     def authenticate(self, role: str, provided: str) -> None:
-        role_name(role)
+        try:
+            role_name(role)
+        except RelayError:
+            raise RelayError(401, "UNAUTHORIZED") from None
+        if role not in self._roles:
+            raise RelayError(401, "UNAUTHORIZED")
         if not isinstance(provided, str) or not hmac.compare_digest(
             self.token_for_role(role), provided
         ):
@@ -107,6 +126,8 @@ class Mailbox:
         recipient = role_name(data["recipient"])
         if sender != actor or sender == recipient:
             raise RelayError(403, "ROLE_MISMATCH")
+        if recipient not in self._roles:
+            raise RelayError(403, "ROLE_NOT_REGISTERED")
         body = data["body"]
         if not isinstance(body, str) or not body or len(body.encode("utf-8")) > MAX_BODY:
             raise RelayError(400, "INVALID_BODY")
@@ -122,6 +143,10 @@ class Mailbox:
                 ):
                     raise RelayError(409, "MESSAGE_ID_CONFLICT")
                 return {"message_id": msg_id, "state": "IN_MAILBOX", "duplicate": True}
+            if reply_to is not None:
+                parent = self._messages.get(reply_to)
+                if parent is None or parent.sender != recipient or parent.recipient != actor:
+                    raise RelayError(400, "INVALID_REPLY_TO")
             if len(self._messages) >= MAX_MESSAGES:
                 raise RelayError(429, "MAILBOX_FULL")
             now = self._clock()
@@ -152,12 +177,52 @@ class Mailbox:
 
 class LocalRelay(ThreadingHTTPServer):
     allow_reuse_address = True
+    request_queue_size = MAX_CLIENT_THREADS
 
     def __init__(self, address: tuple[str, int], mailbox: Mailbox):
         if address[0] != "127.0.0.1":
             raise ValueError("proof relay must be loopback-only")
         self.mailbox = mailbox
+        self._slots = BoundedSemaphore(MAX_CLIENT_THREADS)
         super().__init__(address, Handler)
+
+    def get_request(self):
+        request, addr = super().get_request()
+        request.settimeout(2.0)  # idle-read deadline, separate from absolute deadline
+        return request, addr
+
+    def process_request(self, request, client_address):
+        # Refuse excess unauthenticated clients without spawning unbounded threads.
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    @staticmethod
+    def _expire_connection(request):
+        try:
+            request.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            request.close()
+        except OSError:
+            pass
+
+    def process_request_thread(self, request, client_address):
+        # Absolute wall-clock cap even for clients dripping bytes indefinitely.
+        deadline = Timer(MAX_CONNECTION_SECONDS, self._expire_connection, args=(request,))
+        deadline.daemon = True
+        deadline.start()
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            deadline.cancel()
+            self._slots.release()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -240,8 +305,16 @@ def main() -> None:
     key = os.environ.get("LDW_CHAT_RELAY_SECRET", "")
     if len(key.encode("utf-8")) < 32:
         raise SystemExit("LDW_CHAT_RELAY_SECRET must be supplied securely (32+ bytes)")
+    try:
+        roles_raw = os.environ.get("LDW_CHAT_RELAY_ROLES", "")
+        if len(roles_raw) > 1024:
+            raise ValueError("INVALID_ROLE_ROSTER")
+        roles = json.loads(roles_raw)
+        mailbox = Mailbox(key.encode("utf-8"), allowed_roles=roles)
+    except (ValueError, TypeError):
+        raise SystemExit("LDW_CHAT_RELAY_ROLES must be a trusted JSON list of 2–16 role names") from None
     port = int(os.environ.get("LDW_CHAT_RELAY_PORT", "8767"))
-    with LocalRelay(("127.0.0.1", port), Mailbox(key.encode("utf-8"))) as srv:
+    with LocalRelay(("127.0.0.1", port), mailbox) as srv:
         print(f"LDW_CHAT_RELAY_LOCAL_READY port={srv.server_port} scope=loopback-only", flush=True)
         srv.serve_forever(poll_interval=0.25)
 

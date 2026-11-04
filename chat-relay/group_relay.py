@@ -42,8 +42,10 @@ class GroupMessage:
 
 class GroupMailbox(Mailbox):
     def __init__(self, master_secret: bytes, groups: dict, clock=time.time):
-        super().__init__(master_secret, clock=clock)
-        self._groups = self._validate_groups(groups)
+        validated_groups = self._validate_groups(groups)
+        registered_roles = tuple(sorted({role for members in validated_groups.values() for role in members}))
+        super().__init__(master_secret, clock=clock, allowed_roles=registered_roles)
+        self._groups = validated_groups
         self._group_messages: dict[str, GroupMessage] = {}
 
     @staticmethod

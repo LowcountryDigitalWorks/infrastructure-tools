@@ -1,19 +1,21 @@
 import http.client
 import json
+import socket
 import threading
 import time
 import unittest
 import uuid
 
-from relay import Mailbox, LocalRelay, RelayError, MAX_MESSAGES
+from relay import Mailbox, LocalRelay, RelayError, MAX_MESSAGES, MAX_CLIENT_THREADS
 
 SECRET = b"synthetic-test-key-only-NOT-FOR-PRODUCTION-00000"
+ROLES = ("gm17", "ir02")
 
 
 class MailboxTests(unittest.TestCase):
     def setUp(self):
         self.now = [1000.0]
-        self.box = Mailbox(SECRET, clock=lambda: self.now[0])
+        self.box = Mailbox(SECRET, clock=lambda: self.now[0], allowed_roles=ROLES)
         self.id = str(uuid.uuid4())
 
     def send(self, **kw):
@@ -83,11 +85,31 @@ class MailboxTests(unittest.TestCase):
     def test_no_nonlocal_bind(self):
         self.assertRaises(ValueError, LocalRelay, ("0.0.0.0", 0), self.box)
 
+    def test_unknown_role_never_receives_token_or_messages(self):
+        self.assertCode("ROLE_NOT_REGISTERED", lambda: self.box.token_for_role("unknown"))
+        self.assertCode("ROLE_NOT_REGISTERED", lambda: self.send(recipient="unknown"))
+        self.assertCode("UNAUTHORIZED", lambda: self.box.authenticate("unknown", "x" * 64))
+
+    def test_invalid_role_roster_refused(self):
+        for roles in ((), ("gm17",), ("gm17", "gm17"), ("gm17", "BAD")):
+            with self.assertRaises(ValueError):
+                Mailbox(SECRET, allowed_roles=roles)
+
+    def test_reply_must_reference_reverse_direction_existing_message(self):
+        self.assertCode("INVALID_REPLY_TO", lambda: self.send(reply_to=str(uuid.uuid4())))
+        self.send()
+        self.assertCode("INVALID_REPLY_TO", lambda: self.send(
+            message_id=str(uuid.uuid4()), reply_to=self.id))
+        reverse = dict(message_id=str(uuid.uuid4()), sender="ir02", recipient="gm17",
+                       body="terminal response", reply_to=self.id)
+        self.assertFalse(self.box.send("ir02", reverse)["duplicate"])
+        self.assertEqual(self.box.receive("gm17")["messages"][0]["reply_to"], self.id)
+
 
 class HttpTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.box = Mailbox(SECRET)
+        cls.box = Mailbox(SECRET, allowed_roles=ROLES)
         cls.srv = LocalRelay(("127.0.0.1", 0), cls.box)
         cls.thread = threading.Thread(target=cls.srv.serve_forever, daemon=True)
         cls.thread.start()
@@ -131,6 +153,28 @@ class HttpTests(unittest.TestCase):
         status, body = self.req("GET", "/health")
         self.assertEqual((status, body["scope"]), (200, "LOCAL_ONLY"))
         self.assertNotIn("secret", json.dumps(body))
+
+    def test_partial_header_connections_have_bounded_admission(self):
+        holders = []
+        try:
+            for _ in range(MAX_CLIENT_THREADS):
+                sock = socket.create_connection(("127.0.0.1", self.srv.server_port), timeout=2)
+                sock.sendall(b"POST /v1/send HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\n")
+                holders.append(sock)
+            # Give the server's accept thread a bounded turn to admit socket workers.
+            time.sleep(0.25)
+            self.assertFalse(self.srv._slots.acquire(blocking=False))
+        finally:
+            for sock in holders:
+                sock.close()
+        # Allow the accepted workers to observe peer closure and restore slots.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            status, reply = self.req("GET", "/health")
+            if status == 200:
+                return
+            time.sleep(0.05)
+        self.fail("relay did not recover from incomplete requests")
 
 
 if __name__ == "__main__":

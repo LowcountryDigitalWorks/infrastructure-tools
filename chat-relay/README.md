@@ -7,12 +7,13 @@ This delivers a bidirectional, role-authenticated, owner-controlled local messag
 ## V0 contract
 
 - Python 3.11+ standard library only; loopback-only listener.
-- Authenticated named roles, per-role HMAC tokens derived from protected 32+ byte master secret.
+- Fixed startup-time allowlist of 2–16 named roles, each with per-role HMAC token derived from protected 32+ byte master secret. HTTP callers cannot create roles or change the list.
 - POST /v1/send: exact message_id UUID, sender, recipient, body, optional reply_to UUID. Status IN_MAILBOX means transport acceptance only.
 - GET /v1/receive?limit=20: only the authenticated recipient's unacknowledged messages.
 - POST /v1/ack: only the authenticated recipient can acknowledge its message.
 - GET /health: non-sensitive local status.
-- 15-minute TTL, max 128 retained messages, max 8 KiB body.
+- 15-minute TTL, max 128 retained messages, max 8 KiB body. Valid replies must reference an existing message addressed to the current sender by the proposed reply recipient.
+- Maximum 8 concurrently admitted HTTP client workers, 2-second socket idle timeout and 4-second absolute socket connection deadline (including incomplete unauthenticated headers/bodies). The local server refuses excess connections instead of spawning unbounded threads.
 - UUID replay is idempotent even after acknowledgement until expiry; changed content with the same UUID fails 409.
 - In-memory only: no disk queues, external traffic, bearer/body logging, general shell, credentials or customer data.
 - Only synthetic/public non-sensitive messages are within this proof scope.
@@ -23,11 +24,11 @@ From the repository root:
 
     python3 -m unittest discover -s chat-relay -p test_relay.py -v
 
-The test suite covers two-role delivery and reply, role spoofing refusal, changed-UUID conflict, retry after acknowledgement, expiry, size and schema rejection, mailbox capacity, loopback-only binding, invalid bearer, and non-sensitive health.
+The test suite covers two-role delivery and provenance-checked replies, role spoofing/unknown-role refusal, changed-UUID conflict, retry after acknowledgement, expiry, size and schema rejection, mailbox capacity, loopback-only binding, invalid bearer, partial-header connection admission and non-sensitive health.
 
 ## Run the local proof service
 
-Provision a random master secret of at least 32 bytes from a protected owner-local secret store into the process environment as LDW_CHAT_RELAY_SECRET. Never commit or paste the actual secret, put it in a command-line argument, or expose it in logs. Start:
+Provision a random master secret of at least 32 bytes from a protected owner-local secret store into the process environment as LDW_CHAT_RELAY_SECRET. Also set LDW_CHAT_RELAY_ROLES from trusted local configuration, for example a JSON list of synthetic role names `["gm17","ir02"]`. The role list cannot be supplied through HTTP or by untrusted chat content. Never commit or paste the actual secret, put it in a command-line argument, or expose it in logs. Start:
 
     python3 chat-relay/relay.py
 
