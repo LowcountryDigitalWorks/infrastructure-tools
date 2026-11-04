@@ -8,7 +8,14 @@ permissions:
   contents: read
 jobs:
   genuine-chromium-offline-negative-proof:
-    runs-on: ubuntu-24.04
+    name: "Strict Chromium guest (${{ matrix.os }})"
+    strategy:
+      fail-fast: false
+      matrix:
+        # Comparatively diagnose Ubuntu 24.04's AppArmor restriction; BOTH
+        # jobs must succeed. Legacy 22.04 success cannot bypass 24.04 failure.
+        os: [ubuntu-24.04, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
