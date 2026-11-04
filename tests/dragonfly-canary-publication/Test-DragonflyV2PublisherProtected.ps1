@@ -56,10 +56,35 @@ try {
     $env:GIT_CONFIG_VALUE_1='NUL'
     $env:GIT_OPTIONAL_LOCKS='0'
     $env:GIT_TERMINAL_PROMPT='0'
+
+    # Reviewer M1: test PowerShell's effective command precedence, not just
+    # external PATH lookup. The gate must refuse a harmless shadowing alias
+    # BEFORE acquiring the protected publication guard.
+    Set-Alias -Name git -Value Get-Location -Scope Script -Force
+    try {
+        $aliasDenied=$false
+        try { $null=& $gate -RepositoryRoot $stage -Phase BeforeImport -ProtectedPublication }
+        catch { $aliasDenied=([string]$_.Exception.Message -ceq 'V2_PROVENANCE_PUBLISHER_GIT_UNTRUSTED') }
+        if (-not $aliasDenied) { throw 'TEST_GIT_ALIAS_SHADOW_ALLOWED' }
+    } finally {
+        Remove-Item Alias:\git -Force -ErrorAction SilentlyContinue
+    }
     $result=& $gate -RepositoryRoot $stage -Phase BeforeImport -ProtectedPublication
     if ($result -cne 'DRAGONFLY_V2_PUBLISHER_PROVENANCE_BEFORE_IMPORT=PASS_PROTECTED') { throw 'TEST_BEFORE_FAILED' }
     $guard=$true
     $null=Import-Module -Name $module -Force -PassThru
+
+    # A caller-session function can also shadow the publisher's bare git
+    # command after module import. Refuse it while retaining the held lock.
+    function git { throw 'TEST_GIT_FUNCTION_SHADOW_EXECUTED' }
+    try {
+        $functionDenied=$false
+        try { $null=& $gate -RepositoryRoot $stage -Phase AfterImport -ProtectedPublication }
+        catch { $functionDenied=([string]$_.Exception.Message -ceq 'V2_PROVENANCE_PUBLISHER_GIT_UNTRUSTED') }
+        if (-not $functionDenied) { throw 'TEST_GIT_FUNCTION_SHADOW_ALLOWED' }
+    } finally {
+        Remove-Item Function:\git -Force -ErrorAction SilentlyContinue
+    }
     $result=& $gate -RepositoryRoot $stage -Phase AfterImport -ProtectedPublication
     if ($result -cne 'DRAGONFLY_V2_PUBLISHER_PROVENANCE_AFTER_IMPORT=PASS_PROTECTED') { throw 'TEST_AFTER_FAILED' }
     $denied=$false
