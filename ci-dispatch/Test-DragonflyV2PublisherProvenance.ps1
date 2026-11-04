@@ -1,10 +1,15 @@
-# SOURCE-ONLY, READ-ONLY publication provenance gate. Never invokes the publisher.
-# Must be called BEFORE Import-Module, then AFTER Import-Module in the same operator
-# PowerShell process; a PASS does not authorize protected publication or Gate B.
+# SOURCE-ONLY read-only provenance verifier; never invokes/publishes the module.
+# Unprotected developer checkouts are diagnostics only: loaded code is UNVERIFIED.
+# ProtectedPublication requires a separately approved administrator-owned staging
+# tree and holds a no-write/no-delete file handle across import AND publication.
+# The real operator must run BeforeImport, import, AfterImport, publish, Release in
+# ONE trusted PowerShell process, with Release in finally; caller must independently
+# pin this gate script itself. No source-only PASS authorizes publication or Gate B.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$RepositoryRoot,
-    [Parameter(Mandatory)][ValidateSet('BeforeImport','AfterImport')][string]$Phase
+    [Parameter(Mandatory)][ValidateSet('BeforeImport','AfterImport','Release')][string]$Phase,
+    [switch]$ProtectedPublication
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -14,6 +19,78 @@ $acceptedTree = 'a6eb1d42693793cae2986f973f9e1f2ac2438729'
 $acceptedBlob = 'e322a071e5e6e31a909447823e737252770fafef'
 $publisherRelativePath = 'ci-dispatch/DragonflyCanaryAdjunctV2Publisher.psm1'
 $publisherModuleName = 'DragonflyCanaryAdjunctV2Publisher'
+
+
+# A protected publication guard is intentionally process-local, never persisted
+# to disk or passed to another process. Do not weaken this for test convenience.
+$guardName = 'LDW_DRAGONFLY_V2_PROTECTED_PUBLISH_GUARD'
+$priorGuard = Get-Variable -Name $guardName -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+if ($Phase -ceq 'Release') {
+    if (-not $ProtectedPublication -or $null -eq $priorGuard -or
+        $priorGuard.OwnerPid -ne $PID) { throw 'V2_PROVENANCE_PROTECTED_GUARD_MISSING' }
+    try { $priorGuard.Stream.Dispose() }
+    finally { Remove-Variable -Name $guardName -Scope Global -Force -ErrorAction SilentlyContinue }
+    'DRAGONFLY_V2_PUBLISHER_PROVENANCE_GUARD_RELEASE=PASS'
+    return
+}
+if ($null -ne $priorGuard -and $Phase -ceq 'BeforeImport') {
+    throw 'V2_PROVENANCE_PROTECTED_GUARD_ALREADY_ACTIVE'
+}
+
+function Assert-LdwV2ProtectedStaging {
+    param([string]$Root,[string]$Folder,[string]$File,[string]$Comparison)
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        throw 'V2_PROVENANCE_PROTECTED_WINDOWS_REQUIRED'
+    }
+    $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw 'V2_PROVENANCE_PROTECTED_ADMIN_REQUIRED'
+    }
+    if ([string]::IsNullOrWhiteSpace($env:ProgramData)) { throw 'V2_PROVENANCE_PROGRAMDATA_INVALID' }
+    $ldw = Join-Path $env:ProgramData 'LDW'
+    $expected = Join-Path $ldw 'DragonflyV2PublisherSource'
+    if (-not [string]::Equals([IO.Path]::GetFullPath($Root),[IO.Path]::GetFullPath($expected),$Comparison)) {
+        throw 'V2_PROVENANCE_PROTECTED_STAGE_REQUIRED'
+    }
+    $allowed = @('S-1-5-18','S-1-5-32-544')
+    $replace = [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership
+    $write = $replace -bor [Security.AccessControl.FileSystemRights]::Write -bor
+        [Security.AccessControl.FileSystemRights]::WriteData -bor
+        [Security.AccessControl.FileSystemRights]::CreateFiles -bor
+        [Security.AccessControl.FileSystemRights]::CreateDirectories
+    foreach ($target in @($Root,$Folder,$File)) {
+        $item = Get-Item -LiteralPath $target -Force -ErrorAction Stop
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'V2_PROVENANCE_PROTECTED_REPARSE_REFUSED' }
+        $acl = Get-Acl -LiteralPath $target
+        if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin $allowed) {
+            throw 'V2_PROVENANCE_PROTECTED_OWNER_UNTRUSTED'
+        }
+        foreach ($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
+            if ($rule.AccessControlType -eq 'Allow' -and ($rule.FileSystemRights -band $write) -and
+                $rule.IdentityReference.Value -notin $allowed) {
+                throw 'V2_PROVENANCE_PROTECTED_WRITE_UNTRUSTED'
+            }
+        }
+    }
+    foreach ($target in @($ldw,$env:ProgramData)) {
+        $item = Get-Item -LiteralPath $target -Force -ErrorAction Stop
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'V2_PROVENANCE_PROTECTED_REPARSE_REFUSED' }
+        $acl = Get-Acl -LiteralPath $target
+        if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin $allowed) {
+            throw 'V2_PROVENANCE_PROTECTED_PARENT_OWNER_UNTRUSTED'
+        }
+        foreach ($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
+            if ($rule.AccessControlType -eq 'Allow' -and
+                -not ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -and
+                ($rule.FileSystemRights -band $replace) -and $rule.IdentityReference.Value -notin $allowed) {
+                throw 'V2_PROVENANCE_PROTECTED_PARENT_REPLACE_UNTRUSTED'
+            }
+        }
+    }
+}
 
 function Read-LdwV2GitValue {
     param([string]$Root,[string[]]$Arguments)
@@ -81,10 +158,46 @@ if ((Get-LdwV2GitBlobSha1 $file) -cne $acceptedBlob) {
     throw 'V2_PROVENANCE_ON_DISK_BLOB_MISMATCH'
 }
 
+if ($ProtectedPublication -and $Phase -ceq 'AfterImport') {
+    if ($null -eq $priorGuard -or $priorGuard.OwnerPid -ne $PID -or
+        $priorGuard.Stream.SafeFileHandle.IsClosed -or
+        -not [string]::Equals($priorGuard.Root,$root,$comparison)) {
+        throw 'V2_PROVENANCE_PROTECTED_GUARD_MISSING'
+    }
+}
+if ($ProtectedPublication) {
+    Assert-LdwV2ProtectedStaging -Root $root -Folder $folder -File $file -Comparison $comparison
+}
+
 $loaded = @(Get-Module -Name $publisherModuleName -ErrorAction SilentlyContinue)
 if ($Phase -ceq 'BeforeImport') {
     if ($loaded.Count -ne 0) { throw 'V2_PROVENANCE_PREIMPORT_MODULE_ALREADY_LOADED' }
-    'DRAGONFLY_V2_PUBLISHER_PROVENANCE_BEFORE_IMPORT=PASS'
+    if ($ProtectedPublication) {
+        # Windows FileShare.Read refuses other writers/renames until Release.
+        # Open AFTER staging/ACL validation; re-read hash/status UNDER the handle
+        # to close the gap between the earlier checkout check and lock acquisition.
+        $stream = [IO.File]::Open($file,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+        try {
+            if ((Get-LdwV2GitBlobSha1 $file) -cne $acceptedBlob) {
+                throw 'V2_PROVENANCE_ON_DISK_BLOB_MISMATCH'
+            }
+            $freshStatus = @(& git -C $root status --porcelain --untracked-files=all 2>$null)
+            if ($LASTEXITCODE -ne 0 -or $freshStatus.Count -gt 0) {
+                throw 'V2_PROVENANCE_WORKTREE_DIRTY'
+            }
+            Set-Variable -Name $guardName -Scope Global -Value ([pscustomobject]@{
+                Stream = $stream
+                Root = $root
+                OwnerPid = $PID
+            }) -Force
+        } catch {
+            $stream.Dispose()
+            throw
+        }
+        'DRAGONFLY_V2_PUBLISHER_PROVENANCE_BEFORE_IMPORT=PASS_PROTECTED'
+    } else {
+        'DRAGONFLY_V2_PUBLISHER_PROVENANCE_BEFORE_IMPORT=PASS_SOURCE_ONLY'
+    }
     return
 }
 if ($loaded.Count -ne 1) { throw 'V2_PROVENANCE_LOADED_MODULE_NOT_UNIQUE' }
@@ -97,4 +210,12 @@ if ($command.Count -ne 1 -or $null -eq $command[0].Module -or
     -not [string]::Equals([IO.Path]::GetFullPath([string]$command[0].Module.Path),$modulePath,$comparison)) {
     throw 'V2_PROVENANCE_PUBLISH_COMMAND_MISMATCH'
 }
-'DRAGONFLY_V2_PUBLISHER_PROVENANCE_AFTER_IMPORT=PASS'
+if (-not $ProtectedPublication) {
+    # Correctness rule: a same-path module can contain substituted loaded code
+    # even if malicious bytes were restored before this second disk hash check.
+    throw 'V2_PROVENANCE_LOADED_CODE_UNVERIFIED'
+}
+if ($null -eq $priorGuard -or $priorGuard.Stream.SafeFileHandle.IsClosed) {
+    throw 'V2_PROVENANCE_PROTECTED_GUARD_MISSING'
+}
+'DRAGONFLY_V2_PUBLISHER_PROVENANCE_AFTER_IMPORT=PASS_PROTECTED'
