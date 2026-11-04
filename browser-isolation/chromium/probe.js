@@ -14,7 +14,8 @@ function fail(reason) {
 }
 
 function parseArgs(args) {
-  if (args.length !== 3 || args[0] !== "--probe") throw Error("INVALID_ARGS");
+  if ((args.length !== 3 && args.length !== 4) || args[0] !== "--probe" ||
+      (args.length === 4 && args[3] !== "--trusted-synthetic-only")) throw Error("INVALID_ARGS");
   const host = args[1], port = Number(args[2]);
   if (!/^([0-9]{1,3}\.){3}[0-9]{1,3}$/.test(host) ||
       !Number.isInteger(port) || port < 1 || port > 65535) throw Error("INVALID_TARGET");
@@ -22,7 +23,7 @@ function parseArgs(args) {
   if (octets.some(v => v < 0 || v > 255) || host === "127.0.0.1" || host === "0.0.0.0") {
     throw Error("INVALID_TARGET");
   }
-  return {host, port};
+  return {host, port, trustedSynthetic:args.length === 4};
 }
 
 function directSocketBlocked(host, port) {
@@ -43,7 +44,7 @@ function directSocketBlocked(host, port) {
 }
 
 async function main() {
-  const {host, port} = parseArgs(process.argv.slice(2));
+  const {host, port, trustedSynthetic} = parseArgs(process.argv.slice(2));
   const target = "http://" + host + ":" + port;
   let browser = null, server = null;
   try {
@@ -73,9 +74,11 @@ async function main() {
       server.once("error",reject); server.listen(0,"127.0.0.1",resolve);
     });
     const localPort = server.address().port;
-    // Never disable Chromium sandbox or silently fall back to a root browser.
+    // Strict mode is always the default. The single explicitly flagged
+    // non-sandboxed mode is a TRUSTED SYNTHETIC CI DIAGNOSTIC, never a
+    // fallback and never a production/untrusted-page acceptance.
     phase = "BROWSER_LAUNCH";
-    browser = await chromium.launch({ headless:true, chromiumSandbox:true, timeout:25000 });
+    browser = await chromium.launch({ headless:true, chromiumSandbox:!trustedSynthetic, timeout:25000 });
     const context = await browser.newContext({ acceptDownloads:false, serviceWorkers:"allow" });
     const page = await context.newPage();
     phase = "LOCAL_NAVIGATION";
@@ -136,7 +139,8 @@ async function main() {
       result:"PASS", local_chromium:"PASS", interactions:"PASS",
       vectors:mustAttempt.concat(["service_worker","redirect","direct_tcp"]),
       redirect:"BLOCKED", direct_tcp:"BLOCKED",
-      sandbox_requested:true, source:"SYNTHETIC_GUEST_ONLY"
+      sandbox_requested:!trustedSynthetic,
+      source:trustedSynthetic ? "TRUSTED_SYNTHETIC_NO_CHROMIUM_SANDBOX" : "SYNTHETIC_GUEST_ONLY"
     }) + "\n");
   } finally {
     if (browser) await browser.close().catch(()=>{});
