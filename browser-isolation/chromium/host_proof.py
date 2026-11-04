@@ -322,9 +322,34 @@ def userns_precheck(image_id: str) -> None:
     print("USERNS_PRECHECK_NOT_BROWSER_SANDBOX_ATTESTATION")
 
 
+def host_policy_readback() -> None:
+    """Read only fixed public kernel policy toggles on an ephemeral CI host.
+
+    No raw /proc content, process identities, host paths, profiles or sysctl
+    changes are disclosed. This helps triage but does NOT establish cause.
+    """
+    fields = (
+        ("HOST_APPARMOR_MODULE", "/sys/module/apparmor/parameters/enabled",
+         {"Y": "ENABLED", "N": "DISABLED"}),
+        ("HOST_APPARMOR_RESTRICT_UNPRIV_USERNS",
+         "/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
+         {"1": "ENABLED", "0": "DISABLED"}),
+        ("HOST_UNPRIV_USERNS_CLONE",
+         "/proc/sys/kernel/unprivileged_userns_clone",
+         {"1": "ENABLED", "0": "DISABLED"}),
+    )
+    for label, path, valid in fields:
+        try:
+            actual = pathlib.Path(path).read_text(encoding="ascii").strip()
+        except (OSError, UnicodeError):
+            actual = ""
+        print(label + "=" + valid.get(actual, "UNAVAILABLE"))
+    print("HOST_POLICY_READBACK_NOT_SANDBOX_ATTESTATION")
+
+
 def main(argv: list[str]) -> int:
     if len(argv) not in (2, 3) or (len(argv) == 3 and argv[2] not in (
-        "--trusted-synthetic-only", "--userns-check",
+        "--trusted-synthetic-only", "--userns-check", "--host-policy-readback",
     )):
         print("NO_START: EXACT_IMAGE_ID_REQUIRED", file=sys.stderr)
         return 2
@@ -334,6 +359,8 @@ def main(argv: list[str]) -> int:
             raise BoundaryError("DIAGNOSTIC_CI_ONLY")
         if mode == "--userns-check":
             userns_precheck(argv[1])
+        elif mode == "--host-policy-readback":
+            host_policy_readback()
         else:
             proof(argv[1], mode == "--trusted-synthetic-only")
     except BoundaryError as exc:
