@@ -48,6 +48,20 @@ Monitoring additions for other service types must reuse the same contract semant
 
 This status contract does not confer stop/restart/control authority. When a service is unhealthy, Host Agent reports it, and any recovery action stays with the independently accepted Commander/Admin Broker action policy. **Host Agent must not become a full-admin transport**.
 
+## Desktop Commander replacement cutover (two monitored components)
+
+Existing Host Agent main currently defines `DesktopCommander` as a **required** `RunningAfterLogin` component. When LDW Commander replaces it, Host Agent must not keep reporting that the host is failed solely because the retired third-party component has intentionally stopped.
+
+**Staged, independently reviewable cutover:**
+
+1. **Before Commander deployment:** preserve the existing Desktop Commander observation and desired-state policy unchanged. A not-installed LDW Commander is `UNKNOWN / NOT_DEPLOYED` or absent from required components, never `HEALTHY`.
+2. **Parallel canary:** add a separately named LDW Commander component as **optional** until its reviewed binary/service identity and actual SCM/systemd (or other accepted platform-native lifecycle) health are proven. Verify stopped/failure, stale, restart, and host-disconnected cases. No automatic repair.
+3. **Full product acceptance:** when end-to-end first-party operations, privilege/session revoke, rollback, host recovery and owner-private tool access pass, promote LDW Commander to its accepted required desired state. A permanently running daemon is `RUNNING`; a login-owned tray is `RUNNING_AFTER_LOGIN` with the existing settle semantics; an explicit on-demand adapter is `ON_DEMAND`. Do not infer these from source PR acceptance.
+4. **Retire the old dependency:** only after working first-party Commander readback, change Desktop Commander to **intentionally disabled/not required** in the same reviewed Host Agent source/config/deployment cutover. Confirm the host aggregate no longer incorrectly fails on the deliberately stopped legacy component. Keep rollback and limited emergency access until verified.
+5. **Post-cutover:** independently monitor Commander transport/agent process existence, desired-state match, protected-session readiness, credential-store availability only as safe codes, connection freshness and expired/revoked session cleanup through distinct typed status probes; never expose session tokens, command payloads, account or machine secrets.
+
+Host Agent must report the difference between `process running` and `ready to execute an authorized remote operation`. The former is service-manager liveness; the latter needs a separately approved authenticated, bounded readiness check. An unauthenticated health endpoint alone is insufficient for privileged-readiness claims.
+
 ## Next integration owner and gates
 
 Implementation of `HostAgentLiveSnapshotProvider`, component registration, configuration and Windows/Linux deployed probes belongs to existing `business-operations#554` and the owning Host Agent/HW&VM workstream. GM17 can produce source/contract and route an exact handoff but must not silently overwrite active Host Agent work or merge an unreviewed competing status plugin.
