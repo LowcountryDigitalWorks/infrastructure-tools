@@ -110,6 +110,18 @@ try {
         throw 'DRAGONFLY_CANARY_CI10_READ_NOT_BOUND'
     }
 
+    # Fail before any provider read/write unless Runtime sees the same trusted
+    # Dispatch lock. The caller-level read binding alone is insufficient.
+    $runtimeModule = Get-Module -Name DragonflyCanaryRuntime -ErrorAction SilentlyContinue
+    $ci10Lock = if ($null -ne $runtimeModule) {
+        & $runtimeModule {
+            Get-Command Enter-Ci10DispatcherLock -CommandType Function -ErrorAction SilentlyContinue
+        }
+    } else { $null }
+    if ($null -eq $ci10Lock -or $ci10Lock.ModuleName -cne 'Dispatch') {
+        throw 'DRAGONFLY_CANARY_CI10_LOCK_NOT_BOUND'
+    }
+
     $runPath = 'repos/' + $script:Repository + '/actions/runs/' + $RunId
     $jobsPath = $runPath + '/attempts/' + $RunAttempt + '/jobs?per_page=100'
     $run = Invoke-Ci10Read $runPath
