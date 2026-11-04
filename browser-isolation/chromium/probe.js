@@ -5,44 +5,8 @@
 const http = require("node:http");
 const net = require("node:net");
 const crypto = require("node:crypto");
-const { spawnSync } = require("node:child_process");
 const { chromium } = require("playwright");
 let phase = "INIT";
-let trustedMode = false;
-
-function classifyStrictLaunch() {
-  // Execute only the already installed, Playwright-selected Chromium binary,
-  // with a private, ephemeral in-guest profile and an about:blank page.
-  // All stdout and stderr remain inside this disposable network-none guest.
-  // Only a fixed, source-reviewed classification may leave the guest.
-  try {
-    const browserPath = chromium.executablePath();
-    const profile = "/tmp/ldw-sandbox-diag-" + crypto.randomBytes(6).toString("hex");
-    const args = ["--headless=new", "--no-first-run", "--no-default-browser-check",
-      "--disable-gpu", "--user-data-dir=" + profile, "--dump-dom", "about:blank"];
-    const r = spawnSync(browserPath, args, {encoding:"utf8", timeout:6000,
-      maxBuffer:16384, env:{ HOME:"/tmp", PATH:process.env.PATH || "/usr/bin",
-                            LANG:"C" }});
-    const raw = String(r.stderr || "").toLowerCase();
-    const tags = [
-      ["NO_USABLE_SANDBOX", "no usable sandbox"],
-      ["NAMESPACE_MOVE_DENIED", "failed to move to new namespace"],
-      ["OPERATION_NOT_PERMITTED", "operation not permitted"],
-      ["PERMISSION_DENIED", "permission denied"],
-      ["READ_ONLY_FILESYSTEM", "read-only file system"],
-      ["SHARED_MEMORY", "shared memory"],
-      ["SECCOMP", "seccomp"],
-      ["ZYGOTE", "zygote"],
-      ["SANDBOX", "sandbox"],
-    ];
-    for (const [label, match] of tags) {
-      if (raw.includes(match)) return "GUEST_BROWSER_LAUNCH_DIRECT_" + label;
-    }
-    if (r.error && r.error.code === "ETIMEDOUT") return "GUEST_BROWSER_LAUNCH_DIRECT_TIMEOUT";
-    if (r.status === 0) return "GUEST_BROWSER_LAUNCH_DIRECT_SUCCESS_PLAYWRIGHT_FAILED";
-    return "GUEST_BROWSER_LAUNCH_DIRECT_UNKNOWN";
-  } catch {return "GUEST_BROWSER_LAUNCH_DIRECT_DIAG_UNAVAILABLE";}
-}
 
 function fail(reason) {
   process.stdout.write(JSON.stringify({ result: "NO_START", reason }) + "\n");
@@ -81,7 +45,6 @@ function directSocketBlocked(host, port) {
 
 async function main() {
   const {host, port, trustedSynthetic} = parseArgs(process.argv.slice(2));
-  trustedMode = trustedSynthetic;
   const target = "http://" + host + ":" + port;
   let browser = null, server = null;
   try {
@@ -192,17 +155,32 @@ main().catch(err=>{
     "SERVICE_WORKER_NOT_INVOKED","OFF_GUEST_REDIRECT_WAS_ALLOWED","DIRECT_TCP_REACHED_HOST"]);
   let reason = known.has(err.message) ? err.message : "GUEST_" + phase + "_ERROR";
   if (phase === "BROWSER_LAUNCH" && !known.has(err.message)) {
+    // Parse the ACTUAL Playwright chromium.launch({channel:"chromium",
+    // chromiumSandbox:true}) failure, not a different executablePath binary.
+    // Never print raw stderr, launcher argv, host paths, browser data or URLs.
     const raw = String(err && err.message || "").toLowerCase();
-    // Output ONLY fixed labels; do not echo browser process logs, paths, URLs
-    // or environment/configuration details into ChatGPT/GitHub.
-    if (raw.includes("no usable sandbox")) reason = "GUEST_BROWSER_LAUNCH_NO_USABLE_SANDBOX";
-    else if (raw.includes("failed to move to new namespace")) reason = "GUEST_BROWSER_LAUNCH_NAMESPACE_DENIED";
-    else if (raw.includes("operation not permitted")) reason = "GUEST_BROWSER_LAUNCH_OPERATION_DENIED";
-    else if (raw.includes("error while loading shared libraries")) reason = "GUEST_BROWSER_LAUNCH_SHARED_LIBRARY";
-    else if (raw.includes("target page, context or browser has been closed")) reason = "GUEST_BROWSER_LAUNCH_PROCESS_EXITED";
-  }
-  if (phase === "BROWSER_LAUNCH" && !trustedMode) {
-    reason = classifyStrictLaunch();
+    const signatures = [
+      ["NO_USABLE_SANDBOX", "no usable sandbox"],
+      ["NAMESPACE_DENIED", "failed to move to new namespace"],
+      ["OPERATION_DENIED", "operation not permitted"],
+      ["PERMISSION_DENIED", "permission denied"],
+      ["READ_ONLY_FILESYSTEM", "read-only file system"],
+      ["SHARED_LIBRARY", "error while loading shared libraries"],
+      ["ZYGOTE_HOST", "zygote_host_impl_linux.cc"],
+      ["ZYGOTE_MAIN", "zygote_main_linux.cc"],
+      ["ZYGOTE_COMMUNICATION", "zygote_communication_linux.cc"],
+      ["ZYGOTE", "zygote"],
+      ["SECCOMP", "seccomp"],
+      ["CHROME_SANDBOX_HELPER", "chrome-sandbox"],
+      ["PARENT_CLOSED", "target page, context or browser has been closed"],
+    ];
+    reason = "GUEST_BROWSER_LAUNCH_ACTUAL_UNKNOWN";
+    for (const [category, needle] of signatures) {
+      if (raw.includes(needle)) {
+        reason = "GUEST_BROWSER_LAUNCH_ACTUAL_" + category;
+        break;
+      }
+    }
   }
   fail(reason);
 }).finally(()=>clearTimeout(timer));
