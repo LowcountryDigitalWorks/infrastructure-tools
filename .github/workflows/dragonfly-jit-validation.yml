@@ -20,6 +20,7 @@ on:
       - 'ci-dispatch/DragonflyCanaryAdjunctPublisher.psm1'
       - 'ci-dispatch/tests/Test-DragonflyCanary.ps1'
       - 'ci-dispatch/tests/Test-DragonflyCanaryRuntime.ps1'
+      - 'ci-dispatch/tests/Test-DragonflyCanaryProductionScope.ps1'
       - '.github/workflows/dragonfly-jit-validation.yml'
       - '.github/workflows/dragonfly-jit-canary.yml'
   push:
@@ -45,6 +46,7 @@ on:
       - 'ci-dispatch/DragonflyCanaryAdjunctPublisher.psm1'
       - 'ci-dispatch/tests/Test-DragonflyCanary.ps1'
       - 'ci-dispatch/tests/Test-DragonflyCanaryRuntime.ps1'
+      - 'ci-dispatch/tests/Test-DragonflyCanaryProductionScope.ps1'
       - '.github/workflows/dragonfly-jit-validation.yml'
       - '.github/workflows/dragonfly-jit-canary.yml'
 
@@ -74,6 +76,9 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: powershell
         run: ./tests/dragonfly-canary-publication/Test-DragonflyAdjunctMaterializationPowerShell51.ps1
+      - name: Verify Gate B production module scope on both platforms
+        shell: pwsh
+        run: ./ci-dispatch/tests/Test-DragonflyCanaryProductionScope.ps1
       - name: Verify protected adjunct publisher under Windows PowerShell 5.1
         if: matrix.os == 'windows-latest'
         shell: powershell
