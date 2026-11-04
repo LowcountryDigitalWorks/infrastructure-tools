@@ -347,9 +347,64 @@ def host_policy_readback() -> None:
     print("HOST_POLICY_READBACK_NOT_SANDBOX_ATTESTATION")
 
 
+def clone3_invalid_argument_precheck(image_id: str) -> None:
+    """Probe only whether a deliberately invalid clone3 syscall reaches errno.
+
+    No child is created because the argument pointer and size are invalid.
+    Result is diagnostic, not proof of Chromium sandbox / namespace support.
+    The x86_64 syscall number is fixed for this GitHub-hosted x64 CI lane.
+    """
+    if not IMAGE_ID.fullmatch(image_id):
+        raise BoundaryError("IMAGE_NOT_PINNED")
+    docker = shutil.which("docker")
+    if not docker:
+        raise BoundaryError("DOCKER_NOT_AVAILABLE")
+    seccomp = verified_seccomp_path()
+    script = (
+        "import ctypes, errno, platform; "
+        "machine=platform.machine(); "
+        "libc=ctypes.CDLL(None,use_errno=True); "
+        "rv=libc.syscall(ctypes.c_long(435),ctypes.c_void_p(0),ctypes.c_size_t(0)) "
+        "if machine=='x86_64' else 0; "
+        "err=ctypes.get_errno(); "
+        "status=('NON_X64' if machine!='x86_64' else "
+        "('UNEXPECTED' if rv!=-1 else "
+        "{errno.EPERM:'DENIED_EPERM',errno.EACCES:'DENIED_EACCES',"
+        "errno.ENOSYS:'UNSUPPORTED_ENOSYS',"
+        "errno.EINVAL:'ARGUMENT_REJECTED_EINVAL',"
+        "errno.EFAULT:'ARGUMENT_REJECTED_EFAULT'}.get(err,'OTHER'))); "
+        "print(status)"
+    )
+    args = [
+        docker, "run", "--rm", "--pull=never", "--network=none",
+        "--read-only", "--cap-drop=ALL",
+        "--security-opt=no-new-privileges=true",
+        "--security-opt=seccomp=" + seccomp,
+        "--pids-limit=32", "--memory=256m", "--ipc=private",
+        "--user=10001:10001", "--entrypoint=/usr/bin/python3",
+        image_id, "-c", script,
+    ]
+    try:
+        output = subprocess.run(args, capture_output=True, text=True,
+                                timeout=12, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        print("GUEST_CLONE3_NULL_PROBE=UNAVAILABLE")
+        return
+    allowed = {
+        "DENIED_EPERM", "DENIED_EACCES", "UNSUPPORTED_ENOSYS",
+        "ARGUMENT_REJECTED_EINVAL", "ARGUMENT_REJECTED_EFAULT", "NON_X64",
+        "OTHER",
+    }
+    code = output.stdout.strip()
+    print("GUEST_CLONE3_NULL_PROBE=" +
+          (code if output.returncode == 0 and code in allowed else "UNAVAILABLE"))
+    print("CLONE3_INVALID_ARGUMENT_PROBE_NOT_SANDBOX_ATTESTATION")
+
+
 def main(argv: list[str]) -> int:
     if len(argv) not in (2, 3) or (len(argv) == 3 and argv[2] not in (
         "--trusted-synthetic-only", "--userns-check", "--host-policy-readback",
+        "--clone3-null-check",
     )):
         print("NO_START: EXACT_IMAGE_ID_REQUIRED", file=sys.stderr)
         return 2
@@ -361,6 +416,8 @@ def main(argv: list[str]) -> int:
             userns_precheck(argv[1])
         elif mode == "--host-policy-readback":
             host_policy_readback()
+        elif mode == "--clone3-null-check":
+            clone3_invalid_argument_precheck(argv[1])
         else:
             proof(argv[1], mode == "--trusted-synthetic-only")
     except BoundaryError as exc:
