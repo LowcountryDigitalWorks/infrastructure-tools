@@ -101,8 +101,12 @@ class RealBrowserGuestGateTests(unittest.TestCase):
 
     def test_no_start_phase_is_sanitized(self):
         for phase in ("GUEST_BROWSER_LAUNCH_ERROR", "GUEST_BROWSER_LAUNCH_NO_USABLE_SANDBOX",
-                      "GUEST_BROWSER_LAUNCH_NAMESPACE_DENIED", "GUEST_LOCAL_NAVIGATION_ERROR",
-                      "GUEST_SERVICE_WORKER_ERROR"):
+                      "GUEST_BROWSER_LAUNCH_NAMESPACE_DENIED",
+                      "GUEST_BROWSER_LAUNCH_DIRECT_NAMESPACE_MOVE_DENIED",
+                      "GUEST_BROWSER_LAUNCH_DIRECT_NO_USABLE_SANDBOX",
+                      "GUEST_BROWSER_LAUNCH_DIRECT_SUCCESS_PLAYWRIGHT_FAILED",
+                      "GUEST_BROWSER_LAUNCH_DIRECT_UNKNOWN",
+                      "GUEST_LOCAL_NAVIGATION_ERROR", "GUEST_SERVICE_WORKER_ERROR"):
             with self.assertRaises(BoundaryError) as caught:
                 verify_guest({"result": "NO_START", "reason": phase}, 1)
             self.assertEqual(str(caught.exception), "CHROMIUM_NO_START_" + phase)
