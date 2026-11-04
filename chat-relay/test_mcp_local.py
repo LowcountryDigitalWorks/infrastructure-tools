@@ -133,6 +133,13 @@ class LocalMcpTests(unittest.TestCase):
         self.assertEqual(len(messages[1]["result"]["tools"]), 4)
         self.assertNotIn(self.box.token_for_role("gm17"), sink.getvalue())
 
+    def test_oversized_or_partial_stdio_frame_does_not_emit_result(self):
+        from mcp_local import MAX_FRAME
+        for request in ("x" * (MAX_FRAME + 1), "partial-no-newline"):
+            sink = io.StringIO()
+            self.clients["gm17"].serve(io.StringIO(request), sink)
+            self.assertEqual(sink.getvalue(), "")
+
     def test_invalid_json_returns_parse_error_without_secrets(self):
         raw = io.StringIO("bad-json\n")
         sink = io.StringIO()
