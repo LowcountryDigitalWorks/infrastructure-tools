@@ -19,6 +19,16 @@ The tests:
 
 The source has a localhost-only navigate method for future lower-layer tests. The author-side execution environment's browser policy returned net::ERR_BLOCKED_BY_ADMINISTRATOR for a localhost HTTP navigation, so **real URL navigation has not passed there**. The synthetic page click/type/screenshot proof passed. Never misrepresent a test of set_content as a live site-navigation pass.
 
+## Author-side response to independent network-isolation finding
+
+Independent GM Status06 reviewed prior head `197dc073...` as CHANGES_REQUIRED H0/M1/L2: an HTTP-only Playwright route did not cover WebSockets or service-worker-intercepted requests.
+
+The new source now initializes the **nonpersistent** context with `service_workers="block"` and installs both the exact-loopback HTTP routing guard and a **deny-all** `route_web_socket("**/*", handler)` before constructing a page. The WebSocket handler closes the routed connection without opening a server connection, including localhost sockets. Only denied request counts are available; attempted URLs and message payloads are not emitted by the diagnostic method.
+
+**Important incomplete proof:** the new source has passed the inherited synthetic interaction tests, but the proposed adversarial browser-test addition was refused by the repository tool. Therefore the M1 independent-review gate remains **OPEN**, and current CI does **not** establish a verified negative external-WebSocket, browser-initiated HTTP or Service Worker test. A local author environment also timed out when attempting a direct Chromium/WebSocket diagnostic; no positive egress-denial result was established there. Do not confuse API configuration with tested network isolation.
+
+Playwright documents that `context.route()` does not intercept all Service Worker requests and that WebSockets require a separately registered `route_web_socket()`; neither mechanism is a replacement for actual OS/container-level egress isolation. Further review must prove that no disallowed browser-initiated traffic leaves the process using a deterministic offline fixture/host-controlled network observation. This V0 is still **SYNTHETIC_SET_CONTENT_ONLY** as to proven browser effects; live local HTTP navigation remains a separate dependent PR #213.
+
 ## Integration gates
 
 1. Retain the existing exact BRIDGE-001A read-only contract and complete its genuine owner-private runtime/readback.
