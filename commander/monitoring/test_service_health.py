@@ -1,14 +1,17 @@
 """Contract tests: no actual host services or privileged operations are queried."""
 import json
+import ntpath
+import os
 import subprocess
 import unittest
 from datetime import datetime, timezone, timedelta
+from unittest import mock
 
 from service_health import (
     CONTRACT, MAX_AGE_SECONDS, MAX_SERVICES, Expected, Health,
     LocalServiceObserver, Manager, Observed, ServiceDefinition,
     ServiceMonitorError, ServiceObservation, age_guard, evaluate,
-    parse_systemd, parse_windows_scm,
+    parse_systemd, parse_windows_scm, trusted_windows_system_directory,
 )
 
 
@@ -31,6 +34,12 @@ class ObserverTests(unittest.TestCase):
             if isinstance(output, BaseException):
                 raise output
             return output or result(0, b"active\n")
+        if platform == "windows":
+            # Synthetic Windows contract tests run on both Linux and Windows.
+            patcher = mock.patch("service_health.trusted_windows_system_directory",
+                                 return_value=r"C:\Windows\System32")
+            patcher.start()
+            self.addCleanup(patcher.stop)
         obs = LocalServiceObserver((definition,), platform, runner,
                                    clock=lambda: NOW)
         return obs, calls
@@ -73,7 +82,7 @@ class ObserverTests(unittest.TestCase):
 
     def test_windows_stopped_is_failure_when_expected_running(self):
         monitor, _ = self.observer(WINDOWS,
-                                   result(0, b"STATE : 1  STOPPED\n"), "windows")
+                                   result(0, b"SERVICE_NAME: LDW.Commander\nSTATE : 1  STOPPED\n"), "windows")
         seen = monitor.observe("ldw-commander")
         self.assertEqual((seen.observed, seen.health),
                          (Observed.STOPPED, Health.FAILED))
@@ -87,6 +96,51 @@ class ObserverTests(unittest.TestCase):
                 monitor, _ = self.observer(WINDOWS, x, "windows")
                 self.assertEqual(monitor.observe("ldw-commander").health,
                                  Health.UNKNOWN)
+
+    def test_scm_status_binds_exact_single_requested_service(self):
+        # The name header must be unique, the state unique, and both match
+        # the trusted registered service. Never parse an unrelated Green.
+        samples = (
+            b"STATE : 4  RUNNING\n",
+            b"SERVICE_NAME: Other.Service\nSTATE : 4  RUNNING\n",
+            b"SERVICE_NAME: LDW.Commander\nSERVICE_NAME: Other.Service\nSTATE : 4 RUNNING\n",
+            b"SERVICE_NAME: LDW.Commander\nSTATE : 4 RUNNING\nSTATE : 1 STOPPED\n",
+            b"SERVICE_NAME: LDW.Commander\nSTATE : 2 START_PENDING\n",
+        )
+        for output in samples:
+            with self.subTest(output=output):
+                observer, _ = self.observer(WINDOWS, result(0, output), "windows")
+                item = observer.observe("ldw-commander")
+                self.assertEqual((item.observed, item.health),
+                                 (Observed.UNKNOWN, Health.UNKNOWN))
+
+    def test_spoofed_systemroot_cannot_select_fake_scm_binary(self):
+        # A trusted Windows directory is resolved through the native API,
+        # not through attacker-controlled SystemRoot or PATH.
+        with mock.patch.dict(os.environ, {
+            "SystemRoot": r"C:\AttackerFakeWindows",
+            "PATH": r"C:\AttackerFakeWindows\System32",
+        }):
+            observer, calls = self.observer(
+                WINDOWS, result(0,
+                    b"SERVICE_NAME: LDW.Commander\nSTATE : 4  RUNNING\n"),
+                platform="windows",
+            )
+            item = observer.observe("ldw-commander")
+        self.assertEqual(item.health, Health.HEALTHY)
+        self.assertEqual(calls[0][0][0], ntpath.join(
+            r"C:\Windows\System32", "sc.exe"))
+        self.assertNotIn("AttackerFakeWindows", calls[0][0][0])
+
+    @unittest.skipUnless(os.name == "nt", "native Windows API proof only")
+    def test_real_windows_system_directory_ignores_environment_override(self):
+        before = trusted_windows_system_directory()
+        with mock.patch.dict(os.environ, {"SystemRoot": r"C:\FakeWindows"}):
+            after = trusted_windows_system_directory()
+        self.assertEqual(before.casefold(), after.casefold())
+        self.assertTrue(ntpath.isabs(before))
+        self.assertIn(ntpath.basename(before).casefold(),
+                      ("system32", "syswow64"))
 
     def test_manager_mismatch_does_not_execute_probe(self):
         monitor, calls = self.observer(LINUX, platform="windows")
