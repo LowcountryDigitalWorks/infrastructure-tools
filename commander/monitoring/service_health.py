@@ -12,6 +12,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from enum import Enum
+import ctypes
+from ctypes import wintypes
+import ntpath
 import os
 import re
 import subprocess
@@ -137,13 +140,33 @@ def age_guard(observation: ServiceObservation, now: datetime) -> ServiceObservat
     return observation
 
 
+def trusted_windows_system_directory() -> str:
+    """Get the true system directory through kernel32, never mutable SystemRoot."""
+    if os.name != "nt":
+        raise ServiceMonitorError("WINDOWS_OS_API_UNAVAILABLE")
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_directory = kernel32.GetSystemDirectoryW
+        get_directory.argtypes = [wintypes.LPWSTR, wintypes.UINT]
+        get_directory.restype = wintypes.UINT
+        buffer = ctypes.create_unicode_buffer(32768)
+        size = get_directory(buffer, len(buffer))
+        system_dir = ntpath.normpath(buffer.value)
+        if not 0 < size < len(buffer) or not ntpath.isabs(system_dir):
+            raise ServiceMonitorError("WINDOWS_SYSTEM_DIR_UNVERIFIED")
+        if ntpath.basename(system_dir).casefold() not in ("system32", "syswow64"):
+            raise ServiceMonitorError("WINDOWS_SYSTEM_DIR_UNVERIFIED")
+        return system_dir
+    except (OSError, AttributeError, TypeError, ValueError):
+        raise ServiceMonitorError("WINDOWS_SYSTEM_DIR_UNVERIFIED") from None
+
+
 def _default_run(args: list[str], timeout: int) -> subprocess.CompletedProcess:
     # The unprivileged observer is separate from the service being monitored.
     # No shell, username, secrets, token, network address or command from a model.
     environment = {"PYTHONNOUSERSITE": "1"}
     if os.name == "nt":
-        root = os.environ.get("SystemRoot", r"C:\Windows")
-        environment["SystemRoot"] = root
+        environment["SystemRoot"] = ntpath.dirname(trusted_windows_system_directory())
     return subprocess.run(
         args, shell=False, check=False, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
@@ -161,26 +184,34 @@ def parse_systemd(result: subprocess.CompletedProcess) -> tuple[Observed, str]:
     return Observed.UNKNOWN, "SYSTEMD_UNVERIFIED"
 
 
+_WINDOWS_SERVICE = re.compile(
+    r"^\s*SERVICE_NAME\s*:\s*(?P<name>[A-Za-z][A-Za-z0-9_.@-]{0,79})\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 _WINDOWS_STATE = re.compile(
     r"^\s*STATE\s*:\s*(?P<code>[1-4])\s+(?P<word>STOPPED|START_PENDING|STOP_PENDING|RUNNING)\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
 
 
-def parse_windows_scm(result: subprocess.CompletedProcess) -> tuple[Observed, str]:
-    out = result.stdout[:2048].decode("utf-8", errors="replace")
-    if result.returncode == 0:
-        match = _WINDOWS_STATE.search(out.replace("\r", ""))
-        if match:
-            state = (match.group("code"), match.group("word").upper())
-            if state == ("4", "RUNNING"):
-                return Observed.RUNNING, "SCM_RUNNING"
-            if state == ("1", "STOPPED"):
-                return Observed.STOPPED, "SCM_STOPPED"
-    # Error 1060 means the service does not exist; do not parse arbitrary
-    # localized stderr for an unsafe positive signal.
+def parse_windows_scm(result: subprocess.CompletedProcess,
+                      requested_name: str) -> tuple[Observed, str]:
+    # A STATE line is not proof that the requested OS service was queried.
+    if result.returncode != 0 or not isinstance(result.stdout, bytes):
+        return Observed.UNKNOWN, "SCM_UNVERIFIED"
+    out = result.stdout[:2048].decode("utf-8", errors="replace").replace("\r", "")
+    names = list(_WINDOWS_SERVICE.finditer(out))
+    states = list(_WINDOWS_STATE.finditer(out))
+    if (len(names) != 1 or len(states) != 1
+            or names[0].group("name").casefold() != requested_name.casefold()):
+        return Observed.UNKNOWN, "SCM_UNVERIFIED"
+    state = (states[0].group("code"), states[0].group("word").upper())
+    if state == ("4", "RUNNING"):
+        return Observed.RUNNING, "SCM_RUNNING"
+    if state == ("1", "STOPPED"):
+        return Observed.STOPPED, "SCM_STOPPED"
     return Observed.UNKNOWN, "SCM_UNVERIFIED"
-
 
 class LocalServiceObserver:
     def __init__(
@@ -214,17 +245,19 @@ class LocalServiceObserver:
             if self._platform == "linux":
                 args = ["/usr/bin/systemctl", "--system", "is-active", "--", definition.manager_name]
             else:
-                system_root = os.environ.get("SystemRoot", r"C:\Windows")
-                # Do not allow a caller to supply an arbitrary executable path.
-                args = [os.path.join(system_root, "System32", "sc.exe"),
-                        "query", definition.manager_name]
+                args = None
             try:
+                if self._platform == "windows":
+                    # Never consult SystemRoot, PATH or an injected executable.
+                    trusted_dir = trusted_windows_system_directory()
+                    args = [ntpath.join(trusted_dir, "sc.exe"),
+                            "query", definition.manager_name]
                 result = self._runner(args, PROBE_TIMEOUT_SECONDS)
                 if not isinstance(result, subprocess.CompletedProcess):
                     raise TypeError("unsupported probe result")
                 observed, evidence = (
                     parse_systemd(result) if self._platform == "linux"
-                    else parse_windows_scm(result)
+                    else parse_windows_scm(result, definition.manager_name)
                 )
             except (OSError, subprocess.TimeoutExpired, TypeError, ValueError):
                 observed, evidence = Observed.UNKNOWN, "PROBE_UNAVAILABLE"
