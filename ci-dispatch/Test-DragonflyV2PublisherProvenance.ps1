@@ -38,7 +38,7 @@ if ($null -ne $priorGuard -and $Phase -ceq 'BeforeImport') {
 }
 
 function Assert-LdwV2ProtectedStaging {
-    param([string]$Root,[string]$Folder,[string]$File,[string]$Comparison)
+    param([string]$Root,[string]$Folder,[string]$File,[StringComparison]$Comparison)
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
         throw 'V2_PROVENANCE_PROTECTED_WINDOWS_REQUIRED'
     }
