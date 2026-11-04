@@ -26,4 +26,4 @@ jobs:
           python -m pip install 'playwright==1.57.0'
           python -m playwright install --with-deps chromium
       - name: Synthetic no-external-site interaction tests
-        run: python -m unittest discover -s auto-browser -p test_controller.py -v
+        run: python -m unittest discover -s auto-browser -p 'test_*.py' -v
