@@ -400,10 +400,69 @@ def clone3_invalid_argument_precheck(image_id: str) -> None:
     print("CLONE3_INVALID_ARGUMENT_PROBE_NOT_SANDBOX_ATTESTATION")
 
 
+def clone_newuser_precheck(image_id: str) -> None:
+    """Attempt the precise non-root clone(CLONE_NEWUSER|SIGCHLD) syscall.
+
+    Inside a disposable guest with no network, mounts, host privileges or
+    customer data. A successful child immediately _exit(0); the parent waits.
+    This is only a syscall-path diagnostic; no Chromium-sandbox attestation.
+    """
+    if not IMAGE_ID.fullmatch(image_id):
+        raise BoundaryError("IMAGE_NOT_PINNED")
+    docker = shutil.which("docker")
+    if not docker:
+        raise BoundaryError("DOCKER_NOT_AVAILABLE")
+    seccomp = verified_seccomp_path()
+    script = r"""import ctypes, errno, os, platform, signal
+if platform.machine() != "x86_64":
+    print("NON_X64")
+else:
+    libc = ctypes.CDLL(None, use_errno=True)
+    flags = 0x10000000 | signal.SIGCHLD  # CLONE_NEWUSER | SIGCHLD
+    pid = libc.syscall(ctypes.c_long(56), ctypes.c_ulong(flags),
+                       ctypes.c_void_p(0), ctypes.c_void_p(0),
+                       ctypes.c_void_p(0), ctypes.c_void_p(0))
+    if pid == 0:
+        os._exit(0)
+    if pid > 0:
+        _, status = os.waitpid(pid, 0)
+        print("ALLOWED" if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+              else "CHILD_EXIT_UNVERIFIED")
+    else:
+        e = ctypes.get_errno()
+        print({errno.EPERM:"DENIED_EPERM", errno.EACCES:"DENIED_EACCES",
+               errno.ENOSYS:"UNSUPPORTED_ENOSYS",
+               errno.EINVAL:"DENIED_EINVAL"}.get(e, "OTHER"))
+"""
+    args = [
+        docker, "run", "--rm", "--pull=never", "--network=none",
+        "--read-only", "--cap-drop=ALL",
+        "--security-opt=no-new-privileges=true",
+        "--security-opt=seccomp=" + seccomp,
+        "--pids-limit=32", "--memory=256m", "--ipc=private",
+        "--user=10001:10001", "--entrypoint=/usr/bin/python3",
+        image_id, "-c", script,
+    ]
+    try:
+        output = subprocess.run(args, capture_output=True, text=True,
+                                timeout=12, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        print("GUEST_CLONE_NEWUSER_PROBE=UNAVAILABLE")
+        return
+    allowed = {
+        "ALLOWED", "CHILD_EXIT_UNVERIFIED", "DENIED_EPERM", "DENIED_EACCES",
+        "UNSUPPORTED_ENOSYS", "DENIED_EINVAL", "NON_X64", "OTHER",
+    }
+    code = output.stdout.strip()
+    print("GUEST_CLONE_NEWUSER_PROBE=" +
+          (code if output.returncode == 0 and code in allowed else "UNAVAILABLE"))
+    print("CLONE_NEWUSER_PROBE_NOT_BROWSER_SANDBOX_ATTESTATION")
+
+
 def main(argv: list[str]) -> int:
     if len(argv) not in (2, 3) or (len(argv) == 3 and argv[2] not in (
         "--trusted-synthetic-only", "--userns-check", "--host-policy-readback",
-        "--clone3-null-check",
+        "--clone3-null-check", "--clone-newuser-check",
     )):
         print("NO_START: EXACT_IMAGE_ID_REQUIRED", file=sys.stderr)
         return 2
@@ -417,6 +476,8 @@ def main(argv: list[str]) -> int:
             host_policy_readback()
         elif mode == "--clone3-null-check":
             clone3_invalid_argument_precheck(argv[1])
+        elif mode == "--clone-newuser-check":
+            clone_newuser_precheck(argv[1])
         else:
             proof(argv[1], mode == "--trusted-synthetic-only")
     except BoundaryError as exc:
