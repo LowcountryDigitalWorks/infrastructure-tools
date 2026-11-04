@@ -26,6 +26,16 @@ class RealBrowserGuestGateTests(unittest.TestCase):
             with self.subTest(port=port), self.assertRaises(BoundaryError):
                 command("/usr/bin/docker", self.image, "172.17.0.1", port)
 
+    def test_no_start_phase_is_sanitized(self):
+        for phase in ("GUEST_BROWSER_LAUNCH_ERROR", "GUEST_LOCAL_NAVIGATION_ERROR",
+                      "GUEST_SERVICE_WORKER_ERROR"):
+            with self.assertRaises(BoundaryError) as caught:
+                verify_guest({"result": "NO_START", "reason": phase}, 1)
+            self.assertEqual(str(caught.exception), "CHROMIUM_NO_START_" + phase)
+        with self.assertRaises(BoundaryError) as caught:
+            verify_guest({"result": "NO_START", "reason": "secret /home/runner/.env"}, 1)
+        self.assertEqual(str(caught.exception), "CHROMIUM_NO_START_UNCLASSIFIED")
+
     def test_guest_proof_must_reject_skipped_vectors(self):
         valid = {
             "result":"PASS", "local_chromium":"PASS", "interactions":"PASS",
