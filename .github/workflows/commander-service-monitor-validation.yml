@@ -1,0 +1,29 @@
+name: LDW service monitor contract proof
+
+on:
+  pull_request:
+    paths:
+      - 'commander/monitoring/**'
+      - '.github/workflows/commander-service-monitor-validation.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  service-status-contract:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Configure Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run read-only service status contract tests
+        run: python -m unittest discover -s commander/monitoring -p 'test_*.py' -v
