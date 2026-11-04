@@ -12,6 +12,7 @@ from threading import RLock
 
 from host_session_journal import JournalBoundSyntheticAgent
 from process_containment import FixedProcessCanary, ContainmentRefused
+from preexec_admission import LocalCanaryAdmission, AdmissionRefused
 from session import SessionRefused
 
 
@@ -24,6 +25,8 @@ class ProcessBoundSyntheticSession:
             raise ValueError("FIXED_CANARY_REQUIRED")
         self._agent = host_agent
         self._canary = canary
+        # Host identity is injected by the trusted local agent, not the caller.
+        self._admission = LocalCanaryAdmission(enrolled_host=host_agent._host)
         self._session_id = None
         self._state = "NEW"
         self._lock = RLock()
@@ -32,10 +35,17 @@ class ProcessBoundSyntheticSession:
         return {"state": self._state, "privileged": False,
                 "host_journal_status": self._agent._host_journal.status()["state"]}
 
-    def start(self, signed_token: str, operator: str) -> dict:
+    def start(self, signed_token: str, operator: str, proposal: dict | None = None) -> dict:
         with self._lock:
             if self._state != "NEW":
                 raise SessionRefused("SESSION_NOT_ADMISSIBLE")
+            # Admission precedes grant consumption and process launch. A
+            # caller's risk claim, URL, argv or arbitrary file is never parsed
+            # as an approved fixed operation.
+            try:
+                self._admission.admit(proposal)
+            except AdmissionRefused:
+                raise SessionRefused("COMMAND_NOT_ADMITTED") from None
             # Validate owner, host and expiry BEFORE starting a process.
             session = self._agent.open(signed_token, operator)
             self._session_id = session["session_id"]
