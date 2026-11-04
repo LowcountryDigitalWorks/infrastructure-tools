@@ -6,7 +6,7 @@ from unittest.mock import patch
 import subprocess
 from host_proof import (command, verify_guest, verified_seccomp_path,
     BoundaryError, VECTORS, guarded_container_cleanup, run_bound_guest,
-    host_policy_readback)
+    host_policy_readback, clone3_invalid_argument_precheck)
 
 
 class RealBrowserGuestGateTests(unittest.TestCase):
@@ -71,6 +71,34 @@ class RealBrowserGuestGateTests(unittest.TestCase):
                 host_policy_readback()
         self.assertEqual(unknown.getvalue().count("UNAVAILABLE"), 3)
         self.assertNotIn("secret", unknown.getvalue())
+
+    def test_clone3_invalid_argument_readback_is_immutable_and_redacted(self):
+        valid = subprocess.CompletedProcess([], 0, stdout="DENIED_EPERM\\n",
+                                            stderr="secret private path")
+        sink = io.StringIO()
+        with patch("host_proof.shutil.which", return_value="/usr/bin/docker"):
+            with patch("host_proof.verified_seccomp_path", return_value="/tmp/fixture"):
+                with patch("host_proof.subprocess.run", return_value=valid) as runner:
+                    with contextlib.redirect_stdout(sink):
+                        clone3_invalid_argument_precheck(self.image)
+        arg = runner.call_args.args[0]
+        for flag in ("--network=none", "--read-only", "--cap-drop=ALL",
+                     "--security-opt=no-new-privileges=true",
+                     "--user=10001:10001", "--entrypoint=/usr/bin/python3"):
+            self.assertIn(flag, arg)
+        self.assertFalse(any(q.startswith("--mount") or q.startswith("--volume")
+                             for q in arg))
+        self.assertIn("GUEST_CLONE3_NULL_PROBE=DENIED_EPERM", sink.getvalue())
+        self.assertNotIn("secret", sink.getvalue())
+        raw = subprocess.CompletedProcess([], 0, stdout="secret hidden token")
+        sink = io.StringIO()
+        with patch("host_proof.shutil.which", return_value="/usr/bin/docker"):
+            with patch("host_proof.verified_seccomp_path", return_value="/tmp/fixture"):
+                with patch("host_proof.subprocess.run", return_value=raw):
+                    with contextlib.redirect_stdout(sink):
+                        clone3_invalid_argument_precheck(self.image)
+        self.assertIn("GUEST_CLONE3_NULL_PROBE=UNAVAILABLE", sink.getvalue())
+        self.assertNotIn("secret", sink.getvalue())
 
     def test_named_container_and_label_are_fixed(self):
         args = command("/usr/bin/docker", self.image, "172.17.0.1",
