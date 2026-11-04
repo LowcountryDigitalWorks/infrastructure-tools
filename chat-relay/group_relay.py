@@ -75,10 +75,10 @@ class GroupMailbox(Mailbox):
         if not isinstance(group_id, str) or not GROUP.fullmatch(group_id):
             raise RelayError(400, "INVALID_GROUP_ID")
         members = self._groups.get(group_id)
-        if members is None:
+        # An authenticated nonmember cannot enumerate room names by
+        # distinguishing a real room (403) from a nonexistent one (404).
+        if members is None or actor not in members:
             raise RelayError(404, "GROUP_NOT_FOUND")
-        if actor not in members:
-            raise RelayError(403, "NOT_GROUP_MEMBER")
         return members
 
     def _gc(self) -> None:
@@ -259,15 +259,30 @@ class GroupLocalRelay(LocalRelay):
         self.RequestHandlerClass = GroupHandler
 
 
+def parse_room_config(raw: str) -> dict:
+    if not isinstance(raw, str) or len(raw.encode("utf-8")) > 4096:
+        raise ValueError("INVALID_GROUP_CONFIG")
+    def no_duplicate_names(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("DUPLICATE_GROUP_ID")
+            result[key] = value
+        return result
+    return json.loads(raw, object_pairs_hook=no_duplicate_names)
+
+
 def main() -> None:
     key = os.environ.get("LDW_CHAT_RELAY_SECRET", "")
     if len(key.encode("utf-8")) < 32:
         raise SystemExit("LDW_CHAT_RELAY_SECRET must be securely supplied (32+ bytes)")
+    # The legacy direct-only roster would otherwise be silently ignored in
+    # group mode. Fail closed on ambiguous operator configuration.
+    if "LDW_CHAT_RELAY_ROLES" in os.environ:
+        raise SystemExit("CONFLICTING_ROLE_CONFIG")
     raw = os.environ.get("LDW_CHAT_RELAY_ROOMS", "{}")
-    if len(raw.encode("utf-8")) > 4096:
-        raise SystemExit("INVALID_GROUP_CONFIG")
     try:
-        groups = json.loads(raw)
+        groups = parse_room_config(raw)
         mailbox = GroupMailbox(key.encode("utf-8"), groups=groups)
     except (ValueError, TypeError):
         raise SystemExit("INVALID_GROUP_CONFIG") from None
