@@ -124,6 +124,25 @@ class LocalUserModeTests(unittest.TestCase):
             "file_create", name="expired.txt", value="blocked"))
         self.assertFalse((Path(self.temp.name) / "expired.txt").exists())
 
+    def test_cli_reports_only_disposable_smoke_status(self):
+        import json
+        import subprocess
+        import sys
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__).with_name("local_cli.py")),
+             "--synthetic-demo"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, timeout=8, check=True,
+        )
+        parsed = json.loads(result.stdout)
+        self.assertEqual(parsed["state"], "LOCAL_USER_MODE_PROOF_COMPLETE")
+        self.assertEqual(parsed["file_integrity"], "PASS")
+        self.assertEqual(parsed["child_process"], "PASS")
+        self.assertEqual(parsed["session_revocation"], "REVOKED")
+        self.assertFalse(parsed["privileged"])
+        self.assertFalse(parsed["model_or_plugin_connected"])
+        self.assertNotIn("private_key", result.stdout.decode().lower())
+
     def test_root_must_be_existing_real_directory(self):
         with self.assertRaises(ValueError):
             LocalUserModeProbe(PUBLIC_KEY, POLICY, "synthetic-win-01",
