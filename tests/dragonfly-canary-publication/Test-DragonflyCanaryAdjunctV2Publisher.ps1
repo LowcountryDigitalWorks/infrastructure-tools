@@ -76,6 +76,68 @@ try {
     } $old.ReleaseRoot $old.ManifestSha256
     Assert-True $oldVerified.Valid 'V2_LEGACY_READBACK_FAILED'
 
+    # An existing V1 release is never a valid V2 identity, even with a valid V1 receipt.
+    Assert-ThrowsExact {
+        & $v2 {
+            param($release,$sha)
+            Test-LdwDragonflyCanaryAdjunctV2Core -ReleaseRoot $release -ManifestSha256 $sha
+        } $old.ReleaseRoot $old.ManifestSha256
+    } 'ADJUNCT_V2_RELEASE_IDENTITY_INVALID'
+
+    # Fail closed on any extra V2 file before using the accepted release.
+    $unexpected = Join-Path $new.ReleaseRoot 'synthetic-unexpected-file.txt'
+    [IO.File]::WriteAllText($unexpected,'synthetic only',[Text.UTF8Encoding]::new($false))
+    try {
+        Assert-ThrowsExact {
+            & $v2 {
+                param($release,$sha)
+                Test-LdwDragonflyCanaryAdjunctV2Core -ReleaseRoot $release -ManifestSha256 $sha
+            } $new.ReleaseRoot $new.ManifestSha256
+        } 'ADJUNCT_FILE_SET_DRIFT'
+    } finally { Remove-Item -LiteralPath $unexpected -Force }
+
+    # The manifest must be byte-exact, even when its parsed JSON remains well-formed.
+    $v2ManifestPath = Join-Path $new.ReleaseRoot 'manifest.json'
+    $v2ManifestBytes = [IO.File]::ReadAllBytes($v2ManifestPath)
+    [IO.File]::AppendAllText($v2ManifestPath, ' ', [Text.UTF8Encoding]::new($false))
+    try {
+        Assert-ThrowsExact {
+            & $v2 {
+                param($release,$sha)
+                Test-LdwDragonflyCanaryAdjunctV2Core -ReleaseRoot $release -ManifestSha256 $sha
+            } $new.ReleaseRoot $new.ManifestSha256
+        } 'ADJUNCT_MANIFEST_HASH_DRIFT'
+    } finally { [IO.File]::WriteAllBytes($v2ManifestPath,$v2ManifestBytes) }
+
+    # A wrong verifier receipt cannot select the same on-disk V2 release.
+    Assert-ThrowsExact {
+        & $v2 {
+            param($release,$sha)
+            Test-LdwDragonflyCanaryAdjunctV2Core -ReleaseRoot $release -ManifestSha256 $sha
+        } $new.ReleaseRoot ('0' * 64)
+    } 'ADJUNCT_MANIFEST_HASH_DRIFT'
+
+    # The accepted #10 CRLF-materialized Dispatch is covered by the V2 hash gate.
+    $v2DispatchPath = Join-Path $new.ReleaseRoot 'ci-dispatch/Dispatch.psm1'
+    $v2DispatchBytes = [IO.File]::ReadAllBytes($v2DispatchPath)
+    [IO.File]::AppendAllText($v2DispatchPath, '# synthetic corruption', [Text.UTF8Encoding]::new($false))
+    try {
+        Assert-ThrowsExact {
+            & $v2 {
+                param($release,$sha)
+                Test-LdwDragonflyCanaryAdjunctV2Core -ReleaseRoot $release -ManifestSha256 $sha
+            } $new.ReleaseRoot $new.ManifestSha256
+        } 'ADJUNCT_FILE_HASH_DRIFT'
+    } finally { [IO.File]::WriteAllBytes($v2DispatchPath,$v2DispatchBytes) }
+
+    # All recovered negative fixtures must verify without republishing or changing V1.
+    $recovered = & $v2 {
+        param($release,$sha)
+        Test-LdwDragonflyCanaryAdjunctV2Core -ReleaseRoot $release -ManifestSha256 $sha
+    } $new.ReleaseRoot $new.ManifestSha256
+    Assert-True $recovered.Valid 'V2_NEGATIVE_TEST_RECOVERY_FAILED'
+    Assert-True ((Get-FileHash -LiteralPath $oldManifestPath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $oldManifestHash) 'V2_NEGATIVE_TEST_CHANGED_V1'
+
     # A non-identical existing immutable V2 release must be refused, not overwritten.
     $v2EntryPath = Join-Path $new.ReleaseRoot 'ci-dispatch/Invoke-DragonflyCanaryProduction.ps1'
     Add-Content -LiteralPath $v2EntryPath -Value '# synthetic corruption'
