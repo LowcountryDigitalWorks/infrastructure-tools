@@ -10,6 +10,11 @@ Chromebook REDRIX Crostini execution host. It does **not** register a GitHub
 runner, poll GitHub, store a GitHub credential, install a standing task, or alter
 workflow routing. LDW01 remains the trusted dispatcher/control owner.
 
+For owner-directed Chromebook continuity, the isolated, *read-only*
+[REDRIX R2 multi-sample local health observer](REDRIX_CONTINUITY_READONLY.md)
+provides sanitized local state; it does not unlock ChromeOS pre-login,
+establish LDW01 peer visibility, start a runner, or authorize JIT.
+
 ## Local lifecycle
 
 `dragonfly_jit.py` provides a closed local lifecycle surface:
