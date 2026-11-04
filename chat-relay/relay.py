@@ -186,6 +186,12 @@ class LocalRelay(ThreadingHTTPServer):
         self._slots = BoundedSemaphore(MAX_CLIENT_THREADS)
         super().__init__(address, Handler)
 
+    def handle_error(self, request, client_address):
+        # ThreadingHTTPServer otherwise prints an exception traceback with
+        # the client address on short/invalid connections. This local-only
+        # proof never logs requester IPs, headers, bodies or bearer tokens.
+        return
+
     def get_request(self):
         request, addr = super().get_request()
         request.settimeout(2.0)  # idle-read deadline, separate from absolute deadline
