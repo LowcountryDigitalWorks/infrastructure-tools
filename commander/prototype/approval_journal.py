@@ -10,6 +10,7 @@ cross-process single-use consumption for synthetic FULL_ADMIN issuance.
 from __future__ import annotations
 
 import os
+from contextlib import closing
 from pathlib import Path
 import sqlite3
 import stat
@@ -46,7 +47,7 @@ class ApprovalJournal:
         try:
             self.path = path
             self._verify_file()
-            with self._connect() as db:
+            with closing(self._connect()) as db:
                 if initialize:
                     db.execute(
                         "CREATE TABLE consumed ("
