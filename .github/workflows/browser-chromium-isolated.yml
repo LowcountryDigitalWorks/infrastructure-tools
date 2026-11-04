@@ -42,6 +42,12 @@ jobs:
           set -euo pipefail
           image_id="$(docker image inspect --format '{{.Id}}' ldw-chromium-guest-probe:local)"
           python3 browser-isolation/chromium/host_proof.py "$image_id" --clone3-null-check
+      - name: Probe exact Chromium clone NEWUSER path without host policy change
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_id="$(docker image inspect --format '{{.Id}}' ldw-chromium-guest-probe:local)"
+          python3 browser-isolation/chromium/host_proof.py "$image_id" --clone-newuser-check
       - name: Check unprivileged guest user namespace without changing host policy
         shell: bash
         run: |
