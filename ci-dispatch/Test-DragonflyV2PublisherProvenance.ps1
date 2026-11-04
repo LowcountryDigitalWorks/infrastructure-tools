@@ -24,6 +24,21 @@ if ($ProtectedPublication -and [Environment]::OSVersion.Platform -ne [PlatformID
     throw 'V2_PROVENANCE_PROTECTED_WINDOWS_REQUIRED'
 }
 
+# A Release must close the imported publisher's protected file handle even if
+# the Git executable or its signature became unavailable after BeforeImport.
+# No Git resolution, repository read, or authorization side effect precedes it.
+$guardName = 'LDW_DRAGONFLY_V2_PROTECTED_PUBLISH_GUARD'
+if ($Phase -ceq 'Release') {
+    $held = Get-Variable -Name $guardName -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+    if (-not $ProtectedPublication -or $null -eq $held -or $held.OwnerPid -ne $PID) {
+        throw 'V2_PROVENANCE_PROTECTED_GUARD_MISSING'
+    }
+    try { $held.Stream.Dispose() }
+    finally { Remove-Variable -Name $guardName -Scope Global -Force -ErrorAction SilentlyContinue }
+    'DRAGONFLY_V2_PUBLISHER_PROVENANCE_GUARD_RELEASE=PASS'
+    return
+}
+
 # Resolve the actual application, never a PowerShell alias/function named git.
 # Privileged publication accepts only the fixed signed Program Files Git.exe.
 $script:GitExecutable = if ($ProtectedPublication) {
@@ -46,16 +61,7 @@ if ($ProtectedPublication) {
 
 # A protected publication guard is intentionally process-local, never persisted
 # to disk or passed to another process. Do not weaken this for test convenience.
-$guardName = 'LDW_DRAGONFLY_V2_PROTECTED_PUBLISH_GUARD'
 $priorGuard = Get-Variable -Name $guardName -Scope Global -ValueOnly -ErrorAction SilentlyContinue
-if ($Phase -ceq 'Release') {
-    if (-not $ProtectedPublication -or $null -eq $priorGuard -or
-        $priorGuard.OwnerPid -ne $PID) { throw 'V2_PROVENANCE_PROTECTED_GUARD_MISSING' }
-    try { $priorGuard.Stream.Dispose() }
-    finally { Remove-Variable -Name $guardName -Scope Global -Force -ErrorAction SilentlyContinue }
-    'DRAGONFLY_V2_PUBLISHER_PROVENANCE_GUARD_RELEASE=PASS'
-    return
-}
 if ($null -ne $priorGuard -and $Phase -ceq 'BeforeImport') {
     throw 'V2_PROVENANCE_PROTECTED_GUARD_ALREADY_ACTIVE'
 }
