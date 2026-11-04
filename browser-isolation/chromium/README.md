@@ -19,7 +19,7 @@
 - `test_host_proof.py`: strict command admission, mandatory vector set and evidence-schema negatives.
 - `.github/workflows/browser-chromium-isolated.yml`: disposable Ubuntu PR-only job, normal contents:read GitHub token, public base-image download and source build.
 
-**All successful outputs are labelled `SYNTHETIC_GUEST_ONLY`**. While the guest intentionally attempts to contact the disposable **host-side fixture** and documentation-range address, Docker network-none should prevent actual contact. No real external website is ever visited or requested. Source/CI result is not a production host sandbox authorization.
+**Two explicitly separate CI modes, never an automatic fallback:** strict production-oriented *test* mode requests `chromiumSandbox:true` and must PASS before the strict job can become green; an additional **CI-only `--trusted-synthetic-only` diagnostic** requests `chromiumSandbox:false` solely for the trusted, static test fixture. This second mode retains Docker `--network=none`, non-root UID and all fixed host isolation flags, but reports `TRUSTED_SYNTHETIC_NO_CHROMIUM_SANDBOX`, and **cannot satisfy the sandbox security gate**. CI runs the diagnostic first, then the strict gate; strict failure leaves the overall workflow **FAILED** even if the diagnostic passes. No real external website is visited in either mode, no user data/browser profile is mounted, and the diagnostic cannot be selected by model tool input or used outside GitHub Actions. **Only strict success qualifies as full proposed test PASS**, and even that does not authorize production untrusted browsing.
 
 ## HARD RELEASE HOLDS
 
