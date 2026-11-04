@@ -73,7 +73,7 @@ class RealBrowserGuestGateTests(unittest.TestCase):
         self.assertNotIn("secret", unknown.getvalue())
 
     def test_clone3_invalid_argument_readback_is_immutable_and_redacted(self):
-        valid = subprocess.CompletedProcess([], 0, stdout="DENIED_EPERM\\n",
+        valid = subprocess.CompletedProcess([], 0, stdout="DENIED_EPERM\n",
                                             stderr="secret private path")
         sink = io.StringIO()
         with patch("host_proof.shutil.which", return_value="/usr/bin/docker"):
