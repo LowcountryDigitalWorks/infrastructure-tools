@@ -201,8 +201,13 @@ class StdioMcpBridge:
 
     def serve(self, source, sink):
         # A strict bound on untrusted stdio frames. Never echo requests or tokens.
-        for line in source:
-            if len(line.encode("utf-8")) > MAX_FRAME:
+        while True:
+            # readline with a hard character cap prevents an untrusted stdio
+            # peer from causing unbounded buffering before newline/frame check.
+            line = source.readline(MAX_FRAME + 1)
+            if not line:
+                break
+            if not line.endswith("\n") or len(line.encode("utf-8")) > MAX_FRAME:
                 break
             try:
                 message = json.loads(line)
