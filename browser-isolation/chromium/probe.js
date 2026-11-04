@@ -6,6 +6,7 @@ const http = require("node:http");
 const net = require("node:net");
 const crypto = require("node:crypto");
 const { chromium } = require("playwright");
+const { inspectRendererKernel, VALID: KERNEL_CODES } = require("./kernel_attestation");
 let phase = "INIT";
 
 async function inspectBrowserSandbox(context) {
@@ -135,6 +136,16 @@ async function main() {
     if (await page.locator("#result").textContent() !== "LDW_OK") throw Error("LOCAL_INTERACTION");
     const digest = crypto.createHash("sha256").update(await page.screenshot()).digest("hex");
     if (!/^[0-9a-f]{64}$/.test(digest)) throw Error("SCREENSHOT");
+    phase = "KERNEL_STATUS";
+    // Cross-check the actual live renderer's namespaces and seccomp-filter
+    // count against this trusted guest Node process. Chromium WebUI is still
+    // separately mandatory; this cannot substitute for browser attestation.
+    if (!trustedSynthetic) {
+      const kernel = inspectRendererKernel();
+      if (kernel !== "RENDERER_KERNEL_CORROBORATED") {
+        throw Error("CHROMIUM_KERNEL_" + kernel);
+      }
+    }
     phase = "SANDBOX_STATUS";
     const sandboxDetails = trustedSynthetic ? "NOT_REQUESTED" :
       await inspectBrowserSandbox(context);
@@ -202,6 +213,7 @@ main().catch(err=>{
   const known = new Set(["INVALID_ARGS","INVALID_TARGET","LOCAL_BROWSER_NAVIGATION",
     "LOCAL_INTERACTION","SCREENSHOT","BROWSER_VECTOR_NOT_INVOKED",
     "SERVICE_WORKER_NOT_INVOKED","OFF_GUEST_REDIRECT_WAS_ALLOWED","DIRECT_TCP_REACHED_HOST","CHROMIUM_SANDBOX_LAYER_UNVERIFIED","CHROMIUM_SANDBOX_LAYER_ROWS_NOT_FOUND","CHROMIUM_SANDBOX_LAYER_LABELS_MISSING","CHROMIUM_SANDBOX_LAYER_LAYER_NOT_ACTIVE","CHROMIUM_SANDBOX_LAYER_OVERALL_NOT_VERIFIED","CHROMIUM_SANDBOX_LAYER_PAGE_UNAVAILABLE","CHROMIUM_SANDBOX_LAYER_BOTH_LABELS_MISSING","CHROMIUM_SANDBOX_LAYER_NAMESPACE_LABEL_MISSING","CHROMIUM_SANDBOX_LAYER_SECCOMP_LABEL_MISSING"]);
+  for (const code of KERNEL_CODES) known.add("CHROMIUM_KERNEL_" + code);
   let reason = known.has(err.message) ? err.message : "GUEST_" + phase + "_ERROR";
   if (phase === "BROWSER_LAUNCH" && !known.has(err.message)) {
     // Parse the ACTUAL Playwright chromium.launch({channel:"chromium",
