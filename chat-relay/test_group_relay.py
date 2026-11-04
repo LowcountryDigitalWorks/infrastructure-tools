@@ -1,12 +1,14 @@
 """Pure synthetic proof: group transport is not ChatGPT recipient wake."""
 import http.client
 import json
+import socket
 import threading
+import time
 import unittest
 import uuid
 
 from group_relay import GroupMailbox, GroupLocalRelay
-from relay import RelayError, MAX_MESSAGES
+from relay import RelayError, LocalRelay, MAX_MESSAGES, MAX_CLIENT_THREADS
 
 SECRET = b"synthetic-only-LDW-group-mailbox-test-secret-1234567890"
 ROOMS = {"ldw-ir": ["gm17", "ir02", "ops04"], "ldw-ops": ["gm17", "ops04"]}
@@ -204,6 +206,27 @@ class GroupHTTPTests(unittest.TestCase):
         self.assertEqual((status, error["error"]), (400, "INVALID_LIMIT"))
         status, error = self.request("POST", "/v1/groups/ack", "gm17", {"message_id": uid()})
         self.assertEqual((status, error["error"]), (400, "INVALID_ENVELOPE"))
+
+    def test_group_http_bounded_connection_admission(self):
+        self.assertTrue(issubclass(GroupLocalRelay, LocalRelay))
+        holders = []
+        try:
+            for _ in range(MAX_CLIENT_THREADS):
+                sock = socket.create_connection(("127.0.0.1", self.server.server_port), timeout=2)
+                sock.sendall(b"GET /v1/groups HTTP/1.1\r\nHost: 127.0.0.1\r\n")
+                holders.append(sock)
+            time.sleep(0.3)
+            self.assertFalse(self.server._slots.acquire(blocking=False))
+        finally:
+            for sock in holders:
+                sock.close()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if self.server._slots.acquire(blocking=False):
+                self.server._slots.release()
+                return
+            time.sleep(0.05)
+        self.fail("group relay worker slots did not recover")
 
     def test_http_direct_legacy_works(self):
         direct_id = uid()
