@@ -19,7 +19,7 @@ function Assert-ThrowsExact([scriptblock]$Action,[string]$Expected) {
 $exports = @(Get-Command -Module $v2.Name | Select-Object -ExpandProperty Name | Sort-Object)
 Assert-True ($exports.Count -eq 2 -and
     -not @(Compare-Object @('Publish-LdwDragonflyCanaryAdjunctV2','Test-LdwDragonflyCanaryAdjunctV2') $exports -CaseSensitive).Count) 'ADJUNCT_V2_EXPORT_SURFACE_INVALID'
-$releaseId = '78a3a23b1a9dac59698a09cec2dd6c9a81e4a3ca-feca05f0efecf29f4bf58d251c6da5d71c7c2750'
+$releaseId = '78a3a23b1a9dac59698a09cec2dd6c9a81e4a3ca-e53e016383441fde6ba22cb57821b3d26bdf4824'
 $root = Join-Path ([IO.Path]::GetTempPath()) ('ldw-adjunct-v2-contract-' + [guid]::NewGuid().ToString('N'))
 
 try {
@@ -47,12 +47,12 @@ try {
     Assert-True ($newManifest.schema -eq 2 -and
         $newManifest.artifact -ceq 'ldw-dragonfly-canary-adjunct-v2' -and
         $newManifest.releaseIdentity -ceq $releaseId -and
-        $newManifest.entryCommit -ceq 'feca05f0efecf29f4bf58d251c6da5d71c7c2750') 'V2_MANIFEST_IDENTITY_INVALID'
+        $newManifest.entryCommit -ceq 'e53e016383441fde6ba22cb57821b3d26bdf4824') 'V2_MANIFEST_IDENTITY_INVALID'
     Assert-True ($newManifest.containsCredential -eq $false -and
         $newManifest.containsBootstrap -eq $false -and
         $newManifest.containsPrivateEndpoint -eq $false) 'V2_SECRET_BOUNDARY_INVALID'
     $newEntry = @($newManifest.files | Where-Object path -CEQ 'ci-dispatch/Invoke-DragonflyCanaryProduction.ps1')
-    Assert-True ($newEntry.Count -eq 1 -and $newEntry[0].gitBlob -ceq '47d172ac015edfb8f0713c0422d1585b4d2e2ff2') 'V2_ENTRY_BLOB_INVALID'
+    Assert-True ($newEntry.Count -eq 1 -and $newEntry[0].gitBlob -ceq '2068368b6ba91a476d8a1f05fc6b0792dca2d263') 'V2_ENTRY_BLOB_INVALID'
 
     $newVerified = & $v2 {
         param($release,$sha)

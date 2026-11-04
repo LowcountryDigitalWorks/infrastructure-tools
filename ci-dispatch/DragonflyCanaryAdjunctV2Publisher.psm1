@@ -6,8 +6,8 @@ $ErrorActionPreference = 'Stop'
 
 $script:CanaryCommit = '78a3a23b1a9dac59698a09cec2dd6c9a81e4a3ca'
 $script:CanaryTree = '5f54ee5b76f49250db1358f058745cb30b6587ef'
-$script:EntryCommit = 'feca05f0efecf29f4bf58d251c6da5d71c7c2750'
-$script:EntryTree = '919506dddc1a65f6279117886d7cdf6a9dbf47b0'
+$script:EntryCommit = 'e53e016383441fde6ba22cb57821b3d26bdf4824'
+$script:EntryTree = '18e910ba4ed5113a1a4b5065bcc8f08a5e0084cb'
 $script:ReleaseIdentity = $script:CanaryCommit + '-' + $script:EntryCommit
 $script:DispatchCommit = 'ce2bf253556a69dfb43de7bb8e8a4927c41c9e15'
 $script:DispatchTree = '57ceb47f2a0a40d3b176cde0818a0ad8c5891dca'
@@ -17,7 +17,7 @@ $script:DispatchWindowsSha256 = '0a41b338ca6b8b05ff31a26f30486381c7c836e484985a8
 $script:Files = @(
     [pscustomobject]@{ path='ci-dispatch/DragonflyCanary.psm1'; commit=$script:CanaryCommit; tree=$script:CanaryTree; blob='893c89ae65bd85464f404fa4a4ff762344915520'; representation='raw' },
     [pscustomobject]@{ path='ci-dispatch/DragonflyCanaryRuntime.psm1'; commit=$script:CanaryCommit; tree=$script:CanaryTree; blob='7730f473d2588e885fa6a4f3aec1b486b408dbda'; representation='raw' },
-    [pscustomobject]@{ path='ci-dispatch/Invoke-DragonflyCanaryProduction.ps1'; commit=$script:EntryCommit; tree=$script:EntryTree; blob='47d172ac015edfb8f0713c0422d1585b4d2e2ff2'; representation='raw' },
+    [pscustomobject]@{ path='ci-dispatch/Invoke-DragonflyCanaryProduction.ps1'; commit=$script:EntryCommit; tree=$script:EntryTree; blob='2068368b6ba91a476d8a1f05fc6b0792dca2d263'; representation='raw' },
     [pscustomobject]@{ path='ci-dispatch/Dispatch.psm1'; commit=$script:DispatchCommit; tree=$script:DispatchTree; blob=$script:DispatchBlob; representation='crlf' }
 )
 
