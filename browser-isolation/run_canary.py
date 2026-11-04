@@ -83,6 +83,20 @@ def classify_guest_start_failure(stderr: str, exit_code: int) -> str:
         if marker in source:
             reason = label
             break
+    if reason == "UNKNOWN":
+        # Only fixed Docker option/runtime vocabulary is exposed. This cannot
+        # leak unknown paths, addresses, tokens or untrusted guest output.
+        vocabulary = (
+            "image", "pull", "reference", "format", "manifest", "docker", "daemon",
+            "network", "container", "cannot", "create", "mount", "rootfs",
+            "tmpfs", "cgroup", "pids", "ipc", "seccomp", "security", "runtime",
+            "unsupported", "namespace", "executable", "exec", "invalid", "flag",
+            "unknown", "failed", "found", "file", "directory", "error", "argument",
+        )
+        words = set(re.findall(r"[a-z]+", source))
+        hits = [word.upper() for word in vocabulary if word in words][:8]
+        if hits:
+            reason = "KEYWORDS_" + "_".join(hits)
     code = exit_code if isinstance(exit_code, int) and 0 <= exit_code <= 255 else "OTHER"
     return f"GUEST_NO_STRUCTURED_RESULT_EXIT_{code}_{reason}"
 
