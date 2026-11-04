@@ -122,6 +122,7 @@ def verify_guest(result: object, rc: int,
             "LOCAL_INTERACTION", "SCREENSHOT", "BROWSER_VECTOR_NOT_INVOKED",
             "SERVICE_WORKER_NOT_INVOKED", "OFF_GUEST_REDIRECT_WAS_ALLOWED",
             "DIRECT_TCP_REACHED_HOST", "GUEST_WATCHDOG",
+            "CHROMIUM_SANDBOX_LAYER_UNVERIFIED",
             "GUEST_INIT_ERROR", "GUEST_BROWSER_LAUNCH_ERROR",
             "GUEST_BROWSER_LAUNCH_ACTUAL_UNKNOWN",
             "GUEST_BROWSER_LAUNCH_ACTUAL_NO_USABLE_SANDBOX",
@@ -148,7 +149,7 @@ def verify_guest(result: object, rc: int,
                             (result["reason"] if result["reason"] in allowed else "UNCLASSIFIED")) from None
     if not isinstance(result, dict) or set(result) != {
         "result", "local_chromium", "interactions", "vectors", "redirect",
-        "direct_tcp", "sandbox_requested", "source",
+        "direct_tcp", "sandbox_requested", "sandbox_details", "source",
     }:
         raise BoundaryError("CHROMIUM_RESULT_SCHEMA")
     if result["result"] != "PASS" or result["local_chromium"] != "PASS" or result["interactions"] != "PASS":
@@ -159,6 +160,10 @@ def verify_guest(result: object, rc: int,
                        if trusted_synthetic else "SYNTHETIC_GUEST_ONLY")
     if result["sandbox_requested"] is not (not trusted_synthetic) or result["source"] != expected_source:
         raise BoundaryError("CHROMIUM_SCOPE_INVALID")
+    expected_layers = ("NOT_REQUESTED" if trusted_synthetic
+                       else "NAMESPACE_SECCOMP_ACTIVE")
+    if result["sandbox_details"] != expected_layers:
+        raise BoundaryError("CHROMIUM_SANDBOX_LAYER_UNVERIFIED")
     if rc != 0:
         raise BoundaryError("CHROMIUM_GUEST_EXIT_NONZERO")
 
