@@ -30,6 +30,8 @@ class SyntheticBrowser:
         self._browser = None
         self._context = None
         self._page = None
+        self._blocked_http = 0
+        self._blocked_websocket = 0
 
     def __enter__(self):
         self._playwright = sync_playwright().start()
@@ -39,8 +41,14 @@ class SyntheticBrowser:
             if os.path.isfile("/usr/bin/chromium"):
                 browser_kwargs["executable_path"] = "/usr/bin/chromium"
             self._browser = self._playwright.chromium.launch(**browser_kwargs)
-            self._context = self._browser.new_context(accept_downloads=False)
-            self._context.route("**/*", lambda route: route.continue_() if self._is_synthetic_url(route.request.url) else route.abort())
+            # Service Workers can otherwise bypass HTTP route interception.
+            self._context = self._browser.new_context(
+                accept_downloads=False, service_workers="block",
+            )
+            self._context.route("**/*", self._route_http)
+            # HTTP interception does NOT cover WebSockets. Block every WS,
+            # including local endpoints, before any page is created.
+            self._context.route_web_socket("**/*", self._route_websocket)
             self._page = self._context.new_page()
             return self
         except BaseException:
@@ -55,6 +63,23 @@ class SyntheticBrowser:
         if self._playwright:
             self._playwright.stop()
         self._page = self._context = self._browser = self._playwright = None
+
+    def _route_http(self, route) -> None:
+        if self._is_synthetic_url(route.request.url):
+            route.continue_()
+        else:
+            self._blocked_http += 1
+            route.abort()
+
+    def _route_websocket(self, route) -> None:
+        # No server connection is made; even localhost WS is prohibited in V0.
+        self._blocked_websocket += 1
+        route.close(code=1008)
+
+    def denied_network_counts(self) -> dict:
+        # Safe diagnostics: never emit attempted URLs or request bodies.
+        return {"http": self._blocked_http,
+                "websocket": self._blocked_websocket}
 
     def _is_synthetic_url(self, url: str) -> bool:
         try:
