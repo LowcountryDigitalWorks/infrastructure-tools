@@ -188,6 +188,7 @@ class LocalServiceObserver:
         definitions: tuple[ServiceDefinition, ...],
         platform: str,
         runner: Callable[[list[str], int], subprocess.CompletedProcess] = _default_run,
+        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ):
         if not isinstance(definitions, tuple) or len(definitions) > MAX_SERVICES:
             raise ServiceMonitorError("INVALID_REGISTRY")
@@ -198,12 +199,13 @@ class LocalServiceObserver:
         self._definitions = {d.service_id: d for d in definitions}
         self._platform = platform
         self._runner = runner
+        self._clock = clock
 
     def observe(self, service_id: str, now: datetime | None = None) -> ServiceObservation:
         definition = self._definitions.get(service_id)
         if definition is None:
             raise ServiceMonitorError("SERVICE_NOT_REGISTERED")
-        now = now or datetime.now(timezone.utc)
+        now = now or self._clock()
         if now.tzinfo is None:
             raise ServiceMonitorError("NAIVE_TIMESTAMP")
         if (definition.manager == Manager.WINDOWS_SCM) != (self._platform == "windows"):
@@ -230,4 +232,4 @@ class LocalServiceObserver:
             definition.service_id, definition.manager, definition.desired,
             definition.required, observed, evaluate(definition, observed), evidence, now
         )
-        return age_guard(item, datetime.now(timezone.utc))
+        return age_guard(item, self._clock())
