@@ -7,7 +7,7 @@ import time
 import unittest
 import uuid
 
-from group_relay import GroupMailbox, GroupLocalRelay
+from group_relay import GroupMailbox, GroupLocalRelay, MAX_PER_SENDER, MAX_PER_GROUP, parse_room_config
 from relay import RelayError, LocalRelay, MAX_MESSAGES, MAX_CLIENT_THREADS
 
 SECRET = b"synthetic-only-LDW-group-mailbox-test-secret-1234567890"
@@ -71,11 +71,11 @@ class GroupMailboxTests(unittest.TestCase):
 
     def test_nonmember_cannot_access_or_send(self):
         self.send()
-        self.expect("NOT_GROUP_MEMBER", lambda: self.box.group_receive("ir02", "ldw-ops"))
-        self.expect("NOT_GROUP_MEMBER", lambda: self.box.group_send("ir02", {
+        self.expect("GROUP_NOT_FOUND", lambda: self.box.group_receive("ir02", "ldw-ops"))
+        self.expect("GROUP_NOT_FOUND", lambda: self.box.group_send("ir02", {
             "message_id": uid(), "group_id": "ldw-ops", "sender": "ir02", "body": "intrusion"
         }))
-        self.expect("NOT_GROUP_MEMBER", lambda: self.box.group_acknowledge("ir02", "ldw-ops", self.id))
+        self.expect("GROUP_NOT_FOUND", lambda: self.box.group_acknowledge("ir02", "ldw-ops", self.id))
 
     def test_role_impersonation_and_sender_ack_refused(self):
         self.expect("ROLE_MISMATCH", lambda: self.send(sender="ops04"))
@@ -114,13 +114,63 @@ class GroupMailboxTests(unittest.TestCase):
         self.expect("INVALID_LIMIT", lambda: self.box.group_receive("gm17", "ldw-ir", 100))
         self.expect("GROUP_NOT_FOUND", lambda: self.send(group_id="unknown-room"))
 
-    def test_capacity_shared_with_direct(self):
-        for _ in range(MAX_MESSAGES):
+    def test_sender_quota_cannot_starve_unrelated_group_or_direct(self):
+        first = uid()
+        self.send(message_id=first)
+        for _ in range(MAX_PER_SENDER - 1):
             self.send(message_id=uid())
-        self.expect("MAILBOX_FULL", lambda: self.send())
-        self.expect("MAILBOX_FULL", lambda: self.box.send("gm17", {
-            "message_id": uid(), "sender": "gm17", "recipient": "ir02", "body": "direct"
+        self.expect("SENDER_QUOTA_EXCEEDED", lambda: self.send(message_id=uid()))
+        self.assertTrue(self.send(message_id=first)["duplicate"])
+        # Another sender in another room still has capacity even though
+        # gm17 reached its sender limit.
+        self.assertEqual(self.box.group_send("ops04", {
+            "message_id": uid(), "sender": "ops04",
+            "group_id": "ldw-ops", "body": "unrelated group"
+        })["state"], "GROUP_IN_MAILBOX")
+        self.assertEqual(self.box.send("ir02", {
+            "message_id": uid(), "sender": "ir02",
+            "recipient": "gm17", "body": "direct still usable"
+        })["state"], "IN_MAILBOX")
+        self.expect("SENDER_QUOTA_EXCEEDED", lambda: self.box.send("gm17", {
+            "message_id": uid(), "sender": "gm17",
+            "recipient": "ir02", "body": "quota applied across modes"
         }))
+
+    def test_direct_sender_cannot_starve_group_mailboxes(self):
+        for _ in range(MAX_PER_SENDER):
+            self.box.send("gm17", {
+                "message_id": uid(), "sender": "gm17",
+                "recipient": "ir02", "body": "bounded direct message"
+            })
+        self.expect("SENDER_QUOTA_EXCEEDED", lambda: self.send(message_id=uid()))
+        self.assertEqual(self.box.group_send("ir02", {
+            "message_id": uid(), "sender": "ir02",
+            "group_id": "ldw-ir", "body": "other member can still send"
+        })["state"], "GROUP_IN_MAILBOX")
+
+    def test_room_quota_preserves_other_room_capacity(self):
+        for sender in ("gm17", "ir02"):
+            for _ in range(MAX_PER_SENDER):
+                self.send(actor=sender, message_id=uid())
+        self.assertEqual(MAX_PER_GROUP, 2 * MAX_PER_SENDER)
+        self.expect("GROUP_QUOTA_EXCEEDED", lambda: self.send(
+            actor="ops04", message_id=uid()))
+        self.assertEqual(self.box.group_send("ops04", {
+            "message_id": uid(), "sender": "ops04",
+            "group_id": "ldw-ops", "body": "other room not starved"
+        })["state"], "GROUP_IN_MAILBOX")
+
+    def test_member_cannot_read_or_ack_other_room_message(self):
+        ir_id, ops_id = uid(), uid()
+        self.send(message_id=ir_id)
+        self.send(message_id=ops_id, group_id="ldw-ops")
+        ir_view = self.box.group_receive("ops04", "ldw-ir")["messages"]
+        ops_view = self.box.group_receive("ops04", "ldw-ops")["messages"]
+        self.assertEqual([x["message_id"] for x in ir_view], [ir_id])
+        self.assertEqual([x["message_id"] for x in ops_view], [ops_id])
+        self.expect("NOT_FOUND", lambda: self.box.group_acknowledge(
+            "ops04", "ldw-ops", ir_id))
+        self.assertEqual(len(self.box.group_receive("ops04", "ldw-ir")["messages"]), 1)
 
     def test_reject_bad_membership_config(self):
         for groups in ({"ldw-ir": ["gm17", "gm17"]},
@@ -129,6 +179,18 @@ class GroupMailboxTests(unittest.TestCase):
                        {"ldw-ir": "gm17,ir02"}):
             with self.assertRaises(ValueError):
                 GroupMailbox(SECRET, groups)
+
+    def test_room_config_rejects_duplicate_names(self):
+        self.assertRaises(ValueError, parse_room_config,
+            '{"ldw-ir":["gm17","ir02"],"ldw-ir":["gm17","ops04"]}')
+        parsed = parse_room_config(
+            '{"ldw-ir":["gm17","ir02"],"ldw-ops":["gm17","ops04"]}')
+        self.assertEqual(len(parsed), 2)
+
+    def test_nonmember_room_exists_and_absent_are_indistinguishable(self):
+        for group_id in ("ldw-ops", "not-a-room"):
+            self.expect("GROUP_NOT_FOUND", lambda group_id=group_id:
+                        self.box.group_receive("ir02", group_id))
 
     def test_refuse_public_binding(self):
         with self.assertRaises(ValueError):
@@ -197,7 +259,7 @@ class GroupHTTPTests(unittest.TestCase):
         status, failure = self.request("GET", "/v1/groups", "gm17", token="wrong")
         self.assertEqual((status, failure["error"]), (401, "UNAUTHORIZED"))
         status, failure = self.request("GET", "/v1/groups/receive?group_id=ldw-ops", "ir02")
-        self.assertEqual((status, failure["error"]), (403, "NOT_GROUP_MEMBER"))
+        self.assertEqual((status, failure["error"]), (404, "GROUP_NOT_FOUND"))
 
     def test_http_query_and_scope_fail_closed(self):
         status, error = self.request("GET", "/v1/groups/receive?group_id=ldw-ir&group_id=ldw-ops", "gm17")
@@ -206,6 +268,50 @@ class GroupHTTPTests(unittest.TestCase):
         self.assertEqual((status, error["error"]), (400, "INVALID_LIMIT"))
         status, error = self.request("POST", "/v1/groups/ack", "gm17", {"message_id": uid()})
         self.assertEqual((status, error["error"]), (400, "INVALID_ENVELOPE"))
+
+    def test_direct_receive_rejects_blank_or_duplicate_limits(self):
+        for path in ("/v1/receive?limit=", "/v1/receive?limit=1&limit=2",
+                     "/v1/receive?limit=1&extra=2"):
+            status, error = self.request("GET", path, "ir02")
+            self.assertEqual((status, error["error"]), (400, "INVALID_QUERY"))
+
+    def test_legacy_direct_missing_required_field_is_bounded_error(self):
+        status, error = self.request("POST", "/v1/send", "gm17", {
+            "message_id": uid(), "sender": "gm17", "body": "fixture",
+            "reply_to": uid()
+        })
+        self.assertEqual((status, error["error"]), (400, "INVALID_ENVELOPE"))
+
+    def test_recursive_json_and_oversized_integer_return_json_error(self):
+        # The client inputs are deliberately invalid and never executed.
+        for payload in (
+            b"[" * 1100 + b"0" + b"]" * 1100,
+            b'{"number":' + b"9" * 5000 + b"}",
+        ):
+            for path in ("/v1/send", "/v1/groups/send"):
+                with self.subTest(path=path, length=len(payload)):
+                    conn = http.client.HTTPConnection(
+                        "127.0.0.1", self.server.server_port, timeout=3)
+                    try:
+                        conn.request("POST", path, body=payload,
+                                     headers={
+                                        "X-LDW-Role": "gm17",
+                                        "Authorization": "Bearer " + self.box.token_for_role("gm17"),
+                                        "Content-Type": "application/json",
+                                     })
+                        response = conn.getresponse()
+                        status = response.status
+                        reply = json.loads(response.read())
+                        self.assertEqual(status, 400)
+                        if payload.startswith(b"["):
+                            # A deeply nested but parseable JSON list is a
+                            # bad envelope; parser-dependent recursion refusal
+                            # is likewise a bounded JSON error.
+                            self.assertIn(reply["error"], ("INVALID_JSON", "INVALID_ENVELOPE"))
+                        else:
+                            self.assertEqual(reply["error"], "INVALID_JSON")
+                    finally:
+                        conn.close()
 
     def test_group_http_bounded_connection_admission(self):
         self.assertTrue(issubclass(GroupLocalRelay, LocalRelay))

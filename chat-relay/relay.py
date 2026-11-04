@@ -119,7 +119,7 @@ class Mailbox:
             "message_id", "sender", "recipient", "body", "reply_to"
         }:
             raise RelayError(400, "INVALID_ENVELOPE")
-        if set(data) < {"message_id", "sender", "recipient", "body"}:
+        if not {"message_id", "sender", "recipient", "body"} <= set(data):
             raise RelayError(400, "INVALID_ENVELOPE")
         msg_id = canonical_id(data["message_id"])
         sender = role_name(data["sender"])
@@ -185,6 +185,12 @@ class LocalRelay(ThreadingHTTPServer):
         self.mailbox = mailbox
         self._slots = BoundedSemaphore(MAX_CLIENT_THREADS)
         super().__init__(address, Handler)
+
+    def handle_error(self, request, client_address):
+        # ThreadingHTTPServer otherwise prints an exception traceback with
+        # the client address on short/invalid connections. This local-only
+        # proof never logs requester IPs, headers, bodies or bearer tokens.
+        return
 
     def get_request(self):
         request, addr = super().get_request()
@@ -258,7 +264,7 @@ class Handler(BaseHTTPRequestHandler):
             raise RelayError(413, "REQUEST_TOO_LARGE")
         try:
             data = json.loads(self.rfile.read(length))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+        except (UnicodeDecodeError, ValueError, RecursionError, OverflowError):
             raise RelayError(400, "INVALID_JSON") from None
         if not isinstance(data, dict):
             raise RelayError(400, "INVALID_ENVELOPE")
@@ -289,8 +295,8 @@ class Handler(BaseHTTPRequestHandler):
             actor = self._actor()
             if route.path != "/v1/receive":
                 raise RelayError(404, "NOT_FOUND")
-            p = parse_qs(route.query)
-            if set(p) - {"limit"}:
+            p = parse_qs(route.query, keep_blank_values=True)
+            if set(p) - {"limit"} or any(len(v) != 1 for v in p.values()) or ("limit" in p and not p["limit"][0]):
                 raise RelayError(400, "INVALID_QUERY")
             try:
                 limit = int(p.get("limit", ["20"])[0])
