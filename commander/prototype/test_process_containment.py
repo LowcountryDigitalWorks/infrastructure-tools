@@ -1,6 +1,8 @@
 """Real disposable process parent+child cleanup, never Administrator/root."""
+import os
 import unittest
-from process_containment import FixedProcessCanary, ContainmentRefused
+from unittest import mock
+from process_containment import FixedProcessCanary, ContainmentRefused, _trusted_windows_root
 
 
 class BoundedCanaryTests(unittest.TestCase):
@@ -40,6 +42,19 @@ class BoundedCanaryTests(unittest.TestCase):
                 fixture.refresh()
             self.assertEqual(caught.exception.code, "CLOCK_UNTRUSTED_HOST_QUARANTINED")
             self.assertEqual(fixture.status()["state"], "QUARANTINED")
+
+    @unittest.skipUnless(os.name == "nt", "native Windows OS API proof")
+    def test_windows_root_ignores_environment_override(self):
+        expected = _trusted_windows_root()
+        with mock.patch.dict(os.environ, {
+            "SystemRoot": r"C:\\AttackerWindows",
+            "WINDIR": r"C:\\AttackerWindows",
+            "PATH": r"C:\\AttackerWindows\\System32",
+        }):
+            self.assertEqual(_trusted_windows_root().casefold(), expected.casefold())
+            with FixedProcessCanary() as canary:
+                self.assertEqual(canary.start()["state"], "RUNNING")
+                self.assertEqual(canary.stop()["state"], "DRAINED_VERIFIED")
 
     def test_not_unrestricted_shell(self):
         with self.assertRaises(ContainmentRefused):
