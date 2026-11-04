@@ -1,6 +1,6 @@
 """Static admission negatives. These are NOT a live Docker/packet proof."""
 import unittest
-from run_canary import BoundaryError, command
+from run_canary import BoundaryError, command, validate_guest_result
 
 
 class GuestAdmissionTests(unittest.TestCase):
@@ -33,6 +33,21 @@ class GuestAdmissionTests(unittest.TestCase):
         for port in (-1, 0, 65536, False):
             with self.subTest(port=port), self.assertRaises(BoundaryError):
                 command("docker", self.image, "172.17.0.1", port)
+
+    def test_guest_result_must_prove_each_vector(self):
+        correct = {"guest_fixture": "PASS", "host_gateway": "BLOCKED", "off_guest": "BLOCKED"}
+        validate_guest_result(correct, 0)
+        for key in correct:
+            invalid = dict(correct)
+            invalid[key] = "FAIL"
+            with self.subTest(key=key), self.assertRaises(BoundaryError) as ctx:
+                validate_guest_result(invalid, 1)
+            self.assertEqual(str(ctx.exception), "GUEST_" + key.upper() + "_NOT_PROVEN")
+        for bad in ("PASS", {}, {**correct, "raw_stdout": "untrusted"}):
+            with self.assertRaises(BoundaryError):
+                validate_guest_result(bad, 0)
+        with self.assertRaises(BoundaryError):
+            validate_guest_result(correct, 1)
 
     def test_no_model_supplied_docker_options(self):
         with self.assertRaises(TypeError):
