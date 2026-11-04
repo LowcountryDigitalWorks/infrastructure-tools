@@ -1,6 +1,6 @@
 """Static contract only. Hosted Docker+Chromium is the actual network proof."""
 import unittest
-from host_proof import command, verify_guest, BoundaryError, VECTORS
+from host_proof import command, verify_guest, verified_seccomp_path, BoundaryError, VECTORS
 
 
 class RealBrowserGuestGateTests(unittest.TestCase):
@@ -11,10 +11,12 @@ class RealBrowserGuestGateTests(unittest.TestCase):
                      "--cap-drop=ALL", "--security-opt=no-new-privileges=true",
                      "--user=10001:10001", "--ipc=private"):
             self.assertIn(flag, args)
+        self.assertIn("--security-opt=seccomp=" + verified_seccomp_path(), args)
         for flag in ("--privileged", "--network=host", "--ipc=host",
                      "--pid=host", "--cap-add", "--mount", "--volume"):
             self.assertNotIn(flag, args)
         self.assertFalse(any(s.startswith("--pid=") for s in args))
+        self.assertNotIn("--security-opt=seccomp=unconfined", args)
         self.assertEqual(args[-4:], [self.image, "--probe", "172.17.0.1", "32001"])
 
     def test_mutable_tag_or_changed_port_refused(self):
