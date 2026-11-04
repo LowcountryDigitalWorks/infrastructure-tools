@@ -280,21 +280,30 @@ def userns_precheck(image_id: str) -> None:
     if not docker:
         raise BoundaryError("DOCKER_NOT_AVAILABLE")
     seccomp = verified_seccomp_path()
-    args = [docker, "run", "--rm", "--pull=never", "--network=none",
+    base = [docker, "run", "--rm", "--pull=never", "--network=none",
             "--read-only", "--cap-drop=ALL",
             "--security-opt=no-new-privileges=true",
             "--security-opt=seccomp=" + seccomp,
             "--pids-limit=32", "--memory=256m", "--ipc=private",
-            "--user=10001:10001", "--entrypoint=/usr/bin/unshare",
-            image_id, "--user", "--map-root-user", "true"]
-    try:
-        result = subprocess.run(args, capture_output=True, text=True,
-                                timeout=12, check=False)
-    except (OSError, subprocess.TimeoutExpired):
-        raise BoundaryError("USERNS_PRECHECK_NO_START") from None
-    # The only permitted output is a fixed result; NEVER echo stderr/raw data.
-    print("GUEST_UNPRIV_USERNS_PRECHECK=" +
-          ("AVAILABLE" if result.returncode == 0 else "UNAVAILABLE"))
+            "--user=10001:10001", "--entrypoint=/usr/bin/unshare", image_id]
+    # Each step is a *separate*, disposable non-root process in the existing
+    # Docker network-none guest. No host namespace/policy changes or real sites.
+    probes = (
+        ("GUEST_UNPRIV_USERNS_PRECHECK", ["--user", "--map-root-user", "true"]),
+        ("GUEST_UNPRIV_USERNS_PID", ["--user", "--map-root-user",
+                                   "--pid", "--fork", "true"]),
+        ("GUEST_UNPRIV_USERNS_PID_NET", ["--user", "--map-root-user",
+                                       "--pid", "--net", "--fork", "true"]),
+    )
+    for key, flags in probes:
+        try:
+            result = subprocess.run(base + flags, capture_output=True,
+                                    text=True, timeout=12, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            raise BoundaryError("USERNS_PRECHECK_NO_START") from None
+        # Only fixed status labels are model/CI visible, not stderr/host paths.
+        print(key + "=" + ("AVAILABLE" if result.returncode == 0
+                           else "UNAVAILABLE"))
     print("USERNS_PRECHECK_NOT_BROWSER_SANDBOX_ATTESTATION")
 
 
