@@ -86,6 +86,13 @@ jobs:
       - name: Verify immutable V2 coexistence with accepted V1 on both platforms
         shell: pwsh
         run: ./tests/dragonfly-canary-publication/Test-DragonflyCanaryAdjunctV2Publisher.ps1
+      - name: Verify accepted V2 publisher provenance gate on both platforms
+        shell: pwsh
+        run: ./tests/dragonfly-canary-publication/Test-DragonflyV2PublisherProvenance.ps1
+      - name: Verify V2 provenance gate under Windows PowerShell 5.1
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: ./tests/dragonfly-canary-publication/Test-DragonflyV2PublisherProvenance.ps1
       - name: Verify V2 immutable publisher under Windows PowerShell 5.1
         if: matrix.os == 'windows-latest'
         shell: powershell
