@@ -37,6 +37,30 @@ class RealBrowserGuestGateTests(unittest.TestCase):
             with self.subTest(port=port), self.assertRaises(BoundaryError):
                 command("/usr/bin/docker", self.image, "172.17.0.1", port, nonce=self.nonce)
 
+    def test_chroot_variant_exact_one_rule_and_nonaccepting(self):
+        default = verified_seccomp_path()
+        chroot = verified_seccomp_path(True)
+        self.assertNotEqual(default, chroot)
+        default_args = command("/usr/bin/docker", self.image, "172.17.0.1",
+                               32001, nonce=self.nonce)
+        altered_args = command("/usr/bin/docker", self.image, "172.17.0.1",
+                               32001, nonce=self.nonce, chroot_diagnostic=True)
+        self.assertIn("--security-opt=seccomp=" + default, default_args)
+        self.assertIn("--security-opt=seccomp=" + chroot, altered_args)
+        self.assertIn("--network=none", altered_args)
+        self.assertIn("--read-only", altered_args)
+        self.assertIn("--cap-drop=ALL", altered_args)
+        self.assertIn("--security-opt=no-new-privileges=true", altered_args)
+        self.assertIn("--user=10001:10001", altered_args)
+        self.assertNotIn("--privileged", altered_args)
+        self.assertNotIn("--network=host", altered_args)
+        self.assertNotIn("--security-opt=seccomp=unconfined", altered_args)
+        with self.assertRaisesRegex(BoundaryError, "CHROOT_DIAGNOSTIC_MUST_BE_STRICT"):
+            command("/usr/bin/docker", self.image, "172.17.0.1", 32001,
+                    True, nonce=self.nonce, chroot_diagnostic=True)
+        with self.assertRaisesRegex(BoundaryError, "SECCOMP_MODE_INVALID"):
+            verified_seccomp_path("true")
+
     def test_trusted_synthetic_is_explicit_not_strict_acceptance(self):
         args = command("/usr/bin/docker", self.image, "172.17.0.1", 32001, True, nonce=self.nonce)
         self.assertEqual(args[-5:], [self.image, "--probe", "172.17.0.1", "32001",
