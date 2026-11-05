@@ -15,7 +15,9 @@ ROLES = ("gm17", "ir02")
 class MailboxTests(unittest.TestCase):
     def setUp(self):
         self.now = [1000.0]
-        self.box = Mailbox(SECRET, clock=lambda: self.now[0], allowed_roles=ROLES)
+        self.ticks = [100.0]
+        self.box = Mailbox(SECRET, clock=lambda: self.now[0],
+                           allowed_roles=ROLES, expiry_clock=lambda: self.ticks[0])
         self.id = str(uuid.uuid4())
 
     def send(self, **kw):
@@ -67,7 +69,25 @@ class MailboxTests(unittest.TestCase):
     def test_expiry(self):
         self.send()
         self.now[0] += 901
+        self.ticks[0] += 901
         self.assertEqual(self.box.receive("ir02")["messages"], [])
+        self.assertCode("NOT_FOUND", lambda: self.box.acknowledge("ir02", self.id))
+
+    def test_wall_clock_rollback_does_not_extend_direct_ttl_or_replay_window(self):
+        self.send()
+        self.box.acknowledge("ir02", self.id)
+        self.now[0] -= 86400  # wall clock moves back one day
+        self.ticks[0] += 899
+        self.assertTrue(self.send()["duplicate"])
+        self.ticks[0] += 2
+        self.assertCode("NOT_FOUND", lambda: self.box.acknowledge("ir02", self.id))
+        self.assertFalse(self.send()["duplicate"])
+
+    def test_expired_direct_message_never_resurrects_after_tick_regression(self):
+        self.send()
+        self.ticks[0] += 901
+        self.assertEqual(self.box.receive("ir02")["messages"], [])
+        self.ticks[0] -= 901
         self.assertCode("NOT_FOUND", lambda: self.box.acknowledge("ir02", self.id))
 
     def test_reject_unbounded_payload(self):
@@ -80,6 +100,7 @@ class MailboxTests(unittest.TestCase):
             self.send(message_id=str(uuid.uuid4()))
         self.assertCode("MAILBOX_FULL", lambda: self.send())
         self.now[0] += 901
+        self.ticks[0] += 901
         self.assertFalse(self.send()["duplicate"])
 
     def test_no_nonlocal_bind(self):
