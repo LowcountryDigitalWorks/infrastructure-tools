@@ -1,19 +1,19 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 
 namespace LDW.AdminBroker;
 
 /// <summary>
-/// #186 Gate B proposal, source-only: decode ONE bounded synthetic snapshot of
-/// the future protected promotion-control.json. This does NOT read a path,
-/// establish Windows ACLs, authenticate a process, or authorize promotion.
-/// A caller must first verify its own protected file/parent identity and then
-/// independently perform both the pre-provider and pre-swap state readbacks.
+/// #186 Gate B proposal: decode ONE bounded synthetic snapshot of the future
+/// protected promotion-control.json. This does NOT read paths, attest ACLs,
+/// authenticate any process, or authorize a package promotion.
 /// </summary>
 internal static class PromotionProtectedStateJson
 {
     internal const int MaxDocumentBytes = 4096;
     private const string DataOnly = "DATA_ONLY_PARSED_NOT_AUTHORIZED";
+    private const string StableDataOnly = "DATA_ONLY_STATE_STABLE_NOT_AUTHORIZED";
     private static readonly string[] ExactNames =
     [
         "schema_version", "promotion_enabled", "control_generation",
@@ -29,20 +29,48 @@ internal static class PromotionProtectedStateJson
         value.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     /// <summary>
-    /// DATA_ONLY never means a caller-supplied JSON document is trusted.
-    /// No filepath, elevated operation, GitHub auth, environment, or dispatcher.
+    /// Accept only canonical unsigned decimal notation for nonnegative
+    /// generations. Reject -0, exponents, decimals, leading zeros, and overflow.
+    /// Parsing the same decimal value by different JSON encodings is not enough
+    /// for a source-identity or protected-file trust decision.
+    /// </summary>
+    private static bool TryCanonicalGeneration(JsonElement value, out long generation)
+    {
+        generation = 0;
+        if (value.ValueKind != JsonValueKind.Number)
+            return false;
+        var raw = value.GetRawText();
+        if (raw.Length is < 1 or > 19 ||
+            (raw.Length > 1 && raw[0] == '0') ||
+            raw.Any(c => c is < '0' or > '9'))
+            return false;
+        return long.TryParse(raw, NumberStyles.None,
+            CultureInfo.InvariantCulture, out generation);
+    }
+
+    /// <summary>
+    /// DATA_ONLY means schema validation, never authentication of caller bytes.
+    /// No privileged file access, provider call, environment or dispatcher.
+    /// JSON key names are compared AFTER JSON unescaping; no claim is made
+    /// that all semantically identical JSON has identical bytes.
     /// </summary>
     internal static PromotionProtectedStateJsonResult Parse(byte[]? input)
     {
         if (input is null || input.Length is < 2 or > MaxDocumentBytes)
             return Block("STATE_BYTES_OUT_OF_BOUNDS");
+
+        // One copy prevents the parser and UTF-8 verifier from observing
+        // different versions of a concurrently mutable caller-owned byte[].
+        // A stable *protected file* handle remains a separate future gate.
+        byte[] snapshot = input.ToArray();
         try
         {
-            // Validate UTF-8 strictly before parsing; no replacement chars
-            // may collapse distinct on-disk state representations.
-            _ = new UTF8Encoding(false, true).GetString(input);
+            if (snapshot.Length >= 3 && snapshot[0] == 0xEF &&
+                snapshot[1] == 0xBB && snapshot[2] == 0xBF)
+                return Block("STATE_DOCUMENT_INVALID");
+            _ = new UTF8Encoding(false, true).GetString(snapshot);
             using var document = JsonDocument.Parse(
-                input,
+                snapshot,
                 new JsonDocumentOptions
                 {
                     AllowTrailingCommas = false,
@@ -52,6 +80,7 @@ internal static class PromotionProtectedStateJson
             var root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object)
                 return Block("STATE_SCHEMA_REFUSED");
+
             var seen = new HashSet<string>(StringComparer.Ordinal);
             foreach (var property in root.EnumerateObject())
             {
@@ -59,19 +88,21 @@ internal static class PromotionProtectedStateJson
                     !seen.Add(property.Name))
                     return Block("STATE_SCHEMA_REFUSED");
             }
-            if (seen.Count != ExactNames.Length)
+            if (seen.Count != ExactNames.Length ||
+                root.GetProperty("schema_version").GetRawText() != "1" ||
+                !TryCanonicalGeneration(root.GetProperty("control_generation"),
+                    out long controlGeneration) ||
+                !TryCanonicalGeneration(root.GetProperty("active_generation"),
+                    out long activeGeneration))
                 return Block("STATE_SCHEMA_REFUSED");
 
-            int schema = root.GetProperty("schema_version").GetInt32();
             bool enabled = root.GetProperty("promotion_enabled").GetBoolean();
-            long controlGeneration = root.GetProperty("control_generation").GetInt64();
             string? reason = root.GetProperty("reason_code").GetString();
-            long activeGeneration = root.GetProperty("active_generation").GetInt64();
             string? activeDigest = root.GetProperty("active_digest_sha256").GetString();
             string? changeId = root.GetProperty("last_change_id").GetString();
 
-            if (schema != 1 || controlGeneration <= 0 ||
-                activeGeneration < 0 || activeGeneration == long.MaxValue ||
+            if (controlGeneration <= 0 ||
+                activeGeneration == long.MaxValue ||
                 !LowerHex64(activeDigest))
                 return Block("STATE_VALUES_REFUSED");
 
@@ -86,13 +117,8 @@ internal static class PromotionProtectedStateJson
                 !string.Equals(parsed.ToString("D"), changeId, StringComparison.Ordinal))
                 return Block("STATE_CHANGE_ID_INVALID");
 
-            // This record remains unauthenticated until a fixed privileged
-            // reader obtains/attests it from the protected local state root.
-            // Even an enabled record must be checked against the separately
-            // authenticated pre-swap observation before any activation.
             return new PromotionProtectedStateJsonResult(
-                DataOnly,
-                "EXTERNAL_PROTECTED_READBACK_REQUIRED",
+                DataOnly, "EXTERNAL_PROTECTED_READBACK_REQUIRED",
                 new PromotionProtectedState(
                     enabled, controlGeneration, reason!, activeGeneration, activeDigest!),
                 changeId);
@@ -101,10 +127,33 @@ internal static class PromotionProtectedStateJson
                                    or InvalidOperationException or FormatException
                                    or OverflowException or ArgumentException)
         {
-            // No exception/JSON/input data is echoed. The caller must not use
-            // this source-only decoder as an administrator trust decision.
             return Block("STATE_DOCUMENT_INVALID");
         }
+    }
+
+    /// <summary>
+    /// Model the pre/post readback comparison including last_change_id, which
+    /// is NOT present in the older PromotionProtectedState record. This pure
+    /// comparison does not hold an OS lock and cannot replace a trusted
+    /// protected re-read immediately before a future atomic pointer swap.
+    /// </summary>
+    internal static PromotionDataCheck CheckStable(
+        PromotionProtectedStateJsonResult? initial,
+        PromotionProtectedStateJsonResult? beforeSwap)
+    {
+        if (initial?.Classification != DataOnly ||
+            beforeSwap?.Classification != DataOnly ||
+            initial.State is null || beforeSwap.State is null ||
+            initial.State.PromotionEnabled != true ||
+            beforeSwap.State.PromotionEnabled != true ||
+            initial.State != beforeSwap.State ||
+            initial.LastChangeId is null ||
+            !string.Equals(initial.LastChangeId, beforeSwap.LastChangeId,
+                StringComparison.Ordinal))
+            return new PromotionDataCheck("BLOCKED", "STATE_CHANGED_OR_DISABLED");
+
+        return new PromotionDataCheck(StableDataOnly,
+            "EXTERNAL_PROTECTED_READBACK_REQUIRED");
     }
 }
 
