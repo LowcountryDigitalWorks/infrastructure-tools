@@ -112,21 +112,7 @@ try {
     $publication=Publish-LdwDragonflyCanaryAdjunctV2 -RepositoryRoot $stage
     if (-not $publication.Published -or
         (Split-Path $publication.ReleaseRoot -Leaf) -cne $expectedId -or
-        $publication.ManifestSha256 -cnotmatch '^[a-f0-9]{64}
-} finally {
-    if ($guard) {
-        $released=& $gate -RepositoryRoot $stage -Phase Release -ProtectedPublication
-        if ($released -cne 'DRAGONFLY_V2_PUBLISHER_PROVENANCE_GUARD_RELEASE=PASS') { throw 'TEST_RELEASE_FAILED' }
-    }
-    Get-Module DragonflyCanaryAdjunctV2Publisher | Remove-Module -Force -ErrorAction SilentlyContinue
-    $env:PATH=$originalPath
-    foreach ($key in @([Environment]::GetEnvironmentVariables().Keys)) {
-        if ([string]$key -like 'GIT_*') { [Environment]::SetEnvironmentVariable([string]$key,$null,'Process') }
-    }
-    foreach ($key in $previous.Keys) { [Environment]::SetEnvironmentVariable($key,$previous[$key],'Process') }
-    if ($started -and (Test-Path -LiteralPath $ldw)) { Remove-Item -LiteralPath $ldw -Recurse -Force }
-}
-) {
+        $publication.ManifestSha256 -cnotmatch '^[a-f0-9]{64}$') {
         throw 'TEST_PROTECTED_ACTUAL_PUBLISH_FAILED'
     }
     $manifestPath=Join-Path $publication.ReleaseRoot 'manifest.json'
