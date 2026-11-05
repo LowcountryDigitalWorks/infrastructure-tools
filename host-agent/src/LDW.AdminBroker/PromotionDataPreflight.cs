@@ -90,6 +90,13 @@ internal static class PromotionDataPreflight
         if (last != initial)
             return Block("PROTECTED_STATE_MOVED_OR_REVOKED");
 
+        // DateTimeOffset.AddMinutes throws near the representable extremes.
+        // A malformed/untrusted clock must return a bounded denial instead.
+        if (nowUtc.Offset != TimeSpan.Zero ||
+            nowUtc < DateTimeOffset.UnixEpoch ||
+            nowUtc > DateTimeOffset.MaxValue.AddMinutes(-10))
+            return Block("CLOCK_OUT_OF_RANGE");
+
         if (comment is null || comment.SchemaVersion != 1 ||
             !string.Equals(comment.Repository, Repo, StringComparison.Ordinal) ||
             comment.LedgerIssueNumber != compiledLedgerIssueNumber ||
@@ -123,8 +130,7 @@ internal static class PromotionDataPreflight
                 StringComparison.Ordinal))
             return Block("UNREVIEWED_OPERATION_CATALOG");
 
-        if (nowUtc.Offset != TimeSpan.Zero ||
-            comment.CreatedUtc.Offset != TimeSpan.Zero ||
+        if (comment.CreatedUtc.Offset != TimeSpan.Zero ||
             comment.UpdatedUtc.Offset != TimeSpan.Zero ||
             comment.ExpiresUtc.Offset != TimeSpan.Zero ||
             comment.CreatedUtc != comment.UpdatedUtc ||
