@@ -98,6 +98,76 @@ try {
     try { $null=& $gate -RepositoryRoot $stage -Phase AfterImport -ProtectedPublication }
     catch { $denied=([string]$_.Exception.Message -ceq 'V2_PROVENANCE_GIT_ENVIRONMENT_UNSAFE') }
     if (-not $denied) { throw 'TEST_ENV_ALLOWED' }
+    $env:GIT_CONFIG_VALUE_0='false'
+    if ((& $gate -RepositoryRoot $stage -Phase AfterImport -ProtectedPublication) -cne
+        'DRAGONFLY_V2_PUBLISHER_PROVENANCE_AFTER_IMPORT=PASS_PROTECTED') {
+        throw 'TEST_AFTER_ENV_RESTORE_FAILED'
+    }
+
+    # The existing protected fixture previously stopped at import. Exercise
+    # the REAL accepted V2 publisher while its file lock stays live, but ONLY
+    # inside this disposable hosted-Runner ProgramData fixture. Never invoke
+    # this test script on LDW01; never consume the owner's publication consent.
+    $expectedId='78a3a23b1a9dac59698a09cec2dd6c9a81e4a3ca-e53e016383441fde6ba22cb57821b3d26bdf4824'
+    $publication=Publish-LdwDragonflyCanaryAdjunctV2 -RepositoryRoot $stage
+    if (-not $publication.Published -or
+        (Split-Path $publication.ReleaseRoot -Leaf) -cne $expectedId -or
+        $publication.ManifestSha256 -cnotmatch '^[a-f0-9]{64}
+} finally {
+    if ($guard) {
+        $released=& $gate -RepositoryRoot $stage -Phase Release -ProtectedPublication
+        if ($released -cne 'DRAGONFLY_V2_PUBLISHER_PROVENANCE_GUARD_RELEASE=PASS') { throw 'TEST_RELEASE_FAILED' }
+    }
+    Get-Module DragonflyCanaryAdjunctV2Publisher | Remove-Module -Force -ErrorAction SilentlyContinue
+    $env:PATH=$originalPath
+    foreach ($key in @([Environment]::GetEnvironmentVariables().Keys)) {
+        if ([string]$key -like 'GIT_*') { [Environment]::SetEnvironmentVariable([string]$key,$null,'Process') }
+    }
+    foreach ($key in $previous.Keys) { [Environment]::SetEnvironmentVariable($key,$previous[$key],'Process') }
+    if ($started -and (Test-Path -LiteralPath $ldw)) { Remove-Item -LiteralPath $ldw -Recurse -Force }
+}
+) {
+        throw 'TEST_PROTECTED_ACTUAL_PUBLISH_FAILED'
+    }
+    $manifestPath=Join-Path $publication.ReleaseRoot 'manifest.json'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf) -or
+        (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+        $publication.ManifestSha256) { throw 'TEST_PROTECTED_MANIFEST_HASH_DRIFT' }
+    $manifest=Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    if ($manifest.schema -ne 2 -or
+        $manifest.artifact -cne 'ldw-dragonfly-canary-adjunct-v2' -or
+        $manifest.releaseIdentity -cne $expectedId -or
+        $manifest.containsCredential -ne $false -or
+        $manifest.containsBootstrap -ne $false -or
+        $manifest.containsPrivateEndpoint -ne $false -or
+        @($manifest.files).Count -ne 4) {
+        throw 'TEST_PROTECTED_MANIFEST_CONTENT_INVALID'
+    }
+    $verified=Test-LdwDragonflyCanaryAdjunctV2 -ManifestSha256 $publication.ManifestSha256
+    if (-not $verified.Valid) { throw 'TEST_PROTECTED_ACTUAL_READBACK_FAILED' }
+
+    # Retry is intentionally only a synthetic hosted idempotence test; a
+    # real one-shot AdminBroker publication still requires its replay guard.
+    $repeat=Publish-LdwDragonflyCanaryAdjunctV2 -RepositoryRoot $stage
+    if (-not $repeat.Published -or
+        $repeat.ReleaseRoot -cne $publication.ReleaseRoot -or
+        $repeat.ManifestSha256 -cne $publication.ManifestSha256) {
+        throw 'TEST_PROTECTED_PUBLICATION_NONIDEMPOTENT'
+    }
+    $releases=Join-Path $ldw 'DragonflyCanaryAdjunct/releases'
+    if (@(Get-ChildItem -LiteralPath $releases -Directory -Force).Count -ne 1) {
+        throw 'TEST_PROTECTED_EXTRA_RELEASE'
+    }
+    $bundleRoot=Join-Path $ldw 'DragonflyCanaryAdjunct'
+    if (@(Get-ChildItem -LiteralPath $bundleRoot -Directory -Force |
+        Where-Object { $_.Name -match '^stage-' }).Count -ne 0) {
+        throw 'TEST_PROTECTED_STAGE_RESIDUE'
+    }
+    if ((& $gate -RepositoryRoot $stage -Phase AfterImport -ProtectedPublication) -cne
+        'DRAGONFLY_V2_PUBLISHER_PROVENANCE_AFTER_IMPORT=PASS_PROTECTED') {
+        throw 'TEST_PROTECTED_POST_PUBLISH_LOCK_LOST'
+    }
+    'DRAGONFLY_V2_PROTECTED_ACTUAL_PUBLISH_HOSTED=PASS'
     'DRAGONFLY_V2_PROTECTED_GATE_HOSTED=PASS'
 } finally {
     if ($guard) {
