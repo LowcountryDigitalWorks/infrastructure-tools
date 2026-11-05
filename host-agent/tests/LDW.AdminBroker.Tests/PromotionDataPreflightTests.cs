@@ -1,4 +1,6 @@
 using System.Runtime.CompilerServices;
+using System.Security.Cryptography;
+using System.Text;
 using LDW.AdminBroker;
 
 // Isolated deterministic contract proof. The production launcher, broker
@@ -121,6 +123,68 @@ internal static class PromotionDataPreflightTests
             "overlong relative TTL");
         Block(Check(facts, clock: now.ToOffset(TimeSpan.FromHours(-5))),
             "ambiguous local timezone clock");
+
+        // Independent byte-content proof: Git canonical SHA1 blob hash is
+        // verified in addition to SHA256/length and raw catalog SHA256.
+        // None of these synthetic matching facts is authority to activate.
+        byte[] packageBytes = Encoding.UTF8.GetBytes("LDW-SAMPLE-PACKAGE-ONLY\n");
+        byte[] catalogBytes = Encoding.UTF8.GetBytes("{\"operations\":[\"ELEVATED_IDENTITY_PROOF\"]}");
+        byte[] gitBlobHeader = Encoding.ASCII.GetBytes($"blob {packageBytes.Length}\0");
+        var gitBlobEnvelope = new byte[gitBlobHeader.Length + packageBytes.Length];
+        Buffer.BlockCopy(gitBlobHeader, 0, gitBlobEnvelope, 0, gitBlobHeader.Length);
+        Buffer.BlockCopy(packageBytes, 0, gitBlobEnvelope, gitBlobHeader.Length, packageBytes.Length);
+        var boundFacts = facts with
+        {
+            PackageLength = packageBytes.Length,
+            PackageSha256 = Convert.ToHexString(SHA256.HashData(packageBytes)).ToLowerInvariant(),
+            PackageBlobSha1 = Convert.ToHexString(SHA1.HashData(gitBlobEnvelope)).ToLowerInvariant(),
+            CatalogSha256 = Convert.ToHexString(SHA256.HashData(catalogBytes)).ToLowerInvariant()
+        };
+
+        PromotionDataCheck ByteCheck(PromotionCommentFacts? candidate, byte[]? package, byte[]? catalog) =>
+            PromotionImmutableByteProof.Check(candidate, package, catalog);
+
+        var matchingBytes = ByteCheck(boundFacts, packageBytes, catalogBytes);
+        Assert(matchingBytes.Classification == "DATA_ONLY_BYTES_MATCH_NOT_AUTHORIZED",
+            "correct Git blob SHA1 and independent SHA256/length are data-only");
+        Assert(matchingBytes.ReasonCode == "EXTERNAL_TRUST_GATES_REQUIRED",
+            "byte match cannot authorize package activation");
+        Block(ByteCheck(null, packageBytes, catalogBytes), "missing expected authorization facts");
+        Block(ByteCheck(boundFacts, null, catalogBytes), "missing package bytes");
+        Block(ByteCheck(boundFacts, packageBytes, null), "missing catalog bytes");
+        Block(ByteCheck(boundFacts, Array.Empty<byte>(), catalogBytes), "empty package");
+        Block(ByteCheck(boundFacts, packageBytes, Array.Empty<byte>()), "empty catalog");
+        Block(ByteCheck(boundFacts, new byte[PromotionImmutableByteProof.MaxPackageBytes + 1],
+            catalogBytes), "oversized package before hashing");
+        Block(ByteCheck(boundFacts, packageBytes,
+            new byte[PromotionImmutableByteProof.MaxCatalogBytes + 1]),
+            "oversized catalog before hashing");
+        Block(ByteCheck(boundFacts with { PackageLength = packageBytes.Length + 1 },
+            packageBytes, catalogBytes), "length mismatch");
+        Block(ByteCheck(boundFacts with { PackageSha256 = new string('0', 64) },
+            packageBytes, catalogBytes), "bad package SHA256");
+        Block(ByteCheck(boundFacts with { PackageBlobSha1 = new string('0', 40) },
+            packageBytes, catalogBytes), "bad Git blob SHA1");
+        Block(ByteCheck(boundFacts with { CatalogSha256 = new string('0', 64) },
+            packageBytes, catalogBytes), "bad catalog SHA256");
+        Block(ByteCheck(boundFacts with { PackageSha256 = boundFacts.PackageSha256.ToUpperInvariant() },
+            packageBytes, catalogBytes), "reject noncanonical uppercase SHA256");
+        var mutatedPackage = packageBytes.ToArray();
+        mutatedPackage[0] ^= 1;
+        Block(ByteCheck(boundFacts, mutatedPackage, catalogBytes), "modified package bytes");
+        var mutatedCatalog = catalogBytes.ToArray();
+        mutatedCatalog[0] ^= 1;
+        Block(ByteCheck(boundFacts, packageBytes, mutatedCatalog), "modified catalog bytes");
+        // Spoofed matching bytes merely pass a *data* check, never establish
+        // the actual server-returned 165-W/App identity or independent review.
+        Assert(ByteCheck(boundFacts with { AuthorLogin = "evil" },
+            packageBytes, catalogBytes).Classification == "DATA_ONLY_BYTES_MATCH_NOT_AUTHORIZED",
+            "content-only checker is never an authentication validator");
+
+        // Reviewer LOW-1 follow-up: pathological UTC clocks must BLOCK,
+        // not throw from DateTimeOffset.AddMinutes near representable limits.
+        Block(Check(facts, clock: DateTimeOffset.MinValue), "minimum clock fail closed");
+        Block(Check(facts, clock: DateTimeOffset.MaxValue), "maximum clock fail closed");
 
         // This module has no actual file, broker, provider, parser, execution,
         // privileged task or account installation code. Future trusted package
