@@ -216,3 +216,44 @@ pinning. They do not prove private reachability or server-side OpenSSH policy.
 No production routing, customer/regulated workload, standing poller, public SSH,
 generic shell/admin RPC, security weakening, paid capacity, or claim of
 Hyper-V-equivalent isolation is authorized by this source slice.
+
+## REDRIX ChromeOS-preserving private source CI (manual diagnostic only)
+
+**Owner decision:** Keep ChromeOS, the Termina VM and Debian 13 Crostini `penguin`.
+Do **not** replace ChromeOS, flash firmware, enable Developer Mode or Powerwash
+to use this asset for CI/JIT. REDRIX already exposes multiple CPU cores and
+`/dev/kvm` to Linux; one-off source CI and accepted nested-QEMU tests run in
+the current setup. ChromeOS logout/VM suspension still limits unattended
+availability. See [#96](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/96).
+
+For a normal-user **local source-test proof** (not GitHub Actions registration),
+start the existing Crostini container and use a source-controlled, exact SHA.
+For example, after fetching an independently accepted `main` revision, run:
+
+```bash
+python3 -B dragonfly-jit/redrix_private_source_ci.py \
+  --expected-sha <40-lowercase-hex-accepted-main-commit>
+```
+
+The tool clones **only** the fixed public `LowcountryDigitalWorks/infrastructure-tools`
+repository into a disposable private directory. It temporarily applies
+`umask 0077` within its single-threaded process, isolates HOME/Git config
+and environment credentials from the child processes, refuses SHA drift
+and group/world-writable source files, runs the 60-second bounded Dragonfly
+Python unittest suite, restores its original umask and deletes the checkout.
+It emits one sanitized category+test-count JSON result and never returns a
+GitHub token, private endpoint, source file path or raw child output.
+
+This solves the observed Crostini `umask 0002` → group-writable checkout →
+`CANARY_SOURCE_UNTRUSTED` regression **without changing** the accepted source
+integrity guards or the machine-wide shell default. This local proof
+**is not** a GitHub runner, JIT config, generic remote execution API,
+credential service, poller, scheduler, or permission to run a private workload.
+It never touches installed guest/controller state, Tailscale/SSH settings,
+GitHub provider or runner registration.
+
+The actual one-job secretless GitHub JIT canary still requires the
+separately reviewed protected V2 publication/one-shot LDW01 #10 dispatcher,
+fresh A4 and resource admission, exact workflow/run/job/head binding, and
+provider-positive terminal SUCCESS plus complete runner and guest cleanup
+as controlled by [#139](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/139).
