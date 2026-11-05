@@ -42,10 +42,11 @@ class GroupMessage:
 
 
 class GroupMailbox(Mailbox):
-    def __init__(self, master_secret: bytes, groups: dict, clock=time.time):
+    def __init__(self, master_secret: bytes, groups: dict, clock=time.time, expiry_clock=time.monotonic):
         validated_groups = self._validate_groups(groups)
         registered_roles = tuple(sorted({role for members in validated_groups.values() for role in members}))
-        super().__init__(master_secret, clock=clock, allowed_roles=registered_roles)
+        super().__init__(master_secret, clock=clock, allowed_roles=registered_roles,
+                         expiry_clock=expiry_clock)
         self._groups = validated_groups
         self._group_messages: dict[str, GroupMessage] = {}
 
@@ -83,7 +84,7 @@ class GroupMailbox(Mailbox):
 
     def _gc(self) -> None:
         super()._gc()
-        now = self._clock()
+        now = self._expiry_now()
         for key, message in list(self._group_messages.items()):
             if message.expires_at <= now:
                 del self._group_messages[key]
@@ -163,7 +164,7 @@ class GroupMailbox(Mailbox):
                 raise RelayError(429, "MAILBOX_FULL")
             now = self._clock()
             self._group_messages[message_id] = GroupMessage(
-                message_id, group_id, actor, body, reply_to, now, now + TTL_SECONDS
+                message_id, group_id, actor, body, reply_to, now, self._expiry_now() + TTL_SECONDS
             )
             return {
                 "message_id": message_id, "group_id": group_id,
@@ -182,7 +183,7 @@ class GroupMailbox(Mailbox):
                 if msg.group_id == group_id and msg.sender != actor
                 and actor not in msg.acknowledged_by
             ]
-            pending.sort(key=lambda msg: (msg.created_at, msg.message_id))
+            pending.sort(key=lambda msg: (msg.expires_at, msg.message_id))
             return {
                 "state": "GROUP_MAILBOX_READ", "group_id": group_id,
                 "messages": [msg.view() for msg in pending[:limit]],

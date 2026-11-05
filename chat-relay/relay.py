@@ -73,7 +73,7 @@ class Message:
 
 
 class Mailbox:
-    def __init__(self, master_secret: bytes, clock=time.time, allowed_roles: tuple[str, ...] = ()):
+    def __init__(self, master_secret: bytes, clock=time.time, allowed_roles: tuple[str, ...] = (), expiry_clock=time.monotonic):
         if len(master_secret) < 32:
             raise ValueError("relay master secret must be at least 32 bytes")
         if not isinstance(allowed_roles, (list, tuple)) or not 2 <= len(allowed_roles) <= MAX_ROLES:
@@ -85,7 +85,9 @@ class Mailbox:
         if len(self._roles) != len(allowed_roles):
             raise ValueError("INVALID_ROLE_ROSTER")
         self._secret = master_secret
-        self._clock = clock
+        self._clock = clock  # wall-clock metadata only; never TTL authority
+        self._expiry_clock = expiry_clock
+        self._last_expiry_tick = expiry_clock()
         self._messages: dict[str, Message] = {}
         self._lock = RLock()
 
@@ -108,8 +110,14 @@ class Mailbox:
         ):
             raise RelayError(401, "UNAUTHORIZED")
 
+    def _expiry_now(self) -> float:
+        # In-memory high-water mark: backwards wall-clock/ticker adjustments
+        # cannot resurrect expired UUIDs or release retained tombstones late.
+        self._last_expiry_tick = max(self._last_expiry_tick, self._expiry_clock())
+        return self._last_expiry_tick
+
     def _gc(self) -> None:
-        now = self._clock()
+        now = self._expiry_now()
         for k, msg in list(self._messages.items()):
             if msg.expires_at <= now:
                 del self._messages[k]
@@ -150,7 +158,9 @@ class Mailbox:
             if len(self._messages) >= MAX_MESSAGES:
                 raise RelayError(429, "MAILBOX_FULL")
             now = self._clock()
-            self._messages[msg_id] = Message(msg_id, sender, recipient, body, reply_to, now, now + TTL_SECONDS)
+            self._messages[msg_id] = Message(
+                msg_id, sender, recipient, body, reply_to, now, self._expiry_now() + TTL_SECONDS
+            )
             return {"message_id": msg_id, "state": "IN_MAILBOX", "duplicate": False}
 
     def receive(self, actor: str, limit: int = 20) -> dict:
@@ -159,7 +169,7 @@ class Mailbox:
         with self._lock:
             self._gc()
             pending = [x for x in self._messages.values() if x.recipient == actor and not x.acknowledged]
-            pending.sort(key=lambda x: (x.created_at, x.message_id))
+            pending.sort(key=lambda x: (x.expires_at, x.message_id))
             return {"messages": [x.view() for x in pending[:limit]], "state": "MAILBOX_READ"}
 
     def acknowledge(self, actor: str, message_id: object) -> dict:

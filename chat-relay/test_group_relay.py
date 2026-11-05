@@ -21,7 +21,9 @@ def uid():
 class GroupMailboxTests(unittest.TestCase):
     def setUp(self):
         self.clock = [300.0]
-        self.box = GroupMailbox(SECRET, ROOMS, clock=lambda: self.clock[0])
+        self.ticks = [100.0]
+        self.box = GroupMailbox(SECRET, ROOMS, clock=lambda: self.clock[0],
+                                expiry_clock=lambda: self.ticks[0])
         self.id = uid()
 
     def send(self, actor="gm17", **changes):
@@ -77,6 +79,23 @@ class GroupMailboxTests(unittest.TestCase):
         }))
         self.expect("GROUP_NOT_FOUND", lambda: self.box.group_acknowledge("ir02", "ldw-ops", self.id))
 
+    def test_wall_clock_rollback_does_not_extend_group_ttl(self):
+        self.send()
+        self.box.group_acknowledge("ir02", "ldw-ir", self.id)
+        self.clock[0] -= 86400
+        self.ticks[0] += 899
+        self.assertTrue(self.send()["duplicate"])
+        self.ticks[0] += 2
+        self.expect("NOT_FOUND", lambda: self.box.group_acknowledge("ir02", "ldw-ir", self.id))
+        self.assertFalse(self.send()["duplicate"])
+
+    def test_expired_group_message_never_resurrects_after_tick_regression(self):
+        self.send()
+        self.ticks[0] += 901
+        self.assertEqual(self.box.group_receive("ir02", "ldw-ir")["messages"], [])
+        self.ticks[0] -= 901
+        self.expect("NOT_FOUND", lambda: self.box.group_acknowledge("ir02", "ldw-ir", self.id))
+
     def test_role_impersonation_and_sender_ack_refused(self):
         self.expect("ROLE_MISMATCH", lambda: self.send(sender="ops04"))
         self.send()
@@ -88,6 +107,7 @@ class GroupMailboxTests(unittest.TestCase):
         self.assertTrue(self.send()["duplicate"])
         self.assertEqual(self.box.group_receive("ir02", "ldw-ir")["messages"], [])
         self.clock[0] += 901
+        self.ticks[0] += 901
         self.assertEqual(self.box.group_receive("ops04", "ldw-ir")["messages"], [])
         self.expect("NOT_FOUND", lambda: self.box.group_acknowledge("ops04", "ldw-ir", self.id))
 
