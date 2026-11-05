@@ -34,6 +34,12 @@ internal static class PromotionProtectedStateJsonTests
         static byte[] Bytes(string value) => Encoding.UTF8.GetBytes(value);
         PromotionProtectedStateJsonResult Parse(string text) =>
             PromotionProtectedStateJson.Parse(Bytes(text));
+        var closedReasons = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "STATE_BYTES_OUT_OF_BOUNDS", "STATE_DOCUMENT_INVALID",
+            "STATE_SCHEMA_REFUSED", "STATE_VALUES_REFUSED",
+            "STATE_REASON_INCONSISTENT", "STATE_CHANGE_ID_INVALID"
+        };
         void Block(string candidate, string name)
         {
             var result = Parse(candidate);
@@ -41,7 +47,8 @@ internal static class PromotionProtectedStateJsonTests
                    result.State is null &&
                    result.LastChangeId is null,
                    name);
-            Assert(result.ReasonCode.Length is > 0 and <= 80,
+            Assert(result.ReasonCode.Length is > 0 and <= 80 &&
+                   closedReasons.Contains(result.ReasonCode),
                    name + " bounded refusal");
         }
 
@@ -71,6 +78,51 @@ internal static class PromotionProtectedStateJsonTests
         Assert(result.State is not null && disabled.State is not null &&
                result.State.ActiveGeneration == disabled.State.ActiveGeneration,
             "state parse does not mutate active generations");
+
+        // Pre/post readback equality binds the change ID as well as
+        // PromotionProtectedState's legacy fields.
+        var stable = PromotionProtectedStateJson.CheckStable(result, Parse(valid));
+        Assert(stable.Classification == "DATA_ONLY_STATE_STABLE_NOT_AUTHORIZED" &&
+               stable.ReasonCode == "EXTERNAL_PROTECTED_READBACK_REQUIRED",
+               "matching snapshots are only data evidence, never privilege");
+        var alternateId = "b2d552af-d311-4afe-b827-620c9ef4c831";
+        var movedId = Parse(valid.Replace(change, alternateId));
+        Assert(movedId.Classification == "DATA_ONLY_PARSED_NOT_AUTHORIZED" &&
+               movedId.State == result.State,
+               "changed change ID is invisible to legacy state comparison");
+        Assert(PromotionProtectedStateJson.CheckStable(result, movedId)
+                   .Classification == "BLOCKED",
+               "changed readback identity fails closed");
+        Assert(PromotionProtectedStateJson.CheckStable(result, disabled)
+                   .Classification == "BLOCKED",
+               "emergency-disable change fails closed");
+        Assert(PromotionProtectedStateJson.CheckStable(null, result)
+                   .Classification == "BLOCKED",
+               "missing initial readback");
+        Assert(PromotionProtectedStateJson.CheckStable(result, null)
+                   .Classification == "BLOCKED",
+               "missing final readback");
+        Assert(PromotionProtectedStateJson.CheckStable(
+                   result, Parse(valid.Replace("\"control_generation\":7",
+                         "\"control_generation\":8"))).Classification == "BLOCKED",
+               "control-state generation drift fails closed");
+        var callerMutable = Bytes(valid);
+        var snap = PromotionProtectedStateJson.Parse(callerMutable);
+        Array.Fill(callerMutable, (byte)0);
+        Assert(snap.Classification == "DATA_ONLY_PARSED_NOT_AUTHORIZED" &&
+               snap.LastChangeId == change &&
+               snap.State?.ActiveDigestSha256 == new string('a', 64),
+               "later caller mutation does not affect parsed result");
+
+        var recoveryHold = Parse(Valid(false, "RECOVERY_HOLD"));
+        Assert(recoveryHold.Classification == "DATA_ONLY_PARSED_NOT_AUTHORIZED" &&
+               recoveryHold.State is { PromotionEnabled: false,
+                                       ReasonCode: "RECOVERY_HOLD" },
+               "disabled recovery hold parses but never authorizes");
+        Assert(PromotionProtectedStateJson.CheckStable(result, recoveryHold)
+                   .Classification == "BLOCKED",
+               "recovery hold prevents data-stability acceptance");
+        Block(Valid(true, "RECOVERY_HOLD"), "enabled recovery hold forbidden");
 
         Block("[]", "non-object root");
         Block("null", "null root");
