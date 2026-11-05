@@ -37,9 +37,9 @@ foreach ($case in $cases) {
     }
 }
 
-$isWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+$localWindowsHost = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
 $hasApi = $null -ne [Diagnostics.ProcessStartInfo].GetProperty('ArgumentList')
-$expectedPositive = $isWindows -and $PSVersionTable.PSEdition -ceq 'Core' -and
+$expectedPositive = $localWindowsHost -and $PSVersionTable.PSEdition -ceq 'Core' -and
     $PSVersionTable.PSVersion.Major -ge 7 -and $hasApi
 if ($expectedPositive) {
     $result = Assert-LdwDragonflyProviderShell
