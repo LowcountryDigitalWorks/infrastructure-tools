@@ -143,6 +143,10 @@ internal static class PromotionProtectedStateJsonTests
         Block(valid.Replace("\"schema_version\":1",
               "\"schema_version\":2"),
             "unknown schema version");
+        Block(valid.Replace("\"schema_version\":1",
+              "\"schema_version\":1.0"), "noncanonical schema decimal");
+        Block(valid.Replace("\"schema_version\":1",
+              "\"schema_version\":1e0"), "noncanonical schema exponent");
         Block(valid.Replace("\"promotion_enabled\":true",
               "\"promotion_enabled\":\"true\""),
             "wrong boolean type");
@@ -152,12 +156,20 @@ internal static class PromotionProtectedStateJsonTests
         Block(valid.Replace("\"control_generation\":7",
               "\"control_generation\":1.5"),
             "fractional generation");
+        Block(valid.Replace("\"control_generation\":7",
+              "\"control_generation\":7.0"), "noncanonical generation decimal");
+        Block(valid.Replace("\"control_generation\":7",
+              "\"control_generation\":7e0"), "noncanonical generation exponent");
         Block(valid.Replace("\"active_generation\":4",
               "\"active_generation\":-1"),
             "negative active generation");
         Block(valid.Replace("\"active_generation\":4",
               "\"active_generation\":9223372036854775807"),
             "unsafe maximal generation");
+        Block(valid.Replace("\"active_generation\":4",
+              "\"active_generation\":-0"), "negative zero generation");
+        Block(valid.Replace("\"active_generation\":4",
+              "\"active_generation\":9223372036854775808"), "int64 overflow generation");
         Block(valid.Replace(new string('a', 64), new string('A', 64)),
             "uppercase SHA256 digest");
         Block(valid.Replace(new string('a', 64), new string('x', 64)),
@@ -177,6 +189,26 @@ internal static class PromotionProtectedStateJsonTests
         Block(valid.Replace(change, change[..35]),
             "reject truncated change identity");
 
+        Block(valid.Replace("\"reason_code\":\"NONE\"",
+              "\"reason_code\":null"), "null reason");
+        Block(valid.Replace("\"active_digest_sha256\":\"" + new string('a', 64) + "\"",
+              "\"active_digest_sha256\":null"), "null digest");
+        Block(valid.Replace("\"last_change_id\":\"" + change + "\"",
+              "\"last_change_id\":null"), "null change identity");
+        Block(valid.Replace("\"promotion_enabled\":true",
+              "\"promotion_enabled\":null"), "null enabled type");
+        var escapedKey = valid.Replace("\"schema_version\":1",
+                                       "\"schema\\u005fversion\":1");
+        Assert(Parse(escapedKey).Classification == "DATA_ONLY_PARSED_NOT_AUTHORIZED",
+               "escaped property names accepted after JSON semantic unescaping");
+        var maxSize = Parse(valid.PadRight(PromotionProtectedStateJson.MaxDocumentBytes, ' '));
+        Assert(maxSize.Classification == "DATA_ONLY_PARSED_NOT_AUTHORIZED",
+               "inclusive exactly 4096-byte ceiling permits valid JSON whitespace");
+        var bom = new byte[Bytes(valid).Length + 3];
+        bom[0] = 0xEF; bom[1] = 0xBB; bom[2] = 0xBF;
+        Bytes(valid).CopyTo(bom, 3);
+        Assert(PromotionProtectedStateJson.Parse(bom).Classification == "BLOCKED",
+               "UTF8 BOM refused");
         var oversized = PromotionProtectedStateJson.Parse(
             new byte[PromotionProtectedStateJson.MaxDocumentBytes + 1]);
         Assert(oversized.Classification == "BLOCKED" &&
