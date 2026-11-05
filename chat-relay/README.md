@@ -12,7 +12,7 @@ This delivers a bidirectional, role-authenticated, owner-controlled local messag
 - GET /v1/receive?limit=20: only the authenticated recipient's unacknowledged messages.
 - POST /v1/ack: only the authenticated recipient can acknowledge its message.
 - GET /health: non-sensitive local status.
-- 15-minute TTL, max 128 retained messages, max 8 KiB body. Valid replies must reference an existing message addressed to the current sender by the proposed reply recipient.
+- 15-minute TTL using a process-monotonic expiration clock (wall-clock only for display metadata), high-water expiration guard against backward timer movement, max 128 retained messages, max 8 KiB body. No persistence or cross-restart replay guarantee. Valid replies must reference an existing message addressed to the current sender by the proposed reply recipient.
 - Maximum 8 concurrently admitted HTTP client workers, 2-second socket idle timeout and 4-second absolute socket connection deadline (including incomplete unauthenticated headers/bodies). The local server refuses excess connections instead of spawning unbounded threads.
 - UUID replay is idempotent even after acknowledgement until expiry; changed content with the same UUID fails 409.
 - In-memory only: no disk queues, external traffic, bearer/body logging, general shell, credentials or customer data.
