@@ -125,11 +125,12 @@ internal static class PromotionDataPreflightTests
         // This module has no actual file, broker, provider, parser, execution,
         // privileged task or account installation code. Future trusted package
         // deployment must independently attest every trust boundary.
-        Assert(typeof(PromotionDataPreflight).GetMethods(
+        var checker = typeof(PromotionDataPreflight).GetMethod("Check",
             System.Reflection.BindingFlags.Static |
             System.Reflection.BindingFlags.NonPublic |
-            System.Reflection.BindingFlags.DeclaredOnly)
-            .All(m => m.ReturnType != typeof(bool)), "no authority-granting bool API");
+            System.Reflection.BindingFlags.DeclaredOnly);
+        Assert(checker is not null && checker.ReturnType == typeof(PromotionDataCheck),
+            "public-style data-check entry cannot return success bool");
         Console.WriteLine($"Promotion Gate B DATA-ONLY preflight: {assertions} assertions PASS.");
     }
 }
