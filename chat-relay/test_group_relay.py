@@ -96,6 +96,27 @@ class GroupMailboxTests(unittest.TestCase):
         self.ticks[0] -= 901
         self.expect("NOT_FOUND", lambda: self.box.group_acknowledge("ir02", "ldw-ir", self.id))
 
+    def test_highwater_clamp_preserves_new_group_ttl_after_tick_rollback(self):
+        # Keep the first group envelope live when time advances, then
+        # send another after a clock regression. Without returning the
+        # high-water tick, the second envelope prematurely expires.
+        self.send()
+        self.ticks[0] = 800.0
+        self.assertIn(self.id, [
+            msg["message_id"]
+            for msg in self.box.group_receive("ir02", "ldw-ir")["messages"]
+        ])
+        self.ticks[0] = 200.0
+        newer = uid()
+        self.assertFalse(self.send(message_id=newer)["duplicate"])
+        self.ticks[0] = 1200.0
+        pending = [
+            msg["message_id"]
+            for msg in self.box.group_receive("ir02", "ldw-ir")["messages"]
+        ]
+        self.assertNotIn(self.id, pending)  # first message expired at tick 1000
+        self.assertIn(newer, pending)       # second retained until tick 1700
+
     def test_role_impersonation_and_sender_ack_refused(self):
         self.expect("ROLE_MISMATCH", lambda: self.send(sender="ops04"))
         self.send()
