@@ -58,6 +58,29 @@ class SyntheticSessionTests(unittest.TestCase):
             thunk()
         self.assertEqual(result.exception.reason, reason)
 
+    def _raw_grant(self):
+        payload = self.token.split(".", 1)[0]
+        return base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+
+    def _sign_modified_grant(self, raw):
+        payload = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+        signature = base64.urlsafe_b64encode(TEST_PRIVATE_KEY.sign(raw)).rstrip(b"=").decode("ascii")
+        return payload + "." + signature
+
+    def test_valid_signature_over_duplicate_grant_key_is_rejected(self):
+        raw = self._raw_grant()
+        changed = raw.replace(b'"issuer":', b'"issuer":"INJECTED","issuer":', 1)
+        self.assertNotEqual(raw, changed)
+        self.assert_refused("INVALID_GRANT", lambda: self.agent.open(
+            self._sign_modified_grant(changed), "owner"))
+
+    def test_valid_signature_over_boolean_grant_epoch_is_rejected(self):
+        raw = self._raw_grant()
+        changed = raw.replace(b'"epoch":1,', b'"epoch":true,', 1)
+        self.assertNotEqual(raw, changed)
+        self.assert_refused("INVALID_GRANT", lambda: self.agent.open(
+            self._sign_modified_grant(changed), "owner"))
+
     def test_opens_valid_full_admin_scope_as_synthetic_only(self):
         r = self.agent.open(self.token, "owner")
         self.assertEqual((r["state"], r["host"]), ("SYNTHETIC_OPEN", "canary-win-01"))
