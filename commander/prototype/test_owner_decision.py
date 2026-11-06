@@ -1,6 +1,7 @@
 """Gate A1 negative tests: an LLM assertion is not a signed owner decision."""
 import unittest
 import uuid
+import base64
 import tempfile
 from pathlib import Path
 from approval_journal import ApprovalJournal
@@ -39,6 +40,31 @@ class OwnerDecisionTests(unittest.TestCase):
         with self.assertRaises(SessionRefused) as caught:
             callback()
         self.assertEqual(caught.exception.reason, reason)
+
+    def _sign_modified_decision(self, raw):
+        payload = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+        signature = base64.urlsafe_b64encode(OWNER_PRIVATE.sign(raw)).rstrip(b"=").decode("ascii")
+        return payload + "." + signature
+
+    def _raw_decision(self):
+        payload = self.decision().split(".", 1)[0]
+        return base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+
+    def test_valid_signature_over_duplicate_json_key_is_rejected(self):
+        raw = self._raw_decision()
+        changed = raw.replace(b'"scope":', b'"scope":"MALICIOUS_SCOPE","scope":', 1)
+        self.assertNotEqual(raw, changed)
+        self.refused("OWNER_AUTH_NOT_PROVEN", lambda: self.issuer.issue(
+            "owner", POLICY.host, "FULL_ADMIN", 20,
+            owner_decision=self._sign_modified_decision(changed)))
+
+    def test_valid_signature_over_boolean_epoch_is_rejected(self):
+        raw = self._raw_decision()
+        changed = raw.replace(b'"epoch":1,', b'"epoch":true,', 1)
+        self.assertNotEqual(raw, changed)
+        self.refused("OWNER_AUTH_NOT_PROVEN", lambda: self.issuer.issue(
+            "owner", POLICY.host, "FULL_ADMIN", 20,
+            owner_decision=self._sign_modified_decision(changed)))
 
     def test_valid_signed_owner_canary_only(self):
         token = self.issuer.issue("owner", POLICY.host, "FULL_ADMIN", 20,

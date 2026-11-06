@@ -68,9 +68,9 @@ class SessionIssuer:
             raise ValueError("ISSUER_PRIVATE_KEY_REQUIRED")
         if policy.max_privilege not in PRIVILEGES:
             raise ValueError("INVALID_POLICY_PRIVILEGE")
-        if not 1 <= policy.max_ttl_seconds <= MAX_TTL_SECONDS:
+        if type(policy.max_ttl_seconds) is not int or not 1 <= policy.max_ttl_seconds <= MAX_TTL_SECONDS:
             raise ValueError("INVALID_POLICY_TTL")
-        if not isinstance(epoch, int) or epoch < 1:
+        if type(epoch) is not int or epoch < 1:
             raise ValueError("INVALID_EPOCH")
         self._private_key = private_key
         self._owner_public_key = owner_public_key
@@ -94,7 +94,7 @@ class SessionIssuer:
             raise SessionRefused("POLICY_REFUSED")
         if PRIVILEGES.index(privilege) > PRIVILEGES.index(p.max_privilege):
             raise SessionRefused("POLICY_REFUSED")
-        if not isinstance(ttl_seconds, int) or not 1 <= ttl_seconds <= p.max_ttl_seconds:
+        if type(ttl_seconds) is not int or not 1 <= ttl_seconds <= p.max_ttl_seconds:
             raise SessionRefused("POLICY_REFUSED")
         issued = int(self._clock())
         if privilege == "FULL_ADMIN":
@@ -174,6 +174,11 @@ class SyntheticAgent:
                 "owner_decision"
             }:
                 raise ValueError()
+            # The signed wire representation must match the fixed issuer encoding.
+            if json.dumps(result, sort_keys=True, separators=(",", ":")).encode("utf-8") != payload:
+                raise ValueError("NON_CANONICAL_GRANT")
+            if any(type(result[key]) is not int for key in ("epoch", "issued", "expires", "max_commands")):
+                raise ValueError("INVALID_NUMERIC_FIELD")
         except (ValueError, TypeError):
             raise SessionRefused("INVALID_GRANT") from None
         return result
@@ -188,9 +193,9 @@ class SyntheticAgent:
             raise SessionRefused("WRONG_OPERATOR")
         if g["privilege"] not in PRIVILEGES or PRIVILEGES.index(g["privilege"]) > PRIVILEGES.index(p.max_privilege):
             raise SessionRefused("POLICY_REFUSED")
-        if not isinstance(g["epoch"], int) or g["epoch"] != self._epoch:
+        if type(g["epoch"]) is not int or g["epoch"] != self._epoch:
             raise SessionRefused("REVOKED_EPOCH")
-        if not all(isinstance(g[k], int) for k in ("issued", "expires", "max_commands")):
+        if not all(type(g[k]) is int for k in ("issued", "expires", "max_commands")):
             raise SessionRefused("INVALID_GRANT")
         if g["max_commands"] != MAX_COMMANDS or not 0 < g["expires"] - g["issued"] <= p.max_ttl_seconds:
             raise SessionRefused("POLICY_REFUSED")
@@ -283,7 +288,7 @@ class SyntheticAgent:
 
     def set_epoch(self, epoch: int) -> None:
         """Synthetic local revocation test; production epoch is protected owner state."""
-        if not isinstance(epoch, int) or epoch < self._epoch:
+        if type(epoch) is not int or epoch < self._epoch:
             raise ValueError("INVALID_EPOCH")
         with self._lock:
             self._epoch = epoch
