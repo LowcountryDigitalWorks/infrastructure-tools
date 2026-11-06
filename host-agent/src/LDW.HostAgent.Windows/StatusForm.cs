@@ -15,15 +15,23 @@ internal sealed class StatusForm : Form
 
     private readonly Action _refresh;
     private readonly Action _copyDiagnostics;
-    private readonly TableLayoutPanel _sections = new()
+    private readonly TableLayoutPanel _dashboard = new()
     {
         Dock = DockStyle.Top,
         AutoSize = true,
         AutoSizeMode = AutoSizeMode.GrowAndShrink,
-        ColumnCount = 1,
+        ColumnCount = 2,
         RowCount = 0,
         Margin = Padding.Empty,
         Padding = Padding.Empty
+    };
+    private readonly Panel _scrollHost = new()
+    {
+        Dock = DockStyle.Fill,
+        AutoScroll = true,
+        BackColor = SoftWhite,
+        Padding = new Padding(16, 10, 16, 12),
+        Margin = Padding.Empty
     };
     private readonly PictureBox _brand = new()
     {
@@ -80,6 +88,10 @@ internal sealed class StatusForm : Form
     private readonly Bitmap _brandImage;
     private Icon? _windowIcon;
     private HostAgentLiveSnapshot? _live;
+    private Control? _remoteSection;
+    private Control? _developmentSection;
+    private Control? _systemSection;
+    private Control? _placeholderSection;
 
     public StatusForm(Action refresh, Action copyDiagnostics)
     {
@@ -89,7 +101,7 @@ internal sealed class StatusForm : Form
         Text = "LDW Host Agent";
         StartPosition = FormStartPosition.CenterScreen;
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(820, 620);
+        ClientSize = GetInitialClientSize();
         MinimumSize = new Size(620, 500);
         BackColor = SoftWhite;
         Font = new Font("Segoe UI", 9.25f);
@@ -124,18 +136,10 @@ internal sealed class StatusForm : Form
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.Controls.Add(CreateHeader(), 0, 0);
 
-        var scrollHost = new Panel
-        {
-            Dock = DockStyle.Fill,
-            AutoScroll = true,
-            BackColor = SoftWhite,
-            Padding = new Padding(18, 14, 18, 18),
-            Margin = Padding.Empty
-        };
-        _sections.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        scrollHost.Controls.Add(_sections);
-        root.Controls.Add(scrollHost, 0, 1);
+        _scrollHost.Controls.Add(_dashboard);
+        root.Controls.Add(_scrollHost, 0, 1);
         Controls.Add(root);
+        _scrollHost.Resize += (_, _) => ArrangeDashboard();
 
         AcceptButton = _refreshButton;
         Shown += (_, _) => _refreshButton.Focus();
@@ -157,18 +161,24 @@ internal sealed class StatusForm : Form
     public void UpdateSnapshot(HostAgentLiveSnapshot? live)
     {
         _live = live;
-        _sections.SuspendLayout();
-        _sections.Controls.Clear();
-        _sections.RowStyles.Clear();
-        _sections.RowCount = 0;
+        _dashboard.SuspendLayout();
+        _dashboard.Controls.Clear();
+        _dashboard.RowStyles.Clear();
+        _dashboard.ColumnStyles.Clear();
+        _dashboard.RowCount = 0;
+        _remoteSection = null;
+        _developmentSection = null;
+        _systemSection = null;
+        _placeholderSection = null;
 
         if (live is null)
         {
             _machine.Text = "Waiting for first observation";
             SetOverall(StatusColor.Gray, "Collecting the first trustworthy status sample.");
             _refreshed.Text = "Updated: waiting";
-            AddSection(CreateNoticeCard("Collecting status", "The owner dashboard will populate as soon as a sanitized observation is available."));
-            _sections.ResumeLayout();
+            _placeholderSection = CreateNoticeCard("Collecting status", "The status overview will populate as soon as a trustworthy observation is available.");
+            ArrangeDashboard();
+            _dashboard.ResumeLayout();
             return;
         }
 
@@ -177,6 +187,9 @@ internal sealed class StatusForm : Form
         _refreshed.Text = $"Updated {live.Snapshot.ObservedAt.ToLocalTime():g}";
 
         var observations = live.Snapshot.Components.ToDictionary(x => x.ComponentId, StringComparer.OrdinalIgnoreCase);
+        Control? remote = null;
+        Control? development = null;
+        Control? system = null;
         foreach (var environment in live.Definition.Environments)
         {
             var rows = new List<Control>();
@@ -192,26 +205,41 @@ internal sealed class StatusForm : Form
             var title = environment.Id == "development-automation"
                 ? "Development & Automation"
                 : environment.Name;
-            AddSection(CreateSectionCard(title, rows));
+            var section = CreateSectionCard(title, rows);
+            switch (environment.Id)
+            {
+                case "remote-access": remote = section; break;
+                case "development-automation": development = section; break;
+                case "system": system = section; break;
+            }
         }
 
-        _sections.ResumeLayout();
+        _remoteSection = remote ?? CreateNoticeCard("Remote Access", "No status is available.");
+        _developmentSection = development ?? CreateNoticeCard("Development & Automation", "No status is available.");
+        _systemSection = system ?? CreateNoticeCard("System", "No status is available.");
+        ArrangeDashboard();
+        _dashboard.ResumeLayout();
     }
 
     public void ShowError(string message)
     {
         _live = StatusPresentation.SampleForDisplay(_live, observationSucceeded: false);
-        _sections.SuspendLayout();
-        _sections.Controls.Clear();
-        _sections.RowStyles.Clear();
-        _sections.RowCount = 0;
+        _dashboard.SuspendLayout();
+        _dashboard.Controls.Clear();
+        _dashboard.RowStyles.Clear();
+        _dashboard.ColumnStyles.Clear();
+        _dashboard.RowCount = 0;
         _machine.Text = "Status unavailable";
         SetOverall(StatusColor.Gray, string.IsNullOrWhiteSpace(message)
             ? "Status is unavailable."
             : "Status refresh failed; sensitive details are suppressed.");
         _refreshed.Text = "Updated: unavailable";
-        AddSection(CreateNoticeCard("Status unavailable", "The last observation was not trustworthy, so prior health is not being displayed as current."));
-        _sections.ResumeLayout();
+        _remoteSection = null;
+        _developmentSection = null;
+        _systemSection = null;
+        _placeholderSection = CreateNoticeCard("Status unavailable", "The last observation was not trustworthy, so prior health is not being displayed as current.");
+        ArrangeDashboard();
+        _dashboard.ResumeLayout();
     }
 
     private Control CreateHeader()
@@ -289,12 +317,59 @@ internal sealed class StatusForm : Form
         return header;
     }
 
-    private void AddSection(Control section)
+    private void ArrangeDashboard()
     {
-        var row = _sections.RowCount++;
-        _sections.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        section.Dock = DockStyle.Top;
-        _sections.Controls.Add(section, 0, row);
+        _dashboard.SuspendLayout();
+        _dashboard.Controls.Clear();
+        _dashboard.RowStyles.Clear();
+        _dashboard.ColumnStyles.Clear();
+        if (_placeholderSection is not null)
+        {
+            _dashboard.ColumnCount = 1;
+            _dashboard.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            _dashboard.Controls.Add(_placeholderSection, 0, 0);
+            _dashboard.ResumeLayout();
+            return;
+        }
+
+        var wide = _scrollHost.ClientSize.Width >= 820;
+        _dashboard.ColumnCount = wide ? 2 : 1;
+        _dashboard.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, wide ? 50 : 100));
+        if (wide) _dashboard.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        if (wide)
+        {
+            _dashboard.RowCount = 2;
+            _dashboard.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            _dashboard.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            if (_remoteSection is not null) _dashboard.Controls.Add(_remoteSection, 0, 0);
+            if (_systemSection is not null) _dashboard.Controls.Add(_systemSection, 0, 1);
+            if (_developmentSection is not null)
+            {
+                _dashboard.Controls.Add(_developmentSection, 1, 0);
+                _dashboard.SetRowSpan(_developmentSection, 2);
+            }
+        }
+        else
+        {
+            _dashboard.RowCount = 3;
+            _dashboard.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            _dashboard.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            _dashboard.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            if (_remoteSection is not null) _dashboard.Controls.Add(_remoteSection, 0, 0);
+            if (_developmentSection is not null) _dashboard.Controls.Add(_developmentSection, 0, 1);
+            if (_systemSection is not null) _dashboard.Controls.Add(_systemSection, 0, 2);
+            if (_developmentSection is not null) _dashboard.SetRowSpan(_developmentSection, 1);
+        }
+        _dashboard.ResumeLayout();
+    }
+
+    private static Size GetInitialClientSize()
+    {
+        var workArea = Screen.PrimaryScreen?.WorkingArea;
+        return workArea is null
+            ? new Size(1260, 840)
+            : new Size(Math.Min(1260, Math.Max(620, workArea.Value.Width - 48)),
+                Math.Min(840, Math.Max(500, workArea.Value.Height - 80)));
     }
 
     private static Control CreateSectionCard(string title, IReadOnlyList<Control> rows)
@@ -319,9 +394,9 @@ internal sealed class StatusForm : Form
             Text = title,
             AutoSize = false,
             Dock = DockStyle.Top,
-            Height = 37,
-            Padding = new Padding(13, 9, 12, 0),
-            Font = new Font("Segoe UI", 10.25f, FontStyle.Bold),
+            Height = 31,
+            Padding = new Padding(11, 6, 10, 0),
+            Font = new Font("Segoe UI", 9.75f, FontStyle.Bold),
             ForeColor = EstuaryNavy,
             BackColor = SoftWhite,
             UseMnemonic = false
@@ -367,7 +442,7 @@ internal sealed class StatusForm : Form
             RowCount = 1,
             Dock = DockStyle.Top,
             Margin = Padding.Empty,
-            Padding = new Padding(12, 8, 12, 8),
+            Padding = new Padding(8, 4, 8, 4),
             AccessibleName = accessibleName
         };
         row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 34));
@@ -494,7 +569,14 @@ internal sealed class StatusForm : Form
             if (_live.GitHubRunnerTelemetry is { } runner)
                 text.AppendLine($"Runner: ID present {runner.Id > 0}; online {runner.Online}; busy {runner.Busy}; label count {runner.Labels.Count}.");
             foreach (var observation in _live.Snapshot.Components)
+            {
                 text.AppendLine($"{observation.ComponentId}: {observation.Color} / {observation.Health} — {observation.Summary}");
+                var nextCheck = NextCheckFor(observation.ComponentId, observation.Health);
+                if (nextCheck is not null)
+                    text.AppendLine($"  Next check: {nextCheck}");
+            }
+            if (CiJitTechnicalDetails.UnknownOwnerNextCheck(ci) is { } unknownCiJitNextCheck)
+                text.AppendLine($"  Next check: {unknownCiJitNextCheck}");
         }
 
         using var dialog = new Form
@@ -575,6 +657,19 @@ internal sealed class StatusForm : Form
         : $"{bytes / 1024d / 1024:F1} MiB";
 
     private static string FormatNullable(double? value) => value?.ToString("F2") ?? "unknown";
+
+    private static string? NextCheckFor(string componentId, HealthState health)
+    {
+        if (health is HealthState.Healthy)
+            return null;
+
+        return componentId switch
+        {
+            "dev.cursor-worker" => "After the accepted post-login settle window, inspect the existing LDW Cursor Worker scheduled task and confirm Ubuntu/systemd recovery. Host Agent does not start the WSL distro.",
+            "dev.linux-ci-node" when health == HealthState.Unknown => "Verify the existing known-hosts entry or HostKeyAlias against the approved host-key source. Strict SSH verification remains enabled; Host Agent will not accept a new key automatically.",
+            _ => null
+        };
+    }
 
     private static Color ColorFor(StatusColor color) => color switch
     {

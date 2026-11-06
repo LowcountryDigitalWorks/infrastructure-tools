@@ -2,7 +2,7 @@
 
 **SOURCE-ONLY / NON-ELEVATED / NOT A PRIVILEGED COMMAND CLASSIFIER**
 
-Owning product: infrastructure-tools issue #209. This is a **stacked draft** on the real process-drain and synthetic host-session journal proof in PR #221, which itself depends on #219, #217, #215 and the independently unaccepted Gate A security design #214.
+Owning product: infrastructure-tools issue #209. The process-drain and synthetic host-session journal proof from PR #221 is accepted source on main. Gate A design #214 is not an unaccepted dependency of this proof. This file remains a synthetic local admission proof: it does not grant full-admin execution or claim an OS-level egress control.
 
 ## Owner outcome and boundary
 
@@ -30,4 +30,4 @@ An **unrestricted, real FULL_ADMIN session** cannot be made safe merely by scann
 
 In the full product, arbitrary commands will be possible only after the explicitly authenticated, host/session-scoped FULL_ADMIN grant and accepted host/risk policy are in place. The fixed canary operation exists only to prove **authorization ordering** and negative admission behavior without exposing owner machines. It is not the final product interface, a persistent agent, an installed Host Agent observer, a ChatGPT Chat connector or the browser controller.
 
-This proof adds no new privileges, network listener, enrolled host, customer/regulated data, paid service, secret or ongoing host control. Incremental cost target **$0**. GM17 authored the source and cannot conduct terminal independent security acceptance. No merge/deployment while upstream review gates remain open.
+This proof adds no new privileges, network listener, enrolled host, customer/regulated data, paid service, secret or ongoing host control. Incremental cost target **$0**. The source author cannot conduct terminal independent security acceptance. No merge or deployment from this reconciliation.

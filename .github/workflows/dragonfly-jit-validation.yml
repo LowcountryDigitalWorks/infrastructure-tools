@@ -16,11 +16,16 @@ on:
       - 'ci-dispatch/DragonflyCanary.psm1'
       - 'ci-dispatch/DragonflyCanaryRuntime.psm1'
       - 'ci-dispatch/Invoke-DragonflyCanaryProduction.ps1'
+      - 'ci-dispatch/DragonflyGateBPowerShellRuntime.psm1'
+      - 'ci-dispatch/tests/Test-DragonflyGateBPowerShellRuntime.ps1'
       - 'ci-dispatch/Invoke-DragonflyGateA1.ps1'
       - 'ci-dispatch/DragonflyCanaryAdjunctPublisher.psm1'
+      - 'ci-dispatch/DragonflyCanaryAdjunctV2Publisher.psm1'
+      - 'ci-dispatch/Test-DragonflyV2PublisherProvenance.ps1'
       - 'ci-dispatch/tests/Test-DragonflyCanary.ps1'
       - 'ci-dispatch/tests/Test-DragonflyCanaryRuntime.ps1'
       - 'ci-dispatch/tests/Test-DragonflyCanaryProductionScope.ps1'
+      - 'tests/dragonfly-canary-publication/Test-DragonflyCanaryAdjunctV2Publisher.ps1'
       - '.github/workflows/dragonfly-jit-validation.yml'
       - '.github/workflows/dragonfly-jit-canary.yml'
   push:
@@ -42,11 +47,16 @@ on:
       - 'ci-dispatch/DragonflyCanary.psm1'
       - 'ci-dispatch/DragonflyCanaryRuntime.psm1'
       - 'ci-dispatch/Invoke-DragonflyCanaryProduction.ps1'
+      - 'ci-dispatch/DragonflyGateBPowerShellRuntime.psm1'
+      - 'ci-dispatch/tests/Test-DragonflyGateBPowerShellRuntime.ps1'
       - 'ci-dispatch/Invoke-DragonflyGateA1.ps1'
       - 'ci-dispatch/DragonflyCanaryAdjunctPublisher.psm1'
+      - 'ci-dispatch/DragonflyCanaryAdjunctV2Publisher.psm1'
+      - 'ci-dispatch/Test-DragonflyV2PublisherProvenance.ps1'
       - 'ci-dispatch/tests/Test-DragonflyCanary.ps1'
       - 'ci-dispatch/tests/Test-DragonflyCanaryRuntime.ps1'
       - 'ci-dispatch/tests/Test-DragonflyCanaryProductionScope.ps1'
+      - 'tests/dragonfly-canary-publication/Test-DragonflyCanaryAdjunctV2Publisher.ps1'
       - '.github/workflows/dragonfly-jit-validation.yml'
       - '.github/workflows/dragonfly-jit-canary.yml'
 
@@ -79,6 +89,35 @@ jobs:
       - name: Verify Gate B production module scope on both platforms
         shell: pwsh
         run: ./ci-dispatch/tests/Test-DragonflyCanaryProductionScope.ps1
+      - name: Verify PS7 provider runtime capability and synthetic refuse cases
+        shell: pwsh
+        run: ./ci-dispatch/tests/Test-DragonflyGateBPowerShellRuntime.ps1
+      - name: Verify legacy Windows PowerShell 5.1 cannot run provider
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: ./ci-dispatch/tests/Test-DragonflyGateBPowerShellRuntime.ps1
+      - name: Verify immutable V2 coexistence with accepted V1 on both platforms
+        shell: pwsh
+        run: ./tests/dragonfly-canary-publication/Test-DragonflyCanaryAdjunctV2Publisher.ps1
+      - name: Verify accepted V2 publisher provenance gate on both platforms
+        shell: pwsh
+        run: ./tests/dragonfly-canary-publication/Test-DragonflyV2PublisherProvenance.ps1
+      - name: Verify V2 provenance gate under Windows PowerShell 5.1
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: ./tests/dragonfly-canary-publication/Test-DragonflyV2PublisherProvenance.ps1
+      - name: Exercise actual protected V2 provenance gate on hosted Windows under pwsh
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: ./tests/dragonfly-canary-publication/Test-DragonflyV2PublisherProtected.ps1
+      - name: Exercise actual protected V2 provenance gate on hosted Windows PowerShell 5.1
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: ./tests/dragonfly-canary-publication/Test-DragonflyV2PublisherProtected.ps1
+      - name: Verify V2 immutable publisher under Windows PowerShell 5.1
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: ./tests/dragonfly-canary-publication/Test-DragonflyCanaryAdjunctV2Publisher.ps1
       - name: Verify protected adjunct publisher under Windows PowerShell 5.1
         if: matrix.os == 'windows-latest'
         shell: powershell

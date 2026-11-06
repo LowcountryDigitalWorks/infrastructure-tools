@@ -2,7 +2,7 @@
 
 **Gate C-preparation source only — NOT privileged, NOT deployed, NOT a general sandbox.**
 
-Owning issue: infrastructure-tools #209. This source is stacked on PR #219 (synthetic host journal), which depends on #217 (local user-mode), #215 (signed synthetic owner decisions), and #214 (still independently unaccepted security contract). It must not advance ahead of those author-independent gates.
+Owning issue: infrastructure-tools #209. This source extends the independently source-reviewed and merged actual-main foundation: Gate A architecture PR #214, signed synthetic owner decision/issuer journal PR #237, disposable local user-mode PR #217, and synthetic host journal PR #219 (main merge ae4f6d94c5ab070a8306eac81d2c5a08cfdb620a). This draft nonprivileged process-containment proof requires its own exact-head tests and independent security review.
 
 ## What is actually executed
 
@@ -37,9 +37,9 @@ Additional cross-platform tests cover normal drain-before-release, expiration, f
 - **Windows Job assignment after worker process creation** is safe for this fixed worker only because it blocks on a private stdin gate before launching its child. This is not atomic admission for untrusted code. Actual arbitrary privileged executables need protected OS creation/admission and an independently reviewed service architecture.
 - A normal-user POSIX process group can be escaped by arbitrary/privileged code, and Windows Administrator/SYSTEM processes can create detached services/jobs or break out of ordinary process containment. These tests use trusted fixed code only; do not call the mechanisms non-bypassable for general administration.
 - Process group readback and Job accounting do not audit irreversible files, scheduled tasks or services. Production `DRAINED_VERIFIED` must include independent process, service, task, side-effect and host-journal readback, protected from the privileged payload.
-- The new synthetic ordering integration links PR #219's host journal to this fixed process and only releases after positive OS drain. It still does not implement a protected durable runtime ledger or a recovery path for a genuinely privileged host.
+- The new synthetic ordering integration links the accepted-main PR #219 host journal to this fixed process and only releases after positive OS drain. It still does not implement a protected durable runtime ledger or a recovery path for a genuinely privileged host.
 - Windows runner's job nesting and OS policy must be validated in hosted CI. Failure to assign must fail closed, not skip Windows or fall back to uncontained process start.
 
 Future integration requires protecting session/owner consent, external egress isolation, encrypted authenticated transport, OS-specific job/cgroup helpers, trusted owner-authenticated recovery, and Host Agent read-only status only through the existing business-operations #554 owning lane. No second dashboard, restart manager or unauthorized host mutation.
 
-**No new cost, production host settings, credentials, customer/regulated data, remote listener, machine packages, or privileged agent installation.** Source author GM17 cannot terminally self-review.
+**No new cost, production host settings, credentials, customer/regulated data, remote listener, machine packages, or privileged agent installation.** Source author GM17 and main integrator GM20 cannot terminally self-review; source-only acceptance requires fresh exact-head H0/M0, CI and final main race checks.
