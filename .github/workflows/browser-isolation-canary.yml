@@ -1,0 +1,32 @@
+name: Auto Browser outer network canary (synthetic only)
+on:
+  pull_request:
+    paths:
+      - 'browser-isolation/**'
+      - '.github/workflows/browser-isolation-canary.yml'
+permissions:
+  contents: read
+jobs:
+  synthetic-offline-docker-guest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compile offline Go stdlib fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p browser-isolation/bin
+          CGO_ENABLED=0 GO111MODULE=off go build -trimpath -o browser-isolation/bin/canary ./browser-isolation/canary/main.go
+          ./browser-isolation/bin/canary --local-fixture-only
+      - name: Test fail-closed Docker admission
+        run: python3 -m unittest discover -s browser-isolation -p 'test_*.py' -v
+      - name: Verify external Docker network denial and internal positive fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --network none --pull=false -f browser-isolation/Dockerfile -t ldw-browser-isolation-canary:local browser-isolation
+          image_id="$(docker image inspect --format '{{.Id}}' ldw-browser-isolation-canary:local)"
+          python3 browser-isolation/run_canary.py "$image_id"

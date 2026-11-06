@@ -1,12 +1,12 @@
 # LDW Commander — host-side session restart and quarantine proof
 
-**SYNTHETIC ONLY.** Owning product: infrastructure-tools #209. This is a separate, stacked Gate B proof **on top of** Commander PR #217 (local normal-user file/process), PR #215 (synthetic issuer approval journal), and PR #214 (unaccepted Gate A trust architecture). It does not install an Agent, use root/Administrator, connect to ChatGPT, or create remote access.
+**SYNTHETIC ONLY.** Owning product: infrastructure-tools #209. This is a separate source-only Gate B proof extending the **accepted actual-main foundation**: Gate A design PR #214, signed session + issuer journal PR #237 and the disposable file/process proof PR #217 (merge `220c6e1b20f99eaf0de0a3e08ed3952d0e3147ca`). It does not install an Agent, use root/Administrator, connect to ChatGPT, or create remote access.
 
 ## Added semantics
 
 The issuer's approval journal and the host's session journal answer different questions:
 
-- **Issuer approval journal (parent PR #215):** was a particular signed owner decision already consumed to mint a session grant? One atomic single-use approval record prevents a fresh grant from the same decision across concurrent issuers or restart.
+- **Issuer approval journal (accepted main via PR #237):** was a particular signed owner decision already consumed to mint a session grant? One atomic single-use approval record prevents a fresh grant from the same decision across concurrent issuers or restart.
 - **Host session journal (this proof):** was a particular signed session grant already admitted on this host, and can its previous session be positively accounted for? A second use of its immutable session UUID fails `HOST_SESSION_REPLAY`, including after agent restart. A previous OPEN session without verified cleanup makes a newly started agent report `HOST_QUARANTINED` and refuse all new sessions.
 
 The new `HostSessionJournal` is a **separate, private, disposable SQLite store** with one-time trusted test initialization; the normal host process cannot create a missing ledger during restart. `BEGIN IMMEDIATE` with unique session IDs serializes cross-process reservations. Any missing, corrupt, inaccessible or ambiguously updated journal refuses new sessions. The journal's only terminal state is `REVOKED_VERIFIED`, and it is set solely by the synthetic zero-OS-process revoke method; no remote/model-facing reset/recovery tool exists.
@@ -33,4 +33,4 @@ The inherited Commander workflow runs the suite under Ubuntu and Windows, with t
 
 A real host reboot with an OPEN record **stays quarantined indefinitely** in this proof. Recovery must later require a separately accepted trusted owner recovery ceremony and independent evidence of no privileged descendants, not a model-supplied `clear` call or automatic deletion.
 
-No production host access, Host Agent service/UI changes, secrets, customer data, privileged installer, new recurring subscription or Work/GitHub runtime message bus. Target incremental cash: **$0**. Author GM17 is ineligible for independent terminal security review and may not self-merge this stacked draft.
+No production host access, Host Agent service/UI changes, secrets, customer data, privileged installer, new recurring subscription or Work/GitHub runtime message bus. Target incremental cash: **$0**. Author GM17 and GM20 main-integration work are ineligible for independent terminal security review. This current-main-targeted draft cannot merge until its own fresh exact-head tests, independent source review, and guarded source-only owner acceptance.
