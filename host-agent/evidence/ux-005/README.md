@@ -14,6 +14,8 @@ The current evidence demonstrates the owner-facing v2 presentation:
 - keyboard mnemonics for Refresh, Copy diagnostics, and Technical details;
 - vertically scrollable owner surface with no intentional horizontal scrolling.
 
+For the one-screen desktop overview follow-up and its synthetic evidence, see [`ux-006`](../ux-006/README.md).
+
 The tray sheet renders every accepted `StatusColor` presentation at 16, 20, 24, and 32 pixels from one stable tidal base mark with non-color-only state overlays.
 
 Regenerate on Windows with:
