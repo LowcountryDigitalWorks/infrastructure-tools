@@ -31,7 +31,7 @@ internal static class CiJitTechnicalDetailsTests
         Assert(freshLocalStale.EligibleQueuedCount == 2, "fresh queue counts remain visible in snapshot");
         var freshLocalStaleMessage = CiJitTechnicalDetails.UnknownOwnerNextCheck(freshLocalStale);
         Assert(freshLocalStaleMessage is not null, "unknown owner with fresh queue gets guidance");
-        Assert(!freshLocalStaleMessage.Contains("Queue counts are withheld", StringComparison.Ordinal),
+        Assert(!freshLocalStaleMessage!.Contains("Queue counts are withheld", StringComparison.Ordinal),
             "fresh queue counts must not be described as withheld");
         Assert(freshLocalStaleMessage.Contains("fresh queue evidence", StringComparison.OrdinalIgnoreCase),
             "fresh queue counts are labeled non-actionable queue evidence");
