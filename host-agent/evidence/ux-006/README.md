@@ -6,7 +6,7 @@ At the standard desktop window size, Remote Access, Development & Automation, an
 
 The failed example shows the accepted policy distinction: stopped Ubuntu is healthy because it is optional/on-demand; Cursor Worker is required after sign-in and remains failed after the accepted 120-second settle window. Technical details points to the existing startup task for inspection. It does not start the distro.
 
-The unknown example retains strict SSH host-key verification and stale CI/JIT evidence. Unknown does not become healthy, stale queue counts are withheld, and no SSH trust or queue mutation is offered.
+The unknown example retains strict SSH host-key verification and stale CI/JIT evidence. Unknown does not become healthy, stale or unavailable queue counts are withheld, fresh queue counts may appear when local owner evidence is stale but are not authorization to run, and no SSH trust or queue mutation is offered.
 
 Regenerate from the repository root on Windows with:
 
