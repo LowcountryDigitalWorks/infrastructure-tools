@@ -32,6 +32,25 @@ TEST_COMMAND = (
     "-s", "dragonfly-jit/tests", "-p", "test_*.py", "-q",
 )
 
+# Closed, source-reviewed suites only. A caller chooses one *name*, never a
+# repository, file path, command line, shell fragment, URL or environment.
+# Chat Relay tests bind ONLY 127.0.0.1 on ephemeral ports and shut down in
+# the unittest fixture; no public listener or standing server is installed.
+SUITE_PROFILES = {
+    "dragonfly": (TEST_COMMAND, SOURCE_PATHS),
+    "chat-relay": (
+        ("/usr/bin/python3", "-m", "unittest", "discover",
+         "-s", "chat-relay", "-p", "test_*.py", "-q"),
+        ("chat-relay/relay.py", "chat-relay/group_relay.py",
+         "chat-relay/mcp_local.py"),
+    ),
+    "browser-static": (
+        ("/usr/bin/python3", "-m", "unittest", "discover",
+         "-s", "browser-isolation", "-p", "test_*.py", "-q"),
+        ("browser-isolation/run_canary.py",),
+    ),
+}
+
 
 class SourceCiHold(RuntimeError):
     """Reason is one fixed public-safe code; no raw process output is exposed."""
@@ -84,8 +103,8 @@ def remote_main(*, cwd: Path, env: dict[str, str]) -> str:
     return parts[0]
 
 
-def private_sources(root: Path) -> bool:
-    for relative in SOURCE_PATHS:
+def private_sources(root: Path, paths: tuple[str, ...] = SOURCE_PATHS) -> bool:
+    for relative in paths:
         path = root / relative
         try:
             if any(part.is_symlink() for part in (root, *path.parents)) or path.is_symlink():
@@ -99,7 +118,7 @@ def private_sources(root: Path) -> bool:
     return True
 
 
-def proof(head: str) -> dict[str, object]:
+def proof(head: str, suite: str = "dragonfly") -> dict[str, object]:
     result: dict[str, object] = {
         "schema": 1,
         "marker": "LDW_REDRIX_NATIVE_SOURCE_CI",
@@ -109,7 +128,11 @@ def proof(head: str) -> dict[str, object]:
         "no_guest": True,
         "no_persistent_install": True,
         "source_head": head if SHA_RE.fullmatch(head) else "INVALID",
+        "suite": suite if suite in SUITE_PROFILES else "INVALID",
     }
+    if suite not in SUITE_PROFILES:
+        result["reason"] = "SUITE_NOT_ALLOWLISTED"
+        return result
     if SHA_RE.fullmatch(head) is None or not sys.platform.startswith("linux") or os.geteuid() == 0:
         result["reason"] = "INPUT_OR_PLATFORM_REFUSED"
         return result
@@ -133,9 +156,9 @@ def proof(head: str) -> dict[str, object]:
             recorded = git(("rev-parse", "HEAD"), cwd=root, env=env)
             if recorded.returncode != 0 or recorded.stdout.strip() != head:
                 raise SourceCiHold("HEAD_MISMATCH")
-            if not private_sources(root):
+            if not private_sources(root, SUITE_PROFILES[suite][1]):
                 raise SourceCiHold("PRIVATE_SOURCE_REQUIRED")
-            tests = run(TEST_COMMAND, cwd=root, env=env, timeout=120)
+            tests = run(SUITE_PROFILES[suite][0], cwd=root, env=env, timeout=120)
             match = COUNT_RE.search(tests.stderr + "\n" + tests.stdout)
             if tests.returncode != 0 or match is None or int(match.group(1)) < 1:
                 raise SourceCiHold("SOURCE_TESTS_FAILED")
@@ -156,8 +179,10 @@ def proof(head: str) -> dict[str, object]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--head", required=True, help="Exact accepted public main commit SHA")
+    parser.add_argument("--suite", choices=tuple(SUITE_PROFILES), default="dragonfly",
+                        help="One of the fixed, reviewed source-only test profiles")
     args = parser.parse_args(argv)
-    report = proof(args.head)
+    report = proof(args.head, args.suite)
     print(json.dumps(report, sort_keys=True, separators=(",", ":")))
     return 0 if report["result"] == "PASS_SOURCE_ONLY" else 1
 
