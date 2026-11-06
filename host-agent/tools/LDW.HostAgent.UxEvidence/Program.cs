@@ -12,22 +12,23 @@ System.Windows.Forms.Application.SetCompatibleTextRenderingDefault(false);
 Directory.CreateDirectory(args[0]);
 var definitions = new[]
 {
-    new ComponentDefinition("tailscale", "Tailscale", ComponentKind.Tailscale, DesiredState.Running),
-    new ComponentDefinition("rustdesk", "RustDesk", ComponentKind.RustDesk, DesiredState.Running),
-    new ComponentDefinition("desktop-commander", "Desktop Commander", ComponentKind.DesktopCommander, DesiredState.RunningAfterLogin),
-    new ComponentDefinition("wsl", "Ubuntu (Cursor)", ComponentKind.WslUbuntu, DesiredState.OnDemand, Required: false),
-    new ComponentDefinition("cursor-worker", "Cursor Worker", ComponentKind.CursorWorker, DesiredState.RunningAfterLogin),
-    new ComponentDefinition("linux-node", "Linux CI node", ComponentKind.LinuxNode, DesiredState.Reachable),
-    new ComponentDefinition("github-runner", "GitHub Runner", ComponentKind.GithubRunner, DesiredState.Running),
-    new ComponentDefinition("memory", "Memory / commit pressure", ComponentKind.Memory, DesiredState.Running),
-    new ComponentDefinition("disk", "Disk", ComponentKind.Disk, DesiredState.Running),
-    new ComponentDefinition("cpu", "CPU / pressure state", ComponentKind.Cpu, DesiredState.Running),
+    new ComponentDefinition("remote.tailscale", "Tailscale", ComponentKind.Tailscale, DesiredState.Running),
+    new ComponentDefinition("remote.rustdesk", "RustDesk", ComponentKind.RustDesk, DesiredState.Running),
+    new ComponentDefinition("remote.desktop-commander", "Desktop Commander", ComponentKind.DesktopCommander, DesiredState.RunningAfterLogin),
+    new ComponentDefinition("dev.wsl-ubuntu", "Ubuntu (Cursor)", ComponentKind.WslUbuntu, DesiredState.OnDemand, Required: false),
+    new ComponentDefinition("dev.cursor-worker", "Cursor Worker", ComponentKind.CursorWorker, DesiredState.RunningAfterLogin),
+    new ComponentDefinition("dev.codync-host", "Codync background host", ComponentKind.CodyncHost, DesiredState.RunningAfterLogin, Required: true),
+    new ComponentDefinition("dev.linux-ci-node", "CI-RUNNER-001", ComponentKind.LinuxNode, DesiredState.Reachable),
+    new ComponentDefinition("dev.github-runner", "GitHub Runner", ComponentKind.GithubRunner, DesiredState.Running),
+    new ComponentDefinition("system.memory", "Memory / commit pressure", ComponentKind.Memory, DesiredState.Running),
+    new ComponentDefinition("system.disk", "Disk", ComponentKind.Disk, DesiredState.Running),
+    new ComponentDefinition("system.cpu", "CPU / pressure state", ComponentKind.Cpu, DesiredState.Running),
 };
 var environments = new[]
 {
     new EnvironmentDefinition("remote-access", "Remote Access", definitions[..3]),
-    new EnvironmentDefinition("development-automation", "Development / Automation", definitions[3..7]),
-    new EnvironmentDefinition("system", "System", definitions[7..]),
+    new EnvironmentDefinition("development-automation", "Development / Automation", definitions[3..8]),
+    new EnvironmentDefinition("system", "System", definitions[8..]),
 };
 var device = new DeviceDefinition("fixture", "LDW01", DevicePlatform.Windows, environments);
 var systemTelemetry = new SystemTelemetry(DateTimeOffset.UtcNow, 16UL * 1024 * 1024 * 1024, 8UL * 1024 * 1024 * 1024, 12.5, [], new MemoryPressureTelemetry(50, 0, 0, 0, 0, TimeSpan.Zero, "Normal"));
@@ -48,9 +49,9 @@ var ciJitStatus = new CiJitStatusSnapshot(
     CiJitCapacityState.Ready);
 var snapshots = new[]
 {
-    ("healthy", StatusColor.Green, HealthState.Healthy, "Your system is ready to use.", StatusColor.Green),
-    ("attention-unknown", StatusColor.Yellow, HealthState.Degraded, "Remote access needs attention. Linux node status is unknown.", StatusColor.Yellow),
-    ("failed", StatusColor.Red, HealthState.Failed, "A required component has failed.", StatusColor.Red),
+    ("healthy", StatusColor.Green, HealthState.Healthy, "All required components are healthy. Optional Ubuntu remains stopped until needed.", StatusColor.Green),
+    ("attention-unknown", StatusColor.Yellow, HealthState.Degraded, "Remote access needs attention. SSH and CI/JIT evidence is unknown.", StatusColor.Yellow),
+    ("failed", StatusColor.Red, HealthState.Failed, "Cursor Worker is expected after sign-in; Linux and CI/JIT evidence remains unknown.", StatusColor.Red),
 };
 HostAgentLiveSnapshot? priorHealthySnapshot = null;
 foreach (var (file, overallColor, health, summary, exceptionColor) in snapshots)
@@ -60,14 +61,40 @@ foreach (var (file, overallColor, health, summary, exceptionColor) in snapshots)
         var color = file switch
         {
             "healthy" => component.Kind == ComponentKind.GithubRunner ? StatusColor.Blue : StatusColor.Green,
-            "attention-unknown" => index == 0 ? StatusColor.Yellow : index == 5 ? StatusColor.Gray : StatusColor.Green,
-            _ => index == 0 ? StatusColor.Red : index == 5 ? StatusColor.Gray : StatusColor.Green,
+            "attention-unknown" => component.Id == "remote.tailscale" ? StatusColor.Yellow
+                : component.Id is "dev.linux-ci-node" or "dev.github-runner" ? StatusColor.Gray : StatusColor.Green,
+            _ => component.Id == "dev.cursor-worker" ? StatusColor.Red
+                : component.Id is "dev.linux-ci-node" or "dev.github-runner" ? StatusColor.Gray : StatusColor.Green,
         };
         var componentHealth = color switch { StatusColor.Red => HealthState.Failed, StatusColor.Yellow => HealthState.Degraded, StatusColor.Gray => HealthState.Unknown, _ => HealthState.Healthy };
-        return new ComponentObservation(component.Id, color == StatusColor.Green ? ObservedState.Running : color == StatusColor.Gray ? ObservedState.Unknown : ObservedState.Unavailable, componentHealth, DateTimeOffset.UtcNow, componentHealth switch { HealthState.Failed => "Required service is unavailable.", HealthState.Degraded => "Service is running with a reported issue.", HealthState.Unknown => "No trustworthy observation is available.", _ => component.Kind == ComponentKind.WslUbuntu ? "Available on demand." : "Ready." }, Activity: color == StatusColor.Blue ? ActivityState.ActiveCiJob : ActivityState.None);
+        var state = component.Id == "dev.wsl-ubuntu" && file != "healthy" ? ObservedState.Stopped
+            : color == StatusColor.Green ? ObservedState.Running
+            : color == StatusColor.Gray ? ObservedState.Unknown
+            : color == StatusColor.Red ? ObservedState.Stopped : ObservedState.Unavailable;
+        var summary = componentHealth switch
+        {
+            HealthState.Failed => "Worker remains stopped after the post-login settle window; Host Agent did not start WSL.",
+            HealthState.Degraded => "Service is running with a reported issue.",
+            HealthState.Unknown when component.Id == "dev.linux-ci-node" => "Strict SSH host-key verification is unavailable; Linux health was not fabricated.",
+            HealthState.Unknown => "No trustworthy observation is available.",
+            _ when component.Id == "dev.wsl-ubuntu" && state == ObservedState.Stopped => "Configured WSL distro is stopped; it is available on demand.",
+            _ => component.Kind == ComponentKind.GithubRunner && color == StatusColor.Blue ? "GitHub Runner is online and busy." : "Ready."
+        };
+        return new ComponentObservation(component.Id, state, componentHealth, DateTimeOffset.UtcNow, summary, Activity: color == StatusColor.Blue ? ActivityState.ActiveCiJob : ActivityState.None);
     }).ToArray();
     var snapshot = new DeviceSnapshot("fixture", DateTimeOffset.Now, observations, health, overallColor, summary);
-    var live = new HostAgentLiveSnapshot(device, snapshot, systemTelemetry, new RuntimeContext(OwnerSessionState.Active), new HostAgentSettingsLoadResult(new HostAgentSettings(), false, true, "Synthetic fixture."), null, null, ciJitStatus);
+    var currentCiJit = file == "healthy" ? ciJitStatus : ciJitStatus with
+    {
+        State = CiJitOwnerState.Unknown,
+        Color = StatusColor.Gray,
+        ReasonCode = "LOCAL_STATE_STALE",
+        LocalStateFresh = false,
+        QueueState = CiJitQueueState.Stale,
+        EligibleQueuedCount = null,
+        HeldQueuedCount = null,
+        Capacity = CiJitCapacityState.Unknown
+    };
+    var live = new HostAgentLiveSnapshot(device, snapshot, systemTelemetry, new RuntimeContext(OwnerSessionState.Active), new HostAgentSettingsLoadResult(new HostAgentSettings(), false, true, "Synthetic fixture."), null, null, currentCiJit);
     if (file == "healthy") priorHealthySnapshot = live;
     using var form = new StatusForm(() => { }, () => { });
     form.UpdateSnapshot(live);
@@ -82,6 +109,8 @@ foreach (var (file, overallColor, health, summary, exceptionColor) in snapshots)
         if (string.IsNullOrWhiteSpace(button.AccessibleName))
             throw new InvalidOperationException($"Action button is missing an accessible name: {button.Text}");
     }
+
+    AssertNoVerticalScroll(form, "standard desktop window");
 
     using var image = new Bitmap(form.Width, form.Height);
     form.DrawToBitmap(image, new Rectangle(Point.Empty, image.Size));
@@ -131,6 +160,15 @@ static void AssertNoHorizontalScroll(Control root, string context)
         .FirstOrDefault(x => x.HorizontalScroll.Visible);
     if (horizontalScroll is not null)
         throw new InvalidOperationException($"Horizontal scrolling is not allowed at {context}: {horizontalScroll.GetType().Name}");
+}
+
+static void AssertNoVerticalScroll(Control root, string context)
+{
+    var verticalScroll = Descendants(root)
+        .OfType<ScrollableControl>()
+        .FirstOrDefault(x => x.VerticalScroll.Visible);
+    if (verticalScroll is not null)
+        throw new InvalidOperationException($"Vertical scrolling is not allowed at {context}: {verticalScroll.GetType().Name}");
 }
 
 static IEnumerable<Control> Descendants(Control root)
