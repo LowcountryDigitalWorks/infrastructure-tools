@@ -55,6 +55,9 @@ def parse_and_verify(token: str, owner_public_key: Ed25519PublicKey) -> dict:
         raw, signature = _dec(text), _dec(sig)
         owner_public_key.verify(signature, raw)
         data = json.loads(raw)
+        # Reject duplicate keys, alternate encodings and non-canonical signed bytes.
+        if json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8") != raw:
+            raise ValueError("NON_CANONICAL_OWNER_DECISION")
     except (ValueError, TypeError, InvalidSignature):
         raise OwnerDecisionRefused() from None
     if not isinstance(data, dict) or set(data) != FIELDS:
@@ -71,10 +74,10 @@ def verify_decision(token: str, owner_public_key: Ed25519PublicKey, *,
             data["policy"] != policy or data["host"] != host or
             data["operator"] != operator or data["privilege"] != "FULL_ADMIN" or
             data["scope"] != SCOPE or data["risk"] != FULL_ADMIN_RISK or
-            data["epoch"] != epoch or
-            not isinstance(data["issued"], int) or
-            not isinstance(data["expires"], int) or
-            not isinstance(data["max_session_seconds"], int) or
+            type(data["epoch"]) is not int or data["epoch"] != epoch or
+            type(data["issued"]) is not int or
+            type(data["expires"]) is not int or
+            type(data["max_session_seconds"]) is not int or
             data["issued"] > now or now >= data["expires"] or
             not 0 < data["expires"] - data["issued"] <= MAX_DECISION_AGE or
             not 0 < requested_ttl <= data["max_session_seconds"] or

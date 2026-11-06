@@ -2,7 +2,7 @@
 
 **STATUS: DRAFT SOURCE-ONLY / NO REMOTE ACCESS / NO ADMINISTRATOR-ROOT EXECUTION / NO HOST INSTALLATION**
 
-Owning issue: infrastructure-tools #209. Parent source dependency: PR #215 synthetic signed-session state machine, which is stacked on PR #214 Gate A security architecture. This proof is not an accepted standalone product or authority to weaken either parent.
+Owning issue: infrastructure-tools #209. Accepted main foundation: Gate A security design PR #214 and the independently reviewed synthetic signed-session mainline PR #237 (merge `39af719c6f38b96ce52affd065639f778181f44e`). This disposable file/process proof extends those source-only contracts and does not itself grant runtime or privileged authority.
 
 ## Actual operation introduced
 
@@ -40,4 +40,4 @@ The current prototype holds its in-process session lock through the fixed proces
 
 User goal remains a genuine first-party multi-host remote Desktop Commander replacement, with arbitrary **owner-authorized** Administrator/root terminal/file/service/desktop operations within separately admitted, short-lived and revocable sessions; no third-party Desktop Commander subscription/quota and no Work/GitHub runtime message bus. This local step proves actual OS calls but not those outcomes.
 
-**Do not merge/deploy** while parent #214/#215 independent review is outstanding. Require exact-head CI, separate security review, independent-author acceptance and real host-specific protected installation approval before expanding to arbitrary commands, remote network or elevated execution. No new software subscriptions, customer/regulated data, secret export or standing schedule. Target incremental cost $0.
+**Do not merge before fresh exact-head CI and independent whole-delta security/source review** on the reconciled main-targeted PR #217. Source-only merge is distinct from deployment and any real host-specific protected installation, owner authentication, arbitrary commands, remote networking or elevated execution. No new software subscriptions, customer/regulated data, secret export or standing schedule. Target incremental cost $0.
