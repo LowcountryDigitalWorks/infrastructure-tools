@@ -90,6 +90,25 @@ class MailboxTests(unittest.TestCase):
         self.ticks[0] -= 901
         self.assertCode("NOT_FOUND", lambda: self.box.acknowledge("ir02", self.id))
 
+    def test_highwater_clamp_preserves_new_direct_ttl_after_tick_rollback(self):
+        # Unlike a post-GC resurrection test, this keeps a live message
+        # across a rollback and then sends a NEW message while time is low.
+        # Removing the high-water return guard expires that new message early.
+        self.send()
+        self.ticks[0] = 800.0
+        self.assertIn(self.id, [
+            msg["message_id"] for msg in self.box.receive("ir02")["messages"]
+        ])
+        self.ticks[0] = 200.0
+        newer = str(uuid.uuid4())
+        self.assertFalse(self.send(message_id=newer)["duplicate"])
+        self.ticks[0] = 1200.0
+        pending = [
+            msg["message_id"] for msg in self.box.receive("ir02")["messages"]
+        ]
+        self.assertNotIn(self.id, pending)  # first message expired at tick 1000
+        self.assertIn(newer, pending)       # second retained until tick 1700
+
     def test_reject_unbounded_payload(self):
         self.assertCode("INVALID_BODY", lambda: self.send(body="x" * 8193))
         self.assertCode("INVALID_MESSAGE_ID", lambda: self.send(message_id="not-a-uuid"))
