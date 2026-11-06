@@ -166,5 +166,72 @@ class PrivateSourceCiTests(unittest.TestCase):
         self.assertEqual(current, original)
 
 
+    def test_suite_registry_is_closed_fixed_python_only(self):
+        self.assertEqual(set(ci.SUITE_PROFILES), {"dragonfly", "chat-relay", "browser-static"})
+        for name, (command, paths) in ci.SUITE_PROFILES.items():
+            with self.subTest(suite=name):
+                self.assertEqual(command[0], "/usr/bin/python3")
+                self.assertEqual(command[1:4], ("-m", "unittest", "discover"))
+                self.assertEqual(command[-3:], ("-p", "test_*.py", "-q"))
+                self.assertTrue(paths)
+                self.assertTrue(all(not p.startswith("/") and ".." not in Path(p).parts
+                                    and "\\x00" not in p for p in paths))
+        self.assertEqual(ci.SUITE_PROFILES["dragonfly"][0], ci.TEST_COMMAND)
+        self.assertEqual(ci.SUITE_PROFILES["dragonfly"][1], ci.SOURCE_PATHS)
+
+    def test_unknown_suite_fails_before_any_git_or_test(self):
+        for candidate in ("", "other", "../../etc/passwd", "dragonfly;whoami", None):
+            with self.subTest(candidate=candidate), \
+                 mock.patch.object(ci, "git") as git, \
+                 mock.patch.object(ci, "run") as run, \
+                 mock.patch.object(ci, "remote_main") as remote:
+                report = ci.proof(HEAD, suite=candidate)
+                self.assertEqual(report["result"], "HOLD")
+                self.assertEqual(report["reason"], "SUITE_NOT_ALLOWLISTED")
+                self.assertTrue(report["no_runner"] and report["no_jit_authority"])
+                self.assertEqual(report["suite"], "INVALID")
+                git.assert_not_called()
+                run.assert_not_called()
+                remote.assert_not_called()
+
+    def test_each_new_suite_uses_fixed_commands_and_selected_private_sources(self):
+        for name in ("chat-relay", "browser-static"):
+            with self.subTest(suite=name), \
+                 mock.patch.object(ci, "remote_main", side_effect=[HEAD, HEAD]), \
+                 mock.patch.object(ci, "git", side_effect=self.git_ok), \
+                 mock.patch.object(ci, "private_sources", return_value=True) as private, \
+                 mock.patch.object(ci, "run", return_value=PASSED) as run:
+                outcome = ci.proof(HEAD, suite=name)
+                self.assertEqual(outcome["result"], "PASS_SOURCE_ONLY")
+                self.assertEqual(outcome["suite"], name)
+                self.assertTrue(outcome["no_runner"] and outcome["no_jit_authority"])
+                self.assertEqual(run.call_args.args[0], ci.SUITE_PROFILES[name][0])
+                self.assertEqual(private.call_args.args[1], ci.SUITE_PROFILES[name][1])
+
+    def test_chat_relay_selected_source_group_write_refused(self):
+        paths = ci.SUITE_PROFILES["chat-relay"][1]
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            for relative in paths:
+                file = root / relative
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_text("source-only", encoding="utf-8")
+                file.chmod(0o600)
+            self.assertTrue(ci.private_sources(root, paths))
+            (root / paths[-1]).chmod(0o664)
+            self.assertFalse(ci.private_sources(root, paths))
+
+    def test_browser_static_selected_source_symlink_refused(self):
+        paths = ci.SUITE_PROFILES["browser-static"][1]
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            target = root / "target"
+            target.write_text("fixture", encoding="utf-8")
+            source = root / paths[0]
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.symlink_to(target)
+            self.assertFalse(ci.private_sources(root, paths))
+
+
 if __name__ == "__main__":
     unittest.main()
