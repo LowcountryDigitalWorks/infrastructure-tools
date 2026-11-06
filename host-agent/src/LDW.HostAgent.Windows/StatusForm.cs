@@ -575,8 +575,8 @@ internal sealed class StatusForm : Form
                 if (nextCheck is not null)
                     text.AppendLine($"  Next check: {nextCheck}");
             }
-            if (ci.State == CiJitOwnerState.Unknown)
-                text.AppendLine("  Next check: Queue counts are withheld while queue/local evidence is stale or unavailable. Re-read the accepted CI/JIT status source before treating any prior count as current; no queue action was attempted.");
+            if (CiJitTechnicalDetails.UnknownOwnerNextCheck(ci) is { } unknownCiJitNextCheck)
+                text.AppendLine($"  Next check: {unknownCiJitNextCheck}");
         }
 
         using var dialog = new Form
