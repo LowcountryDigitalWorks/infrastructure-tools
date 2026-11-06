@@ -18,7 +18,22 @@ Run from a reviewed checkout of this helper on the owner-controlled REDRIX norma
 /usr/bin/python3 dragonfly-jit/redrix_native_source_ci.py --head <verified-40-character-main-sha>
 ```
 
-The script checks that the supplied commit is exactly the current public `LowcountryDigitalWorks/infrastructure-tools` `refs/heads/main` before checkout **and again after testing**, fails closed if it moves, and runs only the fixed Dragonfly Python unittest suite. It returns one sanitized JSON result, never raw test stderr/stdout.
+The script checks that the supplied commit is exactly the current public `LowcountryDigitalWorks/infrastructure-tools` `refs/heads/main` before checkout **and again after testing**, and fails closed if it moves. The default remains the original fixed Dragonfly Python unittest suite. It also accepts exactly two **additional, fixed-name, source-reviewed local proof profiles**:
+
+| `--suite` | Bounded work | Network and execution boundary |
+| --- | --- | --- |
+| `dragonfly` (default) | Existing Dragonfly Python source contract tests | Source-only local, no QEMU or provider |
+| `chat-relay` | Standard-library Chat Relay tests | Temporary `127.0.0.1` loopback-only sockets close during tests; no public listener or standing service |
+| `browser-static` | Static Browser Isolation boundary tests | No Docker container, network probe or live browser |
+
+Examples from a reviewed helper checkout, replacing the hash with exact current verified main:
+
+```bash
+/usr/bin/python3 dragonfly-jit/redrix_native_source_ci.py --head <verified-40-char-main-sha> --suite chat-relay
+/usr/bin/python3 dragonfly-jit/redrix_native_source_ci.py --head <verified-40-char-main-sha> --suite browser-static
+```
+
+The `--suite` argument uses a closed parser choice, **not** a caller-selected script, executable, test directory, URL, checkout or environment. Each profile has a fixed `/usr/bin/python3 -m unittest discover` command and fixed source ownership/mode/symlink pins, with the existing one-time, private uncredentialed checkout/cleanup. All profiles emit one sanitized result without raw test stderr/stdout and **never grant GitHub/JIT authority**. The limited source file-mode checks are not equivalent to verifying an arbitrary repository tree and must not be reused as untrusted-PR admission.
 
 The script:
 - refuses root, non-Linux systems, invalid hashes and any moved main;
