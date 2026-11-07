@@ -1,64 +1,161 @@
-# REDRIX Gate A4 — proposed privileged process/FD evidence contract
+# REDRIX Gate A4 — privileged process/FD proof design contract
 
-**Status: PROPOSAL / DATA-ONLY / NOT SECURITY-ACCEPTED / NOT RUNTIME AUTHORITY**
+**Status: PROPOSAL / DESIGN-ONLY / DATA-ONLY / NOT SECURITY-ACCEPTED / NOT RUNTIME AUTHORITY / NO DEPLOYED ROOT HELPER**
 
-Owner: [infrastructure-tools #139](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/139) and [#96](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/96). Independent adversarial feasibility disposition: [#139 comment 6676287868](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/139#issuecomment-6676287868) — CHANGES_REQUIRED (H1/M1). This document is a proposed specification for independent review, **not a permission** to invoke `sudo`, modify kernel or host policy, deploy a helper, bypass remote-tool restrictions, start a JIT job, or treat a synthetic receipt as A4 PASS.
+Owner: [infrastructure-tools #139](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/139) and [#96](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/96). Supersedes prior proposal text only on merge of a reviewed draft PR; it does **not** authorize privilege, installation, kernel or host policy change, standing services, CI-hosted privileged runners, or treatment of synthetic or parsed JSON as A4 PASS.
 
-## Why an additional trust boundary is required
+**Live design disposition (Nov 7, 2026 ET):** independent read-only challenge `3f12307a-87f0-4dfd-8366-640fc71e0bc7` — **CHANGES_REQUIRED H1/M2/L1**; orchestration record [#139 comment 6704877875](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/139#issuecomment-6704877875). Accepted merged source [#252](https://github.com/LowcountryDigitalWorks/infrastructure-tools/pull/252) (`tools/dragonfly_gate_a4_channel_contract.py`) is a **closed request/response parser only** — strictly `DATA_ONLY_NOT_AUTHORIZED`; it cannot attest a root producer, authenticate a channel, or authorize runtime inspection.
 
-The accepted `tools/dragonfly_gate_a4.py` entrypoint requires Linux, effective UID 1000 and home `/home/eddie`. Its pinned `tools/dragonfly_gate_a0.py` dependency scans `/proc`, enumerates same-UID processes, and inspects their `/fd` symlinks to refuse leftover `/dev/kvm` file descriptors. Inaccessible process descriptors are a **HOLD**, not evidence of zero descriptors.
+**Pinned production gates (unchanged by this document):** `tools/dragonfly_gate_a0.py` and `tools/dragonfly_gate_a4.py` remain the accepted UID-1000 entrypoints. This contract does not modify their bytes, expectations, or HOLD semantics.
 
-On physical REDRIX (ChromeOS -> Termina -> Crostini Debian 13 `penguin`), the normal-user A4 attempt returned `A4_PROCESS_VISIBILITY_UNCERTAIN`. Normal-user readback found `ptrace_scope=1` and no effective CAP_SYS_PTRACE/CAP_DAC_READ_SEARCH. This supports a real process-inspection limit but does not prove all same-UID descriptors are permanently invisible. Running the unchanged A4 as root is **not** a solution: it would fail the mandatory effective-UID check. Replacing `/proc` FD evidence with `pgrep` or a simple QEMU count would reduce the accepted security property.
+## Source design versus runtime proof
 
-Existing accepted local source-CI/KVM smoke and prior #98 synthetic systemd credential tests are separate capabilities. Neither establishes an authorized privileged A4 collector. The total Linux-visible RAM (~29.5 GiB) and current 2,048-MiB guest + 8,192-MiB preserved host-reserve admission are unchanged.
-
-## Proposed minimum design for review (not implemented)
-
-1. **Privilege ownership.** A future **fixed, narrowly scoped, one-shot read-only process/FD inspector** may be invoked only through a separately approved owner-local, authenticated, independently reviewed privilege boundary. No standing service, scheduled task, generic remote shell, caller-selected executable/script/URL/path/ref/arguments, sudoers widening, new token, or ambient PATH command. In particular, the current remote path's privilege refusal may not be circumvented. No accepted existing REDRIX protected inspector is asserted here.
-2. **Source/operation identity.** The privilege boundary must verify an immutable, accepted inspector package/entrypoint, exact bytes and trusted ownership/permissions/ancestor chain before execution. All operation selections and file locations are closed in protected source, never supplied by the UID-1000 caller. An untrusted user's JSON, digest, assertion of `euid=0`, PID list or certificate is **data, not privilege attestation**.
-3. **Separate user identity.** Preserve the existing UID-1000 A4 package/receipt/SSH/Tailscale/JIT-state/source/owner/mode/no-symlink checks without changing their expected values. The future root-side inspector obtains process evidence independently; it must not run the existing UID-1000 A4 entrypoint as root, impersonate its result, or silently skip a rejected source check. Any future A4 composition change requires independent source/security acceptance and new exact-bound tests.
-4. **Authenticated live evidence path.** The binding between a protected inspector and the UID-1000 A4 verification must be a separately reviewed, same-invocation, locally authenticated channel with protected inspector identity and bounded lifetime. Merely passing an owner-writable file, stdout claim, caller-created pipe, forged parent PID, or signed-by-the-caller JSON cannot establish trusted process evidence. The accepted design must spell out which trusted side creates and controls the channel, how the verifier authenticates the producer, how replay is refused, and how failure leaves both sides in HOLD.
-5. **Full scope and fail-closed visibility.** The privileged inspector independently enumerates all required processes and accessible `/proc/<pid>/fd` targets, including same-UID/owner-host processes required by the accepted A0 contract. It may broaden to all UIDs as a *stronger* condition if independently accepted, never narrow the existing coverage. An unreadable PID, stat, ownership field, FD, disappearing ambiguous process, or partial enumeration is **HOLD**. No positive conclusion from absence of process name or untrusted caller-provided counts.
-6. **Stability and anti-replay.** Bind each observed process to PID **and kernel start-time identity** (or stronger kernel-validated identity); sample around the UID-1000 A4 readback at least twice, recheck process identities/FD coverage and root inspector source, and fail on PID reuse, exit/replacement races, scope drift, new KVM FD, nonzero QEMU/KVM, sequence mismatch or non-monotonic/stale evidence. Two identical caller-provided JSON documents are not two trusted observations.
-7. **No lasting authority.** A future authenticated observation would be a necessary A4 subproof, **not** permission to mint GitHub JIT material, register a runner, dispatch a workflow, publish V2, alter SSH/Tailscale, alter ChromeOS, migrate credentials, change kernel ptrace policy, or relax memory reserve. The #52/#186 protected V2 publisher and #10 provider queue/runner authorization remain independent sequential gates.
-8. **Data-only until accepted.** Any non-privileged schema/parser or synthetic fixture implementing this proposal must return an explicit `DATA_ONLY_NOT_AUTHORIZED` classification. The only acceptable current production disposition when full inspected-FD evidence is missing is **`A4_PROCESS_VISIBILITY_UNCERTAIN` / HOLD**. A future `A4 PASS` requires exact package/source review, independently accepted authenticated privilege path, current trusted host readback and separate owner/security deployment authority.
-
-## Proposed minimal evidence fields (not an accepted wire format)
-
-A reviewable future schema would bind: protocol version; fixed inspector/source identity; explicit local host identity; a fresh protected operation correlation/nonce; inspection scope and exact UID policy; two independently observed ordered snapshot identifiers with monotonic time bounds; for each observed process PID, kernel start identity, UID and complete descriptor-enumeration result; QEMU process and `/dev/kvm` FD counts; per-process access-completeness markers; validated UID-1000 A4 receipt/source identity; channel-authentication status **measured by the receiver**; and terminal `HOLD` reason classification. Exact sensitive process paths, private SSH endpoints, credentials, arguments and logs must never appear in durable output.
-
-This list is a **design input, not a parser**. No reported `root=true`, `signature=true`, SHA, counter or timestamp should be considered authenticated merely because it appears in a caller-controlled envelope. Where identity, coverage or freshness cannot be proved by an independently protected component, return HOLD.
-
-## Deterministic negative-test and acceptance matrix
-
-| ID | Synthetic condition | Mandatory future result |
+| Layer | What it may establish | What remains **OPEN** until separate acceptance |
 | --- | --- | --- |
-| A4-FD-01 | No accepted privileged inspector/channel | HOLD; normal-user A4 cannot manufacture trusted evidence |
-| A4-FD-02 | Caller supplies arbitrary executable, path, URL, Git ref, PID, FD list or privileges | REFUSE before any privileged operation |
-| A4-FD-03 | Root invokes unmodified UID-1000 A4 or user spoofs UID/home | Existing owner identity check refuses; no promotion |
-| A4-FD-04 | Caller-supplied, forged, copied or replayed `zero KVM` report | HOLD, not A4 PASS |
-| A4-FD-05 | Inspector package, source blob, owner/mode, ancestor, symlink or executable identity drift | HOLD before invocation |
-| A4-FD-06 | Missing `/proc` entry, denied `/proc/<pid>/fd`, unreadable `fd` link/stat/UID | HOLD; zero not inferred |
-| A4-FD-07 | PID exits, is reused or changes kernel start identity between snapshots | HOLD, not two stable snapshots |
-| A4-FD-08 | A process opens or retains `/dev/kvm` or QEMU process exists in either snapshot | HOLD |
-| A4-FD-09 | Two snapshots do not bind one current UID-1000 A4 readback | HOLD |
-| A4-FD-10 | Host identity/nonce/correlation mismatched, stale, nonmonotonic or duplicated | HOLD |
-| A4-FD-11 | Unexpected UID, user-controlled channel, spoofed peer or missing protected producer identity | HOLD |
-| A4-FD-12 | Synthetic clean/complete stable zero-process/KVM-FD fixture | **DATA_ONLY_NOT_AUTHORIZED**, never runtime A4 PASS |
-| A4-FD-13 | A4 receipt/package/SSH/Tailscale or accepted pinned A0/A4 source fails | HOLD independently of process evidence |
-| A4-FD-14 | Inspector reports success but source/provider/V2/queue admission is missing | A4 not promoted to JIT/runner/dispatch authority |
-| A4-FD-15 | FD inspector unavailable, timeout, busy, permission or transport error | HOLD; no fallback to `pgrep`, status CLI or weaker check |
+| **This contract (design)** | Reviewable trust boundaries, failure matrix, sanitized output shape, ordered gates | Any claim that physical REDRIX currently has an accepted privileged inspector |
+| **Non-privileged source** (`dragonfly_gate_a4_fd_inspector_core.py`, channel parser, fixtures) | Deterministic `HOLD` / `REFUSE` / `DATA_ONLY_NOT_AUTHORIZED` against synthetic inputs | Root-side collection, live `/proc` completeness, or A4 PASS |
+| **Future bounded implementation PR** | Immutable package identity, fail-closed tests, channel binding code **as design** | Host install, sudo, capability grant, or one-shot execution on hardware |
+| **Owner/security runtime decision** | — | Exact protected install/rollback, current byte readback, teardown proof |
+| **Physical evidence pairing** | — | UID-1000 A4 receipt + privileged readback reconciled under current policy |
+| **Downstream JIT** | — | [#52](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/52) / [#186](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/186) protected V2 publisher, [#10](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/10) GitHub queue/runner admission |
 
-Tests must verify **actual denial classifications**, not merely the existence of a test name or assertion of `PASS`. An independent source-security reviewer must decide whether an implementation preserves the existing strict acceptance property before code is merged.
+No step above may be skipped by merge order or green CI alone.
 
-## Ordered gates and safe rollback
+## Physical readback context (bounded, not a specification pass)
 
-1. **This proposal:** influence-clean architecture/security review; revise or reject. No runtime claim.
-2. **Bounded source candidate:** reviewed immutable fixed collector, authenticated producer/consumer binding and deterministic fail-closed tests. No system install or privilege yet.
-3. **Owner/security runtime decision:** exact protected local operation, current installed bytes and permission/rollback verification; never reuse #98 synthetic sudo authorization as permission for this new operation.
-4. **Physical REDRIX evidence:** one owner-local approved read-only privileged inspection paired with untouched UID-1000 A4 receipt; independently reconcile both sides and terminal cleanup. Any ambiguity or failure remains HOLD.
-5. **Independent JIT gates:** protected LDW01 V2 publication/readback (#52/#186), #10 exact GitHub queue/runner/SSH/provider admission, accepted memory floor, then at most one previously owner-authorized secretless #139 canary. Runner/JIT teardown must be independently proven.
+On physical REDRIX under normal UID 1000, the accepted A4 path has returned **`A4_PROCESS_VISIBILITY_UNCERTAIN`**. Owner-local readback (Nov 2026) observed **three** denied `/proc/<pid>/fd` directory accesses and **seventy-three** `readlink` denials on individual `fd` entries under the same-UID inspection scope. That supports **incomplete enumeration**, not proof that every descriptor is permanently invisible.
 
-**Rollback for the current source-only proposal:** close the draft PR without merge; it has no deployed state. A future installed collector must specify separate fixed fail-closed uninstall/restore and no lingering elevated service, credential, task, policy or public listener before permission can be granted.
+**Do not infer causality:** observing `kernel.yama.ptrace_scope=1` (or similar) is **not** proof that `PTRACE_MODE_READ` / fscreds denial was *caused* by Yama alone. Other constraints (dumpability, LSM, mount namespace, capability bounding set in the **target user namespace**, missing `CAP_SYS_PTRACE` effective in that namespace, `/proc` visibility policy) must be measured or attempted readback must fail closed. **No security knob relaxation** is in scope for this design.
+
+## Future Gate A trust architecture (review target, not implemented)
+
+The following is the **minimum** independently reviewable architecture for a **hypothetical** one-shot privileged collector. Nothing here asserts that such a collector exists, is installed, or is callable.
+
+```
+  [UID 1000 A4 verifier — existing package, unchanged checks]
+            ^
+            |  (3) one-shot authenticated channel, same invocation,
+            |      created ONLY after (2) passes; receiver-measured
+            v
+  [Protected fixed launcher — immutable package identity]
+            |
+            |  (2) verifies bytes/owner/mode/ancestors; refuses
+            |      caller-selected command/path/ref
+            v
+  [Privileged read-only inspector process — separate identity]
+            |
+            |  (1) proves capability in target user namespace +
+            |      successful bounded /proc readback or HOLD
+            v
+  [Kernel: PID namespace scope, starttime, full FD enumeration]
+```
+
+### (1) Capability and actual readback in the target user namespace
+
+A protected inspector **must not** treat effective UID 0, a caller assertion, or root-owned `/proc/<pid>` dentries as proof of complete FD visibility.
+
+Before any positive process/FD claim, the design must require evidence of **all** of the following, measured inside the **same user namespace and PID namespace scope** as the REDRIX workload under review:
+
+- Effective **`CAP_SYS_PTRACE`** (or strictly narrower independently accepted capability set) in that namespace at inspector start, with explicit refusal if ambient/bounding sets or namespace membership differ from the accepted profile.
+- Successful application of **`PTRACE_MODE_READ` with fscreds** (or equivalent kernel-validated read path) on each process selected for evidence — not merely the absence of a `ptrace` syscall error on an unrelated probe.
+- **`/proc/<pid>/status` dumpability and LSM context** sufficient to explain any denied `fd` readlink: where dumpability is `0` or LSM denies read, the contract classifies **`enumeration_incomplete`** and returns **HOLD**; it does not infer zero KVM FDs.
+- **Physical readback success** for every in-scope `fd` entry in both snapshots (below), not extrapolation from partial samples.
+
+Failure of any measurement, ambiguity of namespace membership, or inability to reproduce denial reason without relaxing policy → **HOLD**. Documenting `ptrace_scope` is informational only.
+
+### (2) Fixed immutable package and protected launcher identity
+
+- **Single closed package:** exact immutable inspector binary (or accepted interpreter + immutable payload), launcher entrypoint, and UID-1000 verifier package hashes are fixed in protected source; **no** caller-supplied executable, script, URL, Git ref, workspace path, interpreter flag, or environment injection.
+- **Pre-invocation verification:** owner, group, mode, device/inode stability checks, and **symlink ancestor chain** verification from an accepted trust root through every path component; any drift → **HOLD** before privilege.
+- **No alternate entrypoints:** no `sudo` rule widening, no `PATH` dispatch, no remote shell, no JIT runner, no ChromeOS host agent channel, and no reuse of #98 synthetic credential tests as authorization for this operation.
+- **Separate identity:** the privileged inspector runs outside the UID-1000 A4 process; it must **not** execute unmodified `dragonfly_gate_a4.py` as root or merge its outcome into the UID-1000 receipt.
+
+### (3) Launcher-owned one-shot authenticated channel (post-boundary)
+
+Binding between inspector and UID-1000 verifier is **only** through a channel the **protected launcher** creates **after** package verification and **after** the privilege boundary is entered for that single invocation.
+
+| Mechanism | Design rule |
+| --- | --- |
+| **`SO_PEERCRED` / `getpeereid`** | Records peer UID/GID/PID at **socket creation or `connect` time**, not proof of which **code image** later wrote bytes. Peer credentials **cannot** alone authenticate the inspector package. |
+| **`SCM_CREDENTIALS` / `SCM_RIGHTS`** | Convenient for passing metadata; **not** proof of protected binary provenance. Must not be treated as signing or attestation. |
+| **Inherited user-FD spoofing** | Verifier **must refuse** pre-opened socket FDs, duplicated FDs from an untrusted parent, or caller-supplied `socketpair` halves. Launcher creates both ends; verifier receives only the launcher-designated receive FD via a fixed, reviewed handoff. |
+| **Producer authentication** | Verifier confirms **exact accepted inspector and launcher byte identity** (same as pre-invocation hash), fresh protected **nonce/correlation** bound to this invocation, **expiry/TTL**, monotonic sequence, and **single-use** teardown. |
+| **Replay / TTL** | Second delivery of the same nonce, stale timestamp, or non-monotonic snapshot sequence → **HOLD**. Stateless parser acceptance of duplicated JSON (merged channel contract) remains **DATA_ONLY_NOT_AUTHORIZED** only. |
+| **`root=true` / `signature=true` fields** | JSON or channel metadata carrying these flags without receiver-measured authentication → **HOLD**; never A4 PASS. |
+
+Channel design is **independent** of the merged non-authorizing parser: the parser may classify malformed envelopes; only a future receiver implementation paired with a reviewed runtime may authenticate.
+
+### (4) Process scope, PID identity, and non-atomic two-snapshot enumeration
+
+Two snapshots are **not** one atomic kernel transaction. The design must fail closed on churn, races, and namespace ambiguity.
+
+- **Scope declaration:** explicit **PID namespace** (and mount/network namespace when they affect `/proc` layout) for Crostini/Termina REDRIX; enumeration covers **all processes required by accepted A0/A4 same-UID policy** at minimum, and may not **narrow** below that without independent acceptance.
+- **Per-process identity:** bind each observation to **`pid` + `starttime`** (from `/proc/<pid>/stat`) and full **Uid:** quartet from `/proc/<pid>/status`. Where the platform supports **`pidfd_open`**, use it to re-validate identity across snapshots; on identity change or `ESRCH`, **HOLD**.
+- **FD enumeration:** for each in-scope process, list **every** entry under `/proc/<pid>/fd` in snapshot A and snapshot B; classify each slot as readable symlink, denied, or missing. Partial list → **HOLD** (extends physical **A4-FD-06**).
+- **Drift rules:** new KVM or QEMU-associated FD/process between snapshots; FD count change without matching identity stability; process exit/reuse with same PID but different `starttime` → **HOLD** (**A4-FD-07**).
+- **`pidfd_getfd`:** explicitly **out of scope** as a shortcut. It duplicates FDs across processes and implies stronger privilege than read-only `/proc` enumeration; any design that depends on it requires a **separate** security review and is not assumed here.
+
+Snapshot A and B must bind to **one** current UID-1000 A4 readback correlation (**A4-FD-09**).
+
+### (5) Bounded sanitized durable output
+
+Durable artifacts and cross-system logs may include only **allowlisted aggregates**, for example:
+
+- Protocol/version and fixed package identity digests (accepted hashes only).
+- Fresh operation nonce id (opaque token, not replayable secret material).
+- Snapshot pair id, monotonic bounds, and **counts** of processes, denied `fd` dirs, denied readlinks, KVM-tagged FD hits, QEMU-named processes.
+- Per-process **opaque stable keys** derived from `(starttime, namespace id)` — **not** raw argv, environ, socket paths, SSH endpoints, or full command lines.
+- Terminal classification: `HOLD` reason code from the matrix below; never raw `/proc` paths, secrets, or credential material.
+
+The merged channel contract’s synthetic fields are **not** this wire format and never imply sanitized live output exists.
+
+### (6) Negative and acceptance matrix (extend, do not duplicate)
+
+Existing rows **A4-FD-01** … **A4-FD-15** remain mandatory. The following **extend** them for the refined architecture (same IDs where the condition is unchanged; new IDs only where the adversary is distinct).
+
+| ID | Condition | Mandatory result |
+| --- | --- | --- |
+| A4-FD-01 | No accepted privileged inspector/channel/runtime install | **HOLD**; UID 1000 cannot manufacture trusted evidence |
+| A4-FD-02 | Caller supplies executable, path, URL, ref, PID list, FD list, or privilege hint | **REFUSE** before privileged boundary |
+| A4-FD-03 | Root or non-1000 invokes unmodified UID-1000 `dragonfly_gate_a4.py` or spoofs home/UID | Existing identity check **REFUSE** |
+| A4-FD-04 | Forged, copied, replayed, or parser-only `zero KVM` narrative | **HOLD** |
+| A4-FD-05 | Inspector/launcher package, blob, owner, mode, ancestor, or symlink drift | **HOLD** before invocation |
+| A4-FD-06 | Missing `/proc` entry, denied `/proc/<pid>/fd`, unreadable link/stat/UID field | **HOLD**; zero not inferred |
+| A4-FD-07 | PID reuse, exit, or `starttime` change between snapshots | **HOLD** |
+| A4-FD-08 | `/dev/kvm` FD or QEMU process in either snapshot | **HOLD** |
+| A4-FD-09 | Snapshots not bound to one current UID-1000 A4 readback | **HOLD** |
+| A4-FD-10 | Nonce/correlation stale, duplicated, or non-monotonic | **HOLD** |
+| A4-FD-11 | User-controlled channel, unexpected peer, or missing receiver-measured producer identity | **HOLD** |
+| A4-FD-12 | Synthetic clean complete stable zero-KVM fixture (incl. parser round-trip) | **`DATA_ONLY_NOT_AUTHORIZED`** only |
+| A4-FD-13 | A4 receipt, SSH/Tailscale, or pinned A0/A4 source check fails | **HOLD** regardless of inspector story |
+| A4-FD-14 | Inspector “success” without V2/queue/#10 admission | No JIT/runner/dispatch promotion |
+| A4-FD-15 | Inspector unavailable, timeout, transport error | **HOLD**; no `pgrep`/weaker fallback |
+| A4-FD-16 | Effective `CAP_SYS_PTRACE` absent in target user namespace | **HOLD** before enumeration |
+| A4-FD-17 | `PTRACE_MODE_READ` / fscreds path not demonstrated per process | **HOLD**; `ptrace_scope` alone insufficient |
+| A4-FD-18 | Dumpability/LSM prevents complete `fd` readback | **HOLD** (`enumeration_incomplete`) |
+| A4-FD-19 | PID namespace scope ambiguous or differs between snapshots | **HOLD** |
+| A4-FD-20 | `pidfd` identity recheck fails or unsupported without accepted alternate | **HOLD** |
+| A4-FD-21 | Verifier accepts caller-supplied socket FD or inherited spoofed channel | **REFUSE** / **HOLD** |
+| A4-FD-22 | `SCM_CREDENTIALS` or peer UID 0 presented as package proof | **HOLD** |
+| A4-FD-23 | Reliance on `pidfd_getfd` without separate accepted review | **REFUSE** in this contract |
+| A4-FD-24 | Channel parser classifies envelope as well-formed | Still **`DATA_ONLY_NOT_AUTHORIZED`** until physical pairing gate |
+
+Tests (future implementation) must assert **terminal classifications**, not string presence of `PASS`.
+
+## Ordered gates, rollback, and explicit OPEN security decisions
+
+1. **This design contract** — influence-clean architecture/security review; revise or reject. **No runtime claim.**
+2. **Bounded source candidate** — immutable launcher/inspector **source**, channel binding, deterministic matrix tests; **no** system install, **no** standing service, **no** privileged CI runner, **no** ChromeOS or memory-reserve change (2 GiB guest + 8 GiB host reserve unchanged).
+3. **Independent owner/security runtime approval** — explicit authority for exact install, on-shot execution, and **rollback** with current byte verification; #98 synthetic sudo history is **not** reusable permission.
+4. **Physical REDRIX pairing** — one owner-authorized secretless privileged read paired with untouched UID-1000 A4; reconcile or **HOLD**. Prior owner-authorized Gate B remains **UNCONSUMED** until explicitly exercised under this sequence.
+5. **JIT publication chain** — #52/#186 V2, #10 queue, then at most one #139 canary; teardown independently proven.
+
+**Rollback (design-only):** close draft PR without merge — no deployed state. Future install must document fail-closed uninstall with no lingering unit, credential, listener, or widened sudoers.
+
+## Related source (read-only cross-reference)
+
+- UID-1000 FD core (synthetic): [`REDRIX_A4_FD_INSPECTOR_CORE.md`](REDRIX_A4_FD_INSPECTOR_CORE.md) — does not replace A0/A4.
+- Merged channel **parser** (DATA_ONLY): `tools/dragonfly_gate_a4_channel_contract.py` — no root attestation.
+- Adversarial feasibility: [#139 comment 6676287868](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/139#issuecomment-6676287868).
 
 References: [#139](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/139), [#96](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/96), [#115](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/115), [#10](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/10), [#52](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/52), [#186](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/186).
