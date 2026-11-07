@@ -69,7 +69,8 @@ class ProcTree:
         )
         fd_dir = proc_dir / "fd"
         fd_dir.mkdir(exist_ok=True)
-        for name, target in (fd_links or {"0": "/dev/null"}).items():
+        links = {"0": "/dev/null"} if fd_links is None else fd_links
+        for name, target in links.items():
             link = fd_dir / name
             if link.exists():
                 link.unlink()
@@ -195,7 +196,7 @@ class A4RealProcPortTests(unittest.TestCase):
                 port.list_fd_targets(143)
             self.assertEqual(ctx.exception.errno, errno.ENOENT)
         with mock.patch("os.readlink", side_effect=vanish_readlink):
-            self.assert_hold(core.inspect_stable(port), "A4_FD_DENIED_FD")
+            self.assert_hold(core.inspect_stable(port), "A4_FD_PROCESS_VANISHED")
 
     def test_empty_fd_dir_is_not_vanished_race(self) -> None:
         self.tree.add_pid(144, comm="worker", fd_links={})
@@ -240,7 +241,7 @@ class A4RealProcPortTests(unittest.TestCase):
         with self.assertRaises(OSError) as ctx:
             self.tree.port().read_status_text(153)
         self.assertEqual(ctx.exception.errno, errno.EINVAL)
-        self.assert_hold(core.inspect_stable(self.tree.port()), "A4_FD_STAT_UNAVAILABLE")
+        self.assert_hold(core.inspect_stable(self.tree.port()), "A4_FD_INCOMPLETE_ENUMERATION")
 
     def test_open_linux_proc_port_rejects_non_linux(self) -> None:
         if os.name == "posix" and sys.platform.startswith("linux"):
