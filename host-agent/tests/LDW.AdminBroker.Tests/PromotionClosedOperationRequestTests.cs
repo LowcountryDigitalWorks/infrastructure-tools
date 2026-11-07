@@ -30,6 +30,25 @@ internal static class PromotionClosedOperationRequestTests
             Assert(result.Classification is not ("AUTHORIZED" or "READY" or "PASS"), reason + " not authorized");
         }
 
+        void BlockBytes(byte[] input, string reason)
+        {
+            var result = PromotionClosedOperationRequest.Validate(input);
+            Assert(result.Classification == "BLOCKED", reason + " blocked");
+            Assert(result.ReasonCode == reason, reason);
+            Assert(result.Classification is not ("AUTHORIZED" or "READY" or "PASS"), reason + " not authorized");
+        }
+
+        static byte[] Utf8WithBom(string text)
+        {
+            var payload = Encoding.UTF8.GetBytes(text);
+            var combined = new byte[3 + payload.Length];
+            combined[0] = 0xEF;
+            combined[1] = 0xBB;
+            combined[2] = 0xBF;
+            Buffer.BlockCopy(payload, 0, combined, 3, payload.Length);
+            return combined;
+        }
+
         const string intent = "DRAGONFLY_V2_PUBLISH_REVIEWED";
         var positive = Check(
             "{\"arguments\":[],\"intent\":\"" + intent + "\",\"schema\":1}");
@@ -98,6 +117,25 @@ internal static class PromotionClosedOperationRequestTests
         var empty = PromotionClosedOperationRequest.Validate(null);
         Assert(empty.Classification == "BLOCKED" &&
             empty.ReasonCode == "REQUEST_ABSENT_OR_OVERSIZED", "absent");
+
+        var minimalShape =
+            "{\"schema\":1,\"intent\":\"" + intent + "\",\"arguments\":[]}";
+        BlockBytes(Utf8WithBom(minimalShape), "REQUEST_ENCODING_REJECTED");
+        Block(
+            "{\"schema\":1,\"intent\":\"" + intent + "\",\"arguments\":[],\"nest\":{\"l2\":{\"l3\":{\"l4\":{\"l5\":1}}}}}",
+            "REQUEST_MALFORMED");
+        Block(
+            "{\"schema\":1,\"intent\":\"" + intent + "\",\"arguments\":[]/*disallowed*/}",
+            "REQUEST_MALFORMED");
+        Block(
+            "{\"schema\":1,\"intent\":\"" + intent + "\",\"arguments\":[],}",
+            "REQUEST_MALFORMED");
+        Block(
+            "{\"schema\":1,\"intent\":\"" + intent + "\\u\",\"arguments\":[]}",
+            "REQUEST_MALFORMED");
+        Block(
+            "{\"schema\":1,\"\\u12\":\"x\",\"intent\":\"" + intent + "\",\"arguments\":[]}",
+            "REQUEST_MALFORMED");
 
         Console.WriteLine($"Closed operation request shape tests: {assertions} assertions passed.");
     }
