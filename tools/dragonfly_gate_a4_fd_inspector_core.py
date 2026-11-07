@@ -121,6 +121,8 @@ class ProcessFixture:
     utime_after_first: Optional[int] = None
     fd_os_error: Optional[int] = None
     effective_uid_after_first: Optional[int] = None
+    uid_saved_after_first: Optional[int] = None
+    uid_fs_after_first: Optional[int] = None
 
 
 @dataclass
@@ -151,6 +153,11 @@ class SyntheticProcRoot:
         real = proc.uid_real if proc.uid_real is not None else effective
         saved = proc.uid_saved if proc.uid_saved is not None else effective
         fs = proc.uid_fs if proc.uid_fs is not None else effective
+        if getattr(self, "_first_pass_done", False):
+            if proc.uid_saved_after_first is not None:
+                saved = proc.uid_saved_after_first
+            if proc.uid_fs_after_first is not None:
+                fs = proc.uid_fs_after_first
         return real, effective, saved, fs
 
     def read_status_text(self, pid: int) -> str:
@@ -210,6 +217,9 @@ class ProcessObservation:
     pid: int
     starttime: int
     uid: int
+    uid_real: int
+    uid_saved: int
+    uid_fs: int
     kvm_fd_present: bool
     qemu_like: bool
     fd_enumeration_complete: bool
@@ -308,6 +318,9 @@ def _observe_same_uid_process(port: ProcPort, pid: int, expected_uid: int) -> Op
         pid=before.pid,
         starttime=before.starttime,
         uid=before.uid,
+        uid_real=before.uid_real,
+        uid_saved=before.uid_saved,
+        uid_fs=before.uid_fs,
         kvm_fd_present=kvm_present,
         qemu_like=qemu_like,
         fd_enumeration_complete=True,
@@ -315,13 +328,13 @@ def _observe_same_uid_process(port: ProcPort, pid: int, expected_uid: int) -> Op
 
 
 def inspect_once(port: ProcPort, *, expected_uid: int = DEFAULT_UID) -> Snapshot:
+    if getattr(port, "enumeration_incomplete", False):
+        raise FdInspectorError("A4_FD_INCOMPLETE_ENUMERATION")
     observations: list[ProcessObservation] = []
     try:
         pids = port.list_numeric_pids()
     except OSError as exc:
         raise _map_os_error(exc) from exc
-    if not pids and getattr(port, "enumeration_incomplete", False):
-        raise FdInspectorError("A4_FD_INCOMPLETE_ENUMERATION")
     all_uid_qemu = _enumerate_all_uid_qemu(port, pids)
     if all_uid_qemu:
         raise FdInspectorError("A4_FD_QEMU_PROCESS_PRESENT")
@@ -356,7 +369,17 @@ def inspect_once(port: ProcPort, *, expected_uid: int = DEFAULT_UID) -> Snapshot
 
 def _snapshot_key(snapshot: Snapshot) -> tuple:
     return tuple(
-        (obs.pid, obs.starttime, obs.uid, obs.kvm_fd_present, obs.qemu_like, obs.fd_enumeration_complete)
+        (
+            obs.pid,
+            obs.starttime,
+            obs.uid,
+            obs.uid_real,
+            obs.uid_saved,
+            obs.uid_fs,
+            obs.kvm_fd_present,
+            obs.qemu_like,
+            obs.fd_enumeration_complete,
+        )
         for obs in snapshot.observations
     )
 
@@ -399,6 +422,9 @@ def inspect_stable(
                 "pid": obs.pid,
                 "starttime": obs.starttime,
                 "uid": obs.uid,
+                "uidReal": obs.uid_real,
+                "uidSaved": obs.uid_saved,
+                "uidFs": obs.uid_fs,
                 "kvmFdPresent": obs.kvm_fd_present,
                 "qemuLike": obs.qemu_like,
                 "fdEnumerationComplete": obs.fd_enumeration_complete,
