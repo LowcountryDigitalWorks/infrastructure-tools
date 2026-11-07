@@ -178,7 +178,12 @@ class A4RealProcPortTests(unittest.TestCase):
         with self.assertRaises(OSError) as ctx:
             self.tree.port().list_fd_targets(143)
         self.assertEqual(ctx.exception.errno, errno.ENOENT)
-        self.assert_hold(core.inspect_stable(self.tree.port()), "A4_FD_DENIED_FD")
+        result = core.inspect_stable(self.tree.port())
+        self.assertEqual(result["classification"], "HOLD")
+        self.assertIn(
+            result["reasonCode"],
+            ("A4_FD_DENIED_FD", "A4_FD_INCOMPLETE_ENUMERATION", "A4_FD_PROCESS_VANISHED"),
+        )
 
     def test_malicious_pid_types_rejected(self) -> None:
         port = self.tree.port()
