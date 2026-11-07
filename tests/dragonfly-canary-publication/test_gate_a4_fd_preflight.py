@@ -257,3 +257,241 @@ class A4FdPreflightTests(unittest.TestCase):
     def test_fd_target_drift_without_kvm(self):
         result = preflight.collect_fd_preflight(DriftFdRoot(), FixedPrivilege([measured()]))
         self.assert_hold(result, "A4_PF_FD_DRIFT")
+
+    def test_foreign_uid_fd_denial_is_not_read_and_clean_stays_data_only(self):
+        class Counting(core.SyntheticProcRoot):
+            def __init__(self):
+                super().__init__(
+                    processes={
+                        50: core.ProcessFixture(
+                            pid=50,
+                            uid=0,
+                            starttime=1,
+                            comm="other",
+                            fd_os_error=errno.EACCES,
+                        ),
+                        100: core.ProcessFixture(
+                            pid=100,
+                            uid=UID,
+                            starttime=2,
+                            comm="worker",
+                            fd_targets=("/dev/null",),
+                        ),
+                    }
+                )
+                self.asked: list[int] = []
+
+            def list_fd_targets(self, pid: int):
+                self.asked.append(pid)
+                return super().list_fd_targets(pid)
+
+        root = Counting()
+        result = preflight.collect_fd_preflight(root, FixedPrivilege([measured()]))
+        self.assert_data_only(result, consistent=True)
+        self.assertNotIn(50, root.asked)
+        self.assertIn(100, root.asked)
+
+    def test_foreign_qemu_and_unreadable_status_hold(self):
+        qemu = core.SyntheticProcRoot(
+            processes={
+                7: core.ProcessFixture(pid=7, uid=0, starttime=3, comm="qemu-system-x86_64"),
+                100: core.ProcessFixture(pid=100, uid=UID, starttime=4, comm="worker", fd_targets=("/dev/null",)),
+            }
+        )
+        self.assert_hold(preflight.collect_fd_preflight(qemu), "A4_FD_QEMU_PROCESS_PRESENT")
+        hidden = core.SyntheticProcRoot(
+            processes={
+                8: core.ProcessFixture(pid=8, uid=0, starttime=5, comm="other", status_available=False),
+            }
+        )
+        self.assert_hold(preflight.collect_fd_preflight(hidden), "A4_FD_DENIED_STATUS")
+
+    def test_identity_drift_inside_scope_read_holds(self):
+        class StartDrift(core.SyntheticProcRoot):
+            def __init__(self):
+                super().__init__(
+                    processes={
+                        100: core.ProcessFixture(
+                            pid=100,
+                            uid=UID,
+                            starttime=4242,
+                            comm="worker",
+                            fd_targets=("/dev/null",),
+                        )
+                    }
+                )
+                self.reads = 0
+
+            def read_stat_line(self, pid: int) -> str:
+                self.reads += 1
+                line = super().read_stat_line(pid)
+                if self.reads == 2:
+                    return line.rsplit(" ", 1)[0] + " 9999"
+                return line
+
+        self.assert_hold(preflight.collect_fd_preflight(StartDrift()), "A4_PF_IDENTITY_DRIFT")
+
+    def test_permuted_pid_and_fd_order_is_not_drift_but_replacement_is(self):
+        def stat_line(pid: int) -> str:
+            tail = ["S", *("0",) * 10, "100", "0", *("0",) * 6, "4242"]
+            return f"{pid} (worker) " + " ".join(tail)
+
+        def status_text() -> str:
+            return "Name:\tworker\nUid:\t1000\t1000\t1000\t1000\n"
+
+        class OrderPort:
+            def __init__(self):
+                self.pid_flip = False
+                self.fd_flip = False
+
+            def list_numeric_pids(self):
+                self.pid_flip = not self.pid_flip
+                return [100, 200] if self.pid_flip else [200, 100]
+
+            def read_stat_line(self, pid: int) -> str:
+                return stat_line(pid)
+
+            def read_status_text(self, pid: int) -> str:
+                return status_text()
+
+            def list_fd_targets(self, pid: int):
+                self.fd_flip = not self.fd_flip
+                if pid == 100:
+                    targets = ["/dev/null", "/dev/null"]
+                else:
+                    targets = ["/dev/null", "/dev/zero"]
+                return list(reversed(targets)) if self.fd_flip else targets
+
+        self.assert_data_only(preflight.collect_fd_preflight(OrderPort()), consistent=False)
+
+        class ReplacePort:
+            def __init__(self):
+                self.seen: set[int] = set()
+
+            def list_numeric_pids(self):
+                return [100]
+
+            def read_stat_line(self, pid: int) -> str:
+                return stat_line(pid)
+
+            def read_status_text(self, pid: int) -> str:
+                return status_text()
+
+            def list_fd_targets(self, pid: int):
+                if pid in self.seen:
+                    return ["/dev/zero"]
+                self.seen.add(pid)
+                return ["/dev/null"]
+
+        self.assert_hold(preflight.collect_fd_preflight(ReplacePort()), "A4_PF_FD_DRIFT")
+
+    def test_duplicate_pid_and_throwing_probes_hold(self):
+        class Duplicate(core.SyntheticProcRoot):
+            def __init__(self):
+                super().__init__(
+                    processes={
+                        100: core.ProcessFixture(pid=100, uid=UID, starttime=1, comm="worker", fd_targets=("/dev/null",))
+                    }
+                )
+
+            def list_numeric_pids(self):
+                return [100, 100]
+
+        self.assert_hold(preflight.collect_fd_preflight(Duplicate()), "A4_PF_DUPLICATE_PID")
+
+        class BoomPort:
+            @property
+            def _proc_root(self):
+                raise RuntimeError("boom")
+
+            def list_numeric_pids(self):
+                return []
+
+            def read_stat_line(self, pid):
+                return ""
+
+            def read_status_text(self, pid):
+                return ""
+
+            def list_fd_targets(self, pid):
+                return []
+
+        class BoomPrivilege:
+            @property
+            def read_privilege(self):
+                raise RuntimeError("boom")
+
+        class Meta(type):
+            @property
+            def __name__(self):
+                raise RuntimeError("name")
+
+        class Nameless(metaclass=Meta):
+            def list_numeric_pids(self):
+                return []
+
+            def read_stat_line(self, pid):
+                return ""
+
+            def read_status_text(self, pid):
+                return ""
+
+            def list_fd_targets(self, pid):
+                return []
+
+        self.assert_hold(preflight.collect_fd_preflight(BoomPort()), "A4_PF_PORT_REFUSED")
+        self.assert_hold(
+            preflight.collect_fd_preflight(clean_root(), BoomPrivilege()),
+            "A4_PF_UNTRUSTED_ATTESTATION",
+        )
+        self.assert_hold(preflight.collect_fd_preflight(Nameless()), "A4_PF_PORT_REFUSED")
+
+    def test_cache_substitution_and_class_spoof_cannot_authorize(self):
+        name = "_ldw_a4_fd_preflight_core"
+        saved = sys.modules.get(name)
+
+        class Fake:
+            __file__ = "not-the-accepted-core.py"
+
+            def inspect_stable(self, port):
+                return {
+                    "classification": "PASS",
+                    "a4Pass": True,
+                    "runtimeAuthority": True,
+                    "privilegedChannelAuthenticated": True,
+                }
+
+        sys.modules[name] = Fake()
+        try:
+            forged = preflight.collect_fd_preflight(clean_root())
+        finally:
+            if saved is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = saved
+        self.assert_hold(forged, "A4_PF_CORE_REFUSED")
+
+        module = sys.modules[name]
+        original = module.inspect_stable
+
+        def swapped(port):
+            return {
+                "classification": "DATA_ONLY_NOT_AUTHORIZED",
+                "a4Pass": True,
+                "runtimeAuthority": True,
+                "privilegedChannelAuthenticated": True,
+            }
+
+        module.inspect_stable = swapped
+        try:
+            patched = preflight.collect_fd_preflight(clean_root())
+        finally:
+            module.inspect_stable = original
+        self.assert_hold(patched, "A4_PF_CORE_REFUSED")
+
+        class LinuxProcPort:
+            pass
+
+        self.assert_hold(preflight.collect_fd_preflight(LinuxProcPort()), "A4_PF_CALLER_SELECTED_ROOT")
+        clean = preflight.collect_fd_preflight(clean_root(), FixedPrivilege([measured(euid=0)]))
+        self.assert_data_only(clean, consistent=True)

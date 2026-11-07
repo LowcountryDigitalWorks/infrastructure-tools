@@ -13,8 +13,11 @@ attest root, namespaces, or capabilities. A clean synthetic result stays
 
 Process identity, UID quartet, start-time reuse, FD denial, QEMU, and
 ``/dev/kvm`` decisions are delegated to the accepted FD inspector core. The
-nonce set is supplied by the future launcher; this module does not store replay
-state and cannot prove that set is complete.
+fingerprint reads file descriptors only for effective UID 1000, matching that
+core, while the core still detects QEMU across every visible UID. The nonce
+set is supplied by the future launcher; this module does not store replay
+state and cannot prove that set is complete. A class rename or a substituted
+``sys.modules`` entry is not package authentication.
 """
 from __future__ import annotations
 
@@ -140,22 +143,58 @@ def _snapshot_shape(value: object) -> Optional[PrivilegeSnapshot]:
     return value
 
 
+def _type_name(value: object) -> Optional[str]:
+    try:
+        name = type(value).__name__
+    except Exception:
+        return None
+    if type(name) is not str:
+        return None
+    return name
+
+
+def _lookup(value: object, name: str) -> tuple[str, object]:
+    """Return found, missing, or error. Only a thrown property is an error."""
+    try:
+        return "found", getattr(value, name)
+    except AttributeError:
+        return "missing", None
+    except Exception:
+        return "error", None
+
+
 def _refuse_port(port: object) -> Optional[dict[str, object]]:
-    if type(port).__name__ in _REFUSED_PORT_TYPES or isinstance(port, (str, bytes, dict, list, tuple)):
+    if isinstance(port, (str, bytes, dict, list, tuple)):
         return hold("A4_PF_CALLER_SELECTED_ROOT")
-    if getattr(port, "_proc_root", None) is not None:
-        return hold("A4_PF_CALLER_SELECTED_ROOT")
-    if any(not callable(getattr(port, name, None)) for name in _PORT_METHODS):
+    name = _type_name(port)
+    if name is None:
         return hold("A4_PF_PORT_REFUSED")
+    if name in _REFUSED_PORT_TYPES:
+        return hold("A4_PF_CALLER_SELECTED_ROOT")
+    state, proc_root = _lookup(port, "_proc_root")
+    if state == "error":
+        return hold("A4_PF_PORT_REFUSED")
+    if state == "found" and proc_root is not None:
+        return hold("A4_PF_CALLER_SELECTED_ROOT")
+    for method in _PORT_METHODS:
+        state, attr = _lookup(port, method)
+        if state != "found" or not callable(attr):
+            return hold("A4_PF_PORT_REFUSED")
     return None
 
 
 def _refuse_privilege(privilege: object) -> Optional[dict[str, object]]:
     if privilege is None:
         return None
-    if isinstance(privilege, (str, bytes, dict, list, tuple, set)) or type(privilege).__name__ in _REFUSED_PORT_TYPES:
+    if isinstance(privilege, (str, bytes, dict, list, tuple, set)):
         return hold("A4_PF_UNTRUSTED_ATTESTATION")
-    if not callable(getattr(privilege, "read_privilege", None)):
+    name = _type_name(privilege)
+    if name is None or name in _REFUSED_PORT_TYPES:
+        return hold("A4_PF_UNTRUSTED_ATTESTATION")
+    state, reader = _lookup(privilege, "read_privilege")
+    if state == "error":
+        return hold("A4_PF_UNTRUSTED_ATTESTATION")
+    if state != "found" or not callable(reader):
         return hold("A4_PF_PORT_REFUSED")
     return None
 
@@ -220,10 +259,28 @@ def _snapshot_drift(before: PrivilegeSnapshot, after: PrivilegeSnapshot) -> Opti
     return None
 
 
-def _accepted_inspect_stable():
-    path = Path(__file__).resolve().with_name("dragonfly_gate_a4_fd_inspector_core.py")
+def _core_path() -> Path:
+    return Path(__file__).resolve().with_name("dragonfly_gate_a4_fd_inspector_core.py")
+
+
+def _path_matches(candidate: object, expected: Path) -> bool:
+    if type(candidate) is not str or not candidate:
+        return False
+    try:
+        return Path(candidate).resolve() == expected
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _accepted_core():
+    """Load the sibling core. A pre-seeded or swapped cache entry is refused."""
+    path = _core_path()
     name = "_ldw_a4_fd_preflight_core"
     module = sys.modules.get(name)
+    if module is not None:
+        found, module_file = _lookup(module, "__file__")
+        if found != "found" or not _path_matches(module_file, path):
+            raise _Refusal("A4_PF_CORE_REFUSED")
     if module is None:
         spec = importlib.util.spec_from_file_location(name, path)
         if spec is None or spec.loader is None:
@@ -231,37 +288,80 @@ def _accepted_inspect_stable():
         module = importlib.util.module_from_spec(spec)
         sys.modules[name] = module
         spec.loader.exec_module(module)
-    inspect = getattr(module, "inspect_stable", None)
-    if not callable(inspect):
+        found, module_file = _lookup(module, "__file__")
+        if found != "found" or not _path_matches(module_file, path):
+            raise _Refusal("A4_PF_CORE_REFUSED")
+    try:
+        inspect = vars(module).get("inspect_stable")
+        code = getattr(inspect, "__code__", None)
+        filename = getattr(code, "co_filename", None)
+    except Exception as exc:
+        raise _Refusal("A4_PF_CORE_REFUSED") from exc
+    if not callable(inspect) or not _path_matches(filename, path):
         raise _Refusal("A4_PF_CORE_REFUSED")
-    return inspect
+    return module
 
 
-def _port_error(exc: Exception) -> str:
+def _accepted_inspect_stable():
+    return _accepted_core().inspect_stable
+
+
+def _reason_from_error(exc: Exception) -> str:
     if isinstance(exc, OSError):
         return _map_os(exc, privilege=False)
-    code = getattr(exc, "code", None)
-    if isinstance(code, str) and _REASON.fullmatch(code):
+    code = exc.args[0] if exc.args and type(exc.args[0]) is str else None
+    if code is not None and _REASON.fullmatch(code):
         return code
-    return "A4_PF_FD_UNREADABLE"
+    return "A4_PF_SCOPE_AMBIGUOUS"
+
+
+def _scope_identity(port: object, pid: int, core: object) -> tuple:
+    error_type = core.FdInspectorError
+    try:
+        stat_line = port.read_stat_line(pid)
+        status_text = port.read_status_text(pid)
+    except OSError as exc:
+        raise _Refusal(_map_os(exc, privilege=False)) from exc
+    except error_type as exc:
+        raise _Refusal(_reason_from_error(exc)) from exc
+    try:
+        parsed_pid, _comm, _utime, starttime = core.parse_proc_stat(stat_line)
+        quartet = core.parse_proc_status_uids(status_text)
+    except error_type as exc:
+        raise _Refusal("A4_PF_SCOPE_AMBIGUOUS") from exc
+    if parsed_pid != pid or len(quartet) != 4:
+        raise _Refusal("A4_PF_IDENTITY_DRIFT")
+    return (parsed_pid, starttime, quartet)
 
 
 def _fingerprint(port: object) -> tuple:
+    core = _accepted_core()
     try:
         pids = port.list_numeric_pids()
-    except Exception as exc:
-        raise _Refusal(_port_error(exc)) from exc
+    except (OSError, core.FdInspectorError) as exc:
+        raise _Refusal(_reason_from_error(exc)) from exc
     if not isinstance(pids, list) or any(type(pid) is not int or pid <= 0 for pid in pids):
         raise _Refusal("A4_PF_MALFORMED_ENUMERATION")
+    if len(pids) != len(set(pids)):
+        raise _Refusal("A4_PF_DUPLICATE_PID")
     rows = []
     for pid in pids:
-        try:
-            targets = port.list_fd_targets(pid)
-        except Exception as exc:
-            raise _Refusal(_port_error(exc)) from exc
-        if not isinstance(targets, list) or any(type(item) is not str for item in targets):
-            raise _Refusal("A4_PF_MALFORMED_ENUMERATION")
-        rows.append((pid, tuple(targets)))
+        before = _scope_identity(port, pid, core)
+        effective_uid = before[2][1]
+        fd_targets: Optional[tuple[str, ...]] = None
+        if effective_uid == core.DEFAULT_UID:
+            try:
+                targets = port.list_fd_targets(pid)
+            except (OSError, core.FdInspectorError) as exc:
+                raise _Refusal(_reason_from_error(exc)) from exc
+            if not isinstance(targets, list) or any(type(item) is not str for item in targets):
+                raise _Refusal("A4_PF_MALFORMED_ENUMERATION")
+            after = _scope_identity(port, pid, core)
+            if after != before:
+                raise _Refusal("A4_PF_IDENTITY_DRIFT")
+            fd_targets = tuple(sorted(targets))
+        rows.append((pid, before, fd_targets))
+    rows.sort(key=lambda item: item[0])
     return tuple(rows)
 
 
