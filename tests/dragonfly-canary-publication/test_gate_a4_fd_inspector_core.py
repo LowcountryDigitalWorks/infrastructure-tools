@@ -82,7 +82,7 @@ class A4FdInspectorCoreTests(unittest.TestCase):
         )
         self.assert_hold(core.inspect_stable(root), "A4_FD_DENIED_FD")
 
-    def test_a4_fd_06_denied_owner_stat(self):
+    def test_a4_fd_06_denied_status(self):
         root = core.SyntheticProcRoot(
             processes={
                 202: core.ProcessFixture(
@@ -90,11 +90,29 @@ class A4FdInspectorCoreTests(unittest.TestCase):
                     uid=UID,
                     starttime=50,
                     comm="bash",
-                    owner_stat_available=False,
+                    status_available=False,
                 )
             }
         )
-        self.assert_hold(core.inspect_stable(root), "A4_FD_DENIED_OWNER_STAT")
+        self.assert_hold(core.inspect_stable(root), "A4_FD_DENIED_STATUS")
+
+    def test_a4_fd_non_dumpable_proc_dir_owner_root_effective_uid1000(self):
+        root = core.SyntheticProcRoot(
+            processes={
+                102: core.ProcessFixture(
+                    pid=102,
+                    uid=UID,
+                    starttime=500,
+                    comm="nd-worker",
+                    proc_dir_uid=0,
+                    fd_targets=("/dev/null",),
+                )
+            }
+        )
+        result = core.inspect_stable(root)
+        self.assert_data_only(result)
+        self.assertEqual(result["sameUidProcessCount"], 1)
+        self.assertEqual(result["processObservations"][0]["pid"], 102)
 
     def test_a4_fd_07_pid_reuse_starttime(self):
         root = core.SyntheticProcRoot(
@@ -255,22 +273,38 @@ class A4FdInspectorCoreTests(unittest.TestCase):
             "A4_FD_PID_MISMATCH",
         )
 
-    def test_a4_fd_process_uid_from_owner_not_stat(self):
-        line = core.SyntheticProcRoot(
+    def test_a4_fd_effective_uid_from_status_not_proc_dir_owner(self):
+        root = core.SyntheticProcRoot(
             processes={
                 212: core.ProcessFixture(
-                    pid=212, uid=UID, starttime=55, utime=9999, comm="bash"
+                    pid=212,
+                    uid=UID,
+                    starttime=55,
+                    utime=9999,
+                    comm="bash",
+                    proc_dir_uid=0,
                 )
             }
-        ).read_stat_line(212)
+        )
+        line = root.read_stat_line(212)
         pid, comm, utime, start = core.parse_proc_stat(line)
         self.assertEqual((pid, comm, utime, start), (212, "bash", 9999, 55))
-        self.assertEqual(
-            core.SyntheticProcRoot(
-                processes={212: core.ProcessFixture(pid=212, uid=UID, starttime=55, comm="bash")}
-            ).read_process_uid(212),
-            UID,
+        uids = core.parse_proc_status_uids(root.read_status_text(212))
+        self.assertEqual(uids, (UID, UID, UID, UID))
+
+    def test_a4_fd_status_effective_uid_drift(self):
+        root = core.SyntheticProcRoot(
+            processes={
+                213: core.ProcessFixture(
+                    pid=213,
+                    uid=UID,
+                    effective_uid_after_first=1001,
+                    starttime=60,
+                    comm="bash",
+                )
+            }
         )
+        self.assert_hold(core.inspect_stable(root), "A4_FD_INCOMPLETE_ENUMERATION")
 
     def test_a4_fd_comm_parsing_with_spaces(self):
         pid, comm, utime, start = core.parse_proc_stat(
@@ -310,7 +344,7 @@ class A4FdInspectorCoreTests(unittest.TestCase):
             def read_stat_line(self, pid: int) -> str:
                 raise NotImplementedError
 
-            def read_process_uid(self, pid: int) -> int:
+            def read_status_text(self, pid: int) -> str:
                 raise NotImplementedError
 
             def list_fd_targets(self, pid: int) -> list[str]:

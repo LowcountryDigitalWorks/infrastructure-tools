@@ -5,9 +5,11 @@ sockets, write disk state, or establish runtime A4 PASS. Continuous Linux /proc
 churn can cause conservative HOLD between paired snapshots; future pidfd anchoring
 may be required for stronger stability guarantees on live hosts.
 
-UID is taken from the owning /proc/<pid> directory (st_uid), never from /proc/stat.
-Accepted pinned A0 QEMU enumeration across all visible PIDs remains mandatory for
-runtime A4; this core performs a fail-closed synthetic all-PID QEMU probe only.
+Effective UID is taken from /proc/<pid>/status (Uid: R/E/S/FS), never from
+/proc/stat or from /proc/<pid> directory ownership (which may be root:root for
+non-dumpable targets). Accepted pinned A0 QEMU enumeration across all visible PIDs
+remains mandatory for runtime A4; this core performs a fail-closed synthetic
+all-PID QEMU probe only.
 """
 from __future__ import annotations
 
@@ -26,10 +28,26 @@ class FdInspectorError(Exception):
     """Synthetic inspection failure surfaced as HOLD."""
 
 
+def parse_proc_status_uids(status_text: str) -> tuple[int, int, int, int]:
+    """Parse /proc/<pid>/status Uid line: real, effective, saved, fs."""
+    for raw in status_text.splitlines():
+        line = raw.strip()
+        if not line.startswith("Uid:"):
+            continue
+        parts = line.split()
+        if len(parts) != 5:
+            raise FdInspectorError("A4_FD_MALFORMED_STATUS")
+        try:
+            return tuple(int(parts[i]) for i in range(1, 5))  # type: ignore[return-value]
+        except ValueError as exc:
+            raise FdInspectorError("A4_FD_MALFORMED_STATUS") from exc
+    raise FdInspectorError("A4_FD_MALFORMED_STATUS")
+
+
 def parse_proc_stat(stat_line: str) -> tuple[int, str, int, int]:
     """Parse /proc/<pid>/stat: pid, comm, utime (field 14), starttime (field 22).
 
-    /proc/stat does not expose UID; callers must use process directory ownership.
+    /proc/stat does not expose UID; callers must use /proc/status Uid fields.
     """
     stat_line = stat_line.strip()
     match = re.match(r"^(\d+) \((.*)\) (\S.*)$", stat_line)
@@ -65,7 +83,7 @@ def process_is_qemu_like(comm: str, exec_tokens: tuple[str, ...]) -> bool:
 class ProcPort(Protocol):
     def list_numeric_pids(self) -> list[int]: ...
     def read_stat_line(self, pid: int) -> str: ...
-    def read_process_uid(self, pid: int) -> int: ...
+    def read_status_text(self, pid: int) -> str: ...
     def list_fd_targets(self, pid: int) -> list[str]: ...
 
 
@@ -88,16 +106,21 @@ class ProcessFixture:
     starttime: int
     comm: str
     utime: int = 100
+    uid_real: Optional[int] = None
+    uid_saved: Optional[int] = None
+    uid_fs: Optional[int] = None
+    proc_dir_uid: int = -1
     exec_tokens: tuple[str, ...] = ()
     fd_targets: tuple[str, ...] = ()
     stat_available: bool = True
-    owner_stat_available: bool = True
+    status_available: bool = True
     fd_available: bool = True
     ambiguous_symlink: bool = False
     vanish_after_first: bool = False
     starttime_after_first: Optional[int] = None
     utime_after_first: Optional[int] = None
     fd_os_error: Optional[int] = None
+    effective_uid_after_first: Optional[int] = None
 
 
 @dataclass
@@ -121,11 +144,27 @@ class SyntheticProcRoot:
             raise ProcAccessDenied("A4_FD_PROCESS_VANISHED")
         return proc
 
-    def read_process_uid(self, pid: int) -> int:
+    def _status_uids(self, proc: ProcessFixture) -> tuple[int, int, int, int]:
+        effective = proc.uid
+        if proc.effective_uid_after_first is not None and getattr(self, "_first_pass_done", False):
+            effective = proc.effective_uid_after_first
+        real = proc.uid_real if proc.uid_real is not None else effective
+        saved = proc.uid_saved if proc.uid_saved is not None else effective
+        fs = proc.uid_fs if proc.uid_fs is not None else effective
+        return real, effective, saved, fs
+
+    def read_status_text(self, pid: int) -> str:
         proc = self._fixture(pid)
-        if not proc.owner_stat_available:
-            raise ProcAccessDenied("A4_FD_DENIED_OWNER_STAT")
-        return proc.uid
+        if not proc.status_available:
+            raise ProcAccessDenied("A4_FD_DENIED_STATUS")
+        real, effective, saved, fs = self._status_uids(proc)
+        dir_uid = proc.proc_dir_uid if proc.proc_dir_uid >= 0 else effective
+        return (
+            f"Name:\t{proc.comm}\n"
+            f"Pid:\t{proc.pid}\n"
+            f"Uid:\t{real}\t{effective}\t{saved}\t{fs}\n"
+            f"ProcDirUidHint:\t{dir_uid}\n"
+        )
 
     def read_stat_line(self, pid: int) -> str:
         proc = self._fixture(pid)
@@ -161,6 +200,9 @@ class ProcessIdentity:
     utime: int
     starttime: int
     uid: int
+    uid_real: int
+    uid_saved: int
+    uid_fs: int
 
 
 @dataclass(frozen=True)
@@ -200,18 +242,31 @@ def _read_identity(port: ProcPort, pid: int) -> ProcessIdentity:
     if parsed_pid != pid:
         raise FdInspectorError("A4_FD_PID_MISMATCH")
     try:
-        uid = port.read_process_uid(pid)
+        status_text = port.read_status_text(pid)
     except ProcAccessDenied as exc:
         raise FdInspectorError(exc.code) from exc
     except OSError as exc:
         raise _map_os_error(exc) from exc
-    return ProcessIdentity(pid=parsed_pid, comm=comm, utime=utime, starttime=starttime, uid=uid)
+    uid_real, uid_effective, uid_saved, uid_fs = parse_proc_status_uids(status_text)
+    return ProcessIdentity(
+        pid=parsed_pid,
+        comm=comm,
+        utime=utime,
+        starttime=starttime,
+        uid=uid_effective,
+        uid_real=uid_real,
+        uid_saved=uid_saved,
+        uid_fs=uid_fs,
+    )
 
 
 def _identity_stable(before: ProcessIdentity, after: ProcessIdentity) -> bool:
     return (
         before.pid == after.pid
         and before.uid == after.uid
+        and before.uid_real == after.uid_real
+        and before.uid_saved == after.uid_saved
+        and before.uid_fs == after.uid_fs
         and before.starttime == after.starttime
     )
 
@@ -285,7 +340,7 @@ def inspect_once(port: ProcPort, *, expected_uid: int = DEFAULT_UID) -> Snapshot
         required = {
             p.pid
             for p in port.processes.values()
-            if p.uid == expected_uid and p.stat_available and p.owner_stat_available
+            if p.uid == expected_uid and p.stat_available and p.status_available
         }
         if seen_uid_pids != required:
             raise FdInspectorError("A4_FD_INCOMPLETE_ENUMERATION")
