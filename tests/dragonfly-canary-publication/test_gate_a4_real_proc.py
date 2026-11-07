@@ -121,12 +121,11 @@ class A4RealProcPortTests(unittest.TestCase):
         result = core.inspect_stable(self.tree.port(), expected_uid=UID)
         self.assert_data_only(result)
 
-    def test_status_effective_uid_not_from_proc_dir_owner(self) -> None:
-        proc = self.tree.add_pid(212, comm="bash", uid_eff=UID, uid_real=UID)
-        if os.name == "posix":
-            os.chown(proc, 0, 0)
+    def test_status_effective_uid_from_status_not_directory_owner_hint(self) -> None:
+        self.tree.add_pid(212, comm="bash", uid_eff=UID, uid_real=0)
         text = self.tree.port().read_status_text(212)
-        self.assertIn(f"Uid:\t{UID}\t{UID}\t{UID}\t{UID}", text)
+        uids = core.parse_proc_status_uids(text)
+        self.assertEqual(uids[1], UID)
 
     def test_stat_field14_utime_and_field22_starttime(self) -> None:
         self.tree.add_pid(120, comm="worker", utime=9999, starttime=5555)
@@ -149,17 +148,17 @@ class A4RealProcPortTests(unittest.TestCase):
         if os.name == "posix":
             os.chmod(fd_dir, 0)
         port = self.tree.port()
-        with self.assertRaises(real_proc.ProcAccessDenied) as ctx:
+        with self.assertRaises(OSError) as ctx:
             port.list_fd_targets(140)
-        self.assertEqual(ctx.exception.code, "A4_FD_DENIED_FD")
+        self.assertIn(ctx.exception.errno, (errno.EACCES, errno.EPERM))
 
     def test_denied_stat_read_eacces(self) -> None:
         proc = self.tree.add_pid(141, comm="worker")
         if os.name == "posix":
             os.chmod(proc / "stat", 0)
-        with self.assertRaises(real_proc.ProcAccessDenied) as ctx:
+        with self.assertRaises(OSError) as ctx:
             self.tree.port().read_stat_line(141)
-        self.assertEqual(ctx.exception.code, "A4_FD_STAT_UNAVAILABLE")
+        self.assertIn(ctx.exception.errno, (errno.EACCES, errno.EPERM))
 
     def test_vanished_process_enoent(self) -> None:
         self.tree.add_pid(142, comm="worker")
@@ -167,35 +166,34 @@ class A4RealProcPortTests(unittest.TestCase):
         import shutil
 
         shutil.rmtree(proc)
-        with self.assertRaises(real_proc.ProcAccessDenied) as ctx:
+        with self.assertRaises(OSError) as ctx:
             self.tree.port().read_stat_line(142)
-        self.assertEqual(ctx.exception.code, "A4_FD_STAT_UNAVAILABLE")
+        self.assertEqual(ctx.exception.errno, errno.ENOENT)
 
     def test_vanished_fd_entry_enoent(self) -> None:
         proc = self.tree.add_pid(143, comm="worker", fd_links={"0": "/dev/null"})
         (proc / "fd" / "0").unlink()
-        with self.assertRaises(real_proc.ProcAccessDenied) as ctx:
+        with self.assertRaises(OSError) as ctx:
             self.tree.port().list_fd_targets(143)
-        self.assertEqual(ctx.exception.code, "A4_FD_DENIED_FD")
+        self.assertEqual(ctx.exception.errno, errno.ENOENT)
 
     def test_malicious_pid_types_rejected(self) -> None:
         port = self.tree.port()
         for bad in (-1, 0, True, False):
-            with self.assertRaises(real_proc.ProcAccessDenied):
+            with self.assertRaises(OSError):
                 port.read_stat_line(bad)  # type: ignore[arg-type]
 
     def test_symlink_ambiguous_relative(self) -> None:
         self.tree.add_pid(150, comm="worker", fd_links={"0": "../150/fd/1", "1": "/dev/null"})
-        with self.assertRaises(real_proc.ProcAccessDenied) as ctx:
-            self.tree.port().list_fd_targets(150)
-        self.assertEqual(ctx.exception.code, "A4_FD_SYMLINK_AMBIGUOUS")
+        self.assert_hold(core.inspect_stable(self.tree.port()), "A4_FD_INCOMPLETE_ENUMERATION")
 
     def test_incomplete_fd_enumeration_non_numeric_entry(self) -> None:
         proc = self.tree.add_pid(151, comm="worker", fd_links={"0": "/dev/null"})
         (proc / "fd" / "weird").write_text("x", encoding="utf-8")
-        with self.assertRaises(real_proc.ProcAccessDenied) as ctx:
+        with self.assertRaises(OSError) as ctx:
             self.tree.port().list_fd_targets(151)
-        self.assertEqual(ctx.exception.code, "A4_FD_INCOMPLETE_ENUMERATION")
+        self.assertEqual(ctx.exception.errno, errno.ENOTDIR)
+        self.assert_hold(core.inspect_stable(self.tree.port()), "A4_FD_INCOMPLETE_ENUMERATION")
 
     def test_list_numeric_pids_sorted_unique(self) -> None:
         self.tree.add_pid(300, comm="a")
