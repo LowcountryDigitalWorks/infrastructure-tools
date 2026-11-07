@@ -26,11 +26,13 @@ class ModelOutputBoundaryTests(unittest.TestCase):
         self.assertNotIn(base64.b64encode(SECRET.encode()).decode(), text)
         self.assertNotIn(SECRET.encode().hex(), text)
 
-    def test_exact_canary_names_are_the_only_positive_results(self):
+    def test_reserved_canary_strings_are_blocked(self):
+        class StatusName(str):
+            pass
+
         for name in ("SYNTHETIC_CANARY_NOT_STARTED", "SYNTHETIC_CANARY_FINISHED"):
-            result = project_model_output(name)
-            self.assertEqual(result, {"status": name})
-            self.assertEqual(set(result), {"status"})
+            self.assert_blocked(name)
+            self.assert_blocked(StatusName(name))
 
     def test_plain_encoded_chunked_and_nested_secrets_are_blocked(self):
         encoded = base64.b64encode(SECRET.encode()).decode()
