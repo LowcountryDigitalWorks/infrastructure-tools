@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -41,7 +42,6 @@ class ProcTree:
 
     def __init__(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="a4-proc-fixture-"))
-        self._extra_numeric_dirs: list[int] = []
 
     def close(self) -> None:
         import shutil
@@ -126,6 +126,7 @@ class A4RealProcPortTests(unittest.TestCase):
         text = self.tree.port().read_status_text(212)
         uids = core.parse_proc_status_uids(text)
         self.assertEqual(uids[1], UID)
+        self.assertNotEqual(uids[0], uids[1])
 
     def test_stat_field14_utime_and_field22_starttime(self) -> None:
         self.tree.add_pid(120, comm="worker", utime=9999, starttime=5555)
@@ -142,23 +143,31 @@ class A4RealProcPortTests(unittest.TestCase):
         self.tree.add_pid(100, comm="worker")
         self.assert_hold(core.inspect_stable(self.tree.port()), "A4_FD_QEMU_PROCESS_PRESENT")
 
-    def test_denied_fd_dir_eacces(self) -> None:
-        proc = self.tree.add_pid(140, comm="worker", fd_links={})
-        fd_dir = proc / "fd"
-        if os.name == "posix":
-            os.chmod(fd_dir, 0)
+    def test_denied_fd_dir_eacces_without_privilege(self) -> None:
+        self.tree.add_pid(140, comm="worker", fd_links={"0": "/dev/null"})
         port = self.tree.port()
-        with self.assertRaises(OSError) as ctx:
-            port.list_fd_targets(140)
-        self.assertIn(ctx.exception.errno, (errno.EACCES, errno.EPERM))
+        real_listdir = os.listdir
 
-    def test_denied_stat_read_eacces(self) -> None:
-        proc = self.tree.add_pid(141, comm="worker")
-        if os.name == "posix":
-            os.chmod(proc / "stat", 0)
-        with self.assertRaises(OSError) as ctx:
-            self.tree.port().read_stat_line(141)
-        self.assertIn(ctx.exception.errno, (errno.EACCES, errno.EPERM))
+        def deny_fd_listdir(path: str | os.PathLike[str]) -> list[str]:
+            text = os.fspath(path)
+            if text.endswith(f"{os.sep}fd") or text.endswith("/fd"):
+                raise PermissionError(errno.EACCES, "synthetic fd dir denied")
+            return real_listdir(path)
+
+        with mock.patch("os.listdir", side_effect=deny_fd_listdir):
+            with self.assertRaises(OSError) as ctx:
+                port.list_fd_targets(140)
+            self.assertIn(ctx.exception.errno, (errno.EACCES, errno.EPERM))
+        with mock.patch("os.listdir", side_effect=deny_fd_listdir):
+            self.assert_hold(core.inspect_stable(port), "A4_FD_DENIED_FD")
+
+    def test_denied_stat_read_eacces_without_privilege(self) -> None:
+        self.tree.add_pid(141, comm="worker")
+        port = self.tree.port()
+        with mock.patch.object(Path, "read_text", side_effect=PermissionError(errno.EACCES, "denied")):
+            with self.assertRaises(OSError) as ctx:
+                port.read_stat_line(141)
+            self.assertIn(ctx.exception.errno, (errno.EACCES, errno.EPERM))
 
     def test_vanished_process_enoent(self) -> None:
         self.tree.add_pid(142, comm="worker")
@@ -170,20 +179,28 @@ class A4RealProcPortTests(unittest.TestCase):
             self.tree.port().read_stat_line(142)
         self.assertEqual(ctx.exception.errno, errno.ENOENT)
 
-    def test_vanished_fd_directory_enoent(self) -> None:
-        proc = self.tree.add_pid(143, comm="worker", fd_links={"0": "/dev/null"})
-        import shutil
+    def test_vanished_fd_entry_enoent_after_enumeration(self) -> None:
+        self.tree.add_pid(143, comm="worker", fd_links={"0": "/dev/null"})
+        port = self.tree.port()
+        real_readlink = os.readlink
 
-        shutil.rmtree(proc / "fd")
-        with self.assertRaises(OSError) as ctx:
-            self.tree.port().list_fd_targets(143)
-        self.assertEqual(ctx.exception.errno, errno.ENOENT)
-        result = core.inspect_stable(self.tree.port())
-        self.assertEqual(result["classification"], "HOLD")
-        self.assertIn(
-            result["reasonCode"],
-            ("A4_FD_DENIED_FD", "A4_FD_INCOMPLETE_ENUMERATION", "A4_FD_PROCESS_VANISHED"),
-        )
+        def vanish_readlink(path: str | os.PathLike[str]) -> str:
+            text = str(path)
+            if text.endswith("/fd/0") or text.endswith("\\fd\\0"):
+                raise FileNotFoundError(errno.ENOENT, "fd vanished between list and readlink")
+            return real_readlink(path)
+
+        with mock.patch("os.readlink", side_effect=vanish_readlink):
+            with self.assertRaises(OSError) as ctx:
+                port.list_fd_targets(143)
+            self.assertEqual(ctx.exception.errno, errno.ENOENT)
+        with mock.patch("os.readlink", side_effect=vanish_readlink):
+            self.assert_hold(core.inspect_stable(port), "A4_FD_DENIED_FD")
+
+    def test_empty_fd_dir_is_not_vanished_race(self) -> None:
+        self.tree.add_pid(144, comm="worker", fd_links={})
+        targets = self.tree.port().list_fd_targets(144)
+        self.assertEqual(targets, [])
 
     def test_malicious_pid_types_rejected(self) -> None:
         port = self.tree.port()
@@ -203,16 +220,27 @@ class A4RealProcPortTests(unittest.TestCase):
         self.assertEqual(ctx.exception.errno, errno.ENOTDIR)
         self.assert_hold(core.inspect_stable(self.tree.port()), "A4_FD_INCOMPLETE_ENUMERATION")
 
+    def test_mixed_numeric_and_invalid_fd_entry_fail_closed(self) -> None:
+        proc = self.tree.add_pid(152, comm="worker", fd_links={"0": "/dev/null", "1": "pipe:[1]"})
+        (proc / "fd" / "cache").write_text("x", encoding="utf-8")
+        port = self.tree.port()
+        with self.assertRaises(OSError) as ctx:
+            port.list_fd_targets(152)
+        self.assertEqual(ctx.exception.errno, errno.ENOTDIR)
+        self.assert_hold(core.inspect_stable(port), "A4_FD_INCOMPLETE_ENUMERATION")
+
     def test_list_numeric_pids_sorted_unique(self) -> None:
         self.tree.add_pid(300, comm="a")
         self.tree.add_pid(100, comm="b")
         self.assertEqual(self.tree.port().list_numeric_pids(), [100, 300])
 
-    def test_denied_fd_becomes_hold_in_core(self) -> None:
-        proc = self.tree.add_pid(160, comm="worker", fd_links={"0": "/dev/null"})
-        if os.name == "posix":
-            os.chmod(proc / "fd", 0)
-        self.assert_hold(core.inspect_stable(self.tree.port()), "A4_FD_DENIED_FD")
+    def test_malformed_status_utf8_fail_closed(self) -> None:
+        proc = self.tree.add_pid(153, comm="worker")
+        (proc / "status").write_bytes(b"Name:\tbad\nPid:\t153\n\xff\xff\n")
+        with self.assertRaises(OSError) as ctx:
+            self.tree.port().read_status_text(153)
+        self.assertEqual(ctx.exception.errno, errno.EINVAL)
+        self.assert_hold(core.inspect_stable(self.tree.port()), "A4_FD_STAT_UNAVAILABLE")
 
     def test_open_linux_proc_port_rejects_non_linux(self) -> None:
         if os.name == "posix" and sys.platform.startswith("linux"):

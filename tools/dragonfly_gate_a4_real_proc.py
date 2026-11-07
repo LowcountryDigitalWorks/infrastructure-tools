@@ -29,23 +29,39 @@ def _validate_pid(pid: int) -> int:
     return pid
 
 
+def _resolved_under(root: Path, path: Path) -> Path:
+    try:
+        resolved_root = root.resolve(strict=False)
+        resolved_path = path.resolve(strict=False)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise OSError(errno.ELOOP, "proc path resolution failed") from exc
+    try:
+        resolved_path.relative_to(resolved_root)
+    except ValueError as exc:
+        raise OSError(errno.EINVAL, "proc path escapes root") from exc
+    return path
+
+
 def _proc_path(proc_root: Path, pid: int, *parts: str) -> Path:
     _validate_pid(pid)
     base = proc_root / str(pid)
     if base.name != str(pid):
         raise OSError(errno.EINVAL, "invalid pid path")
-    resolved = base.resolve(strict=False)
-    try:
-        resolved.relative_to(proc_root.resolve(strict=False))
-    except ValueError as exc:
-        raise OSError(errno.EINVAL, "proc path escapes root") from exc
+    _resolved_under(proc_root, base)
     path = base.joinpath(*parts)
-    path_resolved = path.resolve(strict=False)
-    try:
-        path_resolved.relative_to(proc_root.resolve(strict=False))
-    except ValueError as exc:
-        raise OSError(errno.EINVAL, "proc path escapes root") from exc
+    if any(part in {".", ".."} for part in path.parts):
+        raise OSError(errno.EINVAL, "invalid proc path segment")
+    _resolved_under(proc_root, path)
     return path
+
+
+def _read_text_strict(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise OSError(errno.EINVAL, "malformed proc text") from exc
+    except OSError:
+        raise
 
 
 class LinuxProcPort:
@@ -76,10 +92,7 @@ class LinuxProcPort:
 
     def read_stat_line(self, pid: int) -> str:
         path = _proc_path(self._proc_root, pid, "stat")
-        try:
-            data = path.read_text(encoding="utf-8", errors="strict")
-        except OSError:
-            raise
+        data = _read_text_strict(path)
         line = data.splitlines()[0] if data else ""
         if not line.strip():
             raise OSError(errno.EINVAL, "empty proc stat")
@@ -87,10 +100,7 @@ class LinuxProcPort:
 
     def read_status_text(self, pid: int) -> str:
         path = _proc_path(self._proc_root, pid, "status")
-        try:
-            return path.read_text(encoding="utf-8", errors="strict")
-        except OSError:
-            raise
+        return _read_text_strict(path)
 
     def list_fd_targets(self, pid: int) -> list[str]:
         fd_dir = _proc_path(self._proc_root, pid, "fd")
@@ -99,13 +109,11 @@ class LinuxProcPort:
         except OSError:
             raise
         targets: list[str] = []
-        saw_numeric = False
         for name in entries:
             if name in {".", ".."}:
                 continue
             if not _NUMERIC_FD.fullmatch(name):
                 raise OSError(errno.ENOTDIR, "non-numeric fd entry")
-            saw_numeric = True
             link_path = fd_dir / name
             try:
                 target = os.readlink(link_path)
@@ -116,8 +124,6 @@ class LinuxProcPort:
             if "/fd/" in target and str(pid) in target:
                 raise OSError(errno.ELOOP, "ambiguous fd symlink")
             targets.append(target)
-        if entries and not saw_numeric:
-            raise OSError(errno.ENOTDIR, "fd dir without numeric entries")
         targets.sort(key=lambda item: (len(item), item))
         return targets
 
@@ -134,8 +140,11 @@ def open_linux_proc_port() -> LinuxProcPort:
 
 def proc_port_for_tests(proc_root: Union[str, os.PathLike[str]]) -> LinuxProcPort:
     """TEST ONLY — not runtime authority. Never targets live ``/proc``."""
-    root = Path(proc_root).resolve()
-    if root == _LIVE_PROC_ROOT.resolve():
+    try:
+        root = Path(proc_root).resolve(strict=False)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError("invalid test proc root") from exc
+    if root == _LIVE_PROC_ROOT.resolve(strict=False):
         raise ValueError("test proc root must not be live /proc")
     if not root.is_dir():
         raise ValueError("test proc root must be an existing directory")
