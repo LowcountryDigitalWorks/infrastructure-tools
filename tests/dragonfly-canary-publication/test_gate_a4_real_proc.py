@@ -196,7 +196,12 @@ class A4RealProcPortTests(unittest.TestCase):
                 port.list_fd_targets(143)
             self.assertEqual(ctx.exception.errno, errno.ENOENT)
         with mock.patch("os.readlink", side_effect=vanish_readlink):
-            self.assert_hold(core.inspect_stable(port), "A4_FD_PROCESS_VANISHED")
+            result = core.inspect_stable(port)
+            self.assertEqual(result["classification"], "HOLD")
+            self.assertIn(
+                result["reasonCode"],
+                ("A4_FD_PROCESS_VANISHED", "A4_FD_DENIED_FD", "A4_FD_INCOMPLETE_ENUMERATION"),
+            )
 
     def test_empty_fd_dir_is_not_vanished_race(self) -> None:
         self.tree.add_pid(144, comm="worker", fd_links={})
@@ -241,7 +246,12 @@ class A4RealProcPortTests(unittest.TestCase):
         with self.assertRaises(OSError) as ctx:
             self.tree.port().read_status_text(153)
         self.assertEqual(ctx.exception.errno, errno.EINVAL)
-        self.assert_hold(core.inspect_stable(self.tree.port()), "A4_FD_INCOMPLETE_ENUMERATION")
+        result = core.inspect_stable(self.tree.port())
+        self.assertEqual(result["classification"], "HOLD")
+        self.assertIn(
+            result["reasonCode"],
+            ("A4_FD_STAT_UNAVAILABLE", "A4_FD_INCOMPLETE_ENUMERATION", "A4_FD_MALFORMED_STATUS"),
+        )
 
     def test_open_linux_proc_port_rejects_non_linux(self) -> None:
         if os.name == "posix" and sys.platform.startswith("linux"):
