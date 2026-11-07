@@ -3,6 +3,10 @@
 DATA-ONLY: no sudo, sockets, listeners, filesystem writes, subprocesses, or runtime
 A4 PASS. Caller-supplied JSON is untrusted data; this module never mints authentication
 evidence and never sets privilegedChannelAuthenticated true.
+
+Replay, TTL, freshness binding, and nonce uniqueness are **not** proven by this stateless
+parser. Matching oracle nonce/correlation only means the envelope shape fits; a protected
+producer must authenticate observations and refuse reuse in a future accepted channel.
 """
 from __future__ import annotations
 
@@ -94,11 +98,18 @@ def _data_only() -> dict[str, object]:
     }
 
 
-def _decode_text(data: bytes) -> str:
-    if len(data) > MAX_INPUT_BYTES:
+def _ensure_bytes(data: Any) -> bytes:
+    if isinstance(data, (bytes, bytearray)):
+        return bytes(data)
+    raise ChannelContractError("A4_CH_INVALID_INPUT_TYPE")
+
+
+def _decode_text(data: Any) -> str:
+    payload = _ensure_bytes(data)
+    if len(payload) > MAX_INPUT_BYTES:
         raise ChannelContractError("A4_CH_INPUT_TOO_LARGE")
     try:
-        return data.decode("utf-8")
+        return payload.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ChannelContractError("A4_CH_MALFORMED_UTF8") from exc
 
@@ -130,7 +141,7 @@ def _depth(value: Any, limit: int = MAX_JSON_DEPTH) -> int:
     return 1
 
 
-def _parse_json_bytes(data: bytes) -> dict[str, Any]:
+def _parse_json_bytes(data: Any) -> dict[str, Any]:
     text = _decode_text(data)
     try:
         decoded = json.loads(text, object_pairs_hook=_object_pairs_hook)
@@ -159,6 +170,10 @@ def _require_text(name: str, value: Any, *, max_len: int = MAX_CORRELATION_LEN) 
         raise ChannelContractError("A4_CH_TYPE_MISMATCH")
     if not value or len(value) > max_len:
         raise ChannelContractError("A4_CH_BOUND_VIOLATION")
+    if any(0xD800 <= ord(ch) <= 0xDFFF for ch in value):
+        raise ChannelContractError("A4_CH_MALFORMED_TEXT")
+    if not value.isprintable():
+        raise ChannelContractError("A4_CH_MALFORMED_TEXT")
     if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
         raise ChannelContractError("A4_CH_MALFORMED_TEXT")
     if _SENSITIVE_SUBSTR.search(value):
@@ -266,8 +281,8 @@ def _validate_closed_response(
 
 
 def evaluate_privileged_channel_exchange(
-    request_bytes: bytes,
-    response_bytes: bytes,
+    request_bytes: Any,
+    response_bytes: Any,
     *,
     expected_nonce: str,
     expected_correlation: str,
@@ -280,6 +295,8 @@ def evaluate_privileged_channel_exchange(
     except ChannelContractError as exc:
         return hold(exc.reason_code)
     try:
+        _ensure_bytes(request_bytes)
+        _ensure_bytes(response_bytes)
         request = _parse_json_bytes(request_bytes)
         response = _parse_json_bytes(response_bytes)
         _reject_floats(request)

@@ -207,6 +207,86 @@ class A4ChannelContractTests(unittest.TestCase):
     def test_build_closed_request_helper(self) -> None:
         self.assertEqual(contract.build_closed_request_json(), closed_request())
 
+    def test_nonbytes_input_types_hold_without_traceback(self) -> None:
+        response = closed_response()
+        for bad in (None, "not-bytes", 42, []):
+            with self.subTest(bad=type(bad).__name__):
+                result = contract.evaluate_privileged_channel_exchange(
+                    bad,
+                    response,
+                    expected_nonce=NONCE,
+                    expected_correlation=CORR,
+                )
+                self.assert_hold(result, "A4_CH_INVALID_INPUT_TYPE")
+                result = contract.evaluate_privileged_channel_exchange(
+                    closed_request(),
+                    bad,
+                    expected_nonce=NONCE,
+                    expected_correlation=CORR,
+                )
+                self.assert_hold(result, "A4_CH_INVALID_INPUT_TYPE")
+
+    def test_surrogate_correlation_rejected_even_when_expected_matches(self) -> None:
+        surrogate = "syn\ud800thetic"
+        raw = (
+            b'{"schemaVersion":1,"operation":"' + OP.encode()
+            + b'","correlation":"syn\\ud800thetic","nonce":"' + NONCE.encode()
+            + b'","uidPolicy":1000,"snapshots":[{"sequence":1,"observedAtMonotonicMs":1,'
+            b'"processCount":0,"qemuProcessCount":0,"kvmFdProcessCount":0},'
+            b'{"sequence":2,"observedAtMonotonicMs":2,"processCount":0,"qemuProcessCount":0,"kvmFdProcessCount":0}]}'
+        )
+        self.assert_hold(evaluate(response=raw), "A4_CH_MALFORMED_TEXT")
+        self.assert_hold(
+            evaluate(expected_correlation=surrogate),
+            "A4_CH_MALFORMED_TEXT",
+        )
+
+    def test_identical_response_replay_still_data_only_not_authenticated(self) -> None:
+        """Stateless parser does not prove freshness; both evaluations stay data-only."""
+        req = closed_request()
+        resp = closed_response()
+        first = contract.evaluate_privileged_channel_exchange(
+            req, resp, expected_nonce=NONCE, expected_correlation=CORR
+        )
+        second = contract.evaluate_privileged_channel_exchange(
+            req, resp, expected_nonce=NONCE, expected_correlation=CORR
+        )
+        self.assert_data_only(first)
+        self.assert_data_only(second)
+        self.assert_never_pass(first)
+        self.assert_never_pass(second)
+
+    def test_nested_duplicate_json_key_hold(self) -> None:
+        raw = (
+            b'{"schemaVersion":1,"operation":"' + OP.encode()
+            + b'","correlation":"' + CORR.encode()
+            + b'","nonce":"' + NONCE.encode()
+            + b'","uidPolicy":1000,"snapshots":[{"sequence":1,"sequence":2,'
+            b'"observedAtMonotonicMs":1,"processCount":0,"qemuProcessCount":0,"kvmFdProcessCount":0},'
+            b'{"sequence":2,"observedAtMonotonicMs":2,"processCount":0,"qemuProcessCount":0,"kvmFdProcessCount":0}]}'
+        )
+        self.assert_hold(evaluate(response=raw), "A4_CH_DUPLICATE_KEY")
+
+    def test_non_finite_json_literals_and_float_values_hold(self) -> None:
+        nan_request = (
+            b'{"schemaVersion":1,"operation":"' + OP.encode() + b'","arguments":[],"x":NaN}'
+        )
+        self.assert_hold(evaluate(nan_request), "A4_CH_NON_FINITE_NUMBER")
+        inf_literal = (
+            b'{"schemaVersion":1,"operation":"' + OP.encode()
+            + b'","correlation":"' + CORR.encode()
+            + b'","nonce":"' + NONCE.encode()
+            + b'","uidPolicy":1000,"snapshots":[{"sequence":1,"observedAtMonotonicMs":Infinity,'
+            b'"processCount":0,"qemuProcessCount":0,"kvmFdProcessCount":0},'
+            b'{"sequence":2,"observedAtMonotonicMs":2,"processCount":0,"qemuProcessCount":0,"kvmFdProcessCount":0}]}'
+        )
+        result = evaluate(response=inf_literal)
+        self.assertEqual(result["classification"], "HOLD")
+        self.assertIn(result["reasonCode"], ("A4_CH_MALFORMED_JSON", "A4_CH_NON_FINITE_NUMBER"))
+        payload = json.loads(closed_response())
+        payload["uidPolicy"] = 1000.0
+        self.assert_hold(evaluate(response=json.dumps(payload).encode()), "A4_CH_TYPE_MISMATCH")
+
 
 if __name__ == "__main__":
     unittest.main()
