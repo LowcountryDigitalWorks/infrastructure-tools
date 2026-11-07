@@ -4,8 +4,9 @@ DATA-ONLY / NON-AUTHORIZING: no CLI, subprocess, sudo, network, shell, or filesy
 Does not establish runtime A4 PASS, trusted privileged producer identity, or full kernel
 atomic coverage. Production binding uses the fixed host path ``/proc`` only.
 
-Raises ``OSError`` with normalized errno values so the accepted inspector core can map
-failures without cross-module exception identity issues.
+Raises only ``OSError`` with normalized errno values. This module does **not** import or
+execute ``dragonfly_gate_a4_fd_inspector_core``; the accepted core maps errno via
+``_map_os_error`` to fail-closed HOLD.
 """
 from __future__ import annotations
 

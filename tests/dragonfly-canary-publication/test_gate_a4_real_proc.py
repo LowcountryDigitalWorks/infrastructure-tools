@@ -23,8 +23,9 @@ def load_module(name: str, path: Path):
     return module
 
 
-core = load_module("a4_fd_inspector_core", ROOT / "tools" / "dragonfly_gate_a4_fd_inspector_core.py")
-real_proc = load_module("a4_real_proc", ROOT / "tools" / "dragonfly_gate_a4_real_proc.py")
+CORE_MODULE = "dragonfly_gate_a4_fd_inspector_core"
+core = load_module(CORE_MODULE, ROOT / "tools" / "dragonfly_gate_a4_fd_inspector_core.py")
+real_proc = load_module("dragonfly_gate_a4_real_proc", ROOT / "tools" / "dragonfly_gate_a4_real_proc.py")
 UID = core.DEFAULT_UID
 
 
@@ -160,7 +161,29 @@ class A4RealProcPortTests(unittest.TestCase):
                 port.list_fd_targets(140)
             self.assertIn(ctx.exception.errno, (errno.EACCES, errno.EPERM))
         with mock.patch("os.listdir", side_effect=deny_fd_listdir):
-            self.assert_hold(core.inspect_stable(port), "A4_FD_DENIED_FD")
+            result = core.inspect_stable(port)
+        self.assert_hold(result, "A4_FD_DENIED_FD")
+
+    def test_integration_denied_fd_readlink_oserror_hold(self) -> None:
+        """Regression: adapter OSError must map through core to HOLD without traceback."""
+        self.tree.add_pid(161, comm="worker", fd_links={"0": "/dev/null", "1": "pipe:[1]"})
+        port = self.tree.port()
+        real_readlink = os.readlink
+
+        def deny_readlink(path: str | os.PathLike[str]) -> str:
+            text = os.fspath(path)
+            if f"{os.sep}fd{os.sep}" in text:
+                raise PermissionError(errno.EACCES, "synthetic fd readlink denied")
+            return real_readlink(path)
+
+        with mock.patch("os.readlink", side_effect=deny_readlink):
+            with self.assertRaises(OSError) as ctx:
+                port.list_fd_targets(161)
+            self.assertIn(ctx.exception.errno, (errno.EACCES, errno.EPERM))
+        with mock.patch("os.readlink", side_effect=deny_readlink):
+            result = core.inspect_stable(port)
+        self.assert_hold(result, "A4_FD_DENIED_FD")
+        self.assertFalse(result.get("runtimeAuthority"))
 
     def test_denied_stat_read_eacces_without_privilege(self) -> None:
         self.tree.add_pid(141, comm="worker")
@@ -186,8 +209,8 @@ class A4RealProcPortTests(unittest.TestCase):
         real_readlink = os.readlink
 
         def vanish_readlink(path: str | os.PathLike[str]) -> str:
-            text = str(path)
-            if text.endswith("/fd/0") or text.endswith("\\fd\\0"):
+            text = os.fspath(path)
+            if text.endswith(f"{os.sep}fd{os.sep}0"):
                 raise FileNotFoundError(errno.ENOENT, "fd vanished between list and readlink")
             return real_readlink(path)
 
