@@ -170,12 +170,15 @@ class A4RealProcPortTests(unittest.TestCase):
             self.tree.port().read_stat_line(142)
         self.assertEqual(ctx.exception.errno, errno.ENOENT)
 
-    def test_vanished_fd_entry_enoent(self) -> None:
+    def test_vanished_fd_directory_enoent(self) -> None:
         proc = self.tree.add_pid(143, comm="worker", fd_links={"0": "/dev/null"})
-        (proc / "fd" / "0").unlink()
+        import shutil
+
+        shutil.rmtree(proc / "fd")
         with self.assertRaises(OSError) as ctx:
             self.tree.port().list_fd_targets(143)
         self.assertEqual(ctx.exception.errno, errno.ENOENT)
+        self.assert_hold(core.inspect_stable(self.tree.port()), "A4_FD_DENIED_FD")
 
     def test_malicious_pid_types_rejected(self) -> None:
         port = self.tree.port()
