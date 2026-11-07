@@ -306,6 +306,48 @@ class A4FdInspectorCoreTests(unittest.TestCase):
         )
         self.assert_hold(core.inspect_stable(root), "A4_FD_INCOMPLETE_ENUMERATION")
 
+    def test_a4_fd_saved_uid_drift_between_snapshots(self):
+        root = core.SyntheticProcRoot(
+            processes={
+                214: core.ProcessFixture(
+                    pid=214,
+                    uid=UID,
+                    uid_saved=UID,
+                    uid_fs=UID,
+                    uid_saved_after_first=UID + 1,
+                    starttime=61,
+                    comm="bash",
+                )
+            }
+        )
+        self.assert_hold(core.inspect_stable(root), "A4_FD_PID_REUSE")
+
+    def test_a4_fd_fs_uid_drift_between_snapshots(self):
+        root = core.SyntheticProcRoot(
+            processes={
+                215: core.ProcessFixture(
+                    pid=215,
+                    uid=UID,
+                    uid_saved=UID,
+                    uid_fs=UID,
+                    uid_fs_after_first=UID + 2,
+                    starttime=62,
+                    comm="bash",
+                )
+            }
+        )
+        self.assert_hold(core.inspect_stable(root), "A4_FD_PID_REUSE")
+
+    def test_a4_fd_incomplete_enumeration_all_even_pids(self):
+        root = core.SyntheticProcRoot(
+            processes={
+                210: core.ProcessFixture(pid=210, uid=UID, starttime=32, comm="b"),
+                212: core.ProcessFixture(pid=212, uid=UID, starttime=33, comm="c"),
+            },
+            enumeration_incomplete=True,
+        )
+        self.assert_hold(core.inspect_stable(root), "A4_FD_INCOMPLETE_ENUMERATION")
+
     def test_a4_fd_comm_parsing_with_spaces(self):
         pid, comm, utime, start = core.parse_proc_stat(
             "42 (my worker proc) S 0 0 0 0 0 0 0 0 0 0 4242 0 0 0 0 0 0 0 12345"
