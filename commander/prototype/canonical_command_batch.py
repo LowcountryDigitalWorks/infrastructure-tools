@@ -38,11 +38,8 @@ _ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]{0,31}$")
 _ARGV = re.compile(r"^[A-Za-z0-9._:@/+-]{1,256}$")
 _CWD = re.compile(r"^(posix|windows):[A-Za-z0-9._/-]{1,200}$")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
-_FORBIDDEN_ARGV0 = frozenset({
-    "sh", "bash", "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh",
-    "pwsh.exe", "python", "python.exe", "python3", "curl", "wget", "certutil",
-    "certutil.exe",
-})
+# Closed identity. A path, alias, or unlisted name is a different executable.
+_ALLOWED_ARGV0 = frozenset({"ldw-canary"})
 _SHELL_OR_FETCH = re.compile(r"""[\s$`|&;<>\\'"]|://""")
 
 
@@ -125,8 +122,8 @@ def _command(value: object) -> dict:
         if _SHELL_OR_FETCH.search(argument):
             raise BatchRefused("DYNAMIC_EXECUTION_REFUSED")
         checked_argv.append(argument)
-    if checked_argv[0].lower() in _FORBIDDEN_ARGV0:
-        raise BatchRefused("DYNAMIC_EXECUTION_REFUSED")
+    if checked_argv[0] not in _ALLOWED_ARGV0:
+        raise BatchRefused("EXECUTABLE_NOT_ALLOWED")
     env = value["env_allowlist"]
     if type(env) is not list or len(env) > MAX_ENV:
         raise BatchRefused("SCHEMA_MISMATCH")

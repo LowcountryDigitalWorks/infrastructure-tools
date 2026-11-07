@@ -143,8 +143,30 @@ class CanonicalCommandBatchTests(unittest.TestCase):
             _parse(escaped)
         self.assertEqual(encoding.exception.reason, "NONCANONICAL_ENCODING")
 
+    def test_only_exact_ldw_canary_argv0_is_allowed(self):
+        accepted = _parse()
+        self.assertEqual(accepted["commands"][0]["argv"][0], "ldw-canary")
+        rejected = (
+            "/bin/bash",
+            "/usr/bin/curl",
+            "/usr/bin/python3",
+            "/usr/bin/wget",
+            "C:/Windows/System32/cmd.exe",
+            "busybox",
+            "node",
+            "./ldw-canary",
+            "/opt/ldw/ldw-canary",
+            "C:/LDW/ldw-canary",
+        )
+        for argv0 in rejected:
+            document = _document()
+            document["commands"][0]["argv"] = [argv0, "once"]
+            with self.assertRaises(BatchRefused) as refused:
+                _parse(_raw(document))
+            self.assertEqual(refused.exception.reason, "EXECUTABLE_NOT_ALLOWED", argv0)
+
     def test_shell_download_path_alias_and_replay_collision_refused(self):
-        for argv in (["bash", "-c"], ["curl", "https://example.invalid/x"], ["ldw-canary", "a;b"]):
+        for argv in (["ldw-canary", "a;b"], ["ldw-canary", "https://example.invalid/x"]):
             document = _document()
             document["commands"][0]["argv"] = argv
             with self.assertRaises(BatchRefused) as refused:
