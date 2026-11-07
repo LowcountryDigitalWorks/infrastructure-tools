@@ -172,11 +172,24 @@ class CanonicalCommandBatchTests(unittest.TestCase):
             with self.assertRaises(BatchRefused) as refused:
                 _parse(_raw(document))
             self.assertIn(refused.exception.reason, {"DYNAMIC_EXECUTION_REFUSED", "SCHEMA_MISMATCH"})
-        aliased = _document()
-        aliased["commands"][0]["cwd_identity"] = "posix:/opt/ldw/../canary"
-        with self.assertRaises(BatchRefused) as path:
-            _parse(_raw(aliased))
-        self.assertEqual(path.exception.reason, "PATH_ALIAS")
+        for identity in (
+            "posix:/opt/ldw/../canary",
+            "posix:/opt/ldw/canary/.",
+            "posix:/a/./b",
+            "posix:/a/..",
+            "posix:/opt//ldw",
+            "posix:/opt/ldw/",
+            "posix:relative/file",
+            "windows:relative/path",
+        ):
+            aliased = _document()
+            aliased["commands"][0]["cwd_identity"] = identity
+            with self.assertRaises(BatchRefused) as path:
+                _parse(_raw(aliased))
+            self.assertEqual(path.exception.reason, "PATH_ALIAS", identity)
+        accepted_windows = _document()
+        accepted_windows["commands"][0]["cwd_identity"] = "windows:/opt/ldw/canary"
+        self.assertEqual(_parse(_raw(accepted_windows))["commands"][0]["cwd_identity"], "windows:/opt/ldw/canary")
         windows_slash = _document()
         windows_slash["commands"][0]["cwd_identity"] = "windows:C:\\LDW\\Canary"
         with self.assertRaises(BatchRefused):

@@ -100,10 +100,14 @@ def _integer(value: object, *, low: int, high: int) -> int:
 
 def _cwd(value: object) -> str:
     text = _text(value, limit=220)
-    if not _CWD.fullmatch(text) or ".." in text.split(":")[1].split("/"):
+    prefix, separator, body = text.partition(":")
+    # posix: and windows: are opaque synthetic labels, not OS path resolution.
+    if separator != ":" or prefix not in {"posix", "windows"} or not body.startswith("/"):
         raise BatchRefused("PATH_ALIAS")
-    body = text.split(":", 1)[1]
-    if body.endswith("/") or "//" in body or "/./" in body or body.startswith("./"):
+    parts = body.split("/")
+    if parts[0] != "" or any(part == "" or part in {".", ".."} for part in parts[1:]):
+        raise BatchRefused("PATH_ALIAS")
+    if not _CWD.fullmatch(text):
         raise BatchRefused("PATH_ALIAS")
     return text
 

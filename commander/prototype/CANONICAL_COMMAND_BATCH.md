@@ -8,7 +8,9 @@ Issue: infrastructure-tools #209. This is the missing concrete encoding named by
 
 The canonical bytes are UTF-8 JSON with NFC strings, code-point-sorted object keys, array order preserved, and no insignificant whitespace. SHA-256 is computed over those exact bytes. `intent_text` is display wording. `payload_sha256` is the digest of the separate payload bytes and is not derived from the intent. This module does not launch the payload.
 
-`argv[0]` must be exactly `ldw-canary`. A path, `./ldw-canary`, another name such as `busybox` or `node`, or a shell or downloader is a different identity and is refused. Later argv elements stay closed strings. This is a byte check, not an operating-system execution control.
+`argv[0]` must be exactly `ldw-canary`. A path, `./ldw-canary`, another name such as `busybox` or `node`, or a shell or downloader is a different identity and is refused. Later argv elements stay closed strings.
+
+`cwd_identity` uses a `posix:` or `windows:` prefix plus a slash-absolute body. A component that is `.` or `..`, a repeated slash, or a relative body is refused. Both prefixes are synthetic opaque identifiers. They are not a proven operating-system path, Windows drive mapping, or symlink check. This is a byte check, not an operating-system execution control.
 
 It also refuses duplicate keys, invalid UTF-8, noncanonical whitespace, key order, or escapes, unsafe Unicode, path aliases, type mismatches, stale generation, wrong host or mode, hash mismatch, and repeated command IDs inside one batch. It does not check a signature, store a key, consume a replay journal, or prove pre-spawn OS enforcement. Those remain unresolved Gate A gates.
 
