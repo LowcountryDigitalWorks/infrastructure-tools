@@ -1,0 +1,62 @@
+name: Commander Android confirmation diagnostic
+
+on:
+  pull_request:
+    paths:
+      - 'commander/diagnostic/android-confirmation/**'
+      - '.github/workflows/commander-android-confirmation.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Static source checks
+        run: python -m unittest discover -s commander/diagnostic/android-confirmation/tests -p 'test_*.py' -v
+
+      - name: Install pinned Android command-line tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          url='https://dl.google.com/android/repository/commandlinetools-linux-15859902_latest.zip'
+          expected='4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583'
+          zip="$RUNNER_TEMP/commandlinetools.zip"
+          curl --fail --location --silent --show-error --output "$zip" "$url"
+          echo "$expected  $zip" | sha256sum --check --status
+          sdk="$RUNNER_TEMP/android-sdk"
+          mkdir -p "$sdk/cmdline-tools"
+          unzip -q "$zip" -d "$sdk/cmdline-tools"
+          mv "$sdk/cmdline-tools/cmdline-tools" "$sdk/cmdline-tools/latest"
+          set +o pipefail
+          yes | "$sdk/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$sdk" --licenses >/dev/null || true
+          set -o pipefail
+          "$sdk/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$sdk" "platforms;android-36" "build-tools;35.0.0"
+          echo "ANDROID_SDK_ROOT=$sdk" >> "$GITHUB_ENV"
+
+      - name: Build debug APK
+        working-directory: commander/diagnostic/android-confirmation
+        run: java -classpath gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain assembleDebug --no-daemon
+
+      - name: Verify packaged manifest and print APK digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="commander/diagnostic/android-confirmation/app/build/outputs/apk/debug/app-debug.apk"
+          test -f "$apk"
+          aapt="$ANDROID_SDK_ROOT/build-tools/35.0.0/aapt"
+          "$aapt" dump permissions "$apk"
+          "$aapt" dump xmltree "$apk" AndroidManifest.xml | python commander/diagnostic/android-confirmation/tests/verify_packaged_manifest.py
+          echo "BUILD_COMMIT=$(git rev-parse HEAD)"
+          sha256sum "$apk"

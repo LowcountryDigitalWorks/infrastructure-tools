@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Commander confirmation diagnostic</string>
+    <string name="check_support">Check Support</string>
+    <string name="status_initial">Not checked</string>
+</resources>
