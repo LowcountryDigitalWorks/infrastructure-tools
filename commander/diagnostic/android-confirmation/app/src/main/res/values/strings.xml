@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Commander confirmation diagnostic</string>
+    <string name="check_support">Check Support</string>
+    <string name="status_initial">Not checked</string>
+    <string name="support_caveat">UNSUPPORTED can occur while an accessibility service is running. That result does not show whether secure hardware is present. This diagnostic does not read accessibility settings.</string>
+</resources>
