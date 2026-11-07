@@ -10,6 +10,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
+import threading
+import uuid
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
@@ -19,6 +22,10 @@ from canonical_command_batch import (
 
 DECISION_VERSION = "ldw.commander.signed-batch-decision.v1"
 RISK_CLASS = "SYNTHETIC_BATCH_CRITICAL_RISK_ACKNOWLEDGED"
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_HOST_ID = re.compile(r"^host:[a-z0-9](?:[a-z0-9-]{0,62})$")
+_SIGNER_ID = re.compile(r"^signer-key:[a-z0-9](?:[a-z0-9-]{0,62})$")
+_OPERATOR = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _FIELDS = frozenset({
     "version", "decision_id", "batch_id", "session_id", "host_id", "operator",
     "signer_key_id", "signer_generation", "privilege_mode", "batch_sha256",
@@ -38,11 +45,15 @@ class SyntheticNonceLedger:
 
     def __init__(self):
         self._used: set[str] = set()
+        self._lock = threading.Lock()
 
     def consume(self, nonce: str) -> None:
-        if nonce in self._used:
-            raise BatchDecisionRefused("BATCH_REPLAY")
-        self._used.add(nonce)
+        if type(nonce) is not str:
+            raise BatchDecisionRefused("SCHEMA_MISMATCH")
+        with self._lock:
+            if nonce in self._used:
+                raise BatchDecisionRefused("BATCH_REPLAY")
+            self._used.add(nonce)
 
 
 def _b64decode(encoded: str) -> bytes:
@@ -67,6 +78,61 @@ def _canonical(value: object) -> bytes:
     ).encode("utf-8")
 
 
+def _exact_int(value: object, *, low: int, high: int) -> int:
+    if type(value) is not int or isinstance(value, bool) or not low <= value <= high:
+        raise BatchDecisionRefused("SCHEMA_MISMATCH")
+    return value
+
+
+def _uuid_text(value: object) -> str:
+    if type(value) is not str or len(value) != 36:
+        raise BatchDecisionRefused("SCHEMA_MISMATCH")
+    try:
+        parsed = str(uuid.UUID(value))
+    except (ValueError, TypeError, AttributeError):
+        raise BatchDecisionRefused("SCHEMA_MISMATCH") from None
+    if parsed != value:
+        raise BatchDecisionRefused("SCHEMA_MISMATCH")
+    return value
+
+
+def _digest(value: object) -> str:
+    if type(value) is not str or _HEX64.fullmatch(value) is None:
+        raise BatchDecisionRefused("SCHEMA_MISMATCH")
+    return value
+
+
+def _typed_decision(parsed: dict) -> dict:
+    host_id = parsed["host_id"]
+    signer_key_id = parsed["signer_key_id"]
+    operator = parsed["operator"]
+    if (type(host_id) is not str or _HOST_ID.fullmatch(host_id) is None or
+            type(signer_key_id) is not str or _SIGNER_ID.fullmatch(signer_key_id) is None or
+            type(operator) is not str or _OPERATOR.fullmatch(operator) is None or
+            type(parsed["version"]) is not str or type(parsed["privilege_mode"]) is not str or
+            type(parsed["risk_class"]) is not str):
+        raise BatchDecisionRefused("SCHEMA_MISMATCH")
+    return {
+        "version": parsed["version"],
+        "decision_id": _uuid_text(parsed["decision_id"]),
+        "batch_id": _uuid_text(parsed["batch_id"]),
+        "session_id": _uuid_text(parsed["session_id"]),
+        "host_id": host_id,
+        "operator": operator,
+        "signer_key_id": signer_key_id,
+        "signer_generation": _exact_int(parsed["signer_generation"], low=1, high=2**31 - 1),
+        "privilege_mode": parsed["privilege_mode"],
+        "batch_sha256": _digest(parsed["batch_sha256"]),
+        "intent_sha256": _digest(parsed["intent_sha256"]),
+        "issued_unix": _exact_int(parsed["issued_unix"], low=0, high=2**31 - 1),
+        "expires_unix": _exact_int(parsed["expires_unix"], low=0, high=2**31 - 1),
+        "generation": _exact_int(parsed["generation"], low=1, high=2**31 - 1),
+        "max_commands": _exact_int(parsed["max_commands"], low=1, high=4),
+        "risk_class": parsed["risk_class"],
+        "nonce": _uuid_text(parsed["nonce"]),
+    }
+
+
 def verify_signed_batch(
     token: str,
     public_key: Ed25519PublicKey,
@@ -85,6 +151,11 @@ def verify_signed_batch(
         raise BatchDecisionRefused("SIGNATURE_INVALID")
     if not isinstance(ledger, SyntheticNonceLedger):
         raise BatchDecisionRefused("REPLAY_STATE_REQUIRED")
+    if (type(host_id) is not str or type(operator) is not str or type(signer_key_id) is not str or
+            type(signer_generation) is not int or isinstance(signer_generation, bool) or
+            type(generation) is not int or isinstance(generation, bool) or
+            type(now_unix) is not int or isinstance(now_unix, bool)):
+        raise BatchDecisionRefused("SCHEMA_MISMATCH")
     if not isinstance(token, str) or token.count(".") != 1 or len(token) > 16000:
         raise BatchDecisionRefused("SIGNATURE_INVALID")
     encoded, encoded_sig = token.split(".")
@@ -101,6 +172,7 @@ def verify_signed_batch(
         raise BatchDecisionRefused("SCHEMA_MISMATCH") from None
     if type(parsed) is not dict or set(parsed) != _FIELDS or _canonical(parsed) != raw:
         raise BatchDecisionRefused("NONCANONICAL_ENCODING")
+    parsed = _typed_decision(parsed)
     if parsed["version"] != DECISION_VERSION or parsed["risk_class"] != RISK_CLASS:
         raise BatchDecisionRefused("NOT_BATCH_DECISION")
     if parsed["host_id"] != host_id:

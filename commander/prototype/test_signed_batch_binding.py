@@ -149,6 +149,27 @@ class SignedBatchBindingTests(unittest.TestCase):
             _verify(token, self.public, self.batch_raw)
         self.assertEqual(refused.exception.reason, "NONCANONICAL_ENCODING")
 
+    def test_signed_invalid_types_refuse_before_the_ledger(self):
+        cases = (
+            {"nonce": []},
+            {"nonce": {}},
+            {"nonce": 1},
+            {"generation": True},
+            {"signer_generation": True},
+            {"batch_sha256": "GG" + "a" * 62},
+            {"decision_id": "not-a-uuid"},
+            {"approved": True},
+        )
+        for overrides in cases:
+            token = _sign(self.private, _decision(self.batch_raw, self.batch, **overrides))
+            with self.assertRaises(BatchDecisionRefused) as refused:
+                _verify(token, self.public, self.batch_raw)
+            self.assertIn(refused.exception.reason, {"SCHEMA_MISMATCH", "NONCANONICAL_ENCODING"}, overrides)
+            self.assertNotIsInstance(refused.exception.__cause__, TypeError)
+        with self.assertRaises(BatchDecisionRefused) as trusted_bool:
+            _verify(self.token, self.public, self.batch_raw, signer_generation=True)
+        self.assertEqual(trusted_bool.exception.reason, "SCHEMA_MISMATCH")
+
     def test_module_has_no_private_signer_or_process_api(self):
         import inspect
         import signed_batch_binding as module
