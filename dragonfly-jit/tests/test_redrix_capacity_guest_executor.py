@@ -451,6 +451,65 @@ class GuestExecutorTests(unittest.TestCase):
         self.assertNotIn("jitconfig", blob)
         self.assertNotIn("admission_token", blob)
 
+    def _pid(self, root: Path, pid: int, comm: str, cmdline: bytes = b"") -> None:
+        directory = root / str(pid)
+        directory.mkdir()
+        (directory / "comm").write_text(comm + "\n", encoding="ascii")
+        (directory / "status").write_text("Name:\tworker\nUid:\t1000\t1000\t1000\t1000\n", encoding="ascii")
+        (directory / "cmdline").write_bytes(cmdline)
+
+    def test_qemu_census_fail_closed_fixtures(self):
+        self.assertFalse(exe.PHYSICAL_EXECUTION_ENABLED)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            self.assertEqual(exe.census_qemu(root), "QEMU_CENSUS_UNAVAILABLE")
+            self._pid(root, 1, "systemd")
+            self.assertIs(exe.census_qemu(root), False)
+            self._pid(root, 2, "qemu-system-x86_64")
+            self.assertIs(exe.census_qemu(root), True)
+            hidden = root / "hidden"
+            hidden.mkdir()
+            self._pid(hidden, 3, "worker")
+            (hidden / "3" / "comm").unlink()
+            self.assertEqual(exe.census_qemu(hidden), "QEMU_CENSUS_UNAVAILABLE")
+            renamed = root / "renamed"
+            renamed.mkdir()
+            self._pid(renamed, 4, "not-qemu", b"/usr/bin/qemu-system-x86_64\x00")
+            self.assertIs(exe.census_qemu(renamed), True)
+            try:
+                linked = root / "linked"
+                linked.mkdir()
+                (linked / "real").mkdir()
+                (linked / "5").symlink_to(linked / "real", target_is_directory=True)
+                self.assertEqual(exe.census_qemu(linked), "QEMU_CENSUS_UNAVAILABLE")
+            except OSError:
+                pass
+            huge = root / "huge"
+            huge.mkdir()
+            for pid in range(1, exe.MAX_CENSUS_PIDS + 2):
+                (huge / str(pid)).mkdir()
+            self.assertEqual(exe.census_qemu(huge), "QEMU_CENSUS_UNAVAILABLE")
+
+    def test_unverified_lock_is_not_free_and_run_dirs_are_residue(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            self.assertIs(exe.guest_lock_busy(tmp / "guest.lock"), False)
+            held = tmp / "held.lock"
+            held.write_text("lock", encoding="ascii")
+            try:
+                import fcntl
+            except ImportError:
+                self.assertIsNone(exe.guest_lock_busy(held))
+            else:
+                self.assertIs(exe.guest_lock_busy(held), False)
+                with mock.patch.object(fcntl, "flock", side_effect=BlockingIOError):
+                    self.assertIs(exe.guest_lock_busy(held), True)
+            runs = tmp / "runs"
+            runs.mkdir()
+            (runs / "leftover").mkdir()
+            self.assertEqual(exe.count_controller_residue(runs), 1)
+            self.assertIsNone(exe.count_controller_residue(held))
+
 
 if __name__ == "__main__":
     unittest.main()
