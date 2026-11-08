@@ -1,3 +1,5 @@
+using System.Reflection;
+using System.Text;
 using LDW.HostAgent.Core;
 using LDW.HostAgent.Windows;
 
@@ -7,9 +9,10 @@ if (args.Length != 1)
     return 2;
 }
 
-System.Windows.Forms.Application.EnableVisualStyles();
-System.Windows.Forms.Application.SetCompatibleTextRenderingDefault(false);
+var hostApplicationConfiguration = typeof(StatusForm).Assembly.GetType("LDW.HostAgent.Windows.ApplicationConfiguration", throwOnError: true)!;
+hostApplicationConfiguration.GetMethod("Initialize", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)!.Invoke(null, null);
 Directory.CreateDirectory(args[0]);
+var dpiEvidence = new StringBuilder();
 var definitions = new[]
 {
     new ComponentDefinition("remote.tailscale", "Tailscale", ComponentKind.Tailscale, DesiredState.Running),
@@ -101,6 +104,10 @@ foreach (var (file, overallColor, health, summary, exceptionColor) in snapshots)
     form.Show();
     Application.DoEvents();
 
+    var osEffectiveDpi = form.DeviceDpi;
+    var osDpiIs150Percent = IsOsEffectiveDpi150Percent(osEffectiveDpi);
+    dpiEvidence.AppendLine($"snapshot={file}; osEffectiveDpi={osEffectiveDpi}; osDpiIs150Percent={osDpiIs150Percent}");
+
     var refreshButton = Descendants(form).OfType<Button>().Single(x => x.Text.Contains("Refresh", StringComparison.OrdinalIgnoreCase));
     if (!refreshButton.Focused)
         throw new InvalidOperationException("The owner window must place initial keyboard focus on Refresh.");
@@ -110,7 +117,13 @@ foreach (var (file, overallColor, health, summary, exceptionColor) in snapshots)
             throw new InvalidOperationException($"Action button is missing an accessible name: {button.Text}");
     }
 
-    AssertNoVerticalScroll(form, "standard desktop window");
+    AssertObservationLabelsPresent(form);
+
+    var standardContext = osDpiIs150Percent
+        ? $"os-dpi-aware effective {osEffectiveDpi} (~150%) standard desktop window"
+        : "standard desktop window";
+    AssertNoVerticalScroll(form, standardContext);
+    AssertNoHorizontalScroll(form, standardContext);
 
     using var image = new Bitmap(form.Width, form.Height);
     form.DrawToBitmap(image, new Rectangle(Point.Empty, image.Size));
@@ -118,14 +131,19 @@ foreach (var (file, overallColor, health, summary, exceptionColor) in snapshots)
 
     form.Size = form.MinimumSize;
     Application.DoEvents();
-    AssertNoHorizontalScroll(form, "minimum supported size");
+    var minimumContext = osDpiIs150Percent
+        ? $"os-dpi-aware effective {osEffectiveDpi} (~150%) minimum supported size"
+        : "minimum supported size";
+    AssertNoHorizontalScroll(form, minimumContext);
+    AssertNoVerticalScroll(form, minimumContext);
 
-    // LDW01 currently renders at 96 DPI, so exercise a deterministic 200% scale pass
-    // as a layout smoke rather than claiming the local monitor proves high-DPI behavior.
-    form.Scale(new SizeF(2f, 2f));
-    form.PerformLayout();
-    Application.DoEvents();
-    AssertNoHorizontalScroll(form, "simulated 200% scale");
+    if (osDpiIs150Percent)
+        dpiEvidence.AppendLine($"snapshot={file}; pass=os-dpi-aware-150-standard-and-minimum");
+    else
+        dpiEvidence.AppendLine($"snapshot={file}; proofGap=os-150-dpi-aware-geometry; reason=host-session-effective-dpi-{osEffectiveDpi}; fallback=simulated-control-scale-only");
+
+    RunSimulatedScaleLayoutSmoke(live, 1.5f, "simulated Control.Scale 150%");
+    RunSimulatedScaleLayoutSmoke(live, 2f, "simulated Control.Scale 200%");
 
     form.Hide();
 }
@@ -150,8 +168,41 @@ using (var font = new Font("Segoe UI", 9))
     }
     sheet.Save(Path.Combine(args[0], "tray-icon-sizes.png"));
 }
+
+var evidencePath = Path.Combine(args[0], "dpi-layout-evidence.txt");
+File.WriteAllText(evidencePath, dpiEvidence.ToString(), Encoding.UTF8);
 Console.WriteLine($"Fixture evidence saved to {Path.GetFullPath(args[0])}");
+Console.WriteLine(dpiEvidence.ToString());
 return 0;
+
+static bool IsOsEffectiveDpi150Percent(int deviceDpi)
+    => deviceDpi is >= 138 and <= 156;
+
+static void RunSimulatedScaleLayoutSmoke(HostAgentLiveSnapshot live, float scaleFactor, string context)
+{
+    using var form = new StatusForm(() => { }, () => { });
+    form.UpdateSnapshot(live);
+    form.Size = form.MinimumSize;
+    form.Show();
+    Application.DoEvents();
+    form.Scale(new SizeF(scaleFactor, scaleFactor));
+    form.PerformLayout();
+    Application.DoEvents();
+    AssertNoHorizontalScroll(form, context);
+    AssertNoVerticalScroll(form, context);
+    form.Hide();
+}
+
+static void AssertObservationLabelsPresent(Control root)
+{
+    foreach (var label in Descendants(root).OfType<Label>())
+    {
+        if (string.IsNullOrWhiteSpace(label.AccessibleName) && string.IsNullOrWhiteSpace(label.Text))
+            continue;
+        if (label.AccessibleRole is AccessibleRole.StaticText && string.IsNullOrWhiteSpace(label.AccessibleName) && label.Text.Length > 48)
+            throw new InvalidOperationException($"Long static label is missing an accessible name: {label.Text[..Math.Min(label.Text.Length, 64)]}");
+    }
+}
 
 static void AssertNoHorizontalScroll(Control root, string context)
 {

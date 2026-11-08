@@ -6,6 +6,7 @@
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <GenerateApplicationConfigurationFile>false</GenerateApplicationConfigurationFile>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/LDW.HostAgent.Windows/LDW.HostAgent.Windows.csproj" />
