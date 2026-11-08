@@ -15,7 +15,9 @@ function Assert-ThrowsMessage {
 
 $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $scriptPath = Join-Path $repoRoot 'host-inventory/Get-OfficePcInventory.ps1'
+$script:OfficePcInventorySuppressAutoInvoke = $true
 . $scriptPath
+$script:OfficePcInventoryCimCallCount = 0
 
 function New-OfficePcSyntheticSnapshot {
     param(
@@ -25,7 +27,7 @@ function New-OfficePcSyntheticSnapshot {
     )
     return @{
         OsCaption                         = 'Microsoft Windows 11 Pro'
-        OsBuildNumber                     = 22631
+        OsBuildNumber                     = '22631'
         OsArchitecture                      = 'AMD64'
         TotalVisibleMemoryKib               = $TotalKib
         FreePhysicalMemorySamplesKib        = $FreeSamplesKib
@@ -58,7 +60,23 @@ Assert-True ($base.officepc_enrolled -eq $false) 'enrolled false'
 Assert-True ($base.normal_use_baseline_verified -eq $false) 'baseline false'
 Assert-True ($null -eq $base.host_reserve_mib) 'host reserve null'
 Assert-True ($base.runtime_blocked -eq $true) 'runtime blocked'
+Assert-True ($base.os.build -eq '22631') 'os build string'
+Assert-True ($base.os.architecture -eq 'AMD64') 'os architecture whitelist'
 Assert-True ($null -ne $base.memory_mib.samples_free_mib -and $base.memory_mib.samples_free_mib.Count -eq 3) 'memory samples'
+
+$uintSnapshot = New-OfficePcSyntheticSnapshot
+$uintSnapshot.TotalVisibleMemoryKib = [uint64] 16777216
+$uintSnapshot.FreePhysicalMemorySamplesKib = @([uint64] 800000, [uint64] 790000, [uint64] 785000)
+$uintSnapshot.LogicalProcessorCount = [uint32] 12
+$uintReport = New-OfficePcInventoryReportFromSnapshot -Snapshot $uintSnapshot
+Assert-True ($uintReport.memory_mib.total_physical -eq 16384) 'uint64 total physical'
+Assert-True ($uintReport.cpu.logical_processors -eq 12) 'uint32 logical processors'
+Assert-True ($null -ne $uintReport.memory_mib.samples_free_mib) 'uint64 samples accepted'
+
+$badArch = New-OfficePcSyntheticSnapshot
+$badArch.OsArchitecture = 'WOW64'
+$badArchReport = New-OfficePcInventoryReportFromSnapshot -Snapshot $badArch
+Assert-True ($badArchReport.os.architecture -eq 'UNKNOWN') 'unknown os arch'
 Assert-True ($base.hyper_v_optional_feature -eq 'UNKNOWN') 'hyper-v unknown'
 Assert-True ($base.firmware_virtualization -eq 'UNKNOWN') 'firmware unknown'
 Assert-True ($base.power.sleep_policy -eq 'UNVERIFIED') 'sleep unverified'
@@ -97,13 +115,47 @@ Assert-True ($runA.disposition -eq $runB.disposition) 'deterministic disposition
 
 Assert-True ((ConvertTo-OfficePcSanitizedCpuModel -Raw '  AMD (R) Test') -eq 'AMD (R) Test') 'cpu sanitize'
 
-$dotOnly = $true
-try {
-    $inv = $MyInvocation
-} catch {
-    $dotOnly = $false
+$script:OfficePcInventoryLiveCollector = {
+    $script:OfficePcInventoryCimCallCount++
+    throw 'CIM_MUST_NOT_RUN_IN_DOT_SOURCE'
 }
-Assert-True $true 'dot-source completed without live collection'
+Assert-ThrowsMessage { Invoke-OfficePcInventoryCollection -SampleCount 3 -IntervalSeconds 1 } 'CIM_MUST_NOT' 'injected collector blocks live path'
+$script:OfficePcInventoryLiveCollector = $null
+Assert-True ($script:OfficePcInventoryCimCallCount -eq 1) 'collector invoked once under inject'
+
+$hookPath = Join-Path $PSScriptRoot 'SyntheticCimHook.ps1'
+$hookBody = @'
+$script:OfficePcInventoryLiveCollector = {
+    param($SampleCount, $IntervalSeconds)
+    $samples = [System.Collections.Generic.List[uint64]]::new()
+    for ($i = 0; $i -lt $SampleCount; $i++) { [void]$samples.Add([uint64](800000 - ($i * 1000))) }
+    return @{
+        OsCaption = 'Synthetic Windows'; OsBuildNumber = [uint32]22631; OsArchitecture = 'AMD64'
+        TotalVisibleMemoryKib = [uint64]33554432; FreePhysicalMemorySamplesKib = @($samples)
+        LogicalProcessorCount = [uint32]16; CpuModel = 'Synthetic'; CpuArchitecture = 'x64'
+        SystemVolumeFreeBytes = [uint64]107374182400; HyperVEnabled = $null; FirmwareVirtualizationEnabled = $null
+        OnAcPower = $null; SleepPolicyVerified = $false; SampleCount = $SampleCount; IntervalSeconds = $IntervalSeconds
+    }
+}
+'@
+Set-Content -LiteralPath $hookPath -Value $hookBody -Encoding UTF8
+$fileLines = & {
+    $prev = $env:OFFICEPC_INVENTORY_USE_SYNTHETIC_CIM
+    $env:OFFICEPC_INVENTORY_USE_SYNTHETIC_CIM = '1'
+    try {
+        & powershell -NoProfile -File $scriptPath -SampleCount 3 -IntervalSeconds 1 -Output Json
+    }
+    finally {
+        if ($null -eq $prev) { Remove-Item Env:OFFICEPC_INVENTORY_USE_SYNTHETIC_CIM -ErrorAction SilentlyContinue }
+        else { $env:OFFICEPC_INVENTORY_USE_SYNTHETIC_CIM = $prev }
+    }
+}
+$fileText = ($fileLines | Where-Object { $_ -ne $null } | ForEach-Object { $_.ToString() }) -join "`n"
+Assert-True ($fileText.Trim().StartsWith('{')) 'single json payload'
+$fileObject = $fileText | ConvertFrom-Json
+Assert-True ($fileObject.disposition -eq 'INVENTORY_BLOCKED') 'file json blocked'
+Assert-True ($fileObject.cpu.logical_processors -eq 16) 'file synthetic uint32 cpus'
+Remove-Item -LiteralPath $hookPath -Force -ErrorAction SilentlyContinue
 
 if ($PSVersionTable.PSVersion.Major -ge 7) {
     Assert-True $true 'powershell 7 contract pass'

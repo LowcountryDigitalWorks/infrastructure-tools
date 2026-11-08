@@ -14,11 +14,11 @@ This is **not** host onboarding, enrollment, JIT admission, or LDW01/REDRIX evid
 
 ## Invocation (owner-local, when device is available)
 
-From an elevated **normal-user** PowerShell session **on OfficePC** (not via remote desktop products as a measurement prerequisite):
+From a **non-elevated** owner PowerShell session **on OfficePC** (not via remote desktop products as a measurement prerequisite), using the owner’s normal script execution policy (RemoteSigned or equivalent site policy — **do not** use `ExecutionPolicy Bypass`):
 
 ```powershell
 # Pin exact infrastructure-tools commit after independent review merges this path.
-powershell -NoProfile -ExecutionPolicy Bypass -File .\host-inventory\Get-OfficePcInventory.ps1 -SampleCount 3 -IntervalSeconds 1 -Output Json
+powershell -NoProfile -File .\host-inventory\Get-OfficePcInventory.ps1 -SampleCount 3 -IntervalSeconds 1 -Output Json
 ```
 
 Allowed parameters (fixed bounds only):
@@ -38,7 +38,7 @@ Save stdout JSON to a private operator location; attach SHA-256 of exact `Get-Of
 ## Synthetic contract tests (CI-author / developer laptop)
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\host-inventory\tests\Test-OfficePcInventoryContracts.ps1
+powershell -NoProfile -File .\host-inventory\tests\Test-OfficePcInventoryContracts.ps1
 ```
 
 On PowerShell 7 (when installed), repeat the same command under `pwsh` for version coverage.

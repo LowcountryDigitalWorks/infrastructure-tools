@@ -25,7 +25,19 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+if (-not (Get-Variable -Name OfficePcInventorySuppressAutoInvoke -Scope Script -ErrorAction SilentlyContinue)) {
+    $script:OfficePcInventorySuppressAutoInvoke = $false
+}
+$script:OfficePcInventoryLiveCollector = $null
+if ($env:OFFICEPC_INVENTORY_USE_SYNTHETIC_CIM -eq '1') {
+    $syntheticHook = Join-Path $PSScriptRoot 'tests/SyntheticCimHook.ps1'
+    if (Test-Path -LiteralPath $syntheticHook -PathType Leaf) {
+        . $syntheticHook
+    }
+}
+
 $script:OfficePcInventoryMarker = 'LDW_OFFICEPC_HOST_INVENTORY'
+$script:OfficePcInventoryMaxUInt64 = [uint64] '9223372036854775807'
 $script:OfficePcInventoryClassification = 'INVENTORY_ONLY_NOT_ADMISSION'
 $script:OfficePcInventoryDisposition = 'INVENTORY_BLOCKED'
 $script:OfficePcInventoryDispositionReason = 'OfficePC enrollment and normal-use baseline are not accepted; inventory is evidence-only until owner readback on the enrolled host.'
@@ -92,17 +104,77 @@ function Test-OfficePcInventoryIntervalSeconds {
     return ($Seconds -ge 1 -and $Seconds -le 5)
 }
 
+function ConvertTo-OfficePcBoundedUInt64 {
+    param([AllowNull()] $Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [bool]) { return $null }
+    if ($Value -is [double] -or $Value -is [single] -or $Value -is [decimal]) {
+        if ([double]::IsNaN([double] $Value) -or [double]::IsInfinity([double] $Value)) { return $null }
+    }
+    if ($Value -is [int] -or $Value -is [long] -or $Value -is [int16] -or $Value -is [byte] -or $Value -is [uint32] -or $Value -is [uint64]) {
+        if ($Value -is [int] -or $Value -is [long] -or $Value -is [int16]) {
+            if ([int64] $Value -lt 0) { return $null }
+        }
+    }
+    try {
+        $parsed = [uint64] $Value
+        if ($parsed -gt $script:OfficePcInventoryMaxUInt64) { return $null }
+        return [int64] $parsed
+    }
+    catch {
+        return $null
+    }
+}
+
+function ConvertTo-OfficePcBuildNumberString {
+    param([AllowNull()] $Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [bool]) { return $null }
+    if ($Value -is [string]) {
+        $text = $Value.Trim()
+        if ($text -notmatch '^\d{1,8}$') { return $null }
+        return $text
+    }
+    $bounded = ConvertTo-OfficePcBoundedUInt64 -Value $Value
+    if ($null -eq $bounded -or $bounded -lt 1) { return $null }
+    return ([string] $bounded)
+}
+
 function Test-OfficePcNonNegativeInteger {
     param($Value)
-    if ($null -eq $Value) { return $false }
-    if ($Value -isnot [int] -and $Value -isnot [long]) { return $false }
-    return ([int64] $Value -ge 0)
+    return ($null -ne (ConvertTo-OfficePcBoundedUInt64 -Value $Value))
 }
 
 function Test-OfficePcPositiveInteger {
     param($Value)
-    if (-not (Test-OfficePcNonNegativeInteger -Value $Value)) { return $false }
-    return ([int64] $Value -gt 0)
+    $bounded = ConvertTo-OfficePcBoundedUInt64 -Value $Value
+    return ($null -ne $bounded -and $bounded -gt 0)
+}
+
+function ConvertTo-OfficePcOsArchitectureLabel {
+    param([AllowNull()] $Raw)
+    if ($null -eq $Raw) { return $null }
+    $text = ([string] $Raw).Trim().ToUpperInvariant()
+    switch ($text) {
+        'AMD64' { return 'AMD64' }
+        'ARM64' { return 'ARM64' }
+        'X86' { return 'x86' }
+        'IA64' { return 'UNKNOWN' }
+        default { return $null }
+    }
+}
+
+function Test-OfficePcInventoryDirectExecution {
+    if ($script:OfficePcInventorySuppressAutoInvoke) { return $false }
+    if ($MyInvocation.InvocationName -eq '.') { return $false }
+    if ($null -ne $PSCommandPath -and (Split-Path -Leaf $PSCommandPath) -eq 'Get-OfficePcInventory.ps1') {
+        return $true
+    }
+    $invocation = $MyInvocation.InvocationName
+    if ($null -ne $invocation -and $invocation -match '(?i)Get-OfficePcInventory\.ps1$') {
+        return $true
+    }
+    return $false
 }
 
 function Get-OfficePcEnumTriState {
@@ -126,8 +198,9 @@ function New-OfficePcInventoryReportFromSnapshot {
     )
 
     $totalPhysicalMib = $null
-    if (Test-OfficePcPositiveInteger -Value $Snapshot.TotalVisibleMemoryKib) {
-        $totalPhysicalMib = [int] [math]::Floor([int64] $Snapshot.TotalVisibleMemoryKib / 1024)
+    $totalKib = ConvertTo-OfficePcBoundedUInt64 -Value $Snapshot.TotalVisibleMemoryKib
+    if ($null -ne $totalKib -and $totalKib -gt 0) {
+        $totalPhysicalMib = [int] [math]::Floor($totalKib / 1024)
     }
 
     $memorySamples = $null
@@ -140,11 +213,12 @@ function New-OfficePcInventoryReportFromSnapshot {
         else {
             $converted = New-Object System.Collections.Generic.List[int]
             foreach ($sample in $samples) {
-                if (-not (Test-OfficePcNonNegativeInteger -Value $sample)) {
+                $bounded = ConvertTo-OfficePcBoundedUInt64 -Value $sample
+                if ($null -eq $bounded) {
                     $allSamplesValid = $false
                     break
                 }
-                [void] $converted.Add([int] [math]::Floor([int64] $sample / 1024))
+                [void] $converted.Add([int] [math]::Floor($bounded / 1024))
             }
             if ($allSamplesValid) {
                 $memorySamples = @($converted)
@@ -156,19 +230,20 @@ function New-OfficePcInventoryReportFromSnapshot {
     }
 
     $systemVolumeFreeGib = $null
-    if (Test-OfficePcNonNegativeInteger -Value $Snapshot.SystemVolumeFreeBytes) {
-        $systemVolumeFreeGib = [math]::Round([double] $Snapshot.SystemVolumeFreeBytes / 1GB, 2)
+    $freeBytes = ConvertTo-OfficePcBoundedUInt64 -Value $Snapshot.SystemVolumeFreeBytes
+    if ($null -ne $freeBytes) {
+        $systemVolumeFreeGib = [math]::Round([double] $freeBytes / 1GB, 2)
     }
 
     $logicalProcessors = $null
-    if (Test-OfficePcPositiveInteger -Value $Snapshot.LogicalProcessorCount) {
-        $logicalProcessors = [int] $Snapshot.LogicalProcessorCount
+    $logical = ConvertTo-OfficePcBoundedUInt64 -Value $Snapshot.LogicalProcessorCount
+    if ($null -ne $logical -and $logical -gt 0 -and $logical -le [int]::MaxValue) {
+        $logicalProcessors = [int] $logical
     }
 
-    $build = $null
-    if (Test-OfficePcNonNegativeInteger -Value $Snapshot.OsBuildNumber) {
-        $build = [string] [int] $Snapshot.OsBuildNumber
-    }
+    $build = ConvertTo-OfficePcBuildNumberString -Value $Snapshot.OsBuildNumber
+    $osArchitecture = ConvertTo-OfficePcOsArchitectureLabel -Raw $Snapshot.OsArchitecture
+    if ($null -eq $osArchitecture) { $osArchitecture = 'UNKNOWN' }
 
     $edition = $null
     if ($null -ne $Snapshot.OsCaption -and -not [string]::IsNullOrWhiteSpace([string] $Snapshot.OsCaption)) {
@@ -192,7 +267,7 @@ function New-OfficePcInventoryReportFromSnapshot {
         os                         = [ordered]@{
             edition      = $edition
             build        = $build
-            architecture = $Snapshot.OsArchitecture
+            architecture = $osArchitecture
         }
         cpu                        = [ordered]@{
             architecture        = $Snapshot.CpuArchitecture
@@ -232,6 +307,10 @@ function Get-OfficePcLiveSnapshot {
         [ValidateRange(1, 5)]
         [int] $IntervalSeconds
     )
+
+    if ($null -ne $script:OfficePcInventoryLiveCollector) {
+        return & $script:OfficePcInventoryLiveCollector $SampleCount $IntervalSeconds
+    }
 
     $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
     $cpu = Get-CimInstance -ClassName Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -287,7 +366,7 @@ function Get-OfficePcLiveSnapshot {
     return @{
         OsCaption                         = $os.Caption
         OsBuildNumber                     = $os.BuildNumber
-        OsArchitecture                      = $env:PROCESSOR_ARCHITECTURE
+        OsArchitecture                      = (ConvertTo-OfficePcOsArchitectureLabel -Raw $env:PROCESSOR_ARCHITECTURE)
         TotalVisibleMemoryKib               = $os.TotalVisibleMemorySize
         FreePhysicalMemorySamplesKib        = @($freeSamples)
         LogicalProcessorCount               = if ($null -ne $computer) { $computer.NumberOfLogicalProcessors } else { $null }
@@ -323,7 +402,7 @@ function Invoke-OfficePcInventoryCollection {
     return (New-OfficePcInventoryReportFromSnapshot -Snapshot $snapshot)
 }
 
-if ($MyInvocation.InvocationName -ne '.' -and $MyInvocation.ScriptName -and (Split-Path -Leaf $MyInvocation.ScriptName) -eq 'Get-OfficePcInventory.ps1') {
+if (Test-OfficePcInventoryDirectExecution) {
     if (-not (Test-OfficePcInventorySampleCount -Count $SampleCount)) { throw 'INVENTORY_SAMPLE_COUNT_REFUSED' }
     if (-not (Test-OfficePcInventoryIntervalSeconds -Seconds $IntervalSeconds)) { throw 'INVENTORY_INTERVAL_REFUSED' }
     $result = Invoke-OfficePcInventoryCollection -SampleCount $SampleCount -IntervalSeconds $IntervalSeconds
