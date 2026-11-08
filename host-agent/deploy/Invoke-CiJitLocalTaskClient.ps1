@@ -39,6 +39,12 @@ $script:StatusReasonCodes = @(
 )
 
 function Assert-CiJitLocalTaskClientNormalUser {
+    # The atomic no-overwrite File.Move overload and ProcessStartInfo.ArgumentList
+    # require PowerShell Core / modern .NET. Refuse Desktop 5.1 before any
+    # request-slot write or protected task invocation.
+    if ($PSVersionTable.PSEdition -cne 'Core' -or $PSVersionTable.PSVersion.Major -lt 7) {
+        throw 'LOCAL_CLIENT_PWSH7_REQUIRED'
+    }
     if ($env:OS -cne 'Windows_NT') { throw 'LOCAL_CLIENT_WINDOWS_REQUIRED' }
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
