@@ -88,12 +88,81 @@ class CalibrationTest(unittest.TestCase):
             f.write_text("nr_free_pages 1\n")
             self.assertIsNone(module.read_balloon_vmstat_pages(f))
 
-    def test_balloon_sysfs_present_observation(self):
+    def test_balloon_vmstat_duplicate_keys_rejected(self):
         with tempfile.TemporaryDirectory() as root:
-            device = Path(root) / "virtio5"
+            f = Path(root) / "vmstat"
+            f.write_text("balloon_inflate 1\nballoon_inflate 2\nballoon_deflate 0\n")
+            self.assertIsNone(module.read_balloon_vmstat_pages(f))
+
+    def test_balloon_vmstat_implausible_magnitude_rejected(self):
+        with tempfile.TemporaryDirectory() as root:
+            f = Path(root) / "vmstat"
+            huge = 2**53 + 1
+            f.write_text(f"balloon_inflate {huge}\nballoon_deflate 0\n")
+            self.assertIsNone(module.read_balloon_vmstat_pages(f))
+
+    def _driver_fixture(self, root: Path) -> Path:
+        driver = Path(root) / "virtio_balloon"
+        driver.mkdir()
+        return driver
+
+    def test_balloon_sysfs_symlink_binding_present(self):
+        with tempfile.TemporaryDirectory() as root:
+            driver = self._driver_fixture(root)
+            device = Path(root) / "device"
             device.mkdir()
-            self.assertEqual(module.observe_virtio_balloon_sysfs(device), "PRESENT")
+            link = driver / "virtio5"
+            try:
+                link.symlink_to(device, target_is_directory=True)
+            except OSError:
+                self.skipTest("symlink privilege unavailable")
+            self.assertEqual(module.observe_virtio_balloon_sysfs(driver), "PRESENT")
+
+    def test_balloon_sysfs_renamed_virtio_number_present(self):
+        with tempfile.TemporaryDirectory() as root:
+            driver = self._driver_fixture(root)
+            (driver / "virtio3").mkdir()
+            self.assertEqual(module.observe_virtio_balloon_sysfs(driver), "PRESENT")
+
+    def test_balloon_sysfs_missing_driver_unverified(self):
+        with tempfile.TemporaryDirectory() as root:
             self.assertEqual(module.observe_virtio_balloon_sysfs(Path(root) / "missing"), "UNVERIFIED")
+
+    def test_balloon_sysfs_malformed_entries_ignored(self):
+        with tempfile.TemporaryDirectory() as root:
+            driver = self._driver_fixture(root)
+            (driver / "not_a_virtio_device").mkdir()
+            self.assertEqual(module.observe_virtio_balloon_sysfs(driver), "UNVERIFIED")
+
+    def test_balloon_sysfs_unrelated_entry_with_valid_binding_present(self):
+        with tempfile.TemporaryDirectory() as root:
+            driver = self._driver_fixture(root)
+            (driver / "uevent").write_text("DRIVER=virtio_balloon\n")
+            (driver / "virtio12").mkdir()
+            self.assertEqual(module.observe_virtio_balloon_sysfs(driver), "PRESENT")
+
+    def test_balloon_sysfs_circular_symlink_unverified(self):
+        with tempfile.TemporaryDirectory() as root:
+            driver = self._driver_fixture(root)
+            v5 = driver / "virtio5"
+            v7 = driver / "virtio7"
+            try:
+                v5.symlink_to(v7)
+                v7.symlink_to(v5)
+            except OSError:
+                self.skipTest("symlink privilege unavailable")
+            self.assertEqual(module.observe_virtio_balloon_sysfs(driver), "UNVERIFIED")
+
+    def test_balloon_adjacent_nonmonotonic_marks_hold(self):
+        samples = [
+            _sample(balloon=(100, 50)),
+            _sample(balloon=(150, 55)),
+            _sample(balloon=(140, 60)),
+            _sample(balloon=(160, 65)),
+        ]
+        out = module.classify(samples, (2048, 8192), virtio_balloon_sysfs="PRESENT")
+        self.assertEqual(out["balloon_vmstat"], "HOLD")
+        self.assertFalse(out["jit_admission_authorized"])
 
     def test_balloon_nonmonotonic_marks_hold_without_breaking_auth_flags(self):
         samples = [

@@ -6,12 +6,16 @@ import argparse
 import ast
 import json
 from pathlib import Path
+import re
 import time
 
 MARKER = "LDW_REDRIX_CAPACITY_CALIBRATION"
 RESEARCH_RESERVE_MIB = 6144
 MIN_SAMPLES, MAX_SAMPLES = 3, 6
-VIRTIO_BALLOON_SYSFS = Path("/sys/bus/virtio/drivers/virtio_balloon/virtio5")
+VIRTIO_BALLOON_DRIVER = Path("/sys/bus/virtio/drivers/virtio_balloon")
+_VIRTIO_DEVICE_RE = re.compile(r"^virtio\d+$")
+_MAX_DRIVER_ENTRIES = 32
+_MAX_VMSTAT_PAGE_COUNT = 2**53
 
 
 def controller_memory_contract(path: Path) -> tuple[int, int] | None:
@@ -97,14 +101,55 @@ def read_oom_events(path: Path = Path("/sys/fs/cgroup/memory.events")) -> tuple[
         return None
 
 
-def observe_virtio_balloon_sysfs(device_dir: Path = VIRTIO_BALLOON_SYSFS) -> str:
-    """Presence only; does not read balloon size or host spare memory."""
+def _balloon_driver_path_allowed(driver_dir: Path) -> bool:
+    """Production uses only the fixed driver sysfs path; tests may inject fixture roots."""
+    if driver_dir == VIRTIO_BALLOON_DRIVER:
+        return True
+    normalized = str(driver_dir).replace("\\", "/")
+    if normalized.startswith("/sys/"):
+        try:
+            return driver_dir.resolve() == VIRTIO_BALLOON_DRIVER.resolve()
+        except OSError:
+            return False
+    return True
+
+
+def _virtio_balloon_binding_present(entry: Path, driver_dir: Path) -> bool:
+    """Kernel driver bindings are symlinks to device directories; accept both forms."""
+    if not _VIRTIO_DEVICE_RE.fullmatch(entry.name):
+        return False
     try:
-        if device_dir.is_dir() and not device_dir.is_symlink():
-            return "PRESENT"
+        if not entry.is_dir():
+            return False
+        if entry.is_symlink():
+            target = entry.resolve()
+            if not target.is_dir():
+                return False
+            target_s = str(target).replace("\\", "/")
+            if target_s.startswith("/sys/"):
+                return True
+            return target.resolve() != entry.resolve()
+        return not entry.is_symlink()
+    except OSError:
+        return False
+
+
+def observe_virtio_balloon_sysfs(driver_dir: Path = VIRTIO_BALLOON_DRIVER) -> str:
+    """Presence via bounded driver-dir scan; does not read balloon size or host spare memory."""
+    if not _balloon_driver_path_allowed(driver_dir):
         return "UNVERIFIED"
+    try:
+        if not driver_dir.is_dir():
+            return "UNVERIFIED"
+        entries = list(driver_dir.iterdir())
     except OSError:
         return "UNVERIFIED"
+    if len(entries) > _MAX_DRIVER_ENTRIES:
+        entries = entries[:_MAX_DRIVER_ENTRIES]
+    for entry in entries:
+        if _virtio_balloon_binding_present(entry, driver_dir):
+            return "PRESENT"
+    return "UNVERIFIED"
 
 
 def read_balloon_vmstat_pages(vmstat_path: Path = Path("/proc/vmstat")) -> tuple[int, int] | None:
@@ -116,9 +161,12 @@ def read_balloon_vmstat_pages(vmstat_path: Path = Path("/proc/vmstat")) -> tuple
             if len(parts) != 2 or parts[0] not in ("balloon_inflate", "balloon_deflate"):
                 continue
             value = int(parts[1])
-            if value < 0:
+            if value < 0 or value > _MAX_VMSTAT_PAGE_COUNT:
                 return None
-            found[parts[0]] = value
+            key = parts[0]
+            if key in found:
+                return None
+            found[key] = value
         if set(found) != {"balloon_inflate", "balloon_deflate"}:
             return None
         return found["balloon_inflate"], found["balloon_deflate"]
@@ -133,11 +181,14 @@ def _balloon_deltas(samples: list[tuple[int, int] | None]) -> dict[str, object]:
         return {"balloon_vmstat": "UNVERIFIED", "balloon_indicative_note": "counters absent"}
     if len(present) != len(samples):
         return {"balloon_vmstat": "UNVERIFIED", "balloon_indicative_note": "partial samples"}
+    for pair in present:
+        if pair[0] > _MAX_VMSTAT_PAGE_COUNT or pair[1] > _MAX_VMSTAT_PAGE_COUNT:
+            return {"balloon_vmstat": "HOLD", "balloon_indicative_note": "counter overflow"}
+    for idx in range(1, len(present)):
+        prev, cur = present[idx - 1], present[idx]
+        if cur[0] < prev[0] or cur[1] < prev[1]:
+            return {"balloon_vmstat": "HOLD", "balloon_indicative_note": "nonmonotonic cumulative counters"}
     first, last = present[0], present[-1]
-    if last[0] < first[0] or last[1] < first[1]:
-        return {"balloon_vmstat": "HOLD", "balloon_indicative_note": "nonmonotonic cumulative counters"}
-    if last[0] > 2**53 or last[1] > 2**53:
-        return {"balloon_vmstat": "HOLD", "balloon_indicative_note": "counter overflow"}
     return {
         "balloon_vmstat": "MEASURED_INDICATIVE",
         "balloon_inflate_pages_delta": max(0, last[0] - first[0]),
