@@ -610,14 +610,34 @@ function Assert-Ci7PreDestructiveJobGate {
     if ($configuration.ExpectedJobId -gt 0 -and [string]$configuration.ExpectedJobId -cne [string]$State.JobId) { throw 'CLEANUP_STATE_INVALID' }
 }
 
+function Assert-Ci7ExactAttachedMedia {
+    param([object]$State, $Items, [string]$ExpectedPath)
+    if ($null -eq $Items) { throw 'CLEANUP_MEDIA_MISMATCH' }
+    $list = @($Items)
+    if ($list.Count -ne 1 -or $null -eq $list[0]) { throw 'CLEANUP_MEDIA_MISMATCH' }
+    $path = [string]$list[0].Path
+    if ([string]::IsNullOrWhiteSpace($path)) { throw 'CLEANUP_MEDIA_MISMATCH' }
+    try {
+        Assert-Ci7Path $State.Configuration.Root $path
+        Assert-Ci7Path $State.Configuration.Root $ExpectedPath
+        if ([IO.Path]::GetFullPath($path) -cne [IO.Path]::GetFullPath($ExpectedPath)) { throw 'CLEANUP_MEDIA_MISMATCH' }
+    } catch {
+        $code = [string]$_.Exception.Message
+        if ($code -eq 'CLEANUP_MEDIA_MISMATCH' -or $code -eq 'PATH_OUTSIDE_OWNED_ROOT' -or $code -eq 'REPARSE_PATH_REFUSED') { throw 'CLEANUP_MEDIA_MISMATCH' }
+        throw 'CLEANUP_MEDIA_MISMATCH'
+    }
+}
+
 function Assert-Ci7PreDestructiveOwnership {
-    param([object]$State, [object]$Runner, [object]$Vm, $LockHeld)
+    param([object]$State, [object]$Runner, [object]$Vm, $LockHeld, $Disks, $Dvds)
     Assert-Ci7State $State $State.Configuration.Root
     if ($LockHeld -isnot [bool] -or $LockHeld -ne $true) { throw 'CLEANUP_LOCK_UNCONFIRMED' }
     if ($State.VMId) {
         if ($null -eq $Vm -or [string]$Vm.VMId -cne [string]$State.VMId -or $Vm.Name -cne $State.Name -or
             $Vm.Notes -cne ($script:Marker + ':' + $State.RunId)) { throw 'CLEANUP_VM_MISMATCH' }
-    } elseif ($null -ne $Vm) { throw 'CLEANUP_VM_MISMATCH' }
+        Assert-Ci7ExactAttachedMedia $State $Disks $State.Disk
+        Assert-Ci7ExactAttachedMedia $State $Dvds $State.Seed
+    } elseif ($null -ne $Vm -or $null -ne $Disks -or $null -ne $Dvds) { throw 'CLEANUP_VM_MISMATCH' }
     if ($State.RunnerId) {
         if ($null -eq $Runner -or [string]$Runner.id -cne [string]$State.RunnerId -or $Runner.name -cne $State.Name) { throw 'CLEANUP_RUNNER_MISMATCH' }
         if ($Runner.busy -isnot [bool]) { throw 'CLEANUP_PROVIDER_AMBIGUOUS' }
@@ -637,10 +657,16 @@ function Invoke-Ci7PreDestructiveCleanupGate {
     }
     Assert-Ci7PreDestructiveJobGate -State $State -FirstJob $first -SecondJob $second
     $vm = $null
+    $disks = $null
+    $dvds = $null
     if ($State.VMId) {
         $found = @(Get-VM -ErrorAction Stop | Where-Object { [string]$_.VMId -ceq [string]$State.VMId -or $_.Name -ceq $State.Name })
         if ($found.Count -ne 1) { throw 'CLEANUP_VM_MISMATCH' }
         $vm = $found[0]
+        try {
+            $disks = @(Get-VMHardDiskDrive -VM $vm -ErrorAction Stop)
+            $dvds = @(Get-VMDvdDrive -VM $vm -ErrorAction Stop)
+        } catch { throw 'CLEANUP_MEDIA_MISMATCH' }
     } elseif (@(Get-VM -ErrorAction Stop | Where-Object { $_.Name -ceq $State.Name }).Count) { throw 'CLEANUP_VM_MISMATCH' }
     $runner = $null
     if ($State.RunnerId) {
@@ -650,7 +676,7 @@ function Invoke-Ci7PreDestructiveCleanupGate {
         if ($matches.Count -ne 1) { throw 'CLEANUP_RUNNER_MISMATCH' }
         $runner = $matches[0]
     }
-    Assert-Ci7PreDestructiveOwnership -State $State -Runner $runner -Vm $vm -LockHeld:$LockHeld
+    Assert-Ci7PreDestructiveOwnership -State $State -Runner $runner -Vm $vm -LockHeld:$LockHeld -Disks $disks -Dvds $dvds
 }
 
 function Assert-Ci7AlreadyClean {

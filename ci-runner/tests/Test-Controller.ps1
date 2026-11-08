@@ -501,9 +501,11 @@ try {
         $gate.VMId = [guid]::NewGuid()
         $completed = [pscustomobject]@{ id = $gate.JobId; status = 'completed'; conclusion = 'failure'; run_id = $gateConfig.WorkflowRunId; run_attempt = 1; head_sha = $gateConfig.ExpectedSha; name = 'security' }
         $ownedVm = [pscustomobject]@{ VMId = $gate.VMId; Name = $gate.Name; Notes = ('CI-RUNNER-EPHEMERAL-001:' + $gate.RunId) }
+        $exactDisks = @([pscustomobject]@{ Path = $gate.Disk })
+        $exactDvds = @([pscustomobject]@{ Path = $gate.Seed })
         $idleRunner = [pscustomobject]@{ id = $gate.RunnerId; name = $gate.Name; busy = $false }
         Assert-Ci7PreDestructiveJobGate -State $gate -FirstJob $completed -SecondJob $completed
-        Assert-Ci7PreDestructiveOwnership -State $gate -Runner $idleRunner -Vm $ownedVm -LockHeld $true
+        Assert-Ci7PreDestructiveOwnership -State $gate -Runner $idleRunner -Vm $ownedVm -LockHeld $true -Disks $exactDisks -Dvds $exactDvds
         foreach ($status in @('queued', 'in_progress', 'waiting')) {
             $open = [pscustomobject]@{ id = $gate.JobId; status = $status; conclusion = $null; run_id = $gateConfig.WorkflowRunId; run_attempt = 1; head_sha = $gateConfig.ExpectedSha; name = 'security' }
             RefusesCode { Assert-Ci7PreDestructiveJobGate -State $gate -FirstJob $open -SecondJob $open } 'CLEANUP_CANCEL_REFUSED'
@@ -518,7 +520,14 @@ try {
         RefusesCode { Assert-Ci7PreDestructiveOwnership -State $gate -Runner $idleRunner -Vm $ownedVm -LockHeld 1 } 'CLEANUP_LOCK_UNCONFIRMED'
         RefusesCode { Assert-Ci7PreDestructiveOwnership -State $gate -Runner $idleRunner -Vm $ownedVm -LockHeld $false } 'CLEANUP_LOCK_UNCONFIRMED'
         $busy = [pscustomobject]@{ id = $gate.RunnerId; name = $gate.Name; busy = $true }
-        RefusesCode { Assert-Ci7PreDestructiveOwnership -State $gate -Runner $busy -Vm $ownedVm -LockHeld $true } 'CLEANUP_RUNNER_BUSY'
+        RefusesCode { Assert-Ci7PreDestructiveOwnership -State $gate -Runner $busy -Vm $ownedVm -LockHeld $true -Disks $exactDisks -Dvds $exactDvds } 'CLEANUP_RUNNER_BUSY'
+        RefusesCode { Assert-Ci7PreDestructiveOwnership -State $gate -Runner $idleRunner -Vm $ownedVm -LockHeld $true -Disks @() -Dvds $exactDvds } 'CLEANUP_MEDIA_MISMATCH'
+        RefusesCode { Assert-Ci7PreDestructiveOwnership -State $gate -Runner $idleRunner -Vm $ownedVm -LockHeld $true -Disks @($exactDisks[0], $exactDisks[0]) -Dvds $exactDvds } 'CLEANUP_MEDIA_MISMATCH'
+        RefusesCode { Assert-Ci7PreDestructiveOwnership -State $gate -Runner $idleRunner -Vm $ownedVm -LockHeld $true -Disks @([pscustomobject]@{ Path = '' }) -Dvds $exactDvds } 'CLEANUP_MEDIA_MISMATCH'
+        RefusesCode { Assert-Ci7PreDestructiveOwnership -State $gate -Runner $idleRunner -Vm $ownedVm -LockHeld $true -Disks @([pscustomobject]@{ Path = (Join-Path $root 'other.vhdx') }) -Dvds $exactDvds } 'CLEANUP_MEDIA_MISMATCH'
+        RefusesCode { Assert-Ci7PreDestructiveOwnership -State $gate -Runner $idleRunner -Vm $ownedVm -LockHeld $true -Disks $exactDisks -Dvds @() } 'CLEANUP_MEDIA_MISMATCH'
+        RefusesCode { Assert-Ci7PreDestructiveOwnership -State $gate -Runner $idleRunner -Vm $ownedVm -LockHeld $true -Disks $exactDisks -Dvds @($exactDvds[0], $exactDvds[0]) } 'CLEANUP_MEDIA_MISMATCH'
+        RefusesCode { Assert-Ci7PreDestructiveOwnership -State $gate -Runner $idleRunner -Vm $ownedVm -LockHeld $true -Disks $exactDisks -Dvds @([pscustomobject]@{ Path = (Join-Path $root 'other.iso') }) } 'CLEANUP_MEDIA_MISMATCH'
         $wrongVm = [pscustomobject]@{ VMId = [guid]::NewGuid(); Name = $gate.Name; Notes = $ownedVm.Notes }
         RefusesCode { Assert-Ci7PreDestructiveOwnership -State $gate -Runner $idleRunner -Vm $wrongVm -LockHeld $true } 'CLEANUP_VM_MISMATCH'
         $before = & $module { $script:DeletedVMs }
@@ -531,6 +540,10 @@ try {
         $secondGate = $runnerSource.IndexOf('Invoke-Ci7PreDestructiveCleanupGate $state -LockHeld $true', $firstGate + 1, [StringComparison]::Ordinal)
         $secondRemove = $runnerSource.IndexOf('Remove-Ci7LocalResources $state', $secondGate, [StringComparison]::Ordinal)
         Assert ($firstGate -ge 0 -and $secondGate -gt $firstGate -and $firstRemove -gt $firstGate -and $secondRemove -gt $secondGate)
+        $moduleSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../CiRunner.psm1') -Raw
+        $mediaRead = $moduleSource.IndexOf('Get-VMHardDiskDrive -VM $vm -ErrorAction Stop', [StringComparison]::Ordinal)
+        $mediaOwner = $moduleSource.IndexOf('Assert-Ci7PreDestructiveOwnership -State $State -Runner $runner -Vm $vm', $mediaRead, [StringComparison]::Ordinal)
+        Assert ($mediaRead -gt 0 -and $mediaOwner -gt $mediaRead)
     }
     'DETERMINISTIC_TESTS=PASS'
     'TEST_COUNT=' + $total
