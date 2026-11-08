@@ -490,6 +490,51 @@ class GuestExecutorTests(unittest.TestCase):
                 (huge / str(pid)).mkdir()
             self.assertEqual(exe.census_qemu(huge), "QEMU_CENSUS_UNAVAILABLE")
 
+    def test_collect_preflight_census_gate_precedes_all_controller_checks(self):
+        """Actual read-only preflight entrypoint must fail closed before host work."""
+        self.assertFalse(exe.PHYSICAL_EXECUTION_ENABLED)
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            ctx = make_ctx(tmp)
+            proc = tmp / "fake-proc"
+            ctx.proc_root = proc
+
+            # Missing /proc is not a clean host; no downstream identity is read.
+            with mock.patch.object(
+                exe, "read_controller_identity",
+                side_effect=AssertionError("controller probe reached before QEMU census"),
+            ):
+                report = exe.collect_preflight(ctx)
+            self.assertEqual(report["reason"], "QEMU_CENSUS_UNAVAILABLE")
+            self.assertFalse(report["physical_guest_executed"])
+            self.assertFalse(report["provider_admission_authorized"])
+
+            proc.mkdir()
+            self._pid(proc, 1, "qemu-system-x86_64")
+            with mock.patch.object(
+                exe, "read_controller_identity",
+                side_effect=AssertionError("controller probe reached with live QEMU"),
+            ):
+                report = exe.collect_preflight(ctx)
+            self.assertEqual(report["reason"], "QEMU_ALREADY_PRESENT")
+
+            # A disappearing process must not be reported as 'zero QEMUs'.
+            (proc / "1" / "comm").unlink()
+            with mock.patch.object(
+                exe, "read_controller_identity",
+                side_effect=AssertionError("controller probe reached on censored /proc"),
+            ):
+                report = exe.collect_preflight(ctx)
+            self.assertEqual(report["reason"], "QEMU_CENSUS_UNAVAILABLE")
+
+            # Only a complete, QEMU-free synthetic census can reach the
+            # separate controller-identity gate, which itself still fails.
+            (proc / "1" / "comm").write_text("systemd\n", encoding="ascii")
+            with mock.patch.object(exe, "read_controller_identity", return_value=None):
+                report = exe.collect_preflight(ctx)
+            self.assertEqual(report["reason"], "CONTROLLER_CONTRACT_MISMATCH")
+            self.assertFalse(report["jit_admission_authorized"])
+
     def test_unverified_lock_is_not_free_and_run_dirs_are_residue(self):
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
