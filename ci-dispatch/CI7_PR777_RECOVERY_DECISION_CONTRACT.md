@@ -6,9 +6,9 @@ This note freezes a fail-closed decision table for infrastructure-tools #264. It
 
 Parent issues: #10 and #92. Owning issue: #264. Deployed immutable release under discussion: `4129a3b87b0fbea95d40265fae1ec327d205660e`. The original nested exception remains `UNKNOWN_PRIMARY`. Controller locks and the volatile provider job assignment are still unverified. One later read-only correlation, recorded on #264 in comment `6720217512`, matched the local `RunnerId` and name hash to the unique provider `ci7` registration, confirmed exactly eight expected PR777 labels, and showed that one registration offline and nonbusy. Identifiers from that read stay private. That observation does not authorize cleanup.
 
-## Incident that must not be cancelled
+## Historical original-job state (superseded by later live readback)
 
-Business-operations run `42462196528` attempt 1, job `128673684689`, remains the queued unassigned job for open PR #777 at frozen head `eb84ba430a358f2776ef92f1a751e38d7a92d50e`. It is not proved stale. It is not a job PASS.
+At the original incident observation on November 8, business-operations run `42462196528` attempt 1, job `128673684689`, **was queued/unassigned** for open PR #777 at then-head `eb84ba430a358f2776ef92f1a751e38d7a92d50e`. That observation was not a job PASS. **This is historical evidence, not the latest provider state; see the dated live-state addendum below.**
 
 The deployed `Mode Cleanup` path (`Invoke-IsolatedRunner.ps1` lines 149–180 at that release) and the failure catch (lines 274–292) cancel a workflow whose job is not `completed`. That includes this still-valid queued job. That cancellation is **disallowed** for this incident. A stopped guest plus an owned manifest is not permission to delete the guest or to remove its runner registration.
 
@@ -79,7 +79,7 @@ Every input is exact. Age alone is not staleness. A caller-chosen run or job id 
 | 9 | any | missing and disk missing | already absent | any | any | any | free | any | `HOLD` if job still queued; do not call cancel to "finish" idempotency |
 | 10 | any other combination | | | | | | | | `HOLD` |
 
-Row 0 is this incident. `Cleanup` and the failure catch are the wrong tools for row 0 because both cancel a non-completed job.
+Row 0 is the **historical queued-phase snapshot** of this incident. `Cleanup` and the failure catch were unsafe for row 0 because both could cancel a non-completed job. Later provider state is addressed separately in the dated addendum below; no historical observation is rewritten into a recovery authorization.
 
 ## What each result means
 
@@ -116,7 +116,7 @@ This pull request performs no mutation. It does not authorize Recover, Cleanup, 
 
 The independently reviewed implementation PR #267 (head `32b8138b80b436823c3c301779821f39fb12563b`) currently has `CHANGES_REQUIRED H1/M2`. Its protection against cancellation is meaningful, but its completed-job path deletes the local VM/media before separately authorizing either local deletion or JIT runner deregistration. This is a **new recovery policy**, not a harmless source refactor. The following is a **candidate contract for independent review**, not authority to execute, install, or merge.
 
-**P0 — no-destructive refusal.** Source changes may replace the deployed behavior that cancels valid queued jobs with a fail-closed refusal before **any** provider, VM, disk, seed, or runner mutation. Today's PR777 run `42462196528`/job `128673684689` remains `HOLD_PRESERVE_JOB`. Preserve exact state and failure evidence, no synthetic success, no second `Once`, and never cancel to make recovery appear complete.
+**P0 — no-destructive refusal.** Source changes may replace the deployed behavior that cancels valid queued jobs with a fail-closed refusal before **any** provider, VM, disk, seed, or runner mutation. At the original queued observation PR777 run `42462196528`/job `128673684689` required `HOLD_PRESERVE_JOB`; its subsequent terminal cancellation changes the state classification, not the no-mutation boundary (see dated addendum). Preserve exact state and failure evidence, no synthetic success, no second `Once`, and never cancel to make recovery appear complete.
 
 **P1 — completed does not authorize cleanup.** Two provider reads reporting `completed` plus a terminal conclusion are eligibility *evidence only*, not permission to remove local resources or deregister a runner. Until an independently selected and accepted closed local-only operation exists, even a completed job with exact ownership returns `HOLD`. This corrects PR #267's disputed implicit completed-job cleanup.
 
@@ -134,3 +134,19 @@ The independently reviewed implementation PR #267 (head `32b8138b80b436823c3c301
 4. Require mandatory **actual** Secret Scan, CodeQL, Windows/CI7 validation, influence-clean H0/M0 on the exact final candidate, and host-controlled immutable package installation/readback before considering a separately reviewed local cleanup transaction. Retry/download failures are not security PASS.
 
 **No decision to authorize:** This addendum does not approve any of the three operations, controller promotion, change in protected host, current incident cleanup, cancellation, runner deregistration, or credential work. All present incident states still HOLD.
+
+## November 8, 2026, 4:23 PM ET — live-state reconciliation, non-authorizing
+
+**Status:** This is a dated **evidence update**, not a change to the three-operation authorization policy, an approval, or a new cleanup implementation. The earlier row 0 and historical incident narrative remain valid for their observation window, but they must not be mistaken for the current provider job status. Source: [owning #264 read-only cross-system verification](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/264#issuecomment-6727351843).
+
+| Exact evidence subject | Live evidence at this observation | Required result |
+| --- | --- | --- |
+| **OLD protected local run** `42462196528`, job `128673684689`, PR777 original head `eb84ba430a358f2776ef92f1a751e38d7a92d50e` | GitHub provider says **completed/cancelled**, not success; LDW01 holds exactly one powered-off state-bound CI7 VM, VHD and DVD, protected `Running` state and `cleanup-failed` evidence. All local VM/state/disk/seed identity comparisons were positive on read-only inspection. | `HOLD_OWNED_RESIDUE` **classification only**. Do not infer who cancelled, provider runner absence, a free controller lock, successful scan, or authority for local VM/media removal or runner deregistration. |
+| **NEW current PR777 head** `06cc10ef3001208aa6beeedde7149ca231fa692d`, run `42520300001`, job `128852133656` | Open PR with separate security run **pending**, job **queued/unassigned**. The existing protected guest state **does not** bind to this new job. | `HOLD_PRESERVE_CURRENT_JOB` **classification only**. No queue override, host substitution, second `Once`, job cancellation or synthetic PASS. |
+| Provider status drift, missing exact reviewer/issuer authority, incomplete runner-registration or controller-lock readback | Any missing, changed, or contradictory evidence on re-read | `HOLD`; read-only reconciliation only. |
+
+These new `HOLD_*` labels are **documentation categories, not implemented controller output codes** and grant no additional operation. The physical read did not recheck GitHub runner registration or both controller lock owners; older matching offline/labels observations remain historical. The new provider cancellation was observed, **not performed** by HW & VM ORCH08, and its actor/cause is unknown.
+
+A terminal `cancelled` job is **not** a completed security scan and does not convert a previous guest's residue into removable material. The merged contract's **P0–P4 gates remain unchanged**: no destructive work based on terminal status alone, no conflation of old and current job, and independent policy for `LOCAL_GUEST_REMOVE`, `EXACT_RUNNER_DEREGISTER` and `EXACT_PROVIDER_CANCEL` plus a trusted protected installer/issuer before any runtime use.
+
+Before proposing any future non-destructive source fix, re-read both provider jobs/current PR head and the host's bound state. Before proposing an actual operator transaction, separately prove the exact selected generation, physical tuple, owner/global locks, provider runner assignment/labels/busy, and a security/owner-accepted release/rollback. **This addendum is not that decision.**
