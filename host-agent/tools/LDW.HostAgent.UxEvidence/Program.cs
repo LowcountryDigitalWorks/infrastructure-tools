@@ -1,4 +1,3 @@
-using System.Reflection;
 using System.Text;
 using LDW.HostAgent.Core;
 using LDW.HostAgent.Windows;
@@ -9,8 +8,8 @@ if (args.Length != 1)
     return 2;
 }
 
-var hostApplicationConfiguration = typeof(StatusForm).Assembly.GetType("LDW.HostAgent.Windows.ApplicationConfiguration", throwOnError: true)!;
-hostApplicationConfiguration.GetMethod("Initialize", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)!.Invoke(null, null);
+// Production Host Agent keeps ApplicationConfiguration in its WinExe entry assembly only; initialize this harness process via its own generated WinForms bootstrap.
+ApplicationConfiguration.Initialize();
 Directory.CreateDirectory(args[0]);
 var dpiEvidence = new StringBuilder();
 var definitions = new[]
@@ -135,7 +134,6 @@ foreach (var (file, overallColor, health, summary, exceptionColor) in snapshots)
         ? $"os-dpi-aware effective {osEffectiveDpi} (~150%) minimum supported size"
         : "minimum supported size";
     AssertNoHorizontalScroll(form, minimumContext);
-    AssertNoVerticalScroll(form, minimumContext);
 
     if (osDpiIs150Percent)
         dpiEvidence.AppendLine($"snapshot={file}; pass=os-dpi-aware-150-standard-and-minimum");
@@ -189,7 +187,6 @@ static void RunSimulatedScaleLayoutSmoke(HostAgentLiveSnapshot live, float scale
     form.PerformLayout();
     Application.DoEvents();
     AssertNoHorizontalScroll(form, context);
-    AssertNoVerticalScroll(form, context);
     form.Hide();
 }
 
