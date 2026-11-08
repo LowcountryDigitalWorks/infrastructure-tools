@@ -152,6 +152,7 @@ def make_ctx(
         runs_root=tmp / "runs",
         qemu_factory=_factory,
         preflight_observation=preflight or clean_preflight(),
+        synthetic_test_admission=True,
     )
 
 
@@ -259,8 +260,96 @@ class GuestExecutorTests(unittest.TestCase):
         nonce = "aa" * 16
         good = f"{exe.SUCCESS_PREFIX} nonce={nonce}\n"
         self.assertTrue(exe.parse_success_line(good, nonce))
-        self.assertFalse(exe.parse_success_line(good + good, nonce))
-        self.assertFalse(exe.parse_success_line("LDW_REDRIX_GUEST_BENCH_OK nonce=x", nonce))
+        self.assertEqual(exe.assess_serial_success(good + good, nonce), "SERIAL_DUPLICATE_MARKER")
+        self.assertEqual(
+            exe.assess_serial_success("LDW_REDRIX_GUEST_BENCH_OK nonce=x", nonce),
+            "SUCCESS_MARKER_MISSING",
+        )
+        forged = f"{exe.SUCCESS_PREFIX} nonce=deadbeef\n"
+        conflict = good + forged
+        self.assertEqual(exe.assess_serial_success(conflict, nonce), "SERIAL_MARKER_CONFLICT")
+
+    def test_run_once_local_blocked_without_test_admission(self):
+        with tempfile.TemporaryDirectory() as root:
+            tmp = Path(root)
+            nonce = "e" * 32
+            serial = tmp / "serial.log"
+            proc = FakeProcess(serial_path=serial, nonce=nonce, rss=900_000)
+            ctx = make_ctx(tmp, process=proc)
+            ctx.synthetic_test_admission = False
+
+            def _boom(_argv):
+                raise AssertionError("qemu_factory must not run when disabled")
+
+            ctx.qemu_factory = _boom
+            report = exe.run_once_local(ctx)
+            self.assertEqual(report["reason"], "RUNTIME_NO_START")
+            self.assertFalse(report["physical_guest_executed"])
+
+    def test_wire_linux_executor_does_not_bind_live_port(self):
+        ctx = exe.RunContext(
+            hooks=exe.ExecutorHooks(),
+            guest_lock_path=Path("/tmp/unused-guest.lock"),
+            state_lock_path=Path("/tmp/unused-state.lock"),
+            controller_path=CONTROLLER,
+            base_image_path=CONTROLLER,
+            state_path=Path("/tmp/unused-status.json"),
+            runs_root=Path("/tmp/unused-runs"),
+        )
+        exe.wire_linux_executor(ctx)
+        self.assertIsNone(ctx.qemu_factory)
+        self.assertFalse(ctx.tools_present)
+
+    def test_parse_proc_stat_weird_comm_and_field22(self):
+        tail_fields = " ".join(str(n) for n in list(range(1, 19)) + [55555])
+        line = f"4242 (weird) name) S {tail_fields}\n"
+        parsed = exe.parse_proc_stat_text(line, expected_pid=4242)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed[0], 4242)
+        self.assertEqual(parsed[1], 55555)
+
+    def test_parse_proc_stat_rejects_malformed(self):
+        self.assertIsNone(exe.parse_proc_stat_text("", expected_pid=1))
+        self.assertIsNone(exe.parse_proc_stat_text("abc (x) S", expected_pid=1))
+        bad = "9 (a) S " + " ".join("0" for _ in range(10)) + "\n"
+        self.assertIsNone(exe.parse_proc_stat_text(bad, expected_pid=9))
+
+    def test_verify_owned_process_rejects_starttime_reuse(self):
+        hooks = exe.ExecutorHooks(uid=lambda: 1000, read_proc_starttime=lambda _p: 111)
+        self.assertFalse(exe.verify_owned_process(4242, 99, hooks))
+        self.assertTrue(exe.verify_owned_process(4242, 111, hooks))
+
+    def test_serial_tail_finds_marker_beyond_head_slice(self):
+        with tempfile.TemporaryDirectory() as root:
+            serial = Path(root) / "serial.log"
+            nonce = "f" * 32
+            marker = f"{exe.SUCCESS_PREFIX} nonce={nonce}\n"
+            line = b"[    0.000000] boot: ldw synthetic serial line\n"
+            padding = line * ((100 * 1024) // len(line))
+            serial.write_bytes(padding + marker.encode("utf-8"))
+            tail = exe.read_serial_tail_text(serial)
+            self.assertIsNotNone(tail)
+            self.assertIsNone(exe.assess_serial_success(tail, nonce))
+
+    def test_serial_tail_rejects_symlink(self):
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root)
+            real = base / "serial.log"
+            real.write_text("x\n", encoding="utf-8")
+            link = base / "link.log"
+            try:
+                link.symlink_to(real)
+                self.assertIsNone(exe.read_serial_tail_text(link))
+            except OSError:
+                self.skipTest("symlink privilege unavailable")
+
+    def test_serial_missing_marker_after_tail_read(self):
+        with tempfile.TemporaryDirectory() as root:
+            serial = Path(root) / "serial.log"
+            serial.write_bytes(b"boot\n" * 1000)
+            tail = exe.read_serial_tail_text(serial)
+            self.assertIsNotNone(tail)
+            self.assertEqual(exe.assess_serial_success(tail, "a" * 32), "SUCCESS_MARKER_MISSING")
 
     def test_workload_touches_each_page_and_ttys0(self):
         script = exe.guest_workload_shell_body("abcd")
@@ -310,7 +399,7 @@ class GuestExecutorTests(unittest.TestCase):
             (tmp / "seed.img").touch()
             with mock.patch.object(exe.secrets, "token_hex", return_value=nonce):
                 report = exe.run_once_local(ctx)
-            self.assertEqual(report["reason"], "SUCCESS_MARKER_MISSING")
+            self.assertEqual(report["reason"], "SERIAL_MARKER_CONFLICT")
 
     def test_rss_insufficient_hold(self):
         with tempfile.TemporaryDirectory() as root:

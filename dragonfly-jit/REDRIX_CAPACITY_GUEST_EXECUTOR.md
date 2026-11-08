@@ -8,8 +8,16 @@ This module implements a **fixed one-shot** offline nested-KVM experiment for re
 
 - Only `python3 redrix_capacity_guest_executor.py --run-once-local` is accepted; any other argv is refused.
 - **DRAFT `RUNTIME_NO_START`:** physical execution is **disabled** in source (`PHYSICAL_EXECUTION_ENABLED = false`) until independent H0/M0 security review and Product ORCH admission flip that flag in a separate reviewed change.
-- When enabled in a future reviewed release: Linux UID 1000 only; acquires the **existing** controller `guest.lock` without writing `status.json` or controller `runs/`.
+- `run_once_local()` and `wire_linux_executor()` are guarded: imports cannot launch QEMU while the flag is false unless tests set `RunContext.synthetic_test_admission` (not exposed to CLI).
+- When enabled in a future reviewed release: Linux UID 1000 only; acquires the **existing** controller `guest.lock` (O_NOFOLLOW where supported, no parent mkdir on the physical path) without writing `status.json` or controller `runs/`.
+- Serial success proof uses a **bounded tail read** (256 KiB) with duplicate/forged marker rejection; RSS/dirty-memory and PSI/OOM caveats remain **research / not production admission**.
 - Author tasks must **not** invoke the CLI on physical REDRIX while `RUNTIME_NO_START` is in effect.
+
+## Residual HOLD (source-only hardening)
+
+- Base image inode-stable shared read lock through qemu-img overlay creation is not fully proven in this module; ChromeOS headroom remains **UNVERIFIED**.
+- Full QEMU host process census and guest.lock inode identity against a fixed install layout require physical IR before enabling execution.
+- `state.lock` passive readback holds when the lock file is missing (`STATE_LOCK_UNAVAILABLE`); controller continues to own authoritative state transitions.
 
 ## Guest profile
 

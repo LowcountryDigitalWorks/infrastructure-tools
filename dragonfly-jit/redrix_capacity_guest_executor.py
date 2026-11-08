@@ -41,6 +41,10 @@ MIN_FREE_DISK_GIB = 16
 MAX_LOAD_FRACTION = 0.70
 # Research hypothesis only; physical load proof requires independent corroboration.
 MIN_QEMU_RSS_RESEARCH_KIB = 768 * 1024
+SERIAL_TAIL_MAX_BYTES = 256 * 1024
+SERIAL_MAX_FILE_BYTES = 64 * 1024 * 1024
+MAX_PROC_PID = 2**22
+MAX_PROC_STARTTIME = (1 << 63) - 1
 MAX_PSI_SOME_AVG10 = 1.0
 MAX_PSI_FULL_AVG10 = 1.0
 CONTROLLER_STATE_MARKER = "CI-RUNNER-DRAGONFLY-JIT-001"
@@ -50,6 +54,13 @@ ALLOWED_CONTROLLER_STATES = frozenset({"STOPPED", "AVAILABLE"})
 RUN_ONCE_FLAG = "--run-once-local"
 # Independent IR required before any physical --run-once-local on REDRIX.
 PHYSICAL_EXECUTION_ENABLED = False
+
+
+def _execution_permitted(ctx: "RunContext") -> bool:
+    """Physical path requires flag; unit tests may set RunContext.synthetic_test_admission only."""
+    if PHYSICAL_EXECUTION_ENABLED:
+        return True
+    return bool(ctx.synthetic_test_admission)
 
 
 class GuestLockBusy(Exception):
@@ -337,10 +348,61 @@ def build_cloud_config(nonce_hex: str) -> str:
     )
 
 
-def parse_success_line(serial_text: str, nonce_hex: str) -> bool:
+def assess_serial_success(serial_text: str, nonce_hex: str) -> str | None:
+    """Return HOLD reason when serial proof is missing or ambiguous."""
     expected = f"{SUCCESS_PREFIX} nonce={nonce_hex}"
-    matches = [line.strip() for line in serial_text.splitlines() if line.strip() == expected]
-    return len(matches) == 1
+    exact: list[str] = []
+    for line in serial_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped == expected:
+            exact.append(stripped)
+        elif stripped.startswith(f"{SUCCESS_PREFIX} "):
+            return "SERIAL_MARKER_CONFLICT"
+    if not exact:
+        return "SUCCESS_MARKER_MISSING"
+    if len(exact) > 1:
+        return "SERIAL_DUPLICATE_MARKER"
+    return None
+
+
+def parse_success_line(serial_text: str, nonce_hex: str) -> bool:
+    return assess_serial_success(serial_text, nonce_hex) is None
+
+
+def read_serial_tail_text(
+    path: Path,
+    *,
+    max_tail_bytes: int = SERIAL_TAIL_MAX_BYTES,
+) -> str | None:
+    """Bounded tail read via O_NOFOLLOW regular file; None => treat as SERIAL_UNAVAILABLE."""
+    if path.is_symlink():
+        return None
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(str(path), flags)
+    except OSError:
+        return None
+    try:
+        import stat as stat_mod
+
+        st = os.fstat(fd)
+        if not stat_mod.S_ISREG(st.st_mode):
+            return None
+        size = st.st_size
+        if size < 0 or size > SERIAL_MAX_FILE_BYTES:
+            return None
+        read_len = min(size, max_tail_bytes)
+        os.lseek(fd, max(0, size - read_len), os.SEEK_SET)
+        data = os.read(fd, read_len)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return data.decode("utf-8", errors="replace")
 
 
 @dataclass
@@ -467,6 +529,8 @@ class RunContext:
     tools_present: bool = True
     sample_count: int = MIN_SAMPLES
     preflight_observation: PreflightObservation | None = None
+    # True only in deterministic unit tests; never set from CLI or wire_linux_executor.
+    synthetic_test_admission: bool = False
 
 
 def _read_mem_mib(path: Path) -> int | None:
@@ -613,23 +677,91 @@ def _noop_lock(_path: Path) -> Iterator[None]:
     yield
 
 
-def _read_proc_field(pid: int, prefix: str) -> int | None:
+def parse_proc_stat_text(
+    text: str,
+    *,
+    expected_pid: int | None = None,
+    expected_uid: int | None = None,
+) -> tuple[int, int, int] | None:
+    """Parse pid, starttime (field 22), real uid from /proc/pid/stat (+ status uid)."""
+    if not text or len(text) > 4096:
+        return None
+    space = text.find(" ")
+    if space < 1:
+        return None
+    try:
+        pid = int(text[:space])
+    except ValueError:
+        return None
+    if pid <= 0 or pid > MAX_PROC_PID:
+        return None
+    if expected_pid is not None and pid != expected_pid:
+        return None
+    lparen = text.find("(", space)
+    rparen = text.rfind(")")
+    if lparen < 0 or rparen <= lparen:
+        return None
+    tail = text[rparen + 1 :].strip()
+    if not tail:
+        return None
+    fields = tail.split()
+    # state=fields[0]; starttime is proc field 22 => tail index 19
+    if len(fields) < 20:
+        return None
+    try:
+        starttime = int(fields[19])
+    except ValueError:
+        return None
+    if starttime < 0 or starttime > MAX_PROC_STARTTIME:
+        return None
+    uid = _read_proc_uid(pid) if expected_uid is not None else None
+    if expected_uid is not None and uid != expected_uid:
+        return None
+    return pid, starttime, uid if uid is not None else -1
+
+
+def _read_proc_uid(pid: int) -> int | None:
+    if pid <= 0 or pid > MAX_PROC_PID:
+        return None
     try:
         for line in Path(f"/proc/{pid}/status").read_text(encoding="ascii").splitlines():
-            if line.startswith(prefix):
-                return int(line.split()[1])
+            if line.startswith("Uid:"):
+                parts = line.split()
+                if len(parts) >= 2:
+                    return int(parts[1])
+        return None
     except (OSError, ValueError, IndexError):
         return None
-    return None
+
+
+def read_proc_stat_identity(
+    pid: int,
+    *,
+    expected_uid: int | None = None,
+) -> tuple[int, int, int] | None:
+    if pid <= 0 or pid > MAX_PROC_PID:
+        return None
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text(encoding="ascii", errors="strict")
+    except (OSError, UnicodeError):
+        return None
+    return parse_proc_stat_text(text, expected_pid=pid, expected_uid=expected_uid)
 
 
 def verify_owned_process(pid: int, starttime: int, hooks: ExecutorHooks) -> bool:
+    if pid <= 0 or starttime < 0:
+        return False
     reader = hooks.read_proc_starttime
     if reader is not None:
         observed = reader(pid)
-    else:
-        observed = _read_proc_field(pid, "starttime:")
-    return observed is not None and observed == starttime
+        return observed is not None and observed == starttime
+    identity = read_proc_stat_identity(pid, expected_uid=hooks.uid())
+    if identity is None:
+        return False
+    obs_pid, obs_start, obs_uid = identity
+    if obs_uid >= 0 and obs_uid != hooks.uid():
+        return False
+    return obs_pid == pid and obs_start == starttime
 
 
 def sample_workload_host_telemetry(
@@ -689,8 +821,84 @@ def terminate_owned_child(process: ProcessHandle, hooks: ExecutorHooks) -> bool:
     return process.poll() is not None
 
 
+def validate_guest_lock_path(lock_path: Path, *, expected_uid: int) -> str | None:
+    if lock_path.is_symlink():
+        return "SYMLINK_REFUSED"
+    parent = lock_path.parent
+    try:
+        if parent.is_symlink():
+            return "SYMLINK_REFUSED"
+        if not parent.is_dir():
+            return "GUEST_LOCK_BUSY"
+        pst = parent.stat()
+        import stat as stat_mod
+
+        if not stat_mod.S_ISDIR(pst.st_mode):
+            return "GUEST_LOCK_BUSY"
+        if pst.st_uid != expected_uid:
+            return "GUEST_LOCK_BUSY"
+        if (pst.st_mode & 0o002) or (pst.st_mode & 0o020 and pst.st_gid != os.getgid()):
+            return "GUEST_LOCK_BUSY"
+    except OSError:
+        return "GUEST_LOCK_BUSY"
+    if lock_path.exists():
+        try:
+            lst = lock_path.lstat()
+            import stat as stat_mod
+
+            if stat_mod.S_ISLNK(lst.st_mode):
+                return "SYMLINK_REFUSED"
+        except OSError:
+            return "GUEST_LOCK_BUSY"
+    return None
+
+
+def passive_state_lock_readback(
+    state_lock_path: Path,
+    state_path: Path,
+    runs_root: Path,
+) -> str | None:
+    """Non-blocking shared flock on state.lock, then fail-closed controller read."""
+    if state_lock_path.is_symlink() or state_path.is_symlink():
+        return "SYMLINK_REFUSED"
+    if not state_lock_path.is_file():
+        return "STATE_LOCK_UNAVAILABLE"
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd: int | None = None
+    try:
+        import fcntl
+        import stat as stat_mod
+
+        fd = os.open(str(state_lock_path), flags)
+        st = os.fstat(fd)
+        if not stat_mod.S_ISREG(st.st_mode):
+            return "STATE_LOCK_UNAVAILABLE"
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return "STATE_LOCK_BUSY"
+        return read_controller_runtime_state(state_path, runs_root)
+    except OSError:
+        return "STATE_LOCK_UNAVAILABLE"
+    finally:
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+
 def run_once_local(ctx: RunContext) -> dict[str, Any]:
     """Execute one bounded guest when hooks provide a live host; never writes controller state."""
+    if not _execution_permitted(ctx):
+        return _report(
+            reason="RUNTIME_NO_START",
+            runtime_status="DRAFT_HOLD",
+            physical_guest_executed=False,
+        )
     pre = ctx.preflight_observation
     if pre is None:
         collected = collect_preflight(ctx)
@@ -704,11 +912,17 @@ def run_once_local(ctx: RunContext) -> dict[str, Any]:
         return _report(reason="TOOLING_UNAVAILABLE")
     if ctx.qemu_factory is None:
         return _report(reason="EXECUTOR_PORT_NOT_LIVE")
-    try:
-        if ctx.guest_lock_path.exists() and ctx.guest_lock_path.is_symlink():
-            return _report(reason="SYMLINK_REFUSED")
-    except OSError:
-        return _report(reason="GUEST_LOCK_BUSY")
+    if PHYSICAL_EXECUTION_ENABLED:
+        lock_problem = validate_guest_lock_path(ctx.guest_lock_path, expected_uid=ctx.hooks.uid())
+    else:
+        lock_problem = None
+        try:
+            if ctx.guest_lock_path.is_symlink():
+                lock_problem = "SYMLINK_REFUSED"
+        except OSError:
+            lock_problem = "GUEST_LOCK_BUSY"
+    if lock_problem:
+        return _report(reason=lock_problem)
 
     lock_cm = ctx.hooks.acquire_guest_lock or _noop_lock
     try:
@@ -758,7 +972,13 @@ def run_once_local(ctx: RunContext) -> dict[str, Any]:
                 again = ctx.hooks.recheck_under_guest_lock(ctx)
                 if again:
                     return _report(reason=again, evidence_retained=True)
-            elif (again := read_controller_runtime_state(ctx.state_path, ctx.runs_root)):
+            elif PHYSICAL_EXECUTION_ENABLED:
+                again = passive_state_lock_readback(
+                    ctx.state_lock_path, ctx.state_path, ctx.runs_root
+                )
+            else:
+                again = read_controller_runtime_state(ctx.state_path, ctx.runs_root)
+            if again:
                 return _report(reason=again, evidence_retained=True)
             if ctx.hooks.prepare_guest_artifacts is not None:
                 prep_error = ctx.hooks.prepare_guest_artifacts(
@@ -829,19 +1049,17 @@ def run_once_local(ctx: RunContext) -> dict[str, Any]:
                     physical_guest_executed=True,
                 )
 
-            serial_text = ""
-            try:
-                serial_text = serial_path.read_text(encoding="utf-8", errors="replace")[:65536]
-            except OSError:
+            serial_text = read_serial_tail_text(serial_path)
+            if serial_text is None:
                 return _report(
                     reason="SERIAL_UNAVAILABLE",
                     evidence_retained=not cleanup_work_root(evidence_path),
                     physical_guest_executed=True,
                 )
-
-            if not parse_success_line(serial_text, nonce):
+            marker_problem = assess_serial_success(serial_text, nonce)
+            if marker_problem:
                 return _report(
-                    reason="SUCCESS_MARKER_MISSING",
+                    reason=marker_problem,
                     evidence_retained=not cleanup_work_root(evidence_path),
                     physical_guest_executed=True,
                 )
@@ -914,7 +1132,13 @@ def cleanup_work_root(path: Path) -> bool:
 
 
 def wire_linux_executor(ctx: RunContext) -> None:
-    """Bind live subprocess helpers on Linux only; author task does not invoke main."""
+    """Bind live subprocess helpers on Linux only when physical execution is admitted."""
+    if not PHYSICAL_EXECUTION_ENABLED:
+        ctx.tools_present = False
+        ctx.qemu_factory = None
+        ctx.hooks.prepare_guest_artifacts = None
+        ctx.hooks.acquire_guest_lock = None
+        return
     import shutil
     import subprocess
 
@@ -966,25 +1190,38 @@ def wire_linux_executor(ctx: RunContext) -> None:
     @contextlib.contextmanager
     def _guest_lock(path: Path) -> Iterator[None]:
         import fcntl
+        import stat as stat_mod
 
-        path.parent.mkdir(parents=True, exist_ok=True)
-        handle = path.open("a+")
+        problem = validate_guest_lock_path(path, expected_uid=ctx.hooks.uid())
+        if problem:
+            raise GuestLockBusy(problem)
+        if not path.parent.is_dir():
+            raise GuestLockBusy
+        flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(str(path), flags, 0o600)
         try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            handle.close()
+            st = os.fstat(fd)
+            if not stat_mod.S_ISREG(st.st_mode):
+                raise GuestLockBusy
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError) as exc:
+            os.close(fd)
             raise GuestLockBusy from exc
         try:
             yield
         finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
-            handle.close()
+            with contextlib.suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
 
     class _OwnedPopen:
         def __init__(self, popen: subprocess.Popen[bytes]) -> None:
             self._popen = popen
             self.pid = popen.pid or -1
-            self.starttime = _read_proc_field(self.pid, "starttime:") or -1
+            ident = read_proc_stat_identity(self.pid, expected_uid=os.getuid())
+            self.starttime = ident[1] if ident else -1
 
         def poll(self) -> int | None:
             return self._popen.poll()
