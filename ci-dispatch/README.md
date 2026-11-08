@@ -86,6 +86,20 @@ development checkout. Development tests and publication tooling are preparation
 operations. Runtime requires PowerShell 7.5+ (`ConvertFrom-Json -DateKind String`),
 existing `gh` authentication and the accepted Hyper-V controller prerequisites.
 
+The **normal-user** CI-JIT fixed-operation client at
+`host-agent/deploy/Invoke-CiJitLocalTaskClient.ps1` must also be launched
+with `pwsh` (PowerShell Core 7+). **The separate protected dispatcher
+requires PowerShell 7.5+** for its accepted `ConvertFrom-Json -DateKind`
+contract; successful use of the normal-user client on 7.0–7.4 must never be
+mistaken for dispatcher runtime acceptance. Windows PowerShell 5.1 /
+`powershell.exe` is **not** a supported client runtime. Its older .NET Framework lacks the three-argument
+no-overwrite `File.Move` method used to publish one bounded request slot.
+The client must reject that shell with `LOCAL_CLIENT_PWSH7_REQUIRED` **before**
+writing a slot or starting a task. This runtime check does not resolve stale
+queue state, worker/lock uncertainty, or a separate protected task failure.
+Only the reviewed, published protected task may select/run eligible CI jobs;
+source changes to this client do not authorize deploying it or bypassing #10/#92.
+
 ## Locks, capacity and recovery
 
 A separate exclusive dispatcher file lock serializes pollers. The accepted
