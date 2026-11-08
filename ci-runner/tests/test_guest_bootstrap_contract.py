@@ -14,7 +14,7 @@ class GuestBootstrapContract(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.script = BOOTSTRAP.read_text(encoding="utf-8")
-        begin = cls.script.index("if curl ")
+        begin = cls.script.index("if timeout ")
         end = cls.script.index("; then", begin)
         cls.fetch = cls.script[begin:end].replace("\\\n", " ")
 
@@ -23,7 +23,8 @@ class GuestBootstrapContract(unittest.TestCase):
         for flag in (
             "--proto '=https'", "--tlsv1.2", "--fail", "--location",
             "--connect-timeout 30", "--max-time 300",
-            "--retry 2", "--retry-delay 2", "--retry-max-time 420",
+            "--retry 2", "--retry-delay 2", "--retry-max-time 410",
+            "--proto-redir '=https'", "timeout --signal=TERM --kill-after=5s 420s",
         ):
             with self.subTest(flag=flag):
                 self.assertIn(flag, self.fetch)
@@ -37,16 +38,17 @@ class GuestBootstrapContract(unittest.TestCase):
         s = self.script
         self.assertIn(PINNED_SHA256, s)
         self.assertIn("sha256sum --check --strict", s)
-        fetch_idx = s.index("if curl ")
+        fetch_idx = s.index("if timeout ")
         hash_idx = s.index("sha256sum --check --strict")
         unpack_idx = s.index('tar -xzf "$archive" -C /opt/actions-runner')
         self.assertLess(fetch_idx, hash_idx)
         self.assertLess(hash_idx, unpack_idx)
-        self.assertEqual(s.count("if curl "), 1)
+        self.assertEqual(s.count("if timeout "), 1)
+        self.assertEqual(s.count("  curl --proto "), 1)
 
     def test_exhausted_fetch_still_fails_closed_and_scrubs_jit(self):
         s = self.script
-        begin = s.index("if curl ")
+        begin = s.index("if timeout ")
         end = s.index("printf '%s  %s", begin)
         failure = s[begin:end]
         for classification in (
