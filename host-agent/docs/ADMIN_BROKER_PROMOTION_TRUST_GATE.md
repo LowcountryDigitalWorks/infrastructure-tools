@@ -1,8 +1,8 @@
 # Admin Broker reviewed-operation promotion: trust-root decision gate
 
-**Status:** DRAFT architecture candidate; **NO PROMOTION AUTHORITY**.  
-**Owner:** [infrastructure-tools #186](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/186), with [#52](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/52), [#176](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/176), [#139](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/139), and [#185](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/185).  
-**Purpose:** isolate the smallest independently reviewable trust decision before writing any privileged `DRAGONFLY_V2_PUBLISH_REVIEWED` operation or protected promotion code.  
+**Status:** DRAFT architecture candidate; **NO PROMOTION AUTHORITY**.
+**Owner:** [infrastructure-tools #186](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/186), with [#52](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/52), [#176](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/176), [#139](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/139), and [#185](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/185).
+**Purpose:** isolate the smallest independently reviewable trust decision before writing any privileged `DRAGONFLY_V2_PUBLISH_REVIEWED` operation or protected promotion code.
 **Cash/data boundary:** $0 incremental; no new secret, owner credential, customer data, system mutation, or provider write in this document.
 
 ## Current evidence and non-authority
