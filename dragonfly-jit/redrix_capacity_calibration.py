@@ -262,21 +262,24 @@ def classify(
     report["accepted_memory_floor_met_all_samples"] = min(available) >= guest + reserve
     report["research_only_floor_met_all_samples"] = min(available) >= guest + RESEARCH_RESERVE_MIB
     oom_pairs = [o for _, _, o, _ in samples]
-    if any(o is None for o in oom_pairs):
+    # Validate all present values BEFORE treating any missing sample as
+    # unavailable. A malformed counter must never be masked by a None peer.
+    present_oom = [o for o in oom_pairs if o is not None]
+    valid = all(
+        isinstance(o, tuple)
+        and len(o) == 2
+        and all(type(value) is int and 0 <= value <= 2**53 for value in o)
+        for o in present_oom
+    )
+    if not valid:
+        report["reason"] = "OOM_COUNTER_INVALID"
+        report["oom_event_delta"] = "UNVERIFIED"
+        return report
+    if len(present_oom) != len(oom_pairs):
         report["oom_event_delta"] = "UNAVAILABLE"
     else:
-        # The observer must never turn a counter reset, malformed sample, or
-        # intermediate decline into an apparently reassuring zero-OOM delta.
-        valid = all(
-            isinstance(o, tuple)
-            and len(o) == 2
-            and all(type(value) is int and 0 <= value <= 2**53 for value in o)
-            for o in oom_pairs
-        )
-        if not valid:
-            report["reason"] = "OOM_COUNTER_INVALID"
-            report["oom_event_delta"] = "UNVERIFIED"
-            return report
+        # The observer must never turn an intermediate counter reset into a
+        # reassuring zero-OOM delta, even if the endpoints agree.
         if any(
             current[0] < prior[0] or current[1] < prior[1]
             for prior, current in zip(oom_pairs, oom_pairs[1:])
