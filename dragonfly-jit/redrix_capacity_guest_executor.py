@@ -56,13 +56,6 @@ RUN_ONCE_FLAG = "--run-once-local"
 PHYSICAL_EXECUTION_ENABLED = False
 
 
-def _execution_permitted(ctx: "RunContext") -> bool:
-    """Physical path requires flag; unit tests may set RunContext.synthetic_test_admission only."""
-    if PHYSICAL_EXECUTION_ENABLED:
-        return True
-    return bool(ctx.synthetic_test_admission)
-
-
 class GuestLockBusy(Exception):
     """Non-blocking guest.lock acquisition failed."""
 
@@ -529,8 +522,6 @@ class RunContext:
     tools_present: bool = True
     sample_count: int = MIN_SAMPLES
     preflight_observation: PreflightObservation | None = None
-    # True only in deterministic unit tests; never set from CLI or wire_linux_executor.
-    synthetic_test_admission: bool = False
 
 
 def _read_mem_mib(path: Path) -> int | None:
@@ -892,13 +883,21 @@ def passive_state_lock_readback(
 
 
 def run_once_local(ctx: RunContext) -> dict[str, Any]:
-    """Execute one bounded guest when hooks provide a live host; never writes controller state."""
-    if not _execution_permitted(ctx):
+    """Public entry; refuses unless PHYSICAL_EXECUTION_ENABLED (no alternate admission)."""
+    if not PHYSICAL_EXECUTION_ENABLED:
         return _report(
             reason="RUNTIME_NO_START",
             runtime_status="DRAFT_HOLD",
             physical_guest_executed=False,
         )
+    return _run_once_local_impl(ctx)
+
+
+def _run_once_local_impl(ctx: RunContext) -> dict[str, Any]:
+    """Internal workload body for enabled physical path and deterministic unit tests only.
+
+    Tests must inject FakeProcess hooks only and must not call wire_linux_executor or live subprocess.
+    """
     pre = ctx.preflight_observation
     if pre is None:
         collected = collect_preflight(ctx)

@@ -8,7 +8,7 @@ This module implements a **fixed one-shot** offline nested-KVM experiment for re
 
 - Only `python3 redrix_capacity_guest_executor.py --run-once-local` is accepted; any other argv is refused.
 - **DRAFT `RUNTIME_NO_START`:** physical execution is **disabled** in source (`PHYSICAL_EXECUTION_ENABLED = false`) until independent H0/M0 security review and Product ORCH admission flip that flag in a separate reviewed change.
-- `run_once_local()` and `wire_linux_executor()` are guarded: imports cannot launch QEMU while the flag is false unless tests set `RunContext.synthetic_test_admission` (not exposed to CLI).
+- `run_once_local()` returns `RUNTIME_NO_START` while the flag is false; there is no alternate runtime admission via imports, environment, or context fields. Unit tests exercise `_run_once_local_impl()` with injected fakes only.
 - When enabled in a future reviewed release: Linux UID 1000 only; acquires the **existing** controller `guest.lock` (O_NOFOLLOW where supported, no parent mkdir on the physical path) without writing `status.json` or controller `runs/`.
 - Serial success proof uses a **bounded tail read** (256 KiB) with duplicate/forged marker rejection; RSS/dirty-memory and PSI/OOM caveats remain **research / not production admission**.
 - Author tasks must **not** invoke the CLI on physical REDRIX while `RUNTIME_NO_START` is in effect.

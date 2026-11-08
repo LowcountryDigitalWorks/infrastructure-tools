@@ -152,7 +152,6 @@ def make_ctx(
         runs_root=tmp / "runs",
         qemu_factory=_factory,
         preflight_observation=preflight or clean_preflight(),
-        synthetic_test_admission=True,
     )
 
 
@@ -269,22 +268,23 @@ class GuestExecutorTests(unittest.TestCase):
         conflict = good + forged
         self.assertEqual(exe.assess_serial_success(conflict, nonce), "SERIAL_MARKER_CONFLICT")
 
-    def test_run_once_local_blocked_without_test_admission(self):
+    def test_import_bypass_rejected_no_alternate_admission(self):
         with tempfile.TemporaryDirectory() as root:
             tmp = Path(root)
             nonce = "e" * 32
             serial = tmp / "serial.log"
             proc = FakeProcess(serial_path=serial, nonce=nonce, rss=900_000)
             ctx = make_ctx(tmp, process=proc)
-            ctx.synthetic_test_admission = False
+            ctx.synthetic_test_admission = True  # type: ignore[attr-defined]
 
             def _boom(_argv):
-                raise AssertionError("qemu_factory must not run when disabled")
+                raise AssertionError("qemu_factory must not run when physical path disabled")
 
             ctx.qemu_factory = _boom
             report = exe.run_once_local(ctx)
             self.assertEqual(report["reason"], "RUNTIME_NO_START")
             self.assertFalse(report["physical_guest_executed"])
+            self.assertFalse(list(tmp.glob("**/guest.qcow2")))
 
     def test_wire_linux_executor_does_not_bind_live_port(self):
         ctx = exe.RunContext(
@@ -377,7 +377,7 @@ class GuestExecutorTests(unittest.TestCase):
             (tmp / "seed.img").touch()
             (tmp / "user-data").touch()
             with mock.patch.object(exe.secrets, "token_hex", return_value=nonce):
-                report = exe.run_once_local(ctx)
+                report = exe._run_once_local_impl(ctx)
             self.assertEqual(report["classification"], "LOCAL_SYNTHETIC_MEASURED_NOT_AUTHORIZED")
             self.assertTrue(report["physical_guest_executed"])
             self.assert_never_admits(report)
@@ -398,7 +398,7 @@ class GuestExecutorTests(unittest.TestCase):
             (tmp / "guest.qcow2").touch()
             (tmp / "seed.img").touch()
             with mock.patch.object(exe.secrets, "token_hex", return_value=nonce):
-                report = exe.run_once_local(ctx)
+                report = exe._run_once_local_impl(ctx)
             self.assertEqual(report["reason"], "SERIAL_MARKER_CONFLICT")
 
     def test_rss_insufficient_hold(self):
@@ -412,19 +412,19 @@ class GuestExecutorTests(unittest.TestCase):
             (tmp / "seed.img").touch()
             (tmp / "user-data").touch()
             with mock.patch.object(exe.secrets, "token_hex", return_value=nonce):
-                report = exe.run_once_local(ctx)
+                report = exe._run_once_local_impl(ctx)
             self.assertEqual(report["reason"], "QEMU_RSS_INSUFFICIENT")
 
     def test_guest_lock_busy(self):
         with tempfile.TemporaryDirectory() as root:
             ctx = make_ctx(Path(root), lock_busy=True)
-            self.assertEqual(exe.run_once_local(ctx)["reason"], "GUEST_LOCK_BUSY")
+            self.assertEqual(exe._run_once_local_impl(ctx)["reason"], "GUEST_LOCK_BUSY")
 
     def test_executor_port_missing_without_factory(self):
         with tempfile.TemporaryDirectory() as root:
             ctx = make_ctx(Path(root))
             ctx.qemu_factory = None
-            self.assertEqual(exe.run_once_local(ctx)["reason"], "EXECUTOR_PORT_NOT_LIVE")
+            self.assertEqual(exe._run_once_local_impl(ctx)["reason"], "EXECUTOR_PORT_NOT_LIVE")
 
     def test_controller_state_unavailable_on_missing(self):
         with tempfile.TemporaryDirectory() as root:
