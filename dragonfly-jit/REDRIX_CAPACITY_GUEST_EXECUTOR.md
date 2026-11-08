@@ -1,0 +1,21 @@
+# REDRIX offline guest capacity executor
+
+Status: **SOURCE-ONLY DRAFT**. Distinct from `redrix_capacity_guest_benchmark.py` (non-executing decision table, PR257) and from the protected `dragonfly_jit.py` controller (2048 MiB guest + **8192 MiB** reserve unchanged).
+
+This module implements a **fixed one-shot** offline nested-KVM experiment for research **2+6** floor (8192 MiB) only. It never sets `jit_admission_authorized`, `provider_admission_authorized`, or `production_policy_changed`. ChromeOS host headroom is **UNVERIFIED**.
+
+## Invocation
+
+- Only `python3 redrix_capacity_guest_executor.py --run-once-local` is accepted; any other argv is refused.
+- Linux UID 1000 only; acquires the **existing** controller `guest.lock` without writing `status.json` or controller `runs/`.
+- Author tasks must **not** invoke the CLI on physical REDRIX; ORCH runs one admitted local test after independent review.
+
+## Guest profile
+
+2 vCPU, 2048 MiB RAM, `-nic none`, NoCloud seed, network disabled in cloud-config, serial log to a private 0700 temp dir, 210s wall bound, nonce-bound success line on serial (`LDW_REDRIX_GUEST_EXEC_OK nonce=<hex>`).
+
+OOM counters are read from the **process leaf cgroup** `memory.events` (not root cgroup when absent). Balloon vmstat must be adjacent-stable; PSI avg10 steady across 3–6 preflight samples.
+
+## Rollback
+
+Delete only owned temp artifacts. Never lower the protected 8192 MiB reserve or edit pinned controller blobs. Do not change ChromeOS VM settings without host proof.
