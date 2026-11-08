@@ -109,7 +109,7 @@ These slices are not authorized by this pull request.
 
 ## Non-authorization
 
-This pull request performs no mutation. It does not authorize Recover, Cleanup, Cancel, Once, runner deregistration, disk removal, or a second controller. The original exception remains `UNKNOWN_PRIMARY`. Controller locks and the live provider assignment remain unverified. The observed offline nonbusy registration does not change row 0: it stays `HOLD_PRESERVE_JOB` because the deployed cleanup path would cancel a still-valid queued job.
+This pull request performs no mutation. It does not authorize Recover, Cleanup, Cancel, Once, runner deregistration, disk removal, or a second controller. The original exception remains `UNKNOWN_PRIMARY`. Controller locks and the live provider assignment remain unverified. At the **historical queued-phase row-0 observation**, the offline nonbusy registration did not change the `HOLD_PRESERVE_JOB` result because the deployed cleanup path could cancel that then-valid job. **This is not a present-tense provider-status assertion.** The later **November 8, 2026, 4:23 PM ET** addendum supersedes that particular job-status snapshot: the original job is `completed/cancelled` with preserved local residue (`HOLD_OWNED_RESIDUE`), while the new current-head job is separately queued (`HOLD_PRESERVE_CURRENT_JOB`). Both remain **no-mutation HOLD**; neither permits cleanup, cancellation, deregistration, or a second `Once`.
 
 
 ## Proposed independent policy reconciliation for PR #267 (NOT acceptance)
