@@ -5,12 +5,18 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 from pathlib import Path
+import re
 import time
 
 MARKER = "LDW_REDRIX_CAPACITY_CALIBRATION"
 RESEARCH_RESERVE_MIB = 6144
 MIN_SAMPLES, MAX_SAMPLES = 3, 6
+VIRTIO_BALLOON_DRIVER = Path("/sys/bus/virtio/drivers/virtio_balloon")
+_VIRTIO_DEVICE_RE = re.compile(r"^virtio\d+$")
+_MAX_DRIVER_ENTRIES = 32
+_MAX_VMSTAT_PAGE_COUNT = 2**53
 
 
 def controller_memory_contract(path: Path) -> tuple[int, int] | None:
@@ -47,7 +53,7 @@ def read_available_mib(path: Path = Path("/proc/meminfo")) -> int | None:
         return None
 
 
-def read_pressure_avg10(path: Path = Path("/sys/fs/cgroup/memory.pressure")) -> tuple[float, float] | None:
+def read_pressure_avg10(path: Path) -> tuple[float, float] | None:
     try:
         found = {}
         for line in path.read_text(encoding="ascii").splitlines():
@@ -66,7 +72,20 @@ def read_pressure_avg10(path: Path = Path("/sys/fs/cgroup/memory.pressure")) -> 
         return None
 
 
+def read_memory_pressure_avg10(
+    cgroup_path: Path = Path("/sys/fs/cgroup/memory.pressure"),
+    proc_psi_path: Path = Path("/proc/pressure/memory"),
+) -> tuple[float, float] | None:
+    """Prefer cgroup PSI; fall back to /proc/pressure/memory when bounded and readable."""
+    cgroup = read_pressure_avg10(cgroup_path)
+    if cgroup is not None:
+        return cgroup
+    return read_pressure_avg10(proc_psi_path)
+
+
 def read_oom_events(path: Path = Path("/sys/fs/cgroup/memory.events")) -> tuple[int, int] | None:
+    if not path.is_file():
+        return None
     try:
         values = {}
         for line in path.read_text(encoding="ascii").splitlines():
@@ -83,8 +102,128 @@ def read_oom_events(path: Path = Path("/sys/fs/cgroup/memory.events")) -> tuple[
         return None
 
 
-def classify(samples: list[tuple[int | None, tuple[float, float] | None, tuple[int, int] | None]],
-             contract: tuple[int, int] | None) -> dict:
+def _balloon_driver_path_allowed(driver_dir: Path) -> bool:
+    """Production uses only the fixed driver sysfs path; tests may inject fixture roots."""
+    if driver_dir == VIRTIO_BALLOON_DRIVER:
+        return True
+    normalized = str(driver_dir).replace("\\", "/")
+    if normalized.startswith("/sys/"):
+        try:
+            return driver_dir.resolve() == VIRTIO_BALLOON_DRIVER.resolve()
+        except OSError:
+            return False
+    return True
+
+
+def _symlink_resolves_to_directory(entry: Path, *, max_hops: int = 8) -> bool:
+    """Walk virtio sysfs-style symlinks; reject cycles and non-directory targets."""
+    current = entry
+    seen: set[Path] = set()
+    for _ in range(max_hops):
+        if current in seen:
+            return False
+        seen.add(current)
+        try:
+            if current.is_dir() and not current.is_symlink():
+                return True
+            if not current.is_symlink():
+                return False
+            link = os.readlink(current)
+            nxt = Path(link) if Path(link).is_absolute() else current.parent / link
+            current = nxt
+        except OSError:
+            return False
+    return False
+
+
+def _virtio_balloon_binding_present(entry: Path, driver_dir: Path) -> bool:
+    """Kernel driver bindings are symlinks to device directories; accept both forms."""
+    if not _VIRTIO_DEVICE_RE.fullmatch(entry.name):
+        return False
+    try:
+        if entry.is_symlink():
+            return _symlink_resolves_to_directory(entry)
+        return entry.is_dir()
+    except OSError:
+        return False
+
+
+def observe_virtio_balloon_sysfs(driver_dir: Path = VIRTIO_BALLOON_DRIVER) -> str:
+    """Presence via bounded driver-dir scan; does not read balloon size or host spare memory."""
+    if not _balloon_driver_path_allowed(driver_dir):
+        return "UNVERIFIED"
+    try:
+        if not driver_dir.is_dir():
+            return "UNVERIFIED"
+        entries = list(driver_dir.iterdir())
+    except OSError:
+        return "UNVERIFIED"
+    if len(entries) > _MAX_DRIVER_ENTRIES:
+        entries = entries[:_MAX_DRIVER_ENTRIES]
+    for entry in entries:
+        if _virtio_balloon_binding_present(entry, driver_dir):
+            return "PRESENT"
+    return "UNVERIFIED"
+
+
+def read_balloon_vmstat_pages(vmstat_path: Path = Path("/proc/vmstat")) -> tuple[int, int] | None:
+    """Cumulative balloon_inflate/deflate page counts from vmstat (4 KiB pages each)."""
+    try:
+        found: dict[str, int] = {}
+        for line in vmstat_path.read_text(encoding="ascii").splitlines():
+            parts = line.split()
+            if len(parts) != 2 or parts[0] not in ("balloon_inflate", "balloon_deflate"):
+                continue
+            value = int(parts[1])
+            if value < 0 or value > _MAX_VMSTAT_PAGE_COUNT:
+                return None
+            key = parts[0]
+            if key in found:
+                return None
+            found[key] = value
+        if set(found) != {"balloon_inflate", "balloon_deflate"}:
+            return None
+        return found["balloon_inflate"], found["balloon_deflate"]
+    except (OSError, UnicodeError, ValueError):
+        return None
+
+
+def _balloon_deltas(samples: list[tuple[int, int] | None]) -> dict[str, object]:
+    """Indicative guest VM activity only; not current balloon size or ChromeOS headroom."""
+    present = [s for s in samples if s is not None]
+    if not present:
+        return {"balloon_vmstat": "UNVERIFIED", "balloon_indicative_note": "counters absent"}
+    if len(present) != len(samples):
+        return {"balloon_vmstat": "UNVERIFIED", "balloon_indicative_note": "partial samples"}
+    for pair in present:
+        if pair[0] > _MAX_VMSTAT_PAGE_COUNT or pair[1] > _MAX_VMSTAT_PAGE_COUNT:
+            return {"balloon_vmstat": "HOLD", "balloon_indicative_note": "counter overflow"}
+    for idx in range(1, len(present)):
+        prev, cur = present[idx - 1], present[idx]
+        if cur[0] < prev[0] or cur[1] < prev[1]:
+            return {"balloon_vmstat": "HOLD", "balloon_indicative_note": "nonmonotonic cumulative counters"}
+    first, last = present[0], present[-1]
+    return {
+        "balloon_vmstat": "MEASURED_INDICATIVE",
+        "balloon_inflate_pages_delta": max(0, last[0] - first[0]),
+        "balloon_deflate_pages_delta": max(0, last[1] - first[1]),
+        "balloon_indicative_note": "cumulative vmstat only; not current balloon or host spare",
+    }
+
+
+def classify(
+    samples: list[
+        tuple[
+            int | None,
+            tuple[float, float] | None,
+            tuple[int, int] | None,
+            tuple[int, int] | None,
+        ]
+    ],
+    contract: tuple[int, int] | None,
+    *,
+    virtio_balloon_sysfs: str = "UNVERIFIED",
+) -> dict:
     """One bounded, sanitized diagnostic response; never permits execution."""
     report = {
         "schema": 1,
@@ -97,7 +236,10 @@ def classify(samples: list[tuple[int | None, tuple[float, float] | None, tuple[i
         "chromeos_host_corroboration": "UNVERIFIED",
         "guest_memory_peak": "UNMEASURED",
         "candidate_is_policy": False,
+        "virtio_balloon_sysfs": virtio_balloon_sysfs,
     }
+    balloon_samples = [s[3] for s in samples]
+    report.update(_balloon_deltas(balloon_samples))
     if contract is None or not MIN_SAMPLES <= len(samples) <= MAX_SAMPLES:
         report["reason"] = "INPUT_OR_CONTRACT_UNAVAILABLE"
         return report
@@ -109,18 +251,19 @@ def classify(samples: list[tuple[int | None, tuple[float, float] | None, tuple[i
         "floor_mib": guest + RESEARCH_RESERVE_MIB,
         "approved": False,
     }
-    if any(a is None or p is None for a, p, _ in samples):
+    if any(a is None or p is None for a, p, _, _ in samples):
         report["reason"] = "MEMORY_OR_PRESSURE_UNAVAILABLE"
         return report
-    available = [a for a, _, _ in samples if a is not None]
-    pressures = [p for _, p, _ in samples if p is not None]
+    available = [a for a, _, _, _ in samples if a is not None]
+    pressures = [p for _, p, _, _ in samples if p is not None]
     report["minimum_memavailable_mib"] = min(available)
     report["maximum_psi_some_avg10_pct"] = max(p[0] for p in pressures)
     report["maximum_psi_full_avg10_pct"] = max(p[1] for p in pressures)
     report["accepted_memory_floor_met_all_samples"] = min(available) >= guest + reserve
     report["research_only_floor_met_all_samples"] = min(available) >= guest + RESEARCH_RESERVE_MIB
-    if samples[0][2] is not None and samples[-1][2] is not None:
-        first, last = samples[0][2], samples[-1][2]
+    oom_pairs = [o for _, _, o, _ in samples]
+    if all(o is not None for o in oom_pairs):
+        first, last = oom_pairs[0], oom_pairs[-1]
         report["observed_oom_delta"] = max(0, last[0] - first[0])
         report["observed_oom_kill_delta"] = max(0, last[1] - first[1])
     else:
@@ -138,12 +281,20 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("samples must be 3..6 and interval 0..5")
     try:
         contract = controller_memory_contract(Path(__file__).with_name("dragonfly_jit.py"))
+        balloon_sysfs = observe_virtio_balloon_sysfs()
         samples = []
         for n in range(args.samples):
-            samples.append((read_available_mib(), read_pressure_avg10(), read_oom_events()))
+            samples.append(
+                (
+                    read_available_mib(),
+                    read_memory_pressure_avg10(),
+                    read_oom_events(),
+                    read_balloon_vmstat_pages(),
+                )
+            )
             if n + 1 < args.samples:
                 time.sleep(args.interval_seconds)
-        report = classify(samples, contract)
+        report = classify(samples, contract, virtio_balloon_sysfs=balloon_sysfs)
     except (Exception, KeyboardInterrupt):
         report = classify([], None)
         report["reason"] = "SAMPLING_FAILED"
