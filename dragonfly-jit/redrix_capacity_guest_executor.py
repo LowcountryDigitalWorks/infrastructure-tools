@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import ast
 import contextlib
+import errno
 import hashlib
 import json
 import math
@@ -38,6 +39,8 @@ TIMEOUT_SECONDS = 210
 MIN_SAMPLES, MAX_SAMPLES = 3, 6
 SAMPLE_INTERVAL = 1.0
 MIN_FREE_DISK_GIB = 16
+MAX_CENSUS_PIDS = 4096
+_QEMU_BASENAMES = frozenset({"qemu-kvm", "kvm"})
 MAX_LOAD_FRACTION = 0.70
 # Research hypothesis only; physical load proof requires independent corroboration.
 MIN_QEMU_RSS_RESEARCH_KIB = 768 * 1024
@@ -513,6 +516,7 @@ class RunContext:
     state_path: Path
     runs_root: Path
     kvm_path: Path = Path("/dev/kvm")
+    proc_root: Path = Path("/proc")
     meminfo_path: Path = Path("/proc/meminfo")
     psi_cgroup: Path = Path("/sys/fs/cgroup/memory.pressure")
     psi_proc: Path = Path("/proc/pressure/memory")
@@ -556,9 +560,110 @@ def _read_psi(path_a: Path, path_b: Path) -> tuple[float, float] | None:
     return None
 
 
+def _qemu_basename(token: str) -> bool:
+    name = token.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    return bool(name) and (name in _QEMU_BASENAMES or name.startswith("qemu-system"))
+
+
+def census_qemu(proc_root: Path) -> str | bool:
+    """Return True when QEMU is visible. False only if every numeric pid was classified.
+
+    An empty listing, a symlink, an unreadable pid, or a scan above the cap is
+    QEMU_CENSUS_UNAVAILABLE. Absence of a QEMU name is not a clean host.
+    This is not a privileged A4 census and does not authorize provider JIT.
+    """
+    try:
+        if proc_root.is_symlink() or not proc_root.is_dir():
+            return "QEMU_CENSUS_UNAVAILABLE"
+        names = os.listdir(proc_root)
+    except OSError:
+        return "QEMU_CENSUS_UNAVAILABLE"
+    pids = [name for name in names if name.isascii() and name.isdecimal() and not name.startswith("0")]
+    if not pids or len(pids) > MAX_CENSUS_PIDS:
+        return "QEMU_CENSUS_UNAVAILABLE"
+    present = False
+    for name in pids:
+        pid_dir = proc_root / name
+        try:
+            if pid_dir.is_symlink() or not pid_dir.is_dir():
+                return "QEMU_CENSUS_UNAVAILABLE"
+            comm = (pid_dir / "comm").read_text(encoding="ascii").strip()
+            status = (pid_dir / "status").read_text(encoding="ascii")
+            if not comm or "Uid:" not in status:
+                return "QEMU_CENSUS_UNAVAILABLE"
+            try:
+                exe_target = os.readlink(pid_dir / "exe")
+            except OSError as exc:
+                if getattr(exc, "errno", None) != errno.ENOENT:
+                    return "QEMU_CENSUS_UNAVAILABLE"
+                exe_target = ""
+            cmdline = (pid_dir / "cmdline").read_bytes()
+        except (OSError, UnicodeError):
+            return "QEMU_CENSUS_UNAVAILABLE"
+        tokens = [comm, exe_target]
+        for part in cmdline.split(b"\x00"):
+            if not part:
+                continue
+            try:
+                tokens.append(part.decode("ascii"))
+            except UnicodeError:
+                return "QEMU_CENSUS_UNAVAILABLE"
+        if any(_qemu_basename(token) for token in tokens):
+            present = True
+    return present
+
+
+def guest_lock_busy(lock_path: Path) -> bool | None:
+    """True when the exact lock is held. False only if it is absent or a non-blocking lock succeeds."""
+    try:
+        if lock_path.is_symlink():
+            return None
+        if not lock_path.exists():
+            return False
+    except OSError:
+        return None
+    try:
+        import fcntl
+    except ImportError:
+        return None
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd: int | None = None
+    try:
+        fd = os.open(str(lock_path), flags)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    except BlockingIOError:
+        return True
+    except OSError:
+        return None
+    finally:
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+
+def count_controller_residue(runs_root: Path) -> int | None:
+    try:
+        if not runs_root.exists():
+            return 0
+        if runs_root.is_symlink() or not runs_root.is_dir():
+            return None
+        return sum(1 for _ in runs_root.iterdir())
+    except OSError:
+        return None
+
+
 def collect_preflight(ctx: RunContext) -> PreflightObservation | dict[str, Any]:
     if ctx.extra_argv:
         return _report(reason="ARGV_OR_PATH_REFUSED")
+    census = census_qemu(ctx.proc_root)
+    if census == "QEMU_CENSUS_UNAVAILABLE":
+        return _report(reason="QEMU_CENSUS_UNAVAILABLE")
+    if census is True:
+        return _report(reason="QEMU_ALREADY_PRESENT")
     identity = read_controller_identity(ctx.controller_path)
     if identity is None:
         return _report(reason="CONTROLLER_CONTRACT_MISMATCH")
@@ -615,8 +720,12 @@ def collect_preflight(ctx: RunContext) -> PreflightObservation | dict[str, Any]:
         controller_state = str(state["state"])
     except (OSError, json.JSONDecodeError, KeyError, TypeError):
         return _report(reason="CONTROLLER_STATE_UNAVAILABLE")
-    qemu_present = False
-    residue = 0
+    residue = count_controller_residue(ctx.runs_root)
+    if residue is None:
+        return _report(reason="CONTROLLER_RUNS_RESIDUE")
+    lock_state = guest_lock_busy(ctx.guest_lock_path)
+    if lock_state is None:
+        return _report(reason="GUEST_LOCK_BUSY")
     load = _finite_load(0.0)
     free_disk = MIN_FREE_DISK_GIB
     try:
@@ -641,9 +750,9 @@ def collect_preflight(ctx: RunContext) -> PreflightObservation | dict[str, Any]:
         load_fraction=load,
         free_disk_gib=int(free_disk),
         kvm_rw=kvm_rw,
-        qemu_present=qemu_present,
+        qemu_present=False,
         controller_state=controller_state,
-        lock_busy=False,
+        lock_busy=lock_state,
         residue_runs=residue,
         symlink_refused=False,
         controller_blob=identity["blob"],
