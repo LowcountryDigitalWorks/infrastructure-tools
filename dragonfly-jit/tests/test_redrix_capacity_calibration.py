@@ -227,6 +227,88 @@ class CalibrationTest(unittest.TestCase):
         self.assertEqual(out["maximum_psi_some_avg10_pct"], 0.1)
         self.assertFalse(out["ci_dispatch_authorized"])
 
+    def test_oom_counter_reset_at_end_refuses_zero_clamp(self):
+        samples = [
+            _sample(9600, (0, 0), (5, 3)),
+            _sample(9600, (0, 0), (6, 4)),
+            _sample(9600, (0, 0), (4, 5)),
+        ]
+        out = module.classify(samples, (2048, 8192))
+        self.assertEqual(out["classification"], "HOLD")
+        self.assertEqual(out["reason"], "OOM_COUNTER_NONMONOTONIC")
+        self.assertEqual(out["oom_event_delta"], "UNVERIFIED")
+        self.assertNotIn("observed_oom_delta", out)
+        self.assertFalse(out["jit_admission_authorized"])
+
+    def test_oom_counter_mid_sample_reset_refuses_same_end_value(self):
+        samples = [
+            _sample(9600, (0, 0), (10, 3)),
+            _sample(9600, (0, 0), (9, 3)),
+            _sample(9600, (0, 0), (10, 3)),
+        ]
+        out = module.classify(samples, (2048, 8192))
+        self.assertEqual(out["classification"], "HOLD")
+        self.assertEqual(out["reason"], "OOM_COUNTER_NONMONOTONIC")
+        self.assertNotIn("observed_oom_kill_delta", out)
+
+    def test_oom_malformed_or_negative_value_holds(self):
+        for malformed in ((-1, 0), (1, -1), ("1", 0), (True, 0), (2**53 + 1, 0), (1,)):
+            with self.subTest(malformed=malformed):
+                samples = [_sample(9600, (0, 0), (1, 0)),
+                           _sample(9600, (0, 0), malformed),
+                           _sample(9600, (0, 0), (2, 0))]
+                out = module.classify(samples, (2048, 8192))
+                self.assertEqual(out["classification"], "HOLD")
+                self.assertEqual(out["reason"], "OOM_COUNTER_INVALID")
+                self.assertNotIn("observed_oom_delta", out)
+
+    def test_oom_invalid_is_not_masked_by_missing_sample(self):
+        for malformed in ((-1, 0), ("1", 0), (1,), (True, 0)):
+            with self.subTest(malformed=malformed):
+                samples = [
+                    _sample(9600, (0, 0), malformed),
+                    _sample(9600, (0, 0), None),
+                    _sample(9600, (0, 0), (1, 0)),
+                ]
+                out = module.classify(samples, (2048, 8192))
+                self.assertEqual(out["classification"], "HOLD")
+                self.assertEqual(out["reason"], "OOM_COUNTER_INVALID")
+                self.assertEqual(out["oom_event_delta"], "UNVERIFIED")
+                self.assertNotIn("observed_oom_delta", out)
+                self.assertFalse(out["jit_admission_authorized"])
+
+    def test_oom_valid_present_plus_missing_is_unavailable(self):
+        samples = [
+            _sample(9600, (0, 0), (2, 1)),
+            _sample(9600, (0, 0), None),
+            _sample(9600, (0, 0), (3, 1)),
+        ]
+        out = module.classify(samples, (2048, 8192))
+        self.assertEqual(out["classification"], "MEASURED_NOT_AUTHORIZED")
+        self.assertEqual(out["oom_event_delta"], "UNAVAILABLE")
+        self.assertNotIn("observed_oom_delta", out)
+        self.assertFalse(out["candidate_is_policy"])
+
+    def test_oom_missing_is_unknown_not_zero(self):
+        out = module.classify([_sample(9600, (0, 0), None)] * 3, (2048, 8192))
+        self.assertEqual(out["oom_event_delta"], "UNAVAILABLE")
+        self.assertNotIn("observed_oom_delta", out)
+        self.assertFalse(out["jit_admission_authorized"])
+
+    def test_oom_unchanged_and_increased_are_descriptive_not_authority(self):
+        same = module.classify([_sample(9600, (0, 0), (2, 1))] * 3, (2048, 8192))
+        self.assertEqual(same["oom_event_observation"], "UNCHANGED")
+        self.assertEqual(same["observed_oom_delta"], 0)
+        increased = module.classify(
+            [_sample(9600, (0, 0), (2, 1)),
+             _sample(9600, (0, 0), (2, 1)),
+             _sample(9600, (0, 0), (3, 2))],
+            (2048, 8192),
+        )
+        self.assertEqual(increased["oom_event_observation"], "INCREASED")
+        self.assertEqual(increased["observed_oom_delta"], 1)
+        self.assertFalse(increased["candidate_is_policy"])
+
     def test_does_not_emit_raw_sensitive_input(self):
         out = module.classify([_sample(9600, (0, 0), None, None)] * 3, (2048, 8192))
         blob = json.dumps(out).lower()

@@ -262,12 +262,37 @@ def classify(
     report["accepted_memory_floor_met_all_samples"] = min(available) >= guest + reserve
     report["research_only_floor_met_all_samples"] = min(available) >= guest + RESEARCH_RESERVE_MIB
     oom_pairs = [o for _, _, o, _ in samples]
-    if all(o is not None for o in oom_pairs):
-        first, last = oom_pairs[0], oom_pairs[-1]
-        report["observed_oom_delta"] = max(0, last[0] - first[0])
-        report["observed_oom_kill_delta"] = max(0, last[1] - first[1])
-    else:
+    # Validate all present values BEFORE treating any missing sample as
+    # unavailable. A malformed counter must never be masked by a None peer.
+    present_oom = [o for o in oom_pairs if o is not None]
+    valid = all(
+        isinstance(o, tuple)
+        and len(o) == 2
+        and all(type(value) is int and 0 <= value <= 2**53 for value in o)
+        for o in present_oom
+    )
+    if not valid:
+        report["reason"] = "OOM_COUNTER_INVALID"
+        report["oom_event_delta"] = "UNVERIFIED"
+        return report
+    if len(present_oom) != len(oom_pairs):
         report["oom_event_delta"] = "UNAVAILABLE"
+    else:
+        # The observer must never turn an intermediate counter reset into a
+        # reassuring zero-OOM delta, even if the endpoints agree.
+        if any(
+            current[0] < prior[0] or current[1] < prior[1]
+            for prior, current in zip(oom_pairs, oom_pairs[1:])
+        ):
+            report["reason"] = "OOM_COUNTER_NONMONOTONIC"
+            report["oom_event_delta"] = "UNVERIFIED"
+            return report
+        first, last = oom_pairs[0], oom_pairs[-1]
+        report["observed_oom_delta"] = last[0] - first[0]
+        report["observed_oom_kill_delta"] = last[1] - first[1]
+        report["oom_event_observation"] = (
+            "INCREASED" if (last[0] > first[0] or last[1] > first[1]) else "UNCHANGED"
+        )
     report["classification"] = "MEASURED_NOT_AUTHORIZED"
     return report
 
