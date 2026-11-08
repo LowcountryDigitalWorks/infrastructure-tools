@@ -168,10 +168,9 @@ try {
             try { $lock = [IO.File]::Open((Join-Path $directory 'controller.lock'), 'OpenOrCreate', 'ReadWrite', 'None') }
             catch { throw 'ACTIVE_CONTROLLER_OR_LOCK_UNCERTAIN' }
             try {
+                Invoke-Ci7PreDestructiveCleanupGate $state -LockHeld $true
                 Remove-Ci7LocalResources $state
-                $job = Get-Ci7CleanupJob $state
-                if ($job.status -ne 'completed') { Invoke-Ci7Api ('repos/' + $state.Configuration.Repository + '/actions/runs/' + $state.Configuration.WorkflowRunId + '/cancel') POST }
-                Remove-Ci7Runner $state -Interrupted
+                Remove-Ci7Runner $state
                 $lock.Dispose(); $lock = $null
                 Clear-Ci7TransientState $state
                 'INTERRUPTED_CLEANUP=PASS'
@@ -274,16 +273,18 @@ try {
     } catch {
         Write-Ci7Evidence $state 'failed'
         if (-not $cleanupComplete) {
+            $destructiveStarted = $false
             try {
+                Invoke-Ci7PreDestructiveCleanupGate $state -LockHeld $true
+                $destructiveStarted = $true
                 Remove-Ci7LocalResources $state
-                $current = Get-Ci7CleanupJob $state
-                if ($current.status -ne 'completed') { Invoke-Ci7Api ('repos/' + $Repository + '/actions/runs/' + $WorkflowRunId + '/cancel') POST }
-                Remove-Ci7Runner $state -Interrupted
+                Remove-Ci7Runner $state
                 if ($lock) { $lock.Dispose(); $lock = $null }
                 Clear-Ci7TransientState $state
                 $cleanupComplete = $true
                 if ($statusProvenanceValid) { Set-Ci7StatusPhase Complete -ProvenanceValid }
             } catch {
+                if (-not $destructiveStarted) { throw }
                 if ($statusProvenanceValid -and $state) {
                     $failurePhase = if ([string]$state.Phase -in $statusActivePhases) { [string]$state.Phase } else { 'ArtifactsRemoved' }
                     Set-Ci7StatusPhase $failurePhase -ProvenanceValid -ProvenFailure -FailureReason STALE_RESIDUE

@@ -15,6 +15,11 @@ function Refuses([scriptblock]$Action) {
     try { & $Action | Out-Null } catch { $rejected = $true }
     Assert $rejected
 }
+function RefusesCode([scriptblock]$Action, [string]$Code) {
+    $seen = ''
+    try { & $Action | Out-Null } catch { $seen = [string]$_.Exception.Message }
+    Assert ($seen -ceq $Code)
+}
 try {
     [void](New-Item -ItemType Directory -Path (Join-Path $root 'runs') -Force)
     [void](New-Item -ItemType Directory -Path (Join-Path $root 'evidence') -Force)
@@ -486,6 +491,46 @@ try {
         & $module {param($s);$script:TestRunners=@([pscustomobject]@{id=999;name=$s.Name;busy=$false;labels=@()})} $state
         Refuses {Assert-Ci7AlreadyClean $root $state.RunId}
         Assert ((& $module {$script:DeletedRunners}) -eq 1)
+    }
+    Check 'cleanup cannot mutate or cancel unless two reads show the exact completed job' {
+        $gateConfig = New-Ci7Configuration -Repository 'LowcountryDigitalWorks/business-operations' -WorkflowRunId 42462196528 -ExpectedSha ('c' * 40) -Root $root
+        $gate = New-Ci7State $gateConfig ('c' * 32)
+        [void](New-Item -ItemType Directory -Path $gate.Directory -Force)
+        $gate.JobId = 128673684689
+        $gate.RunnerId = 42
+        $gate.VMId = [guid]::NewGuid()
+        $completed = [pscustomobject]@{ id = $gate.JobId; status = 'completed'; conclusion = 'failure'; run_id = $gateConfig.WorkflowRunId; run_attempt = 1; head_sha = $gateConfig.ExpectedSha; name = 'security' }
+        $ownedVm = [pscustomobject]@{ VMId = $gate.VMId; Name = $gate.Name; Notes = ('CI-RUNNER-EPHEMERAL-001:' + $gate.RunId) }
+        $idleRunner = [pscustomobject]@{ id = $gate.RunnerId; name = $gate.Name; busy = $false }
+        Assert-Ci7PreDestructiveJobGate -State $gate -FirstJob $completed -SecondJob $completed
+        Assert-Ci7PreDestructiveOwnership -State $gate -Runner $idleRunner -Vm $ownedVm -LockHeld $true
+        foreach ($status in @('queued', 'in_progress', 'waiting')) {
+            $open = [pscustomobject]@{ id = $gate.JobId; status = $status; conclusion = $null; run_id = $gateConfig.WorkflowRunId; run_attempt = 1; head_sha = $gateConfig.ExpectedSha; name = 'security' }
+            RefusesCode { Assert-Ci7PreDestructiveJobGate -State $gate -FirstJob $open -SecondJob $open } 'CLEANUP_CANCEL_REFUSED'
+        }
+        $moved = [pscustomobject]@{ id = $gate.JobId; status = 'in_progress'; conclusion = $null; run_id = $gateConfig.WorkflowRunId; run_attempt = 1; head_sha = $gateConfig.ExpectedSha; name = 'security' }
+        RefusesCode { Assert-Ci7PreDestructiveJobGate -State $gate -FirstJob $completed -SecondJob $moved } 'CLEANUP_PROVIDER_RACE'
+        $other = [pscustomobject]@{ id = 999; status = 'completed'; conclusion = 'success'; run_id = $gateConfig.WorkflowRunId; run_attempt = 1; head_sha = $gateConfig.ExpectedSha; name = 'security' }
+        RefusesCode { Assert-Ci7PreDestructiveJobGate -State $gate -FirstJob $other -SecondJob $other } 'CLEANUP_PROVIDER_RACE'
+        $broken = [pscustomobject]@{ id = $gate.JobId; status = 'completed'; conclusion = 'success'; run_id = $gateConfig.WorkflowRunId; run_attempt = 1; head_sha = $gateConfig.ExpectedSha; name = 'security'; provider_api = @() }
+        $broken.status = @()
+        RefusesCode { Assert-Ci7PreDestructiveJobGate -State $gate -FirstJob $broken -SecondJob $broken } 'CLEANUP_PROVIDER_AMBIGUOUS'
+        RefusesCode { Assert-Ci7PreDestructiveOwnership -State $gate -Runner $idleRunner -Vm $ownedVm -LockHeld 1 } 'CLEANUP_LOCK_UNCONFIRMED'
+        RefusesCode { Assert-Ci7PreDestructiveOwnership -State $gate -Runner $idleRunner -Vm $ownedVm -LockHeld $false } 'CLEANUP_LOCK_UNCONFIRMED'
+        $busy = [pscustomobject]@{ id = $gate.RunnerId; name = $gate.Name; busy = $true }
+        RefusesCode { Assert-Ci7PreDestructiveOwnership -State $gate -Runner $busy -Vm $ownedVm -LockHeld $true } 'CLEANUP_RUNNER_BUSY'
+        $wrongVm = [pscustomobject]@{ VMId = [guid]::NewGuid(); Name = $gate.Name; Notes = $ownedVm.Notes }
+        RefusesCode { Assert-Ci7PreDestructiveOwnership -State $gate -Runner $idleRunner -Vm $wrongVm -LockHeld $true } 'CLEANUP_VM_MISMATCH'
+        $before = & $module { $script:DeletedVMs }
+        RefusesCode { Assert-Ci7PreDestructiveJobGate -State $gate -FirstJob $open -SecondJob $open } 'CLEANUP_CANCEL_REFUSED'
+        Assert ((& $module { $script:DeletedVMs }) -eq $before)
+        $runnerSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../Invoke-IsolatedRunner.ps1') -Raw
+        Assert (-not $runnerSource.Contains('/cancel'))
+        $firstGate = $runnerSource.IndexOf('Invoke-Ci7PreDestructiveCleanupGate $state -LockHeld $true', [StringComparison]::Ordinal)
+        $firstRemove = $runnerSource.IndexOf('Remove-Ci7LocalResources $state', $firstGate, [StringComparison]::Ordinal)
+        $secondGate = $runnerSource.IndexOf('Invoke-Ci7PreDestructiveCleanupGate $state -LockHeld $true', $firstGate + 1, [StringComparison]::Ordinal)
+        $secondRemove = $runnerSource.IndexOf('Remove-Ci7LocalResources $state', $secondGate, [StringComparison]::Ordinal)
+        Assert ($firstGate -ge 0 -and $secondGate -gt $firstGate -and $firstRemove -gt $firstGate -and $secondRemove -gt $secondGate)
     }
     'DETERMINISTIC_TESTS=PASS'
     'TEST_COUNT=' + $total

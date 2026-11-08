@@ -583,6 +583,76 @@ function Clear-Ci7TransientState {
     Write-Ci7Evidence $State 'complete'
 }
 
+function Assert-Ci7PreDestructiveJobGate {
+    param([object]$State, [object]$FirstJob, [object]$SecondJob)
+    Assert-Ci7State $State $State.Configuration.Root
+    if (-not $State.JobId -or [long]$State.JobId -le 0) { throw 'CLEANUP_STATE_INVALID' }
+    if ($null -eq $FirstJob -or $null -eq $SecondJob) { throw 'CLEANUP_PROVIDER_AMBIGUOUS' }
+    $names = @('id', 'status', 'conclusion', 'run_id', 'run_attempt', 'head_sha', 'name')
+    foreach ($job in @($FirstJob, $SecondJob)) {
+        foreach ($name in $names) {
+            if ($job.PSObject.Properties.Name -cnotcontains $name) { throw 'CLEANUP_PROVIDER_AMBIGUOUS' }
+        }
+    }
+    foreach ($name in $names) {
+        if ([string]$FirstJob.$name -cne [string]$SecondJob.$name) { throw 'CLEANUP_PROVIDER_RACE' }
+    }
+    $status = [string]$FirstJob.status
+    if (@('queued', 'in_progress', 'waiting', 'pending', 'requested') -ccontains $status) { throw 'CLEANUP_CANCEL_REFUSED' }
+    if ($status -cne 'completed' -or [string]::IsNullOrWhiteSpace([string]$FirstJob.conclusion)) { throw 'CLEANUP_PROVIDER_AMBIGUOUS' }
+    $configuration = $State.Configuration
+    if ([string]$FirstJob.id -cne [string]$State.JobId -or
+        [string]$FirstJob.run_id -cne [string]$configuration.WorkflowRunId -or
+        [string]$FirstJob.head_sha -cne [string]$configuration.ExpectedSha) { throw 'CLEANUP_PROVIDER_RACE' }
+    if ($configuration.RunAttempt -ge 1 -and [string]$FirstJob.run_attempt -cne [string]$configuration.RunAttempt) { throw 'CLEANUP_PROVIDER_RACE' }
+    if ($configuration.RunAttempt -lt 1 -and ([string]$FirstJob.run_attempt -notmatch '^[1-9][0-9]*$')) { throw 'CLEANUP_STATE_INVALID' }
+    if (-not [string]::IsNullOrWhiteSpace([string]$configuration.ExpectedJobName) -and [string]$FirstJob.name -cne [string]$configuration.ExpectedJobName) { throw 'CLEANUP_PROVIDER_RACE' }
+    if ($configuration.ExpectedJobId -gt 0 -and [string]$configuration.ExpectedJobId -cne [string]$State.JobId) { throw 'CLEANUP_STATE_INVALID' }
+}
+
+function Assert-Ci7PreDestructiveOwnership {
+    param([object]$State, [object]$Runner, [object]$Vm, $LockHeld)
+    Assert-Ci7State $State $State.Configuration.Root
+    if ($LockHeld -isnot [bool] -or $LockHeld -ne $true) { throw 'CLEANUP_LOCK_UNCONFIRMED' }
+    if ($State.VMId) {
+        if ($null -eq $Vm -or [string]$Vm.VMId -cne [string]$State.VMId -or $Vm.Name -cne $State.Name -or
+            $Vm.Notes -cne ($script:Marker + ':' + $State.RunId)) { throw 'CLEANUP_VM_MISMATCH' }
+    } elseif ($null -ne $Vm) { throw 'CLEANUP_VM_MISMATCH' }
+    if ($State.RunnerId) {
+        if ($null -eq $Runner -or [string]$Runner.id -cne [string]$State.RunnerId -or $Runner.name -cne $State.Name) { throw 'CLEANUP_RUNNER_MISMATCH' }
+        if ($Runner.busy -isnot [bool]) { throw 'CLEANUP_PROVIDER_AMBIGUOUS' }
+        if ($Runner.busy) { throw 'CLEANUP_RUNNER_BUSY' }
+    } elseif ($null -ne $Runner) { throw 'CLEANUP_RUNNER_MISMATCH' }
+}
+
+function Invoke-Ci7PreDestructiveCleanupGate {
+    param([object]$State, $LockHeld)
+    try {
+        $first = Get-Ci7CleanupJob $State
+        $second = Get-Ci7CleanupJob $State
+    } catch {
+        $known = [string]$_.Exception.Message
+        if ($known -cmatch '^[A-Z][A-Z0-9_]+$') { throw $known }
+        throw 'CLEANUP_PROVIDER_UNAVAILABLE'
+    }
+    Assert-Ci7PreDestructiveJobGate -State $State -FirstJob $first -SecondJob $second
+    $vm = $null
+    if ($State.VMId) {
+        $found = @(Get-VM -ErrorAction Stop | Where-Object { [string]$_.VMId -ceq [string]$State.VMId -or $_.Name -ceq $State.Name })
+        if ($found.Count -ne 1) { throw 'CLEANUP_VM_MISMATCH' }
+        $vm = $found[0]
+    } elseif (@(Get-VM -ErrorAction Stop | Where-Object { $_.Name -ceq $State.Name }).Count) { throw 'CLEANUP_VM_MISMATCH' }
+    $runner = $null
+    if ($State.RunnerId) {
+        $all = Invoke-Ci7Api ('repos/' + $State.Configuration.Repository + '/actions/runners?per_page=100')
+        if ($all.total_count -gt 100) { throw 'RUNNER_INVENTORY_TRUNCATED' }
+        $matches = @($all.runners | Where-Object { $_.id -eq $State.RunnerId -or $_.name -ceq $State.Name })
+        if ($matches.Count -ne 1) { throw 'CLEANUP_RUNNER_MISMATCH' }
+        $runner = $matches[0]
+    }
+    Assert-Ci7PreDestructiveOwnership -State $State -Runner $runner -Vm $vm -LockHeld:$LockHeld
+}
+
 function Assert-Ci7AlreadyClean {
     param([string]$Root, [string]$RunId, [string[]]$ApprovedRepositories = @('LowcountryDigitalWorks/business-operations', 'LowcountryDigitalWorks/royal-cruise-tracker'))
     if ($RunId -cnotmatch '^[0-9a-f]{32}$') { throw 'LOCAL_RUN_ID_INVALID' }
