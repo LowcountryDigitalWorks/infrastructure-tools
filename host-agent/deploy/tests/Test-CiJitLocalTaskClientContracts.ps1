@@ -23,6 +23,9 @@ foreach ($required in @(
     "ArgumentList.Add('/TN')",
     "[IO.FileMode]::CreateNew",
     "[IO.File]::Move(`$temp,`$slot,`$false)",
+    "`$PSVersionTable.PSEdition -cne 'Core'",
+    "`$PSVersionTable.PSVersion.Major -lt 7",
+    "LOCAL_CLIENT_PWSH7_REQUIRED",
     "LOCAL_CLIENT_NORMAL_USER_REQUIRED",
     "LOCAL_CLIENT_REPARSE_REFUSED",
     "LOCAL_CLIENT_ARGUMENT_REFUSED"
@@ -112,6 +115,34 @@ foreach ($case in @(
     $cli = Invoke-LocalClientCli $case.Args
     if ($cli.Combined -match [regex]::Escape($case.Forbidden)) { throw ('LOCAL_CLIENT_CLI_DEFAULT_BINDING_FAILED: ' + $case.Name) }
     if ($case['ExpectRefusal'] -eq $true -and $cli.Combined -notmatch 'LOCAL_CLIENT_ARGUMENT_REFUSED') { throw ('LOCAL_CLIENT_CLI_ARGUMENT_REFUSAL_EXPECTED: ' + $case.Name) }
+}
+
+
+# Windows PowerShell 5.1 is the LDW01 agent's default shell; it must fail
+# before attempting the unsupported three-argument File.Move overload.
+# STATUS is read-only and exercises the runtime gate without an enqueue.
+if ($env:OS -ceq 'Windows_NT') {
+    $desktop = Get-Command powershell.exe -ErrorAction SilentlyContinue
+    if ($null -ne $desktop) {
+        $psi = [Diagnostics.ProcessStartInfo]::new($desktop.Source)
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        foreach ($arg in @('-NoLogo','-NoProfile','-NonInteractive','-File',$client,'-Operation','STATUS')) {
+            $null = $psi.ArgumentList.Add($arg)
+        }
+        $process = [Diagnostics.Process]::Start($psi)
+        try {
+            $out = $process.StandardOutput.ReadToEnd()
+            $err = $process.StandardError.ReadToEnd()
+            $process.WaitForExit()
+            $combined = $out + $err
+            if ($process.ExitCode -eq 0 -or $combined -cnotmatch 'LOCAL_CLIENT_PWSH7_REQUIRED' -or
+                $combined -match 'Cannot find an overload') {
+                throw 'LOCAL_CLIENT_DESKTOP_FAIL_CLOSED_GATE_FAILED'
+            }
+        } finally { $process.Dispose() }
+    }
 }
 
 'CI_JIT_LOCAL_TASK_CLIENT_CONTRACT=PASS'
