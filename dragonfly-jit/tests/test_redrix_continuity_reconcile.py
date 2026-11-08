@@ -143,6 +143,54 @@ class ReconcileTests(unittest.TestCase):
         sample["local"]["classification"] = "HOLD"
         self.assertEqual(reconcile(sample)["reasons"], ["LOCAL_HOLD"])
 
+    def test_malformed_nested_values_hold_without_traceback(self) -> None:
+        cases = []
+        sample = packet()
+        sample["remote"]["provider_api"] = []
+        cases.append(sample)
+        sample = packet()
+        sample["local"]["classification"] = {}
+        cases.append(sample)
+        sample = packet()
+        sample["local"]["reasons"] = [{}]
+        cases.append(sample)
+        sample = packet()
+        sample["local"]["reasons"] = ["SAMPLE_FAILED", "SAMPLE_FAILED"]
+        cases.append(sample)
+        sample = packet()
+        sample["local"]["reasons"] = []
+        cases.append(sample)
+        sample = packet()
+        sample["local"]["qemu_absent"] = 1
+        cases.append(sample)
+        sample = packet()
+        sample["remote"]["provider_verified_simulation"] = 0
+        cases.append(sample)
+        for sample in cases:
+            result = reconcile(sample)
+            self.assertEqual(result["classification"], "HOLD")
+            self.assertEqual(result["reasons"], ["SCHEMA_INVALID"])
+            self.assert_closed(result)
+            self.assertNotIn("[]", json.dumps(result["reasons"]))
+        floated = packet()
+        floated["schema_version"] = 1.0
+        self.assertEqual(reconcile(floated)["reasons"], ["VERSION_UNSUPPORTED"])
+        flagged = packet()
+        flagged["local"]["schema_version"] = True
+        self.assertEqual(reconcile(flagged)["reasons"], ["VERSION_UNSUPPORTED"])
+        self.assertEqual(reconcile(packet(), [{}])["reasons"], ["SCHEMA_INVALID"])
+        self.assertEqual(reconcile(packet(), {"nonce-synthetic-001"})["reasons"], ["SCHEMA_INVALID"])
+        long_nonce = "n" * 64
+        self.assertEqual(reconcile(packet(), [long_nonce])["reasons"], ["SCHEMA_INVALID"])
+        self.assertEqual(reconcile(packet(), ["nonce-other", "nonce-other"])["reasons"], ["SCHEMA_INVALID"])
+        sample = packet()
+        sample["remote"]["tailscale_peer"] = "ABSENT"
+        absent = reconcile(sample)
+        self.assertEqual(absent["classification"], "DEGRADED")
+        self.assertEqual(absent["reasons"], ["TAILSCALE_ABSENT"])
+        self.assertNotEqual(absent["classification"], "DATA_ONLY_NOT_AUTHORIZED")
+        self.assert_closed(absent)
+
     def test_history_is_not_mutated(self) -> None:
         seen = ["nonce-other"]
         reconcile(packet(), seen)

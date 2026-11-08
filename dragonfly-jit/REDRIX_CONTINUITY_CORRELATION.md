@@ -20,7 +20,8 @@ dictionaries:
   `DEGRADED_NETWORK`, or `HOLD`);
 - a future LDW01/provider reachability and owner-session receipt.
 
-It does not read files, call the network, or run device commands. Matching
+It does not read files, call the network, or run device commands. An absent or stale Tailscale peer is `DEGRADED`, not a correlated pair.
+Matching
 inputs return `DATA_ONLY_NOT_AUTHORIZED`. They never return `JIT_READY`,
 `ONLINE_READY`, or `LOGIN_REQUIRED`. `ci_dispatch_authorized` stays false.
 `process_visibility` stays `UNVERIFIED`. A simulated provider flag may set

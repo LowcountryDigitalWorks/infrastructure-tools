@@ -69,12 +69,12 @@ def _result(classification: str, reason: str, peer: str = "UNVERIFIED") -> dict:
 
 
 def _exact(value: dict, allowed: set[str], label: str) -> None:
+    del label
     if not isinstance(value, dict) or set(value) != allowed:
         raise _Reject("HOLD", "SCHEMA_INVALID" if not isinstance(value, dict) else "UNKNOWN_FIELD")
-    if value.get("schema") != SCHEMA or value.get("schema_version") != SCHEMA_VERSION:
+    version = value.get("schema_version")
+    if value.get("schema") != SCHEMA or type(version) is not int or version != SCHEMA_VERSION:
         raise _Reject("HOLD", "VERSION_UNSUPPORTED")
-    if label:
-        return
 
 
 def _token(value: object, min_len: int = 8, max_len: int = 40) -> bool:
@@ -96,9 +96,47 @@ def _time(value: object) -> dt.datetime:
 
 
 def _ttl(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_TTL_SECONDS:
+    if type(value) is not int or not 1 <= value <= MAX_TTL_SECONDS:
         raise _Reject("HOLD", "SCHEMA_INVALID")
     return value
+
+
+def _text_choice(value: object, allowed: set[str], overclaim: set[str] | None = None) -> str:
+    if type(value) is not str or value not in allowed:
+        if type(value) is str and value in (overclaim or set()):
+            raise _Reject("HOLD", "USER_CONFIDENCE_REJECTED")
+        raise _Reject("HOLD", "SCHEMA_INVALID")
+    return value
+
+
+def _flag(value: object) -> bool:
+    if type(value) is not bool:
+        raise _Reject("HOLD", "SCHEMA_INVALID")
+    return value
+
+
+def _reasons(value: object) -> None:
+    if type(value) is not list or not 1 <= len(value) <= 4:
+        raise _Reject("HOLD", "SCHEMA_INVALID")
+    if any(type(item) is not str or item not in LOCAL_REASONS for item in value):
+        raise _Reject("HOLD", "SCHEMA_INVALID")
+    if len(set(value)) != len(value):
+        raise _Reject("HOLD", "SCHEMA_INVALID")
+
+
+def _history(seen_nonces: object) -> set[str]:
+    if seen_nonces is None:
+        return set()
+    if type(seen_nonces) not in (list, tuple) or len(seen_nonces) > 16:
+        raise _Reject("HOLD", "SCHEMA_INVALID")
+    cleaned: list[str] = []
+    for item in seen_nonces:
+        if not _token(item, max_len=32):
+            raise _Reject("HOLD", "SCHEMA_INVALID")
+        cleaned.append(item)
+    if len(set(cleaned)) != len(cleaned):
+        raise _Reject("HOLD", "SCHEMA_INVALID")
+    return set(cleaned)
 
 
 def canonical_packet() -> dict:
@@ -182,16 +220,13 @@ def _check_time(local: dict, remote: dict, now: dt.datetime, seen_nonces: set[st
 
 
 def _check_claims(local: dict, remote: dict) -> str:
-    if local["ci_dispatch_authorized"] is not False or local["chromeos_session"] != "NOT_OBSERVED":
+    if _flag(local["ci_dispatch_authorized"]) is not False:
         raise _Reject("HOLD", "USER_CONFIDENCE_REJECTED")
-    if local["a4_process_visibility"] != "UNVERIFIED":
-        raise _Reject("HOLD", "USER_CONFIDENCE_REJECTED")
-    if not isinstance(local["reasons"], list) or not local["reasons"] or any(
-        reason not in LOCAL_REASONS for reason in local["reasons"]
-    ):
-        raise _Reject("HOLD", "SCHEMA_INVALID")
-    if local["classification"] not in LOCAL_CLASSIFICATIONS or local["qemu_absent"] not in (True, False):
-        raise _Reject("HOLD", "SCHEMA_INVALID")
+    _text_choice(local["chromeos_session"], {"NOT_OBSERVED"}, {"LOGGED_IN"})
+    _text_choice(local["a4_process_visibility"], {"UNVERIFIED"}, {"VERIFIED"})
+    _reasons(local["reasons"])
+    classification = _text_choice(local["classification"], LOCAL_CLASSIFICATIONS)
+    qemu_absent = _flag(local["qemu_absent"])
     allowed_remote = {
         "reachability": {"SIMULATED_UNVERIFIED"},
         "owner_session": {"NOT_SUPPLIED", "REMOTE_CLAIM"},
@@ -202,12 +237,12 @@ def _check_claims(local: dict, remote: dict) -> str:
         "vm_posture": {"NOT_SUPPLIED", "UNAVAILABLE"},
         "controller_lease": {"NONE", "AMBIGUOUS"},
     }
+    overclaim = {"AUTHENTICATED", "ONLINE", "HIGH", "CONFIRMED", "LOGGED_IN", "JIT_READY", "ONLINE_READY"}
     for key, allowed in allowed_remote.items():
-        if remote[key] not in allowed:
-            raise _Reject("HOLD", "USER_CONFIDENCE_REJECTED" if remote[key] in {
-                "AUTHENTICATED", "ONLINE", "HIGH", "CONFIRMED", "LOGGED_IN",
-            } else "SCHEMA_INVALID")
-    if remote["provider_verified_simulation"] not in (True, False):
+        value = remote[key]
+        if type(value) is not str or value not in allowed:
+            raise _Reject("HOLD", "USER_CONFIDENCE_REJECTED" if type(value) is str and value in overclaim else "SCHEMA_INVALID")
+    if _flag(remote["provider_verified_simulation"]) not in (True, False):
         raise _Reject("HOLD", "SCHEMA_INVALID")
     if remote["provider_api"] == "FAILED":
         raise _Reject("HOLD", "PROVIDER_API_FAILURE")
@@ -219,11 +254,13 @@ def _check_claims(local: dict, remote: dict) -> str:
         raise _Reject("UNVERIFIED", "LOGIN_OR_VM_UNAVAILABLE")
     if remote["tailscale_peer"] == "STALE":
         raise _Reject("DEGRADED", "TAILSCALE_STALE")
-    if local["qemu_absent"] is not True:
+    if remote["tailscale_peer"] == "ABSENT":
+        raise _Reject("DEGRADED", "TAILSCALE_ABSENT")
+    if qemu_absent is not True:
         raise _Reject("DEGRADED", "QEMU_RESIDUE")
-    if local["classification"] == "HOLD":
+    if classification == "HOLD":
         raise _Reject("HOLD", "LOCAL_HOLD")
-    if local["classification"].startswith("DEGRADED_"):
+    if classification.startswith("DEGRADED_"):
         raise _Reject("DEGRADED", "LOCAL_DEGRADED")
     peer = "SIMULATED_FIELD_ONLY" if remote["provider_verified_simulation"] is True else "UNVERIFIED"
     return peer
@@ -248,12 +285,12 @@ def reconcile(packet: dict, seen_nonces: list[str] | None = None) -> dict:
             raise _Reject("HOLD", "UNKNOWN_FIELD")
         _exact(local, LOCAL_KEYS, "local")
         _exact(remote, REMOTE_KEYS, "remote")
-        history = set(seen_nonces or [])
-        if any(not isinstance(item, str) for item in history):
-            raise _Reject("HOLD", "SCHEMA_INVALID")
+        history = _history(seen_nonces)
         _check_identity(local, remote)
         _check_time(local, remote, _time(packet["now"]), history)
         peer = _check_claims(local, remote)
     except _Reject as rejected:
         return _result(rejected.classification, rejected.reason)
+    except (TypeError, ValueError):
+        return _result("HOLD", "SCHEMA_INVALID")
     return _result("DATA_ONLY_NOT_AUTHORIZED", "BOTH_VIEWS_CORRELATED_NOT_A_CHANNEL", peer)
