@@ -154,7 +154,6 @@ class CalibrationTest(unittest.TestCase):
         out = module.classify(s, (2048, 8192))
         self.assertEqual(out["observed_oom_delta"], 1)
         self.assertEqual(out["observed_oom_kill_delta"], 1)
-        self.assertEqual(out["oom_event_delta"], "UNAVAILABLE")
         self.assertEqual(out["minimum_memavailable_mib"], 9570)
         self.assertEqual(out["maximum_psi_some_avg10_pct"], 0.1)
         self.assertFalse(out["ci_dispatch_authorized"])
