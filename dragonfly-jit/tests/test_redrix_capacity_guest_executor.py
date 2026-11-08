@@ -104,6 +104,22 @@ def make_ctx(
             raise exe.GuestLockBusy
         yield
 
+    (tmp / "runs").mkdir(exist_ok=True)
+    (tmp / "status.json").write_text(
+        json.dumps(
+            {
+                "schema": exe.CONTROLLER_STATE_SCHEMA,
+                "marker": exe.CONTROLLER_STATE_MARKER,
+                "state": "STOPPED",
+                "updated_at": None,
+                "run_id": None,
+                "qemu_pid": None,
+                "reason": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+
     def _prep(_ctx, work_root, overlay, seed, user_data, serial_path, nonce_hex):
         del work_root, overlay, seed, user_data, serial_path, nonce_hex
         return None
@@ -122,7 +138,9 @@ def make_ctx(
         acquire_guest_lock=_lock,
         prepare_guest_artifacts=_prep,
         read_proc_status=lambda _pid: proc._rss if proc else None,
+        read_proc_starttime=lambda _pid: proc.starttime if proc else None,
         read_oom=lambda _path: (0, 0),
+        workload_host_check=lambda: None,
     )
     return exe.RunContext(
         hooks=hooks,
@@ -160,15 +178,13 @@ class GuestExecutorTests(unittest.TestCase):
         with redirect_stdout(buf := StringIO()):
             self.assertEqual(exe.main(["--run-once-local", "--evil"]), 2)
 
-    def test_main_refuses_non_linux(self):
-        if __import__("sys").platform == "linux":
-            self.skipTest("linux host")
+    def test_main_run_once_is_no_start(self):
         buf = StringIO()
         from contextlib import redirect_stdout
 
         with redirect_stdout(buf):
             self.assertEqual(exe.main(["--run-once-local"]), 2)
-        self.assertIn("PLATFORM_REFUSED", buf.getvalue())
+        self.assertIn("RUNTIME_NO_START", buf.getvalue())
 
     def test_no_subprocess_import_at_module_level(self):
         tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
@@ -188,14 +204,24 @@ class GuestExecutorTests(unittest.TestCase):
                 exe.discover_memory_events_path(cgroup, Path(root) / "sys-fs-cgroup")
             )
 
+    def test_discover_cgroup_ignores_v1_lines(self):
+        with tempfile.TemporaryDirectory() as root:
+            cgroup = Path(root) / "proc-self-cgroup"
+            cgroup.write_text("1:memory:/user.slice\n", encoding="ascii")
+            self.assertIsNone(exe.discover_memory_events_path(cgroup, Path(root) / "cgroup"))
+
     def test_finite_load_rejects_nan(self):
         self.assertIsNone(exe._finite_load(float("nan")))
         obs = clean_preflight(load_fraction=float("nan"))
         self.assertEqual(exe.assess_preflight(obs), "CAPACITY_CPU")
 
     def test_balloon_nonmonotonic_hold(self):
-        obs = clean_preflight(balloon_inflate=[1, 2, 1])
+        obs = clean_preflight(balloon_inflate=[5, 4, 4])
         self.assertEqual(exe.assess_preflight(obs), "BALLOON_NONMONOTONIC")
+
+    def test_balloon_inflation_rejected(self):
+        obs = clean_preflight(balloon_inflate=[1, 1, 2])
+        self.assertEqual(exe.assess_preflight(obs), "BALLOON_INFLATION")
 
     def test_preflight_matrix(self):
         cases = (
@@ -236,17 +262,20 @@ class GuestExecutorTests(unittest.TestCase):
         self.assertFalse(exe.parse_success_line(good + good, nonce))
         self.assertFalse(exe.parse_success_line("LDW_REDRIX_GUEST_BENCH_OK nonce=x", nonce))
 
-    def test_workload_touches_each_page(self):
-        script = exe.guest_workload_script("abcd")
+    def test_workload_touches_each_page_and_ttys0(self):
+        script = exe.guest_workload_shell_body("abcd")
         self.assertIn("page[i]=1", script)
-        self.assertIn("for i in range(0,len(page),4096)", script)
+        self.assertIn("/dev/ttyS0", script)
+        config = exe.build_cloud_config("c" * 32)
+        self.assertIn("write_files:", config)
+        self.assertNotIn("python3, -c", config)
 
     def test_mocked_run_success_not_authorized(self):
         with tempfile.TemporaryDirectory() as root:
             tmp = Path(root)
             nonce = "b" * 32
             serial = tmp / "serial.log"
-            proc = FakeProcess(serial_path=serial, nonce=nonce, rss=500_000)
+            proc = FakeProcess(serial_path=serial, nonce=nonce, rss=900_000)
             ctx = make_ctx(tmp, process=proc)
             clock = {"t": 0.0}
 
@@ -274,7 +303,7 @@ class GuestExecutorTests(unittest.TestCase):
                 serial_path.write_text(f"{exe.SUCCESS_PREFIX} nonce=deadbeef\n", encoding="utf-8")
                 return None
 
-            proc = SilentProcess(serial_path=serial, nonce=nonce, rss=500_000)
+            proc = SilentProcess(serial_path=serial, nonce=nonce, rss=900_000)
             ctx = make_ctx(tmp, process=proc)
             ctx.hooks.prepare_guest_artifacts = _prep
             (tmp / "guest.qcow2").touch()
@@ -307,6 +336,24 @@ class GuestExecutorTests(unittest.TestCase):
             ctx = make_ctx(Path(root))
             ctx.qemu_factory = None
             self.assertEqual(exe.run_once_local(ctx)["reason"], "EXECUTOR_PORT_NOT_LIVE")
+
+    def test_controller_state_unavailable_on_missing(self):
+        with tempfile.TemporaryDirectory() as root:
+            tmp = Path(root)
+            self.assertEqual(
+                exe.read_controller_runtime_state(tmp / "missing.json", tmp / "runs"),
+                "CONTROLLER_STATE_UNAVAILABLE",
+            )
+
+    def test_cleanup_refuses_symlink_artifacts(self):
+        with tempfile.TemporaryDirectory() as root:
+            tmp = Path(root)
+            (tmp / "evil").touch()
+            try:
+                (tmp / "link").symlink_to(tmp / "evil")
+                self.assertFalse(exe.cleanup_work_root(tmp))
+            except OSError:
+                self.skipTest("symlink privilege unavailable")
 
     def test_json_has_no_runner_tokens(self):
         report = exe._report()

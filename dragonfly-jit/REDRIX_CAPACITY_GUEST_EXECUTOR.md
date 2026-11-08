@@ -7,8 +7,9 @@ This module implements a **fixed one-shot** offline nested-KVM experiment for re
 ## Invocation
 
 - Only `python3 redrix_capacity_guest_executor.py --run-once-local` is accepted; any other argv is refused.
-- Linux UID 1000 only; acquires the **existing** controller `guest.lock` without writing `status.json` or controller `runs/`.
-- Author tasks must **not** invoke the CLI on physical REDRIX; ORCH runs one admitted local test after independent review.
+- **DRAFT `RUNTIME_NO_START`:** physical execution is **disabled** in source (`PHYSICAL_EXECUTION_ENABLED = false`) until independent H0/M0 security review and Product ORCH admission flip that flag in a separate reviewed change.
+- When enabled in a future reviewed release: Linux UID 1000 only; acquires the **existing** controller `guest.lock` without writing `status.json` or controller `runs/`.
+- Author tasks must **not** invoke the CLI on physical REDRIX while `RUNTIME_NO_START` is in effect.
 
 ## Guest profile
 

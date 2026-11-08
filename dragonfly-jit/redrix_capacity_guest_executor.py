@@ -39,10 +39,17 @@ MIN_SAMPLES, MAX_SAMPLES = 3, 6
 SAMPLE_INTERVAL = 1.0
 MIN_FREE_DISK_GIB = 16
 MAX_LOAD_FRACTION = 0.70
-MIN_QEMU_RSS_KIB = 256 * 1024
+# Research hypothesis only; physical load proof requires independent corroboration.
+MIN_QEMU_RSS_RESEARCH_KIB = 768 * 1024
+MAX_PSI_SOME_AVG10 = 1.0
+MAX_PSI_FULL_AVG10 = 1.0
+CONTROLLER_STATE_MARKER = "CI-RUNNER-DRAGONFLY-JIT-001"
+CONTROLLER_STATE_SCHEMA = 1
 GUEST_LOCK_NAME = "guest.lock"
 ALLOWED_CONTROLLER_STATES = frozenset({"STOPPED", "AVAILABLE"})
 RUN_ONCE_FLAG = "--run-once-local"
+# Independent IR required before any physical --run-once-local on REDRIX.
+PHYSICAL_EXECUTION_ENABLED = False
 
 
 class GuestLockBusy(Exception):
@@ -137,37 +144,70 @@ def discover_memory_events_path(
     *,
     max_lines: int = 32,
 ) -> Path | None:
-    """Resolve the calling process leaf memory.events without assuming root cgroup."""
+    """Resolve cgroup v2 unified hierarchy `0::/path` memory.events only."""
     try:
         lines = cgroup_file.read_text(encoding="ascii").splitlines()[:max_lines]
     except OSError:
         return None
     rel: str | None = None
     for line in lines:
-        if not line or line.count(":") < 2:
+        if not line.startswith("0::"):
             continue
-        _id, _controllers, path = line.split(":", 2)
-        if path in ("", "/"):
-            rel = path.lstrip("/") or None
-            continue
-        rel = path.lstrip("/")
-        if rel:
-            break
+        rel = line[3:].strip().lstrip("/")
+        break
     if rel is None:
-        events = cgroup_root / "memory.events"
-        return events if events.is_file() else None
-    candidate = cgroup_root / rel / "memory.events"
+        return None
+    if ".." in rel.split("/") or rel.startswith(".."):
+        return None
+    candidate = (cgroup_root / rel / "memory.events") if rel else cgroup_root / "memory.events"
     try:
         resolved = candidate.resolve(strict=False)
     except OSError:
         return None
-    resolved_s = str(resolved).replace("\\", "/")
     root_s = str(cgroup_root.resolve(strict=False)).replace("\\", "/")
-    if not resolved_s.startswith(root_s + "/") and resolved_s != root_s:
+    resolved_s = str(resolved).replace("\\", "/")
+    if not resolved_s.startswith(root_s):
         return None
-    if ".." in rel.split("/"):
+    return candidate if candidate.is_file() and not candidate.is_symlink() else None
+
+
+def read_controller_runtime_state(state_path: Path, runs_root: Path) -> str | None:
+    """Return a HOLD reason when controller state cannot be trusted; else None."""
+    if state_path.is_symlink() or not state_path.is_file():
+        return "CONTROLLER_STATE_UNAVAILABLE"
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return "CONTROLLER_STATE_UNAVAILABLE"
+    if not isinstance(payload, dict):
+        return "CONTROLLER_STATE_INVALID"
+    if payload.get("schema") != CONTROLLER_STATE_SCHEMA or payload.get("marker") != CONTROLLER_STATE_MARKER:
+        return "CONTROLLER_STATE_INVALID"
+    state = payload.get("state")
+    if not isinstance(state, str) or state not in ALLOWED_CONTROLLER_STATES | {"RUNNING", "DRAINING", "HOLD", "FAILED"}:
+        return "CONTROLLER_STATE_INVALID"
+    if state not in ALLOWED_CONTROLLER_STATES:
+        return "CONTROLLER_STATE_REFUSED"
+    qemu_pid = payload.get("qemu_pid")
+    if qemu_pid is not None and (not isinstance(qemu_pid, int) or isinstance(qemu_pid, bool) or qemu_pid <= 0):
+        return "CONTROLLER_STATE_INVALID"
+    if qemu_pid:
+        return "QEMU_ALREADY_PRESENT"
+    if runs_root.is_symlink():
+        return "SYMLINK_REFUSED"
+    if not runs_root.is_dir():
+        if runs_root.exists():
+            return "CONTROLLER_RUNS_RESIDUE"
         return None
-    return candidate if candidate.is_file() else None
+    try:
+        for entry in runs_root.iterdir():
+            if entry.is_symlink():
+                return "CONTROLLER_RUNS_RESIDUE"
+            if not entry.is_dir():
+                return "CONTROLLER_RUNS_RESIDUE"
+    except OSError:
+        return "CONTROLLER_RUNS_RESIDUE"
+    return None
 
 
 def read_oom_events(path: Path) -> tuple[int, int] | None:
@@ -248,11 +288,13 @@ def fixed_qemu_argv(overlay: Path, seed: Path, serial_path: Path) -> list[str] |
     ]
 
 
-def guest_workload_script(nonce_hex: str) -> str:
+def guest_workload_shell_body(nonce_hex: str) -> str:
+    marker_line = f"{SUCCESS_PREFIX} nonce={nonce_hex}"
     return (
+        "#!/bin/bash\n"
+        "set -euo pipefail\n"
+        "python3 - <<'PY'\n"
         "import hashlib,time\n"
-        f"NONCE={nonce_hex!r}\n"
-        f"MARKER={SUCCESS_PREFIX!r}\n"
         f"chunks={WORKLOAD_MIB}\n"
         "buf=[]\n"
         "for _ in range(chunks):\n"
@@ -263,12 +305,14 @@ def guest_workload_script(nonce_hex: str) -> str:
         "digest=hashlib.sha256(b''.join(buf[:64])).hexdigest()\n"
         "open('/tmp/redrix-exec.bin','wb').write(digest.encode())\n"
         f"time.sleep({HOLD_SECONDS})\n"
-        "print(MARKER+' nonce='+NONCE)\n"
+        "PY\n"
+        f"printf '%s\\n' '{marker_line}' > /dev/ttyS0\n"
     )
 
 
 def build_cloud_config(nonce_hex: str) -> str:
-    script = guest_workload_script(nonce_hex).replace("\n", "\\n")
+    script = guest_workload_shell_body(nonce_hex)
+    indented = "\n".join(f"      {line}" if line else "      " for line in script.splitlines())
     return (
         "#cloud-config\n"
         "hostname: ldw-redrix-capacity-exec\n"
@@ -276,8 +320,14 @@ def build_cloud_config(nonce_hex: str) -> str:
         "disable_root: true\n"
         "network:\n"
         "  config: disabled\n"
+        "write_files:\n"
+        "  - path: /usr/local/sbin/ldw-redrix-exec.sh\n"
+        "    permissions: '0755'\n"
+        "    owner: root:root\n"
+        "    content: |\n"
+        f"{indented}\n"
         "runcmd:\n"
-        f"  - [ python3, -c, \"{script}\" ]\n"
+        "  - [ /usr/local/sbin/ldw-redrix-exec.sh ]\n"
         "power_state:\n"
         "  delay: now\n"
         "  mode: poweroff\n"
@@ -338,11 +388,23 @@ def assess_preflight(obs: PreflightObservation) -> str | None:
         return "PSI_UNAVAILABLE"
     if any(item != obs.psi_some_full[0] for item in obs.psi_some_full):
         return "PSI_UNSTABLE"
+    for some, full in obs.psi_some_full:
+        if some > MAX_PSI_SOME_AVG10 or full > MAX_PSI_FULL_AVG10:
+            return "PSI_PRESSURE"
     if len(obs.balloon_inflate) != len(obs.mem_available_mib):
         return "BALLOON_UNAVAILABLE"
     for idx in range(1, len(obs.balloon_inflate)):
-        if obs.balloon_inflate[idx] < obs.balloon_inflate[idx - 1]:
+        before = obs.balloon_inflate[idx - 1]
+        after = obs.balloon_inflate[idx]
+        if not isinstance(before, int) or not isinstance(after, int):
+            return "BALLOON_UNAVAILABLE"
+        if after < before:
             return "BALLOON_NONMONOTONIC"
+        if after > before:
+            return "BALLOON_INFLATION"
+    for item in obs.mem_available_mib:
+        if not isinstance(item, int) or item < 0:
+            return "MEMORY_OR_PRESSURE_UNAVAILABLE"
     load = _finite_load(obs.load_fraction)
     if load is None or load > MAX_LOAD_FRACTION:
         return "CAPACITY_CPU"
@@ -381,6 +443,9 @@ class ExecutorHooks:
     acquire_guest_lock: Callable[[Path], Iterator[None]] | None = None
     prepare_guest_artifacts: Callable[..., str | None] | None = None
     read_proc_status: Callable[[int], int | None] | None = None
+    read_proc_starttime: Callable[[int], int | None] | None = None
+    recheck_under_guest_lock: Callable[[RunContext], str | None] | None = None
+    workload_host_check: Callable[[], str | None] | None = None
 
 
 @dataclass
@@ -487,20 +552,16 @@ def collect_preflight(ctx: RunContext) -> PreflightObservation | dict[str, Any]:
             vmstat0 = ctx.vmstat_path.read_text(encoding="ascii")
         except OSError:
             return _report(reason="BALLOON_UNAVAILABLE")
+    state_problem = read_controller_runtime_state(ctx.state_path, ctx.runs_root)
+    if state_problem:
+        return _report(reason=state_problem)
     try:
         state = json.loads(ctx.state_path.read_text(encoding="utf-8"))
-        controller_state = str(state.get("state", "HOLD"))
-        qemu_pid = state.get("qemu_pid")
-    except (OSError, json.JSONDecodeError):
-        controller_state = "STOPPED"
-        qemu_pid = None
-    qemu_present = bool(qemu_pid)
-    try:
-        residue = len([p for p in ctx.runs_root.iterdir() if p.is_dir() and not p.is_symlink()])
-    except OSError:
-        residue = -1
-    if residue < 0:
-        return _report(reason="CONTROLLER_RUNS_RESIDUE")
+        controller_state = str(state["state"])
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        return _report(reason="CONTROLLER_STATE_UNAVAILABLE")
+    qemu_present = False
+    residue = 0
     load = _finite_load(0.0)
     free_disk = MIN_FREE_DISK_GIB
     try:
@@ -552,6 +613,82 @@ def _noop_lock(_path: Path) -> Iterator[None]:
     yield
 
 
+def _read_proc_field(pid: int, prefix: str) -> int | None:
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text(encoding="ascii").splitlines():
+            if line.startswith(prefix):
+                return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def verify_owned_process(pid: int, starttime: int, hooks: ExecutorHooks) -> bool:
+    reader = hooks.read_proc_starttime
+    if reader is not None:
+        observed = reader(pid)
+    else:
+        observed = _read_proc_field(pid, "starttime:")
+    return observed is not None and observed == starttime
+
+
+def sample_workload_host_telemetry(
+    ctx: RunContext,
+    *,
+    mem_floor_mib: int,
+    balloon_baseline: int,
+    oom_before: tuple[int, int],
+    memory_events_path: str,
+) -> str | None:
+    mem = _read_mem_mib(ctx.meminfo_path)
+    if mem is None or mem < mem_floor_mib:
+        return "WORKLOAD_MEMORY_PRESSURE"
+    psi = _read_psi(ctx.psi_cgroup, ctx.psi_proc)
+    if psi is None:
+        return "WORKLOAD_PSI_UNAVAILABLE"
+    if psi[0] > MAX_PSI_SOME_AVG10 or psi[1] > MAX_PSI_FULL_AVG10:
+        return "WORKLOAD_PSI_PRESSURE"
+    try:
+        vmstat = ctx.vmstat_path.read_text(encoding="ascii")
+    except OSError:
+        return "WORKLOAD_BALLOON_UNAVAILABLE"
+    balloon = parse_vmstat_balloon_inflate(vmstat)
+    if balloon is None:
+        return "WORKLOAD_BALLOON_UNAVAILABLE"
+    if balloon < balloon_baseline:
+        return "WORKLOAD_BALLOON_NONMONOTONIC"
+    if balloon > balloon_baseline:
+        return "WORKLOAD_BALLOON_INFLATION"
+    events_path = Path(memory_events_path)
+    if not events_path.is_file():
+        return "WORKLOAD_OOM_UNAVAILABLE"
+    oom_now = ctx.hooks.read_oom(events_path)
+    if oom_now is None:
+        return "WORKLOAD_OOM_UNAVAILABLE"
+    if oom_now[0] > oom_before[0] or oom_now[1] > oom_before[1]:
+        return "WORKLOAD_OOM_INCREASED"
+    return None
+
+
+def terminate_owned_child(process: ProcessHandle, hooks: ExecutorHooks) -> bool:
+    if not verify_owned_process(process.pid, process.starttime, hooks):
+        return False
+    if process.poll() is not None:
+        return True
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except Exception:
+        if not verify_owned_process(process.pid, process.starttime, hooks):
+            return False
+        process.kill()
+        try:
+            process.wait(timeout=5)
+        except Exception:
+            return False
+    return process.poll() is not None
+
+
 def run_once_local(ctx: RunContext) -> dict[str, Any]:
     """Execute one bounded guest when hooks provide a live host; never writes controller state."""
     pre = ctx.preflight_observation
@@ -592,8 +729,8 @@ def run_once_local(ctx: RunContext) -> dict[str, Any]:
 
     argv = fixed_qemu_argv(overlay, seed, serial_path)
     if argv is None:
-        cleanup_work_root(work_root)
-        return _report(reason="ARGV_OR_PATH_REFUSED", evidence_retained=True)
+        retained = not cleanup_work_root(work_root)
+        return _report(reason="ARGV_OR_PATH_REFUSED", evidence_retained=retained)
 
     manifest_path.write_text(
         json.dumps(
@@ -612,79 +749,134 @@ def run_once_local(ctx: RunContext) -> dict[str, Any]:
     started = ctx.hooks.now()
     process: ProcessHandle | None = None
     peak_rss = 0
+    balloon_baseline = pre.balloon_inflate[-1]
+    mem_during: list[int] = []
+    evidence_path = work_root
     try:
         with lock_iter:
+            if ctx.hooks.recheck_under_guest_lock is not None:
+                again = ctx.hooks.recheck_under_guest_lock(ctx)
+                if again:
+                    return _report(reason=again, evidence_retained=True)
+            elif (again := read_controller_runtime_state(ctx.state_path, ctx.runs_root)):
+                return _report(reason=again, evidence_retained=True)
             if ctx.hooks.prepare_guest_artifacts is not None:
                 prep_error = ctx.hooks.prepare_guest_artifacts(
                     ctx, work_root, overlay, seed, user_data, serial_path, nonce
                 )
                 if prep_error is not None:
-                    cleanup_work_root(work_root)
-                    return _report(reason=prep_error, evidence_retained=True)
+                    return _report(
+                        reason=prep_error,
+                        evidence_retained=not cleanup_work_root(work_root),
+                    )
             elif not user_data.exists():
                 user_data.write_text(build_cloud_config(nonce), encoding="utf-8")
                 os.chmod(user_data, 0o600)
             process = ctx.qemu_factory(argv)
+            if not verify_owned_process(process.pid, process.starttime, ctx.hooks):
+                return _report(reason="CHILD_OWNERSHIP_UNCERTAIN", evidence_retained=True)
             while ctx.hooks.now() - started < TIMEOUT_SECONDS:
+                if not verify_owned_process(process.pid, process.starttime, ctx.hooks):
+                    return _report(reason="CHILD_OWNERSHIP_UNCERTAIN", evidence_retained=True)
                 rss = read_proc_rss_kib(process.pid, ctx.hooks)
                 if rss is not None:
                     peak_rss = max(peak_rss, rss)
+                if ctx.hooks.workload_host_check is not None:
+                    host_problem = ctx.hooks.workload_host_check()
+                else:
+                    host_problem = sample_workload_host_telemetry(
+                        ctx,
+                        mem_floor_mib=RESEARCH_FLOOR_MIB,
+                        balloon_baseline=balloon_baseline,
+                        oom_before=pre.oom_before,
+                        memory_events_path=pre.memory_events_path,
+                    )
+                if host_problem:
+                    if not terminate_owned_child(process, ctx.hooks):
+                        return _report(reason="CHILD_TERMINATION_UNCERTAIN", evidence_retained=True)
+                    return _report(
+                        reason=host_problem,
+                        evidence_retained=not cleanup_work_root(evidence_path),
+                        physical_guest_executed=True,
+                    )
+                sample = _read_mem_mib(ctx.meminfo_path)
+                if sample is not None:
+                    mem_during.append(sample)
                 if process.poll() is not None:
                     break
                 ctx.hooks.sleep(0.15)
             if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=10)
-                except Exception:
-                    process.kill()
-                    process.wait(timeout=5)
-                cleanup_work_root(work_root)
-                return _report(reason="GUEST_TIMEOUT", evidence_retained=True, physical_guest_executed=True)
+                if not terminate_owned_child(process, ctx.hooks):
+                    return _report(reason="CHILD_TERMINATION_UNCERTAIN", evidence_retained=True)
+                return _report(
+                    reason="GUEST_TIMEOUT",
+                    evidence_retained=not cleanup_work_root(evidence_path),
+                    physical_guest_executed=True,
+                )
 
             events_path = Path(pre.memory_events_path)
             oom_after = ctx.hooks.read_oom(events_path)
             if oom_after is None:
-                cleanup_work_root(work_root)
-                return _report(reason="OOM_COUNTER_UNAVAILABLE", evidence_retained=True, physical_guest_executed=True)
+                return _report(
+                    reason="OOM_COUNTER_UNAVAILABLE",
+                    evidence_retained=not cleanup_work_root(evidence_path),
+                    physical_guest_executed=True,
+                )
+            if oom_after[0] > pre.oom_before[0] or oom_after[1] > pre.oom_before[1]:
+                return _report(
+                    reason="OOM_EVENT_INCREASED",
+                    evidence_retained=not cleanup_work_root(evidence_path),
+                    physical_guest_executed=True,
+                )
 
             serial_text = ""
             try:
                 serial_text = serial_path.read_text(encoding="utf-8", errors="replace")[:65536]
             except OSError:
-                cleanup_work_root(work_root)
-                return _report(reason="SERIAL_UNAVAILABLE", evidence_retained=True, physical_guest_executed=True)
+                return _report(
+                    reason="SERIAL_UNAVAILABLE",
+                    evidence_retained=not cleanup_work_root(evidence_path),
+                    physical_guest_executed=True,
+                )
 
             if not parse_success_line(serial_text, nonce):
-                cleanup_work_root(work_root)
-                return _report(reason="SUCCESS_MARKER_MISSING", evidence_retained=True, physical_guest_executed=True)
-            if peak_rss < MIN_QEMU_RSS_KIB:
-                cleanup_work_root(work_root)
-                return _report(reason="QEMU_RSS_INSUFFICIENT", evidence_retained=True, physical_guest_executed=True)
+                return _report(
+                    reason="SUCCESS_MARKER_MISSING",
+                    evidence_retained=not cleanup_work_root(evidence_path),
+                    physical_guest_executed=True,
+                )
+            if peak_rss < MIN_QEMU_RSS_RESEARCH_KIB:
+                return _report(
+                    reason="QEMU_RSS_INSUFFICIENT",
+                    evidence_retained=not cleanup_work_root(evidence_path),
+                    physical_guest_executed=True,
+                )
             if process.poll() != 0:
-                cleanup_work_root(work_root)
-                return _report(reason="QEMU_NONZERO_EXIT", evidence_retained=True, physical_guest_executed=True)
+                return _report(
+                    reason="QEMU_NONZERO_EXIT",
+                    evidence_retained=not cleanup_work_root(evidence_path),
+                    physical_guest_executed=True,
+                )
 
-            cleanup_work_root(work_root)
+            cleaned = cleanup_work_root(evidence_path)
             return _report(
                 classification="LOCAL_SYNTHETIC_MEASURED_NOT_AUTHORIZED",
                 reason="OFFLINE_SYNTHETIC_COMPLETE",
                 physical_guest_executed=True,
                 peak_qemu_rss_kib=peak_rss,
-                oom_delta=max(0, oom_after[0] - pre.oom_before[0]),
-                oom_kill_delta=max(0, oom_after[1] - pre.oom_before[1]),
-                minimum_memavailable_mib=min(pre.mem_available_mib),
+                oom_delta=oom_after[0] - pre.oom_before[0],
+                oom_kill_delta=oom_after[1] - pre.oom_before[1],
+                minimum_memavailable_mib=min(pre.mem_available_mib + mem_during),
+                rss_research_threshold_kib=MIN_QEMU_RSS_RESEARCH_KIB,
                 nonce_bound=nonce,
+                cleanup_complete=cleaned,
             )
     except GuestLockBusy:
-        cleanup_work_root(work_root)
-        return _report(reason="GUEST_LOCK_BUSY")
+        return _report(reason="GUEST_LOCK_BUSY", evidence_retained=not cleanup_work_root(evidence_path))
     except Exception:
         if process is not None:
             with contextlib.suppress(Exception):
-                if process.poll() is None:
-                    process.kill()
-        cleanup_work_root(work_root)
+                terminate_owned_child(process, ctx.hooks)
         return _report(reason="EXECUTION_UNCERTAIN", evidence_retained=True)
 
 
@@ -701,18 +893,24 @@ def read_proc_rss_kib(pid: int, hooks: ExecutorHooks) -> int | None:
     return None
 
 
-def cleanup_work_root(path: Path) -> None:
+def cleanup_work_root(path: Path) -> bool:
+    """Remove owned regular files only; return True when fully removed."""
     try:
         if not path.exists():
-            return
-        for child in sorted(path.iterdir(), key=lambda p: p.name, reverse=True):
+            return True
+        if path.is_symlink():
+            return False
+        for child in path.iterdir():
             if child.is_symlink():
-                continue
+                return False
             if child.is_file():
                 child.unlink(missing_ok=True)
+            else:
+                return False
         path.rmdir()
+        return not path.exists()
     except OSError:
-        pass
+        return path.exists() is False
 
 
 def wire_linux_executor(ctx: RunContext) -> None:
@@ -782,12 +980,31 @@ def wire_linux_executor(ctx: RunContext) -> None:
             fcntl.flock(handle, fcntl.LOCK_UN)
             handle.close()
 
+    class _OwnedPopen:
+        def __init__(self, popen: subprocess.Popen[bytes]) -> None:
+            self._popen = popen
+            self.pid = popen.pid or -1
+            self.starttime = _read_proc_field(self.pid, "starttime:") or -1
+
+        def poll(self) -> int | None:
+            return self._popen.poll()
+
+        def terminate(self) -> None:
+            self._popen.terminate()
+
+        def kill(self) -> None:
+            self._popen.kill()
+
+        def wait(self, timeout: float | None = None) -> int:
+            return self._popen.wait(timeout=timeout)
+
     def _popen(argv: list[str]) -> ProcessHandle:
-        return subprocess.Popen(
+        popen = subprocess.Popen(
             argv,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        return _OwnedPopen(popen)
 
     ctx.hooks.prepare_guest_artifacts = _prepare
     ctx.hooks.acquire_guest_lock = _guest_lock
@@ -801,6 +1018,19 @@ def main(argv: list[str] | None = None) -> int:
     args, extras = parser.parse_known_args(argv)
     if extras or not args.run_once_local:
         print(json.dumps(_report(reason="CLI_REFUSED"), sort_keys=True, separators=(",", ":")))
+        return 2
+    if not PHYSICAL_EXECUTION_ENABLED:
+        print(
+            json.dumps(
+                _report(
+                    reason="RUNTIME_NO_START",
+                    runtime_status="DRAFT_HOLD",
+                    physical_guest_executed=False,
+                ),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
         return 2
     if sys.platform != "linux":
         print(json.dumps(_report(reason="PLATFORM_REFUSED"), sort_keys=True, separators=(",", ":")))
