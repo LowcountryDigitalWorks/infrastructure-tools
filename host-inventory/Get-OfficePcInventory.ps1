@@ -28,14 +28,6 @@ $ErrorActionPreference = 'Stop'
 if (-not (Get-Variable -Name OfficePcInventorySuppressAutoInvoke -Scope Script -ErrorAction SilentlyContinue)) {
     $script:OfficePcInventorySuppressAutoInvoke = $false
 }
-$script:OfficePcInventoryLiveCollector = $null
-if ($env:OFFICEPC_INVENTORY_USE_SYNTHETIC_CIM -eq '1') {
-    $syntheticHook = Join-Path $PSScriptRoot 'tests/SyntheticCimHook.ps1'
-    if (Test-Path -LiteralPath $syntheticHook -PathType Leaf) {
-        . $syntheticHook
-    }
-}
-
 $script:OfficePcInventoryMarker = 'LDW_OFFICEPC_HOST_INVENTORY'
 $script:OfficePcInventoryMaxUInt64 = [uint64] '9223372036854775807'
 $script:OfficePcInventoryClassification = 'INVENTORY_ONLY_NOT_ADMISSION'
@@ -108,22 +100,22 @@ function ConvertTo-OfficePcBoundedUInt64 {
     param([AllowNull()] $Value)
     if ($null -eq $Value) { return $null }
     if ($Value -is [bool]) { return $null }
-    if ($Value -is [double] -or $Value -is [single] -or $Value -is [decimal]) {
-        if ([double]::IsNaN([double] $Value) -or [double]::IsInfinity([double] $Value)) { return $null }
+    if ($Value -is [string]) { return $null }
+    if ($Value -is [double] -or $Value -is [single] -or $Value -is [decimal]) { return $null }
+    $unsigned = $null
+    if ($Value -is [byte] -or $Value -is [uint16] -or $Value -is [uint32] -or $Value -is [uint64]) {
+        $unsigned = [uint64] $Value
     }
-    if ($Value -is [int] -or $Value -is [long] -or $Value -is [int16] -or $Value -is [byte] -or $Value -is [uint32] -or $Value -is [uint64]) {
-        if ($Value -is [int] -or $Value -is [long] -or $Value -is [int16]) {
-            if ([int64] $Value -lt 0) { return $null }
-        }
+    elseif ($Value -is [int16] -or $Value -is [int] -or $Value -is [long]) {
+        $signed = [int64] $Value
+        if ($signed -lt 0) { return $null }
+        $unsigned = [uint64] $signed
     }
-    try {
-        $parsed = [uint64] $Value
-        if ($parsed -gt $script:OfficePcInventoryMaxUInt64) { return $null }
-        return [int64] $parsed
-    }
-    catch {
+    else {
         return $null
     }
+    if ($unsigned -gt $script:OfficePcInventoryMaxUInt64) { return $null }
+    return [int64] $unsigned
 }
 
 function ConvertTo-OfficePcBuildNumberString {
@@ -307,10 +299,6 @@ function Get-OfficePcLiveSnapshot {
         [ValidateRange(1, 5)]
         [int] $IntervalSeconds
     )
-
-    if ($null -ne $script:OfficePcInventoryLiveCollector) {
-        return & $script:OfficePcInventoryLiveCollector $SampleCount $IntervalSeconds
-    }
 
     $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
     $cpu = Get-CimInstance -ClassName Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1

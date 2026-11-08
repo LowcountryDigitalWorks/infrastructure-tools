@@ -17,7 +17,6 @@ $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $scriptPath = Join-Path $repoRoot 'host-inventory/Get-OfficePcInventory.ps1'
 $script:OfficePcInventorySuppressAutoInvoke = $true
 . $scriptPath
-$script:OfficePcInventoryCimCallCount = 0
 
 function New-OfficePcSyntheticSnapshot {
     param(
@@ -115,47 +114,66 @@ Assert-True ($runA.disposition -eq $runB.disposition) 'deterministic disposition
 
 Assert-True ((ConvertTo-OfficePcSanitizedCpuModel -Raw '  AMD (R) Test') -eq 'AMD (R) Test') 'cpu sanitize'
 
-$script:OfficePcInventoryLiveCollector = {
-    $script:OfficePcInventoryCimCallCount++
-    throw 'CIM_MUST_NOT_RUN_IN_DOT_SOURCE'
-}
-Assert-ThrowsMessage { Invoke-OfficePcInventoryCollection -SampleCount 3 -IntervalSeconds 1 } 'CIM_MUST_NOT' 'injected collector blocks live path'
-$script:OfficePcInventoryLiveCollector = $null
-Assert-True ($script:OfficePcInventoryCimCallCount -eq 1) 'collector invoked once under inject'
+Assert-True ($null -eq (ConvertTo-OfficePcBoundedUInt64 -Value 2.5)) 'reject double ram'
+Assert-True ($null -eq (ConvertTo-OfficePcBoundedUInt64 -Value 0.5)) 'reject fractional ram'
+Assert-True ($null -eq (ConvertTo-OfficePcBoundedUInt64 -Value ([double]::NaN))) 'reject nan ram'
+Assert-True ($null -eq (ConvertTo-OfficePcBoundedUInt64 -Value '1234')) 'reject numeric string ram'
+Assert-True ($null -eq (ConvertTo-OfficePcBoundedUInt64 -Value ([uint64] '18446744073709551615'))) 'reject uint64 overflow'
+Assert-True ((ConvertTo-OfficePcBuildNumberString -Value '22631') -eq '22631') 'build string accepted'
+Assert-True ((ConvertTo-OfficePcBuildNumberString -Value ([uint32] 22631)) -eq '22631') 'build integer accepted'
 
-$hookPath = Join-Path $PSScriptRoot 'SyntheticCimHook.ps1'
-$hookBody = @'
-$script:OfficePcInventoryLiveCollector = {
-    param($SampleCount, $IntervalSeconds)
-    $samples = [System.Collections.Generic.List[uint64]]::new()
-    for ($i = 0; $i -lt $SampleCount; $i++) { [void]$samples.Add([uint64](800000 - ($i * 1000))) }
-    return @{
-        OsCaption = 'Synthetic Windows'; OsBuildNumber = [uint32]22631; OsArchitecture = 'AMD64'
-        TotalVisibleMemoryKib = [uint64]33554432; FreePhysicalMemorySamplesKib = @($samples)
-        LogicalProcessorCount = [uint32]16; CpuModel = 'Synthetic'; CpuArchitecture = 'x64'
-        SystemVolumeFreeBytes = [uint64]107374182400; HyperVEnabled = $null; FirmwareVirtualizationEnabled = $null
-        OnAcPower = $null; SleepPolicyVerified = $false; SampleCount = $SampleCount; IntervalSeconds = $IntervalSeconds
+Assert-True (-not (Test-OfficePcInventoryDirectExecution)) 'dot-source is not direct execution'
+
+$env:OFFICEPC_INVENTORY_USE_SYNTHETIC_CIM = '1'
+$maliciousHook = Join-Path $PSScriptRoot 'MaliciousAutoloadHook.ps1'
+Assert-True (-not (Test-Path -LiteralPath $maliciousHook)) 'malicious hook absent in repo'
+$sourceText = Get-Content -LiteralPath $scriptPath -Raw
+Assert-True ($sourceText -notmatch 'OFFICEPC_INVENTORY_USE_SYNTHETIC_CIM') 'no env autoload in source'
+Assert-True ($sourceText -notmatch 'SyntheticCimHook') 'no hook filename in source'
+Remove-Item Env:OFFICEPC_INVENTORY_USE_SYNTHETIC_CIM -ErrorAction SilentlyContinue
+
+$escapedScript = $scriptPath.Replace("'", "''")
+$childCommand = @"
+`$ErrorActionPreference = 'Stop'
+function Get-CimInstance {
+    param([string] `$ClassName)
+    switch (`$ClassName) {
+        'Win32_OperatingSystem' {
+            return [pscustomobject]@{
+                Caption = 'Synthetic Windows'
+                BuildNumber = '22631'
+                TotalVisibleMemorySize = [uint64]33554432
+                FreePhysicalMemory = [uint64]800000
+            }
+        }
+        'Win32_Processor' {
+            return [pscustomobject]@{
+                Name = 'Synthetic Processor'
+                Architecture = 9
+                VirtualizationFirmwareEnabled = `$false
+            }
+        }
+        'Win32_ComputerSystem' { return [pscustomobject]@{ NumberOfLogicalProcessors = [uint32]16 } }
+        'Win32_Battery' { return `$null }
+        default { return `$null }
     }
 }
-'@
-Set-Content -LiteralPath $hookPath -Value $hookBody -Encoding UTF8
-$fileLines = & {
-    $prev = $env:OFFICEPC_INVENTORY_USE_SYNTHETIC_CIM
-    $env:OFFICEPC_INVENTORY_USE_SYNTHETIC_CIM = '1'
-    try {
-        & powershell -NoProfile -File $scriptPath -SampleCount 3 -IntervalSeconds 1 -Output Json
-    }
-    finally {
-        if ($null -eq $prev) { Remove-Item Env:OFFICEPC_INVENTORY_USE_SYNTHETIC_CIM -ErrorAction SilentlyContinue }
-        else { $env:OFFICEPC_INVENTORY_USE_SYNTHETIC_CIM = $prev }
-    }
+function Get-PSDrive {
+    param([string] `$Name)
+    return [pscustomobject]@{ Free = [int64]107374182400 }
 }
+function Get-WindowsOptionalFeature { return `$null }
+& '$escapedScript' -SampleCount 3 -IntervalSeconds 1 -Output Json
+"@
+$fileLines = powershell -NoProfile -Command $childCommand
 $fileText = ($fileLines | Where-Object { $_ -ne $null } | ForEach-Object { $_.ToString() }) -join "`n"
-Assert-True ($fileText.Trim().StartsWith('{')) 'single json payload'
+Assert-True ($fileText.Trim().StartsWith('{')) 'file invocation json payload'
 $fileObject = $fileText | ConvertFrom-Json
-Assert-True ($fileObject.disposition -eq 'INVENTORY_BLOCKED') 'file json blocked'
-Assert-True ($fileObject.cpu.logical_processors -eq 16) 'file synthetic uint32 cpus'
-Remove-Item -LiteralPath $hookPath -Force -ErrorAction SilentlyContinue
+Assert-True ($fileObject.disposition -eq 'INVENTORY_BLOCKED') 'file blocked disposition'
+Assert-True ($fileObject.cpu.logical_processors -eq 16) 'mocked cim logical processors'
+
+$staleHook = Join-Path $PSScriptRoot 'SyntheticCimHook.ps1'
+if (Test-Path -LiteralPath $staleHook) { Remove-Item -LiteralPath $staleHook -Force }
 
 if ($PSVersionTable.PSVersion.Major -ge 7) {
     Assert-True $true 'powershell 7 contract pass'
