@@ -88,9 +88,11 @@ existing `gh` authentication and the accepted Hyper-V controller prerequisites.
 
 The **normal-user** CI-JIT fixed-operation client at
 `host-agent/deploy/Invoke-CiJitLocalTaskClient.ps1` must also be launched
-with `pwsh` (PowerShell Core 7+, with 7.5+ recommended for the accepted
-protected dispatcher). Windows PowerShell 5.1 / `powershell.exe` is **not** a
-supported client runtime. Its older .NET Framework lacks the three-argument
+with `pwsh` (PowerShell Core 7+). **The separate protected dispatcher
+requires PowerShell 7.5+** for its accepted `ConvertFrom-Json -DateKind`
+contract; successful use of the normal-user client on 7.0–7.4 must never be
+mistaken for dispatcher runtime acceptance. Windows PowerShell 5.1 /
+`powershell.exe` is **not** a supported client runtime. Its older .NET Framework lacks the three-argument
 no-overwrite `File.Move` method used to publish one bounded request slot.
 The client must reject that shell with `LOCAL_CLIENT_PWSH7_REQUIRED` **before**
 writing a slot or starting a task. This runtime check does not resolve stale
