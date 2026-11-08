@@ -62,11 +62,13 @@ test "$(id -Gn ldw-runner)" = ldw-runner
 install -d -o ldw-runner -g ldw-runner -m 0700 /opt/actions-runner
 archive=/var/tmp/ci7-runner.tar.gz
 phase DOWNLOAD
-# Retry only curl's default transient HTTP status classes (408/429/5xx).
-# The total retry window is bounded, and every successful transfer must still
-# pass the immutable SHA-256 check before extraction or use. No alternate URL.
-if curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
-  --retry 2 --retry-delay 2 --retry-max-time 420 --connect-timeout 30 --max-time 300 \
+# Retry only curl's default transient statuses and timeouts (not arbitrary errors).
+# GNU timeout imposes a hard wall limit including Retry-After sleeps; timeout
+# failure takes the original fail-closed JIT-scrub/poweroff branch. Redirects
+# stay HTTPS-only, and SHA-256 verification remains mandatory before extraction.
+if timeout --signal=TERM --kill-after=5s 420s \
+  curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location --silent --show-error \
+  --retry 2 --retry-delay 2 --retry-max-time 410 --connect-timeout 30 --max-time 300 \
   --output "$archive" 'https://github.com/actions/runner/releases/download/v2.338.0/actions-runner-linux-x64-2.338.0.tar.gz'; then
   :
 else
