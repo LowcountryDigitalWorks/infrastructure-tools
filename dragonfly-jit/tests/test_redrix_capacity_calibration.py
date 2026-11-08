@@ -262,6 +262,33 @@ class CalibrationTest(unittest.TestCase):
                 self.assertEqual(out["reason"], "OOM_COUNTER_INVALID")
                 self.assertNotIn("observed_oom_delta", out)
 
+    def test_oom_invalid_is_not_masked_by_missing_sample(self):
+        for malformed in ((-1, 0), ("1", 0), (1,), (True, 0)):
+            with self.subTest(malformed=malformed):
+                samples = [
+                    _sample(9600, (0, 0), malformed),
+                    _sample(9600, (0, 0), None),
+                    _sample(9600, (0, 0), (1, 0)),
+                ]
+                out = module.classify(samples, (2048, 8192))
+                self.assertEqual(out["classification"], "HOLD")
+                self.assertEqual(out["reason"], "OOM_COUNTER_INVALID")
+                self.assertEqual(out["oom_event_delta"], "UNVERIFIED")
+                self.assertNotIn("observed_oom_delta", out)
+                self.assertFalse(out["jit_admission_authorized"])
+
+    def test_oom_valid_present_plus_missing_is_unavailable(self):
+        samples = [
+            _sample(9600, (0, 0), (2, 1)),
+            _sample(9600, (0, 0), None),
+            _sample(9600, (0, 0), (3, 1)),
+        ]
+        out = module.classify(samples, (2048, 8192))
+        self.assertEqual(out["classification"], "MEASURED_NOT_AUTHORIZED")
+        self.assertEqual(out["oom_event_delta"], "UNAVAILABLE")
+        self.assertNotIn("observed_oom_delta", out)
+        self.assertFalse(out["candidate_is_policy"])
+
     def test_oom_missing_is_unknown_not_zero(self):
         out = module.classify([_sample(9600, (0, 0), None)] * 3, (2048, 8192))
         self.assertEqual(out["oom_event_delta"], "UNAVAILABLE")
