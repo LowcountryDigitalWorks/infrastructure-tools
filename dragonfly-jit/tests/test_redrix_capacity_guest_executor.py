@@ -529,7 +529,7 @@ class GuestExecutorTests(unittest.TestCase):
 
             # Only a complete, QEMU-free synthetic census can reach the
             # separate controller-identity gate, which itself still fails.
-            (proc / "1" / "comm").write_text("systemd\\n", encoding="ascii")
+            (proc / "1" / "comm").write_text("systemd\n", encoding="ascii")
             with mock.patch.object(exe, "read_controller_identity", return_value=None):
                 report = exe.collect_preflight(ctx)
             self.assertEqual(report["reason"], "CONTROLLER_CONTRACT_MISMATCH")
