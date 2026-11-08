@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 from pathlib import Path
 import re
 import time
@@ -114,22 +115,35 @@ def _balloon_driver_path_allowed(driver_dir: Path) -> bool:
     return True
 
 
+def _symlink_resolves_to_directory(entry: Path, *, max_hops: int = 8) -> bool:
+    """Walk virtio sysfs-style symlinks; reject cycles and non-directory targets."""
+    current = entry
+    seen: set[Path] = set()
+    for _ in range(max_hops):
+        if current in seen:
+            return False
+        seen.add(current)
+        try:
+            if current.is_dir() and not current.is_symlink():
+                return True
+            if not current.is_symlink():
+                return False
+            link = os.readlink(current)
+            nxt = Path(link) if Path(link).is_absolute() else current.parent / link
+            current = nxt
+        except OSError:
+            return False
+    return False
+
+
 def _virtio_balloon_binding_present(entry: Path, driver_dir: Path) -> bool:
     """Kernel driver bindings are symlinks to device directories; accept both forms."""
     if not _VIRTIO_DEVICE_RE.fullmatch(entry.name):
         return False
     try:
-        if not entry.is_dir():
-            return False
         if entry.is_symlink():
-            target = entry.resolve()
-            if not target.is_dir():
-                return False
-            target_s = str(target).replace("\\", "/")
-            if target_s.startswith("/sys/"):
-                return True
-            return target.resolve() != entry.resolve()
-        return not entry.is_symlink()
+            return _symlink_resolves_to_directory(entry)
+        return entry.is_dir()
     except OSError:
         return False
 
