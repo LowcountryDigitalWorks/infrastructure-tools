@@ -122,7 +122,11 @@ Assert-True ($null -eq (ConvertTo-OfficePcBoundedUInt64 -Value ([uint64] '184467
 Assert-True ((ConvertTo-OfficePcBuildNumberString -Value '22631') -eq '22631') 'build string accepted'
 Assert-True ((ConvertTo-OfficePcBuildNumberString -Value ([uint32] 22631)) -eq '22631') 'build integer accepted'
 
+Assert-True (-not $script:OfficePcInventoryInvokedDirectly) 'dot-source captured as not direct'
 Assert-True (-not (Test-OfficePcInventoryDirectExecution)) 'dot-source is not direct execution'
+$script:OfficePcInventorySuppressAutoInvoke = $false
+Assert-True (-not (Test-OfficePcInventoryDirectExecution)) 'dot-source not direct without suppress flag'
+$script:OfficePcInventorySuppressAutoInvoke = $true
 
 $env:OFFICEPC_INVENTORY_USE_SYNTHETIC_CIM = '1'
 $maliciousHook = Join-Path $PSScriptRoot 'MaliciousAutoloadHook.ps1'
@@ -130,9 +134,37 @@ Assert-True (-not (Test-Path -LiteralPath $maliciousHook)) 'malicious hook absen
 $sourceText = Get-Content -LiteralPath $scriptPath -Raw
 Assert-True ($sourceText -notmatch 'OFFICEPC_INVENTORY_USE_SYNTHETIC_CIM') 'no env autoload in source'
 Assert-True ($sourceText -notmatch 'SyntheticCimHook') 'no hook filename in source'
+$testDeleteHook = @(Get-Content -LiteralPath $PSCommandPath | Where-Object { $_ -match '^\s*Remove-Item\b' -and $_ -match 'SyntheticCimHook' })
+$sourceDeleteHook = @(Get-Content -LiteralPath $scriptPath | Where-Object { $_ -match '^\s*Remove-Item\b' -and $_ -match 'SyntheticCimHook' })
+Assert-True ($testDeleteHook.Count -eq 0) 'tests do not delete hook file'
+Assert-True ($sourceDeleteHook.Count -eq 0) 'inventory script does not delete hook file'
 Remove-Item Env:OFFICEPC_INVENTORY_USE_SYNTHETIC_CIM -ErrorAction SilentlyContinue
 
 $escapedScript = $scriptPath.Replace("'", "''")
+$dotSourceChild = @"
+`$ErrorActionPreference = 'Stop'
+`$script:OfficePcCimCallCount = 0
+function Get-CimInstance {
+    `$script:OfficePcCimCallCount++
+    throw 'LIVE_CIM_MUST_NOT_RUN'
+}
+function Get-PSDrive {
+    `$script:OfficePcCimCallCount++
+    throw 'LIVE_PSDRIVE_MUST_NOT_RUN'
+}
+function Get-WindowsOptionalFeature {
+    `$script:OfficePcCimCallCount++
+    throw 'LIVE_FEATURE_MUST_NOT_RUN'
+}
+. '$escapedScript'
+if (Test-OfficePcInventoryDirectExecution) { throw 'DOT_SOURCE_CLASSIFIED_AS_DIRECT' }
+Write-Output ('DOT_SOURCE_CIM_CALLS=' + `$script:OfficePcCimCallCount)
+"@
+$dotSourceLines = powershell -NoProfile -Command $dotSourceChild
+$dotSourceText = ($dotSourceLines | Where-Object { $_ -ne $null } | ForEach-Object { $_.ToString() }) -join "`n"
+Assert-True ($dotSourceText -match 'DOT_SOURCE_CIM_CALLS=0') 'dot-source child did not run live collector'
+Assert-True ($dotSourceText.Trim() -notmatch '^\s*\{') 'dot-source child emitted no json'
+
 $childCommand = @"
 `$ErrorActionPreference = 'Stop'
 function Get-CimInstance {
@@ -171,9 +203,7 @@ Assert-True ($fileText.Trim().StartsWith('{')) 'file invocation json payload'
 $fileObject = $fileText | ConvertFrom-Json
 Assert-True ($fileObject.disposition -eq 'INVENTORY_BLOCKED') 'file blocked disposition'
 Assert-True ($fileObject.cpu.logical_processors -eq 16) 'mocked cim logical processors'
-
-$staleHook = Join-Path $PSScriptRoot 'SyntheticCimHook.ps1'
-if (Test-Path -LiteralPath $staleHook) { Remove-Item -LiteralPath $staleHook -Force }
+Assert-True (($fileLines | Where-Object { $_ -match '^\s*\{' }).Count -eq 1) 'direct child yields exactly one json object'
 
 if ($PSVersionTable.PSVersion.Major -ge 7) {
     Assert-True $true 'powershell 7 contract pass'

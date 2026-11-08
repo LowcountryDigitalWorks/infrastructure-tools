@@ -25,6 +25,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Capture once at script entry; inside functions $MyInvocation refers to the function, not how this file was loaded.
+$script:OfficePcInventoryInvokedDirectly = ($MyInvocation.InvocationName -ne '.')
+
 if (-not (Get-Variable -Name OfficePcInventorySuppressAutoInvoke -Scope Script -ErrorAction SilentlyContinue)) {
     $script:OfficePcInventorySuppressAutoInvoke = $false
 }
@@ -158,15 +161,7 @@ function ConvertTo-OfficePcOsArchitectureLabel {
 
 function Test-OfficePcInventoryDirectExecution {
     if ($script:OfficePcInventorySuppressAutoInvoke) { return $false }
-    if ($MyInvocation.InvocationName -eq '.') { return $false }
-    if ($null -ne $PSCommandPath -and (Split-Path -Leaf $PSCommandPath) -eq 'Get-OfficePcInventory.ps1') {
-        return $true
-    }
-    $invocation = $MyInvocation.InvocationName
-    if ($null -ne $invocation -and $invocation -match '(?i)Get-OfficePcInventory\.ps1$') {
-        return $true
-    }
-    return $false
+    return $script:OfficePcInventoryInvokedDirectly
 }
 
 function Get-OfficePcEnumTriState {
