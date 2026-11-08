@@ -110,3 +110,27 @@ These slices are not authorized by this pull request.
 ## Non-authorization
 
 This pull request performs no mutation. It does not authorize Recover, Cleanup, Cancel, Once, runner deregistration, disk removal, or a second controller. The original exception remains `UNKNOWN_PRIMARY`. Controller locks and the live provider assignment remain unverified. The observed offline nonbusy registration does not change row 0: it stays `HOLD_PRESERVE_JOB` because the deployed cleanup path would cancel a still-valid queued job.
+
+
+## Proposed independent policy reconciliation for PR #267 (NOT acceptance)
+
+The independently reviewed implementation PR #267 (head `32b8138b80b436823c3c301779821f39fb12563b`) currently has `CHANGES_REQUIRED H1/M2`. Its protection against cancellation is meaningful, but its completed-job path deletes the local VM/media before separately authorizing either local deletion or JIT runner deregistration. This is a **new recovery policy**, not a harmless source refactor. The following is a **candidate contract for independent review**, not authority to execute, install, or merge.
+
+**P0 — no-destructive refusal.** Source changes may replace the deployed behavior that cancels valid queued jobs with a fail-closed refusal before **any** provider, VM, disk, seed, or runner mutation. Today's PR777 run `42462196528`/job `128673684689` remains `HOLD_PRESERVE_JOB`. Preserve exact state and failure evidence, no synthetic success, no second `Once`, and never cancel to make recovery appear complete.
+
+**P1 — completed does not authorize cleanup.** Two provider reads reporting `completed` plus a terminal conclusion are eligibility *evidence only*, not permission to remove local resources or deregister a runner. Until an independently selected and accepted closed local-only operation exists, even a completed job with exact ownership returns `HOLD`. This corrects PR #267's disputed implicit completed-job cleanup.
+
+**P2 — split three separately authorized operations.** A future `LOCAL_GUEST_REMOVE` may remove only the exact owned VM/VHD/DVD and must never cancel the GitHub run or remove its runner. A future `EXACT_RUNNER_DEREGISTER` needs independently accepted runner-identity/labels/busy checks and must not delete media or cancel the workflow. `EXACT_PROVIDER_CANCEL` is distinct, requiring positive PR-head change or closure plus an explicitly accepted run-specific cancellation policy; it never targets an already completed job. Do not automatically chain these three operations.
+
+**P3 — identity and ownership before any future write.** Before *proposing* a local-only action, bind live PR head and attempt plus job `id`, `run_id`, `run_attempt`, `head_sha`, `name`, `runner_id`, `runner_name`, `status`, and `conclusion` across two complete reads. Missing, changed or unassigned completed-job runner identity => HOLD. Match the assigned runner ID/name to the protected state; match one GitHub registration with **exactly eight distinct expected labels** (no extras or duplicates) and `busy=false`. Match VMId and Notes, exactly one disk and DVD with state-bound paths and reparse-safe owned root. Prove both the per-run lock and global controller lock belong to the executing owner, not just that they happen to exist.
+
+**P4 — race and credentials.** Immediately before any separately authorized operation, refresh provider job, PR head, runner registration and lock ownership. If the attempt, assignment, PR head, runner labels/busy state or lock changes, HOLD. Two consecutive REST reads are not an atomic provider lock. Persist only closed classifications, never raw token, runner credential, stdout, stderr, arbitrary exception, private path or customer data.
+
+### Authorized source-only sequence under this *proposed* contract
+
+1. First separate the **queue-preservation hotfix** from recovery: reject queued and unapproved completed jobs **without destructive effects** in both `Mode Cleanup` and failure catch. Add tests for zero provider/VM/runner writes on every refused state. Do not grant new cleanup rights.
+2. Add the missing exact eight-label and job-assignment checks to the bounded preflight/unit tests. Test queued, completed-without-local-approval, changed attempt/PR head, absent/changed job runner assignment, duplicate/extra/missing labels, provider outage, ambiguous controller locks, VMId/Notes/media mismatch and partial provenance; all remain HOLD before any write.
+3. Freeze a combined six-file controller candidate only after independent source acceptance. Do not edit the accepted `Dispatch.psm1` snapshot allowlist or `Test-ControllerSnapshots.ps1` to make a candidate authorize itself. #269 and #186 D0 must independently select an issuer, generation and protected first-install/rollback path.
+4. Require mandatory **actual** Secret Scan, CodeQL, Windows/CI7 validation, influence-clean H0/M0 on the exact final candidate, and host-controlled immutable package installation/readback before considering a separately reviewed local cleanup transaction. Retry/download failures are not security PASS.
+
+**No decision to authorize:** This addendum does not approve any of the three operations, controller promotion, change in protected host, current incident cleanup, cancellation, runner deregistration, or credential work. All present incident states still HOLD.
