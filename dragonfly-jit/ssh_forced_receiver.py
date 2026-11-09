@@ -12,6 +12,7 @@ import stat
 import sys
 
 REMOTE_SENTINEL = "/nonexistent/ldw-dragonfly-jit-handoff-v1"
+TRANSFER_REMOTE_SENTINEL = "/nonexistent/ldw-dragonfly-jit-transfer-v2"
 OWNER_USER = "eddie"
 HANDOFF_MODULE_NAME = "ldw_dragonfly_handoff_contract"
 HANDOFF_FILENAME = "handoff_contract.py"
@@ -96,6 +97,22 @@ def _load_handoff_contract():
     )
 
 
+INBOUND_TRANSFER_MODULE_NAME = "ldw_dragonfly_inbound_transfer_v2"
+INBOUND_TRANSFER_FILENAME = "inbound_transfer_v2.py"
+EXPECTED_INBOUND_TRANSFER_GIT_BLOB = "2e8ccb803af1ba5450b1e02a53ee4222d76c74d2"
+
+
+def _load_inbound_transfer_v2():
+    receiver_path = Path(__file__).absolute()
+    _assert_owned_regular_source(receiver_path, max_bytes=MAX_RECEIVER_BYTES)
+    return _load_module(
+        module_name=INBOUND_TRANSFER_MODULE_NAME,
+        source_path=receiver_path.parent / INBOUND_TRANSFER_FILENAME,
+        expected_blob=EXPECTED_INBOUND_TRANSFER_GIT_BLOB,
+        max_bytes=MAX_HANDOFF_BYTES,
+    )
+
+
 def _load_canary_executor():
     receiver_path = Path(__file__).absolute()
     _assert_owned_regular_source(receiver_path, max_bytes=MAX_RECEIVER_BYTES)
@@ -124,7 +141,19 @@ def _owner_state_root() -> Path:
 
 def run_receiver(*, stdin, stdout, stderr, environ: dict[str, str], state_root: Path | None = None) -> int:
     try:
-        if environ.get("SSH_ORIGINAL_COMMAND") != REMOTE_SENTINEL:
+        original = environ.get("SSH_ORIGINAL_COMMAND")
+        if original == TRANSFER_REMOTE_SENTINEL:
+            transfer = _load_inbound_transfer_v2()
+            root = state_root if state_root is not None else _owner_state_root()
+            install_root = root / "adjunct-v2"
+            return transfer.run_inbound_transfer(
+                stdin=stdin,
+                stdout=stdout,
+                stderr=stderr,
+                install_root=install_root,
+                state_root=root,
+            )
+        if original != REMOTE_SENTINEL:
             raise ReceiverError("ORIGINAL_COMMAND_INVALID")
         root = state_root if state_root is not None else _owner_state_root()
         handoff = _load_handoff_contract()

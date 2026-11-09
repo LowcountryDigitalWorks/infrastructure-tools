@@ -20,6 +20,7 @@ REMOTE_USER = "eddie"
 # rule replaces it with the reviewed receiver. If that rule is missing, this request
 # fails closed instead of resolving an executable from the remote user's PATH.
 REMOTE_SENTINEL = "/nonexistent/ldw-dragonfly-jit-handoff-v1"
+TRANSFER_REMOTE_SENTINEL = "/nonexistent/ldw-dragonfly-jit-transfer-v2"
 SSH_PORT = 22
 MAX_ENDPOINT_CHARS = 253
 SSH_EXECUTABLE = PureWindowsPath(r"C:\Windows\System32\OpenSSH\ssh.exe")
@@ -146,4 +147,21 @@ def build_openssh_plan(payload: object, *, local_app_data: str) -> dict:
         "expected_host_key_fingerprint": config["host_key_fingerprint"],
         "stdin_capsule_only": True,
         "opens_network": False,
+    }
+
+
+def build_openssh_transfer_plan(payload: object, *, local_app_data: str) -> dict:
+    """Exact OpenSSH argv plan for the closed V2 adjunct transfer profile only."""
+    handoff = build_openssh_plan(payload, local_app_data=local_app_data)
+    args = list(handoff["arguments"])
+    if args[-1] != REMOTE_SENTINEL:
+        raise TransportContractError("TRANSPORT_HANDOFF_COMMAND_INVALID")
+    args[-1] = TRANSFER_REMOTE_SENTINEL
+    return {
+        **handoff,
+        "marker": "DRAGONFLY-JIT-TRANSPORT-V2-TRANSFER-001",
+        "arguments": args,
+        "remote_command": TRANSFER_REMOTE_SENTINEL,
+        "stdin_transfer_envelope_only": True,
+        "stdin_capsule_only": False,
     }
