@@ -231,7 +231,6 @@ def validate_transfer_envelope(payload: object) -> dict:
 
 
 def _claim_manifest_once(state_root: Path, manifest_sha256: str) -> None:
-    state_root.mkdir(parents=True, exist_ok=True)
     _assert_private_dir(state_root)
     claim_path = state_root / "v2-transfer-claims.json"
     claims: dict[str, str] = {}
@@ -258,7 +257,6 @@ def install_transfer_bundle(
     if release_root.exists():
         raise TransferError("TRANSFER_RELEASE_ALREADY_PRESENT")
     _claim_manifest_once(state_root, envelope["manifest_sha256"])
-    install_root.mkdir(parents=True, exist_ok=True)
     _assert_private_dir(install_root)
     staging = Path(tempfile.mkdtemp(prefix="ldw-v2-transfer-", dir=install_root))
     try:
@@ -266,7 +264,6 @@ def install_transfer_bundle(
         for rel_path, data in envelope["files"].items():
             target = staging / rel_path
             _write_private_file(target, data)
-        release_root.parent.mkdir(parents=True, exist_ok=True)
         _assert_private_dir(release_root.parent)
         os.replace(staging, release_root)
         staging = None
