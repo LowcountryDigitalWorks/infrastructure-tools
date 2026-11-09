@@ -126,6 +126,7 @@ function Build-LdwDragonflyAdjunctV2TransferEnvelope {
         release_identity = $script:ReleaseIdentity
         manifest_sha256 = $manifestSha
         manifest = $manifest
+        manifest_content = [Convert]::ToBase64String($manifestBytes)
         files = $files
     }
 }
