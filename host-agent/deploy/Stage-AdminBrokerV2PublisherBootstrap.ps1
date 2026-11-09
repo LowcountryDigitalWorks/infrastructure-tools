@@ -3,7 +3,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$acceptedBootstrapSha256 = 'a3ede74deeee78f68b5fa4db620c56d4acfe3131c587d3252281ae7c8eecd2d4'
+$acceptedBootstrapSha256 = 'f3df596c88cdef40ef8b2bb3ff2561ce83a545ebb678e884d3aae5829facb1e4'
 $acceptedV2WorkerSha256 = '75788c05edcf14199e53de239ef333dcefb9bc09385ba22de2b99cfda91bcabe'
 $bootstrapFileName = 'Install-AdminBrokerV2PublisherBootstrap.ps1'
 $workerBundleName = 'Invoke-AdminBrokerV2PublisherWorker.ps1'
