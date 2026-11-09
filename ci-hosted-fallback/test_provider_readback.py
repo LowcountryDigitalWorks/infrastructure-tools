@@ -20,6 +20,7 @@ from provider_readback import (
     READ_STALE_IDENTITY,
     READ_UNTRUSTED_CALLER,
     READ_UNTRUSTED_INPUT,
+    TrustedHostEvidence,
     evaluate_provider_plan,
     read_provider_readback,
 )
@@ -30,18 +31,17 @@ JOB_ID = 128961978297
 PR = 740
 
 
-def _trusted_context(
+def _evidence(
     *,
     private_blocked: bool = True,
     duplicate_job: bool = False,
     kind: str = "LDW_PROTECTED_HOST_SYNTHETIC",
-) -> dict[str, object]:
-    return {
-        "schema_version": "1.0",
-        "attestation_kind": kind,
-        "private_capacity_blocked_attested": private_blocked,
-        "active_duplicate_local_or_jit_job_attested": duplicate_job,
-    }
+) -> TrustedHostEvidence:
+    return TrustedHostEvidence(
+        attestation_kind=kind,
+        private_capacity_blocked_attested=private_blocked,
+        active_duplicate_local_or_jit_job_attested=duplicate_job,
+    )
 
 
 def _budgets_json(budget_usd: float = 0.0, prevent: bool = True, *, duplicate_actions: bool = False) -> str:
@@ -132,9 +132,8 @@ def _pr_json(*, state: str = "open", head_sha: str = HEAD) -> str:
 
 def _request(**overrides: object) -> dict[str, object]:
     base: dict[str, object] = {
-        "schema_version": "1.1",
+        "schema_version": "1.2",
         "trusted_caller": "LDW_HOST_GH_ADAPTER",
-        "host_trusted_context": _trusted_context(),
         "pull_request_number": PR,
         "head_sha": HEAD,
         "run_id": RUN_ID,
@@ -169,6 +168,7 @@ def _fixed_clock(now: datetime):
 
 class ProviderReadbackTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.evidence = _evidence()
         self.clock = _fixed_clock(datetime(2026, 11, 8, 12, 30, 0, tzinfo=timezone.utc))
         self.good = {
             f"/orgs/LowcountryDigitalWorks/settings/billing/budgets?per_page=100": (0, _budgets_json()),
@@ -187,6 +187,7 @@ class ProviderReadbackTests(unittest.TestCase):
         out = evaluate_provider_plan(
             _request(),
             gh_runner=_mock_runner(self.good),
+            trusted_host_evidence=self.evidence,
             utc_now=self.clock,
         )
         self.assertFalse(out["execute"])
@@ -198,14 +199,41 @@ class ProviderReadbackTests(unittest.TestCase):
         out = read_provider_readback(
             _request(trusted_caller="MODEL_GUESS"),
             gh_runner=_mock_runner(self.good),
+            trusted_host_evidence=self.evidence,
             utc_now=self.clock,
         )
         self.assertEqual(out["readback_code"], READ_UNTRUSTED_CALLER)
 
-    def test_missing_host_trusted_context_rejected(self) -> None:
+    def test_missing_injected_evidence_rejected(self) -> None:
         out = read_provider_readback(
-            _request(host_trusted_context=None),  # type: ignore[arg-type]
+            _request(),
             gh_runner=_mock_runner(self.good),
+            trusted_host_evidence=None,
+            utc_now=self.clock,
+        )
+        self.assertEqual(out["readback_code"], READ_UNTRUSTED_CALLER)
+
+    def test_request_owned_serialized_context_extra_field_rejected(self) -> None:
+        payload = _request()
+        payload["host_trusted_context"] = {
+            "schema_version": "1.0",
+            "attestation_kind": "LDW_PROTECTED_HOST_RUNTIME",
+            "private_capacity_blocked_attested": True,
+            "active_duplicate_local_or_jit_job_attested": False,
+        }
+        out = read_provider_readback(
+            payload,
+            gh_runner=_mock_runner(self.good),
+            trusted_host_evidence=self.evidence,
+            utc_now=self.clock,
+        )
+        self.assertEqual(out["readback_code"], READ_UNTRUSTED_INPUT)
+
+    def test_runtime_attestation_injection_rejected_v0(self) -> None:
+        out = read_provider_readback(
+            _request(),
+            gh_runner=_mock_runner(self.good),
+            trusted_host_evidence=_evidence(kind="LDW_PROTECTED_HOST_RUNTIME"),
             utc_now=self.clock,
         )
         self.assertEqual(out["readback_code"], READ_UNTRUSTED_CALLER)
@@ -219,7 +247,7 @@ class ProviderReadbackTests(unittest.TestCase):
             calls.append(argv)
             return _mock_runner(self.good)(argv)
 
-        out = read_provider_readback(payload, gh_runner=spy, utc_now=self.clock)
+        out = read_provider_readback(payload, gh_runner=spy, trusted_host_evidence=self.evidence, utc_now=self.clock)
         self.assertEqual(out["readback_code"], READ_UNTRUSTED_INPUT)
         self.assertEqual(calls, [])
 
@@ -231,7 +259,7 @@ class ProviderReadbackTests(unittest.TestCase):
             calls.append(argv)
             return 0, "{}"
 
-        out = read_provider_readback(payload, gh_runner=spy, utc_now=self.clock)
+        out = read_provider_readback(payload, gh_runner=spy, trusted_host_evidence=self.evidence, utc_now=self.clock)
         self.assertEqual(out["readback_code"], READ_UNTRUSTED_INPUT)
         self.assertEqual(calls, [])
 
@@ -243,18 +271,18 @@ class ProviderReadbackTests(unittest.TestCase):
             calls.append(argv)
             return 0, "{}"
 
-        out = read_provider_readback(payload, gh_runner=spy, utc_now=self.clock)
+        out = read_provider_readback(payload, gh_runner=spy, trusted_host_evidence=self.evidence, utc_now=self.clock)
         self.assertEqual(out["readback_code"], READ_UNTRUSTED_INPUT)
         self.assertEqual(calls, [])
 
     def test_gh_unavailable(self) -> None:
-        out = read_provider_readback(_request(), gh_runner=lambda _a: (127, ""), utc_now=self.clock)
+        out = read_provider_readback(_request(), gh_runner=lambda _a: (127, ""), trusted_host_evidence=self.evidence, utc_now=self.clock)
         self.assertEqual(out["readback_code"], READ_GH_UNAVAILABLE)
 
     def test_budget_403_forbidden(self) -> None:
         mapping = dict(self.good)
         mapping[f"/orgs/LowcountryDigitalWorks/settings/billing/budgets?per_page=100"] = (403, "")
-        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), utc_now=self.clock)
+        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), trusted_host_evidence=self.evidence, utc_now=self.clock)
         self.assertEqual(out["readback_code"], READ_GH_FORBIDDEN)
 
     def test_gh_exit_one_generic_hold(self) -> None:
@@ -263,19 +291,19 @@ class ProviderReadbackTests(unittest.TestCase):
             1,
             '{"message":"boom"}',
         )
-        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), utc_now=self.clock)
+        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), trusted_host_evidence=self.evidence, utc_now=self.clock)
         self.assertEqual(out["readback_code"], READ_GH_UNAVAILABLE)
 
     def test_malformed_budget_json(self) -> None:
         mapping = dict(self.good)
         mapping[f"/orgs/LowcountryDigitalWorks/settings/billing/budgets?per_page=100"] = (0, "not-json")
-        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), utc_now=self.clock)
+        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), trusted_host_evidence=self.evidence, utc_now=self.clock)
         self.assertEqual(out["readback_code"], READ_GH_MALFORMED)
 
     def test_oversize_response_body(self) -> None:
         mapping = dict(self.good)
         mapping[f"/orgs/LowcountryDigitalWorks/settings/billing/budgets?per_page=100"] = (0, "x" * 300_000)
-        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), utc_now=self.clock)
+        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), trusted_host_evidence=self.evidence, utc_now=self.clock)
         self.assertEqual(out["readback_code"], READ_GH_MALFORMED)
 
     def test_no_actions_org_budget_row(self) -> None:
@@ -295,7 +323,7 @@ class ProviderReadbackTests(unittest.TestCase):
                 }
             ),
         )
-        out = evaluate_provider_plan(_request(), gh_runner=_mock_runner(mapping), utc_now=self.clock)
+        out = evaluate_provider_plan(_request(), gh_runner=_mock_runner(mapping), trusted_host_evidence=self.evidence, utc_now=self.clock)
         self.assertEqual(out["readback_code"], "READ_OK")
         assert out["planner_result"] is not None
         self.assertNotEqual(out["planner_result"]["recommended_route"], ROUTE_HOSTED_CLEAN_PLAN_BUDGET_CAPPED)
@@ -306,7 +334,7 @@ class ProviderReadbackTests(unittest.TestCase):
             0,
             _budgets_json(duplicate_actions=True),
         )
-        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), utc_now=self.clock)
+        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), trusted_host_evidence=self.evidence, utc_now=self.clock)
         self.assertEqual(out["readback_code"], READ_GH_MALFORMED)
 
     def test_prevent_not_hard_stopped(self) -> None:
@@ -315,7 +343,7 @@ class ProviderReadbackTests(unittest.TestCase):
             0,
             _budgets_json(prevent=False),
         )
-        out = evaluate_provider_plan(_request(), gh_runner=_mock_runner(mapping), utc_now=self.clock)
+        out = evaluate_provider_plan(_request(), gh_runner=_mock_runner(mapping), trusted_host_evidence=self.evidence, utc_now=self.clock)
         assert out["planner_result"] is not None
         self.assertNotEqual(out["planner_result"]["recommended_route"], ROUTE_HOSTED_CLEAN_PLAN_BUDGET_CAPPED)
 
@@ -325,7 +353,7 @@ class ProviderReadbackTests(unittest.TestCase):
             0,
             _pr_json(head_sha="a" * 40),
         )
-        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), utc_now=self.clock)
+        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), trusted_host_evidence=self.evidence, utc_now=self.clock)
         self.assertEqual(out["readback_code"], READ_STALE_IDENTITY)
 
     def test_stale_run_attempt_mismatch(self) -> None:
@@ -334,7 +362,7 @@ class ProviderReadbackTests(unittest.TestCase):
             0,
             _run_json(attempt=2),
         )
-        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), utc_now=self.clock)
+        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), trusted_host_evidence=self.evidence, utc_now=self.clock)
         self.assertEqual(out["readback_code"], READ_STALE_IDENTITY)
 
     def test_job_run_id_mismatch(self) -> None:
@@ -343,7 +371,7 @@ class ProviderReadbackTests(unittest.TestCase):
             0,
             json.dumps({"id": JOB_ID, "run_id": RUN_ID + 1, "status": "queued", "conclusion": None}),
         )
-        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), utc_now=self.clock)
+        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), trusted_host_evidence=self.evidence, utc_now=self.clock)
         self.assertEqual(out["readback_code"], READ_STALE_IDENTITY)
 
     def test_run_not_pull_request_event(self) -> None:
@@ -363,7 +391,7 @@ class ProviderReadbackTests(unittest.TestCase):
                 }
             ),
         )
-        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), utc_now=self.clock)
+        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), trusted_host_evidence=self.evidence, utc_now=self.clock)
         self.assertEqual(out["readback_code"], READ_STALE_IDENTITY)
 
     def test_run_missing_pr_link(self) -> None:
@@ -383,7 +411,7 @@ class ProviderReadbackTests(unittest.TestCase):
                 }
             ),
         )
-        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), utc_now=self.clock)
+        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), trusted_host_evidence=self.evidence, utc_now=self.clock)
         self.assertEqual(out["readback_code"], READ_STALE_IDENTITY)
 
     def test_run_completed_rejected(self) -> None:
@@ -392,7 +420,7 @@ class ProviderReadbackTests(unittest.TestCase):
             0,
             _run_json(status="completed", conclusion="success"),
         )
-        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), utc_now=self.clock)
+        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), trusted_host_evidence=self.evidence, utc_now=self.clock)
         self.assertEqual(out["readback_code"], READ_JOB_NOT_ELIGIBLE)
 
     def test_queued_timeout_exceeded(self) -> None:
@@ -401,7 +429,7 @@ class ProviderReadbackTests(unittest.TestCase):
             0,
             _run_json(created_at="2026-11-01T12:00:00Z"),
         )
-        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), utc_now=self.clock)
+        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), trusted_host_evidence=self.evidence, utc_now=self.clock)
         self.assertEqual(out["readback_code"], READ_JOB_NOT_ELIGIBLE)
 
     def test_queued_future_created_at_rejected(self) -> None:
@@ -410,7 +438,7 @@ class ProviderReadbackTests(unittest.TestCase):
             0,
             _run_json(created_at="2026-11-09T12:00:00Z"),
         )
-        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), utc_now=self.clock)
+        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), trusted_host_evidence=self.evidence, utc_now=self.clock)
         self.assertEqual(out["readback_code"], READ_JOB_NOT_ELIGIBLE)
 
     def test_pr_not_open(self) -> None:
@@ -419,7 +447,7 @@ class ProviderReadbackTests(unittest.TestCase):
             0,
             _pr_json(state="closed"),
         )
-        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), utc_now=self.clock)
+        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), trusted_host_evidence=self.evidence, utc_now=self.clock)
         self.assertEqual(out["readback_code"], READ_STALE_IDENTITY)
 
     def test_canceled_job_conclusion(self) -> None:
@@ -428,7 +456,7 @@ class ProviderReadbackTests(unittest.TestCase):
             0,
             _job_json(conclusion="cancelled"),
         )
-        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), utc_now=self.clock)
+        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), trusted_host_evidence=self.evidence, utc_now=self.clock)
         self.assertEqual(out["readback_code"], READ_JOB_NOT_ELIGIBLE)
 
     def test_job_not_queued(self) -> None:
@@ -437,8 +465,59 @@ class ProviderReadbackTests(unittest.TestCase):
             0,
             _job_json(status="completed"),
         )
-        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), utc_now=self.clock)
+        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), trusted_host_evidence=self.evidence, utc_now=self.clock)
         self.assertEqual(out["readback_code"], READ_JOB_NOT_ELIGIBLE)
+
+    def test_job_in_progress_rejected(self) -> None:
+        mapping = dict(self.good)
+        mapping[f"/repos/LowcountryDigitalWorks/business-operations/actions/jobs/{JOB_ID}"] = (
+            0,
+            _job_json(status="in_progress"),
+        )
+        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), trusted_host_evidence=self.evidence, utc_now=self.clock)
+        self.assertEqual(out["readback_code"], READ_JOB_NOT_ELIGIBLE)
+
+    def test_job_waiting_rejected(self) -> None:
+        mapping = dict(self.good)
+        mapping[f"/repos/LowcountryDigitalWorks/business-operations/actions/jobs/{JOB_ID}"] = (
+            0,
+            _job_json(status="waiting"),
+        )
+        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), trusted_host_evidence=self.evidence, utc_now=self.clock)
+        self.assertEqual(out["readback_code"], READ_JOB_NOT_ELIGIBLE)
+
+    def test_job_pending_rejected(self) -> None:
+        mapping = dict(self.good)
+        mapping[f"/repos/LowcountryDigitalWorks/business-operations/actions/jobs/{JOB_ID}"] = (
+            0,
+            _job_json(status="pending"),
+        )
+        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), trusted_host_evidence=self.evidence, utc_now=self.clock)
+        self.assertEqual(out["readback_code"], READ_JOB_NOT_ELIGIBLE)
+
+    def test_pr_missing_repo_full_name_rejected(self) -> None:
+        mapping = dict(self.good)
+        mapping[f"/repos/LowcountryDigitalWorks/business-operations/pulls/{PR}"] = (
+            0,
+            json.dumps({"number": PR, "state": "open", "head": {"sha": HEAD}}),
+        )
+        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), trusted_host_evidence=self.evidence, utc_now=self.clock)
+        self.assertEqual(out["readback_code"], READ_STALE_IDENTITY)
+
+    def test_pr_fork_repo_rejected(self) -> None:
+        mapping = dict(self.good)
+        mapping[f"/repos/LowcountryDigitalWorks/business-operations/pulls/{PR}"] = (
+            0,
+            json.dumps(
+                {
+                    "number": PR,
+                    "state": "open",
+                    "head": {"sha": HEAD, "repo": {"full_name": "attacker/not-business-operations"}},
+                }
+            ),
+        )
+        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), trusted_host_evidence=self.evidence, utc_now=self.clock)
+        self.assertEqual(out["readback_code"], READ_STALE_IDENTITY)
 
     def test_runner_assigned_blocks_planner(self) -> None:
         mapping = dict(self.good)
@@ -446,18 +525,15 @@ class ProviderReadbackTests(unittest.TestCase):
             0,
             _job_json(runner_id=99),
         )
-        out = evaluate_provider_plan(_request(), gh_runner=_mock_runner(mapping), utc_now=self.clock)
+        out = evaluate_provider_plan(_request(), gh_runner=_mock_runner(mapping), trusted_host_evidence=self.evidence, utc_now=self.clock)
         assert out["planner_result"] is not None
         self.assertEqual(out["planner_result"]["recommended_route"], "HOLD_PROVIDER_CAPACITY")
 
     def test_private_capacity_unverified_without_attestation(self) -> None:
-        ctx = _trusted_context(private_blocked=False)
         out = evaluate_provider_plan(
-            _request(
-                private_capacity_blocked=True,
-                host_trusted_context=ctx,
-            ),
+            _request(private_capacity_blocked=True),
             gh_runner=_mock_runner(self.good),
+            trusted_host_evidence=_evidence(private_blocked=False),
             utc_now=self.clock,
         )
         self.assertEqual(out["readback_code"], READ_CAPACITY_UNVERIFIED)
@@ -465,11 +541,9 @@ class ProviderReadbackTests(unittest.TestCase):
 
     def test_private_capacity_unknown_false(self) -> None:
         out = evaluate_provider_plan(
-            _request(
-                private_capacity_blocked=False,
-                host_trusted_context=_trusted_context(private_blocked=False),
-            ),
+            _request(private_capacity_blocked=False),
             gh_runner=_mock_runner(self.good),
+            trusted_host_evidence=_evidence(private_blocked=False),
             utc_now=self.clock,
         )
         assert out["planner_result"] is not None
@@ -477,11 +551,9 @@ class ProviderReadbackTests(unittest.TestCase):
 
     def test_duplicate_active_job_hold(self) -> None:
         out = evaluate_provider_plan(
-            _request(
-                active_duplicate_local_or_jit_job=True,
-                host_trusted_context=_trusted_context(duplicate_job=True),
-            ),
+            _request(active_duplicate_local_or_jit_job=True),
             gh_runner=_mock_runner(self.good),
+            trusted_host_evidence=_evidence(duplicate_job=True),
             utc_now=self.clock,
         )
         assert out["planner_result"] is not None
@@ -489,11 +561,9 @@ class ProviderReadbackTests(unittest.TestCase):
 
     def test_duplicate_claim_without_attestation(self) -> None:
         out = read_provider_readback(
-            _request(
-                active_duplicate_local_or_jit_job=True,
-                host_trusted_context=_trusted_context(duplicate_job=False),
-            ),
+            _request(active_duplicate_local_or_jit_job=True),
             gh_runner=_mock_runner(self.good),
+            trusted_host_evidence=_evidence(duplicate_job=False),
             utc_now=self.clock,
         )
         self.assertEqual(out["readback_code"], READ_CAPACITY_UNVERIFIED)
@@ -502,6 +572,7 @@ class ProviderReadbackTests(unittest.TestCase):
         out = read_provider_readback(
             _request(data_classification="CUSTOMER_REGULATED"),
             gh_runner=_mock_runner(self.good),
+            trusted_host_evidence=self.evidence,
             utc_now=self.clock,
         )
         self.assertEqual(out["readback_code"], READ_UNTRUSTED_INPUT)
@@ -510,6 +581,7 @@ class ProviderReadbackTests(unittest.TestCase):
         out = evaluate_provider_plan(
             _request(bounded_required_cost=math.nan),
             gh_runner=_mock_runner(self.good),
+            trusted_host_evidence=self.evidence,
             utc_now=self.clock,
         )
         self.assertEqual(out["readback_code"], READ_UNTRUSTED_INPUT)
@@ -519,6 +591,7 @@ class ProviderReadbackTests(unittest.TestCase):
         out = evaluate_provider_plan(
             _request(bounded_required_cost=-1),
             gh_runner=_mock_runner(self.good),
+            trusted_host_evidence=self.evidence,
             utc_now=self.clock,
         )
         self.assertEqual(out["readback_code"], READ_UNTRUSTED_INPUT)
@@ -527,19 +600,24 @@ class ProviderReadbackTests(unittest.TestCase):
     def test_job_not_found(self) -> None:
         mapping = dict(self.good)
         mapping[f"/repos/LowcountryDigitalWorks/business-operations/actions/jobs/{JOB_ID}"] = (404, "")
-        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), utc_now=self.clock)
+        out = read_provider_readback(_request(), gh_runner=_mock_runner(mapping), trusted_host_evidence=self.evidence, utc_now=self.clock)
         self.assertEqual(out["readback_code"], "READ_GH_NOT_FOUND")
 
     def test_output_never_execute(self) -> None:
-        out = evaluate_provider_plan(_request(), gh_runner=_mock_runner(self.good), utc_now=self.clock)
+        out = evaluate_provider_plan(_request(), gh_runner=_mock_runner(self.good), trusted_host_evidence=self.evidence, utc_now=self.clock)
         self.assertFalse(out["execute"])
         assert out["planner_result"] is not None
         self.assertFalse(out["planner_result"]["execute"])
 
     def test_planner_input_sets_trusted_billing_source(self) -> None:
-        out = read_provider_readback(_request(), gh_runner=_mock_runner(self.good), utc_now=self.clock)
+        out = read_provider_readback(_request(), gh_runner=_mock_runner(self.good), trusted_host_evidence=self.evidence, utc_now=self.clock)
         assert out["planner_input"] is not None
         self.assertEqual(out["planner_input"]["billing_evidence_source"], "GITHUB_ORG_ADMIN_READ")
+
+    def test_planner_job_status_not_fabricated(self) -> None:
+        out = read_provider_readback(_request(), gh_runner=_mock_runner(self.good), trusted_host_evidence=self.evidence, utc_now=self.clock)
+        assert out["planner_input"] is not None
+        self.assertEqual(out["planner_input"]["job_status"], "queued")
 
     def test_bool_job_id_rejected_without_gh(self) -> None:
         payload = _request(job_id=True)  # type: ignore[arg-type]
@@ -549,7 +627,7 @@ class ProviderReadbackTests(unittest.TestCase):
             calls.append(argv)
             return 0, "{}"
 
-        out = read_provider_readback(payload, gh_runner=spy, utc_now=self.clock)
+        out = read_provider_readback(payload, gh_runner=spy, trusted_host_evidence=self.evidence, utc_now=self.clock)
         self.assertEqual(out["readback_code"], READ_UNTRUSTED_INPUT)
         self.assertEqual(calls, [])
 

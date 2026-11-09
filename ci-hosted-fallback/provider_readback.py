@@ -4,8 +4,8 @@ GET-only, fixed org/repo/workflow allowlist, no dispatch/mutation/credentials.
 Produces a closed DTO suitable for :func:`plan_fallback` with
 ``billing_evidence_source=GITHUB_ORG_ADMIN_READ`` only when reads succeed.
 
-``trusted_caller`` and caller-supplied capacity flags are **not** authentication;
-protected host/OS identity is only accepted via injected ``host_trusted_context``.
+``trusted_caller`` and request JSON cannot prove protected host identity.
+Capacity attestations require injected :class:`TrustedHostEvidence` (not serializable in the request).
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from plan_fallback import (
     plan_fallback,
 )
 
-READBACK_SCHEMA_VERSION = "1.1"
+READBACK_SCHEMA_VERSION = "1.2"
 ALLOWED_ORGANIZATION = "LowcountryDigitalWorks"
 ALLOWED_REPOSITORY = "LowcountryDigitalWorks/business-operations"
 ALLOWED_WORKFLOW_ID = "validate-documentation"
@@ -36,27 +36,38 @@ TRUSTED_CALLER_IDENTITIES = frozenset(
         "LDW_HOST_GH_ADAPTER",
     }
 )
-TRUSTED_CONTEXT_SCHEMA_VERSION = "1.0"
-TRUSTED_CONTEXT_ATTESTATION_KINDS = frozenset(
+V0_INJECTED_ATTESTATION_KINDS = frozenset(
     {
         "LDW_PROTECTED_HOST_SYNTHETIC",
-        "LDW_PROTECTED_HOST_RUNTIME",
     }
 )
-TRUSTED_CONTEXT_FIELDS = frozenset(
-    {
-        "schema_version",
+
+
+class TrustedHostEvidence:
+    """Non-serializable host attestation supplied by protected orchestrator code (not the request body)."""
+
+    __slots__ = (
         "attestation_kind",
         "private_capacity_blocked_attested",
         "active_duplicate_local_or_jit_job_attested",
-    }
-)
+    )
+
+    def __init__(
+        self,
+        *,
+        attestation_kind: str,
+        private_capacity_blocked_attested: bool,
+        active_duplicate_local_or_jit_job_attested: bool,
+    ) -> None:
+        self.attestation_kind = attestation_kind
+        self.private_capacity_blocked_attested = private_capacity_blocked_attested
+        self.active_duplicate_local_or_jit_job_attested = active_duplicate_local_or_jit_job_attested
+
 
 READ_REQUEST_FIELDS = frozenset(
     {
         "schema_version",
         "trusted_caller",
-        "host_trusted_context",
         "pull_request_number",
         "head_sha",
         "run_id",
@@ -92,7 +103,6 @@ READ_JOB_NOT_ELIGIBLE = "READ_JOB_NOT_ELIGIBLE"
 READ_CAPACITY_UNVERIFIED = "READ_CAPACITY_UNVERIFIED"
 
 _LIVE_RUN_STATUSES = frozenset({"queued", "in_progress", "waiting", "requested", "pending"})
-_LIVE_JOB_STATUSES = frozenset({"queued", "waiting", "pending", "in_progress"})
 
 
 def _utc_now_default() -> datetime:
@@ -211,25 +221,16 @@ def _head_sha(value: Any) -> str | None:
     return value
 
 
-def _closed_trusted_context(value: Any) -> dict[str, Any] | None:
-    if type(value) is not dict:
+def _accept_trusted_host_evidence(value: Any) -> TrustedHostEvidence | None:
+    if not isinstance(value, TrustedHostEvidence):
         return None
-    if set(value.keys()) != TRUSTED_CONTEXT_FIELDS:
+    if value.attestation_kind not in V0_INJECTED_ATTESTATION_KINDS:
         return None
-    if value["schema_version"] != TRUSTED_CONTEXT_SCHEMA_VERSION:
+    blocked = value.private_capacity_blocked_attested
+    duplicate = value.active_duplicate_local_or_jit_job_attested
+    if type(blocked) is not bool or type(duplicate) is not bool:
         return None
-    if value["attestation_kind"] not in TRUSTED_CONTEXT_ATTESTATION_KINDS:
-        return None
-    blocked = _exact_bool(value["private_capacity_blocked_attested"])
-    duplicate = _exact_bool(value["active_duplicate_local_or_jit_job_attested"])
-    if blocked is None or duplicate is None:
-        return None
-    return {
-        "schema_version": TRUSTED_CONTEXT_SCHEMA_VERSION,
-        "attestation_kind": value["attestation_kind"],
-        "private_capacity_blocked_attested": blocked,
-        "active_duplicate_local_or_jit_job_attested": duplicate,
-    }
+    return value
 
 
 def _validate_read_request(payload: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -260,11 +261,9 @@ def _validate_read_request(payload: Mapping[str, Any]) -> dict[str, Any] | None:
     dup = _exact_bool(payload["active_duplicate_local_or_jit_job"])
     if priv is None or dup is None:
         return None
-    trusted_context = _closed_trusted_context(payload["host_trusted_context"])
     return {
         "schema_version": READBACK_SCHEMA_VERSION,
         "trusted_caller": payload["trusted_caller"],
-        "host_trusted_context": trusted_context,
         "pull_request_number": pr_number,
         "head_sha": head_sha,
         "run_id": run_id,
@@ -353,14 +352,15 @@ def _run_lists_pr(run_json: dict[str, Any], pr_number: int) -> bool:
 
 def _capacity_flags_for_planner(
     validated: dict[str, Any],
+    *,
+    trusted_host_evidence: TrustedHostEvidence | None,
 ) -> tuple[bool, bool, str | None]:
-    """Map caller claims + host context to planner flags; fail closed on unverified TRUE claims."""
-    ctx = validated["host_trusted_context"]
-    if ctx is None:
+    """Map caller claims + injected host evidence to planner flags; fail closed on unverified TRUE claims."""
+    if trusted_host_evidence is None:
         return False, False, READ_UNTRUSTED_CALLER
 
-    attested_blocked = ctx["private_capacity_blocked_attested"]
-    attested_dup = ctx["active_duplicate_local_or_jit_job_attested"]
+    attested_blocked = trusted_host_evidence.private_capacity_blocked_attested
+    attested_dup = trusted_host_evidence.active_duplicate_local_or_jit_job_attested
     claim_blocked = validated["private_capacity_blocked_claim"]
     claim_dup = validated["active_duplicate_local_or_jit_job_claim"]
 
@@ -377,6 +377,7 @@ def read_provider_readback(
     *,
     gh_runner: GhRunner | None = None,
     utc_now: UtcNow | None = None,
+    trusted_host_evidence: TrustedHostEvidence | None = None,
 ) -> dict[str, Any]:
     """Fetch fixed GitHub metadata and return planner input or redacted HOLD code."""
     validated = _validate_read_request(request)
@@ -386,7 +387,14 @@ def read_provider_readback(
     if validated["trusted_caller"] not in TRUSTED_CALLER_IDENTITIES:
         return _redacted_hold(READ_UNTRUSTED_CALLER)
 
-    capacity_blocked, capacity_dup, capacity_hold = _capacity_flags_for_planner(validated)
+    accepted_evidence = _accept_trusted_host_evidence(trusted_host_evidence)
+    if trusted_host_evidence is not None and accepted_evidence is None:
+        return _redacted_hold(READ_UNTRUSTED_CALLER)
+
+    capacity_blocked, capacity_dup, capacity_hold = _capacity_flags_for_planner(
+        validated,
+        trusted_host_evidence=accepted_evidence,
+    )
     if capacity_hold is not None:
         return _redacted_hold(capacity_hold)
 
@@ -485,17 +493,18 @@ def read_provider_readback(
     if type(pr_head_sha) is not str or pr_head_sha != expected_head:
         return _redacted_hold(READ_STALE_IDENTITY)
     pr_repo = pr_head.get("repo")
-    if type(pr_repo) is dict:
-        full_name = pr_repo.get("full_name")
-        if type(full_name) is str and full_name != ALLOWED_REPOSITORY:
-            return _redacted_hold(READ_STALE_IDENTITY)
+    if type(pr_repo) is not dict:
+        return _redacted_hold(READ_STALE_IDENTITY)
+    full_name = pr_repo.get("full_name")
+    if type(full_name) is not str or full_name != ALLOWED_REPOSITORY:
+        return _redacted_hold(READ_STALE_IDENTITY)
 
     status = job_json.get("status")
     conclusion = job_json.get("conclusion")
     runner_id = job_json.get("runner_id")
     runner_name = job_json.get("runner_name")
 
-    if type(status) is not str or status not in _LIVE_JOB_STATUSES:
+    if status != "queued":
         return _redacted_hold(READ_JOB_NOT_ELIGIBLE)
     if conclusion is not None:
         return _redacted_hold(READ_JOB_NOT_ELIGIBLE)
@@ -517,7 +526,7 @@ def read_provider_readback(
         "run_id": run_id,
         "run_attempt": validated["run_attempt"],
         "job_id": job_id,
-        "job_status": "queued",
+        "job_status": status,
         "queued_within_approved_timeout": True,
         "runner_assigned": runner_assigned,
         "private_capacity_blocked": capacity_blocked,
@@ -548,9 +557,15 @@ def evaluate_provider_plan(
     *,
     gh_runner: GhRunner | None = None,
     utc_now: UtcNow | None = None,
+    trusted_host_evidence: TrustedHostEvidence | None = None,
 ) -> dict[str, Any]:
     """Run trusted readback then :func:`plan_fallback` (still ``execute:false``)."""
-    readback = read_provider_readback(request, gh_runner=gh_runner, utc_now=utc_now)
+    readback = read_provider_readback(
+        request,
+        gh_runner=gh_runner,
+        utc_now=utc_now,
+        trusted_host_evidence=trusted_host_evidence,
+    )
     if readback["planner_input"] is None:
         return {
             "schema_version": READBACK_SCHEMA_VERSION,
