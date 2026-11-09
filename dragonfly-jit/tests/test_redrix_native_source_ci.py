@@ -169,7 +169,7 @@ class PrivateSourceCiTests(unittest.TestCase):
     def test_all_profile_runs_each_fixed_suite_in_one_checkout(self):
         counts = (136, 68, 6)
         fixtures = [
-            subprocess.CompletedProcess((), 0, "", f"Ran {count} tests in 0.1s\\n\\nOK\\n")
+            subprocess.CompletedProcess((), 0, "", f"Ran {count} tests in 0.1s\n\nOK\n")
             for count in counts
         ]
         with (
