@@ -656,6 +656,99 @@ def count_controller_residue(runs_root: Path) -> int | None:
         return None
 
 
+MAX_STAGED_BASE_BYTES = 4 * 1024**3
+
+
+def stage_pinned_private_base(source: Path, staged: Path) -> str | None:
+    """Copy a pinned base through a no-follow descriptor into a private work root.
+
+    The external base filename is never used as an overlay backing path.
+    Copy bytes are SHA-512-verified and the staged inode is checked via a
+    fresh no-follow readback before qemu-img receives its private path.
+    The owner-private directory excludes other UIDs; this cannot defend
+    against a malicious process running as the SAME UID.  Source-only: the
+    physical execution gate remains disabled.
+    """
+    import stat as stat_mod
+
+    refusal = "BASE_STAGE_UNVERIFIED"
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_CLOEXEC"):
+        return refusal
+    try:
+        if staged.parent.is_symlink():
+            return refusal
+        parent = staged.parent.stat(follow_symlinks=False)
+        if (
+            not stat_mod.S_ISDIR(parent.st_mode)
+            or parent.st_uid != os.getuid()
+            or parent.st_mode & 0o077
+        ):
+            return refusal
+        if staged.exists() or staged.is_symlink():
+            return refusal
+        nofollow = os.O_NOFOLLOW | os.O_CLOEXEC
+        with contextlib.ExitStack() as stack:
+            src_fd = os.open(str(source), os.O_RDONLY | nofollow)
+            stack.callback(os.close, src_fd)
+            src_stat = os.fstat(src_fd)
+            if (
+                not stat_mod.S_ISREG(src_stat.st_mode)
+                or not 0 < src_stat.st_size <= MAX_STAGED_BASE_BYTES
+            ):
+                return refusal
+            dst_fd = os.open(
+                str(staged), os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600
+            )
+            stack.callback(os.close, dst_fd)
+            staged_stat = os.fstat(dst_fd)
+            if (
+                not stat_mod.S_ISREG(staged_stat.st_mode)
+                or staged_stat.st_uid != os.getuid()
+                or staged_stat.st_mode & 0o077
+            ):
+                return refusal
+            digest = hashlib.sha512()
+            copied = 0
+            while True:
+                block = os.read(src_fd, 1024 * 1024)
+                if not block:
+                    break
+                copied += len(block)
+                if copied > MAX_STAGED_BASE_BYTES:
+                    return refusal
+                digest.update(block)
+                offset = 0
+                while offset < len(block):
+                    count = os.write(dst_fd, block[offset:])
+                    if count <= 0:
+                        return refusal
+                    offset += count
+            os.fsync(dst_fd)
+            if copied != src_stat.st_size or digest.hexdigest() != EXPECTED_BASE_SHA512:
+                return refusal
+            # Re-read the exact private inode, not the original external path.
+            check_fd = os.open(str(staged), os.O_RDONLY | nofollow)
+            stack.callback(os.close, check_fd)
+            check_stat = os.fstat(check_fd)
+            if (
+                not stat_mod.S_ISREG(check_stat.st_mode)
+                or (check_stat.st_dev, check_stat.st_ino, check_stat.st_size)
+                != (staged_stat.st_dev, staged_stat.st_ino, copied)
+            ):
+                return refusal
+            checked = hashlib.sha512()
+            while True:
+                block = os.read(check_fd, 1024 * 1024)
+                if not block:
+                    break
+                checked.update(block)
+            if checked.hexdigest() != EXPECTED_BASE_SHA512:
+                return refusal
+        return None
+    except (OSError, ValueError):
+        return refusal
+
+
 def collect_preflight(ctx: RunContext) -> PreflightObservation | dict[str, Any]:
     if ctx.extra_argv:
         return _report(reason="ARGV_OR_PATH_REFUSED")
@@ -1264,7 +1357,14 @@ def wire_linux_executor(ctx: RunContext) -> None:
         serial_path: Path,
         nonce_hex: str,
     ) -> str | None:
-        del work_root, serial_path
+        del serial_path
+        # The private, SHA-512-verified backing image lives for the full
+        # overlay/guest lifetime in the same owned 0700 temporary directory.
+        # Never pass the mutable original base-image path to qemu-img.
+        private_base = work_root / "pinned-base.qcow2"
+        staged_problem = stage_pinned_private_base(run_ctx.base_image_path, private_base)
+        if staged_problem:
+            return staged_problem
         try:
             subprocess.run(
                 [
@@ -1275,7 +1375,7 @@ def wire_linux_executor(ctx: RunContext) -> None:
                     "-F",
                     "qcow2",
                     "-b",
-                    str(run_ctx.base_image_path),
+                    str(private_base),
                     str(overlay),
                     "8G",
                 ],
