@@ -173,7 +173,7 @@ def validate_transfer_manifest(manifest: object) -> dict:
 def validate_transfer_envelope(payload: object) -> dict:
     if not isinstance(payload, dict):
         raise TransferError("TRANSFER_ENVELOPE_INVALID")
-    if set(payload) != {"schema", "marker", "release_identity", "manifest_sha256", "manifest", "files"}:
+    if set(payload) != {"schema", "marker", "release_identity", "manifest_sha256", "manifest", "manifest_content", "files"}:
         raise TransferError("TRANSFER_ENVELOPE_INVALID")
     if payload.get("schema") != TRANSFER_SCHEMA or payload.get("marker") != TRANSFER_MARKER:
         raise TransferError("TRANSFER_ENVELOPE_MARKER_INVALID")
@@ -182,7 +182,26 @@ def validate_transfer_envelope(payload: object) -> dict:
     manifest_sha256 = payload.get("manifest_sha256")
     if not isinstance(manifest_sha256, str) or len(manifest_sha256) != 64:
         raise TransferError("TRANSFER_MANIFEST_SHA_INVALID")
-    manifest = validate_transfer_manifest(payload.get("manifest"))
+    # Carry exact publisher-written UTF-8 bytes: PowerShell uses ordered,
+    # compressed JSON and Windows CRLF. Re-serializing in Python changes SHA.
+    raw_content = payload.get("manifest_content")
+    if not isinstance(raw_content, str):
+        raise TransferError("TRANSFER_MANIFEST_CONTENT_INVALID")
+    try:
+        manifest_blob = base64.b64decode(raw_content, validate=True)
+    except Exception as exc:
+        raise TransferError("TRANSFER_MANIFEST_CONTENT_INVALID") from exc
+    if not manifest_blob or len(manifest_blob) > MAX_FILE_BYTES:
+        raise TransferError("TRANSFER_MANIFEST_CONTENT_INVALID")
+    if _sha256_hex(manifest_blob) != manifest_sha256:
+        raise TransferError("TRANSFER_MANIFEST_SHA_MISMATCH")
+    try:
+        exact_manifest = json.loads(manifest_blob.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise TransferError("TRANSFER_MANIFEST_CONTENT_INVALID") from exc
+    if exact_manifest != payload.get("manifest"):
+        raise TransferError("TRANSFER_MANIFEST_OBJECT_DRIFT")
+    manifest = validate_transfer_manifest(exact_manifest)
     files = payload.get("files")
     if not isinstance(files, dict) or set(files) != set(PINNED_FILE_PATHS):
         raise TransferError("TRANSFER_FILE_SET_INVALID")
@@ -215,13 +234,8 @@ def validate_transfer_envelope(payload: object) -> dict:
         elif _git_blob_sha1(data) != PINNED_FILE_BLOBS[path]:
             raise TransferError("TRANSFER_FILE_PROVENANCE_MISMATCH")
         decoded[path] = data
-    manifest_blob = json.dumps(
-        manifest,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8") + b"\n"
-    if _sha256_hex(manifest_blob) != manifest_sha256:
-        raise TransferError("TRANSFER_MANIFEST_SHA_MISMATCH")
+    # No generated replacement: stage precisely the bytes the published
+    # manifest digest covers, then verify those bytes after atomic install.
     decoded[MANIFEST_FILENAME] = manifest_blob
     return {
         "manifest_sha256": manifest_sha256,
