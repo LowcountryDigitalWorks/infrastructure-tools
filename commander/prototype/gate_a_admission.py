@@ -167,6 +167,27 @@ class GateAAdmission:
         now_unix = int(self._clock())
         context = self._context
         try:
+            batch = parse_canonical_batch(
+                batch_raw,
+                host_id=context.host_id,
+                privilege_mode=PRIVILEGE_MODE,
+                generation=context.batch_generation,
+                now_unix=now_unix,
+            )
+        except BatchRefused as refused:
+            if refused.reason in {"EXPIRED_OR_AMBIGUOUS_TTL", "STALE_GENERATION", "WRONG_HOST", "WRONG_MODE"}:
+                raise GateARefused(refused.reason) from refused
+            raise GateARefused("BATCH_NOT_BOUND") from refused
+        command_ids = [item["command_id"] for item in batch["commands"]]
+        if command_id not in command_ids:
+            raise GateARefused("COMMAND_NOT_IN_BATCH")
+        try:
+            payload_matches(batch, command_id, payload)
+        except BatchRefused as refused:
+            raise GateARefused("HASH_MISMATCH") from refused
+        if any(item["argv"][0] != "ldw-canary" for item in batch["commands"]):
+            raise GateARefused("EXECUTABLE_NOT_ALLOWED")
+        try:
             bound = verify_signed_batch(
                 decision_token,
                 context.signer_public_key,
@@ -189,25 +210,6 @@ class GateAAdmission:
         self._split_brain.record(bound["decision_id"], bound["batch_sha256"])
         if command_id not in bound["command_ids"]:
             raise GateARefused("COMMAND_NOT_IN_BATCH")
-        try:
-            batch = parse_canonical_batch(
-                batch_raw,
-                host_id=context.host_id,
-                privilege_mode=PRIVILEGE_MODE,
-                generation=context.batch_generation,
-                now_unix=now_unix,
-            )
-        except BatchRefused as refused:
-            if refused.reason in {"EXPIRED_OR_AMBIGUOUS_TTL", "STALE_GENERATION"}:
-                raise GateARefused(refused.reason) from refused
-            raise GateARefused("BATCH_NOT_BOUND") from refused
-        try:
-            payload_matches(batch, command_id, payload)
-        except BatchRefused as refused:
-            raise GateARefused("HASH_MISMATCH") from refused
-        argv0 = batch["commands"][0]["argv"][0]
-        if argv0 != "ldw-canary":
-            raise GateARefused("EXECUTABLE_NOT_ALLOWED")
         model_projection = project_model_output(payload)
         return {
             "status": ADMITTED_STATUS,

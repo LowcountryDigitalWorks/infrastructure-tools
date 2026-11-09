@@ -215,6 +215,29 @@ class GateAAdmissionTests(unittest.TestCase):
         self.assertNotIn("admin", admitted)
         self.assertNotIn("OWNER_PRESENCE_PROVEN", admitted)
 
+    def test_bad_command_id_then_valid_same_token_does_not_burn_nonce(self) -> None:
+        ledger = SyntheticNonceLedger()
+        gate = GateAAdmission(_context(self.private, ledger), clock=lambda: NOW)
+        wrong_id = "99999999-9999-4999-8999-999999999999"
+        with self.assertRaises(GateARefused):
+            gate.admit(_proposal(self.token, self.batch_raw, command_id=wrong_id))
+        gate.admit(_proposal(self.token, self.batch_raw))
+
+    def test_bad_payload_then_valid_same_token_does_not_burn_nonce(self) -> None:
+        ledger = SyntheticNonceLedger()
+        gate = GateAAdmission(_context(self.private, ledger), clock=lambda: NOW)
+        with self.assertRaises(GateARefused):
+            gate.admit(_proposal(self.token, self.batch_raw, payload=b"tampered-bytes"))
+        gate.admit(_proposal(self.token, self.batch_raw))
+
+    def test_valid_admission_still_replays_on_second_use(self) -> None:
+        ledger = SyntheticNonceLedger()
+        gate = GateAAdmission(_context(self.private, ledger), clock=lambda: NOW)
+        gate.admit(_proposal(self.token, self.batch_raw))
+        with self.assertRaises(GateARefused) as refused:
+            gate.admit(_proposal(self.token, self.batch_raw))
+        self.assertEqual(refused.exception.reason, "REPLAY")
+
 
 if __name__ == "__main__":
     unittest.main()
