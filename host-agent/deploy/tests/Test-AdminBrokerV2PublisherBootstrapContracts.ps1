@@ -4,6 +4,10 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+if ($PSVersionTable.PSEdition -eq 'Core') {
+    throw 'WINDOWS_POWERSHELL_51_REQUIRED'
+}
+
 $deployRoot = Split-Path -Parent $PSScriptRoot
 $installPath = Join-Path $deployRoot 'Install-AdminBrokerV2PublisherBootstrap.ps1'
 $stagePath = Join-Path $deployRoot 'Stage-AdminBrokerV2PublisherBootstrap.ps1'
@@ -26,6 +30,10 @@ function Assert-Refused([scriptblock]$Action, [string]$Code) {
         throw "EXPECTED_REFUSAL: $Code (got $($_.Exception.Message))"
     }
     throw "EXPECTED_REFUSAL: $Code"
+}
+
+function Test-SourceContains([string]$Haystack, [string]$Needle) {
+    $Haystack.IndexOf($Needle, [StringComparison]::Ordinal) -ge 0
 }
 
 function Get-BytesSha256([byte[]]$Bytes) {
@@ -59,6 +67,7 @@ $manifestJson = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 
 $installSha = (Get-FileHash -LiteralPath $installPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $v2Sha = (Get-FileHash -LiteralPath $v2WorkerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$manifestFileSha = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $manifestInstallPin = @($manifestJson.artifacts | Where-Object { $_.name -ceq 'Install-AdminBrokerV2PublisherBootstrap.ps1' }).sha256.ToLowerInvariant()
 $manifestWorkerPin = @($manifestJson.artifacts | Where-Object { $_.name -ceq 'Invoke-AdminBrokerV2PublisherWorker.ps1' }).sha256.ToLowerInvariant()
 
@@ -66,11 +75,19 @@ Assert-True ($manifestJson.schema -eq 1) 'manifest schema'
 Assert-True ($manifestJson.protocol -ceq 'ldw.admin-broker.v2-bootstrap.review-manifest.v1') 'manifest protocol'
 Assert-True ($manifestInstallPin -ceq $installSha) 'manifest install pin equals materialized file SHA256'
 Assert-True ($manifestWorkerPin -ceq $v2Sha) 'manifest worker pin equals materialized file SHA256'
-Assert-True (-not $installSource.Contains('acceptedBootstrapSha256 =', [StringComparison]::Ordinal)) 'Install has no embedded bootstrap SHA pin'
-Assert-True (-not $stageSource.Contains('acceptedBootstrapSha256', [StringComparison]::Ordinal)) 'Stage has no embedded bootstrap SHA pin'
-Assert-True ($installSource.Contains('Read-ReviewManifest', [StringComparison]::Ordinal)) 'Install reads review manifest'
-Assert-True ($installSource.Contains('BOOTSTRAP_SHA256_MISMATCH', [StringComparison]::Ordinal)) 'Install self-hash mismatch code'
-Assert-True ($stageSource.Contains('AdminBrokerV2BootstrapReviewManifest.json', [StringComparison]::Ordinal)) 'Stage uses review manifest file'
+Assert-True (Test-SourceContains $stageSource 'trustedBootstrapSha256') 'Stage embeds reviewed bootstrap pin'
+Assert-True (Test-SourceContains $stageSource 'trustedWorkerSha256') 'Stage embeds reviewed worker pin'
+Assert-True (Test-SourceContains $stageSource 'trustedReviewManifestFileSha256') 'Stage embeds reviewed manifest file pin'
+Assert-True (Test-SourceContains $stageSource 'REVIEWED_MANIFEST_PIN_MISMATCH') 'Stage rejects self-consistent forged manifest'
+Assert-True (-not (Test-SourceContains $installSource 'JsonDocument')) 'Install avoids System.Text.Json'
+Assert-True (-not (Test-SourceContains $stageSource 'JsonDocument')) 'Stage avoids System.Text.Json'
+Assert-True (-not (Test-SourceContains $v2Source 'JsonDocument')) 'Worker avoids System.Text.Json'
+Assert-True (Test-SourceContains $installSource 'Read-ReviewManifest') 'Install reads review manifest'
+Assert-True (Test-SourceContains $installSource 'BOOTSTRAP_SHA256_MISMATCH') 'Install self-hash mismatch code'
+Assert-True (Test-SourceContains $installSource 'POWERSHELL_HOST_BITNESS_REFUSED') 'Install refuses 32-bit host'
+Assert-True (Test-SourceContains $installSource 'SYSWOW64_RUNTIME_REFUSED') 'Install refuses SysWOW64 runtime'
+Assert-True (Test-SourceContains $installSource 'Restore-V1Task') 'Install can restore V1 task'
+Assert-True (Test-SourceContains $installSource 'TASK_UPDATE_AMBIGUOUS_V1_RESTORED') 'Ambiguous readback restores V1'
 
 if (Test-Path -LiteralPath (Join-Path $repoRoot '.git')) {
     $gitInstallBlob = (git -C $repoRoot rev-parse "HEAD:host-agent/deploy/Install-AdminBrokerV2PublisherBootstrap.ps1" 2>$null).Trim()
@@ -128,25 +145,59 @@ try {
     [IO.File]::WriteAllBytes($sandboxInstall, $rawBytes)
     $bad = Read-ReviewManifest
     Assert-Refused { Assert-ProtectedArtifactSha256 $sandboxInstall $bad.BootstrapSha256 'BOOTSTRAP_SHA256_MISMATCH' } 'BOOTSTRAP_SHA256_MISMATCH'
+
+    $extraFieldManifest = (Get-Content -LiteralPath $manifestPath -Raw) -replace '"schema": 1', '"schema": 1, "unexpected": true'
+    [IO.File]::WriteAllText($sandboxManifest, $extraFieldManifest, [Text.UTF8Encoding]::new($false))
+    Assert-Refused { Read-ReviewManifest } 'REVIEW_MANIFEST_INVALID'
+
+    $forgeDir = Join-Path $env:TEMP ('LDW_V2Forge_' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $forgeDir -Force | Out-Null
+    try {
+        $forgeInstall = Join-Path $forgeDir $bootstrapFileName
+        $forgeWorker = Join-Path $forgeDir $workerBundleName
+        $forgeManifest = Join-Path $forgeDir $reviewManifestFileName
+        [IO.File]::WriteAllText($forgeInstall, '# forged', [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($forgeWorker, '# forged', [Text.UTF8Encoding]::new($false))
+        $forgedShaInstall = (Get-FileHash -LiteralPath $forgeInstall -Algorithm SHA256).Hash.ToLowerInvariant()
+        $forgedShaWorker = (Get-FileHash -LiteralPath $forgeWorker -Algorithm SHA256).Hash.ToLowerInvariant()
+        $forgedManifest = @{
+            schema = 1
+            protocol = 'ldw.admin-broker.v2-bootstrap.review-manifest.v1'
+            artifacts = @(
+                @{ name = $bootstrapFileName; sha256 = $forgedShaInstall },
+                @{ name = $workerBundleName; sha256 = $forgedShaWorker }
+            )
+        } | ConvertTo-Json -Depth 5 -Compress
+        [IO.File]::WriteAllText($forgeManifest, $forgedManifest, [Text.UTF8Encoding]::new($false))
+        $assertFileFn = $stageAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-FileSha256' }, $false)
+        if ($null -eq $assertFileFn) { throw 'FUNCTION_REQUIRED: Assert-FileSha256' }
+        . ([scriptblock]::Create($assertFileFn.Extent.Text))
+        Assert-Refused {
+            Assert-FileSha256 $forgeInstall $installSha 'REVIEWED_BOOTSTRAP_SHA256_MISMATCH'
+        } 'REVIEWED_BOOTSTRAP_SHA256_MISMATCH'
+    } finally {
+        Remove-Item -LiteralPath $forgeDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 } finally {
     Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 $installBody = ($installSource -split "`n" | Select-Object -Skip 2) -join "`n"
 foreach ($forbidden in @('Import-Module', 'Invoke-WebRequest', 'Invoke-RestMethod', 'git ', 'ssh ', 'gh ', 'param(')) {
-    Assert-True (-not $installBody.Contains($forbidden, [StringComparison]::Ordinal)) "Install forbids: $forbidden"
+    Assert-True (-not (Test-SourceContains $installBody $forbidden)) "Install forbids: $forbidden"
 }
-Assert-True (-not $installSource.Contains('Start-Process', [StringComparison]::Ordinal)) 'Install forbids Start-Process'
+Assert-True (-not (Test-SourceContains $installSource 'Start-Process')) 'Install forbids Start-Process'
 
-Assert-True ($stageSource.Contains("[Environment]::GetFolderPath('System')", [StringComparison]::Ordinal)) 'Stage resolves system directory via API'
-Assert-True ($stageSource.Contains('PROTECTED_COPY_HASH_MISMATCH', [StringComparison]::Ordinal)) 'Stage post-copy hash gate'
-Assert-True ($installSource.Contains('HOLD_TASK_UPDATE_AMBIGUOUS', [StringComparison]::Ordinal)) 'Install ambiguous task HOLD'
-Assert-True ($installSource.Contains('Remove-StagedV2Worker', [StringComparison]::Ordinal)) 'Install rollback removes staged V2 only'
+Assert-True (Test-SourceContains $stageSource 'System32') 'Stage pins native System32 path'
+Assert-True (Test-SourceContains $stageSource 'POWERSHELL_HOST_BITNESS_REFUSED') 'Stage refuses 32-bit host'
+Assert-True (Test-SourceContains $stageSource 'PROTECTED_COPY_HASH_MISMATCH') 'Stage post-copy hash gate'
+Assert-True (Test-SourceContains $installSource 'Remove-StagedV2Worker') 'Install rollback removes staged V2 only'
 
-Assert-True ($v2Source.Contains("DRAGONFLY_V2_PUBLISH_REVIEWED", [StringComparison]::Ordinal)) 'V2 worker registers publish operation'
-Assert-True ($installSource.Contains('WINDOWSAPPS_RUNTIME_REFUSED', [StringComparison]::Ordinal)) 'Install refuses WindowsApps for V2 task runtime'
+Assert-True (Test-SourceContains $v2Source 'DRAGONFLY_V2_PUBLISH_REVIEWED') 'V2 worker registers publish operation'
+Assert-True (Test-SourceContains $installSource 'WINDOWSAPPS_RUNTIME_REFUSED') 'Install refuses WindowsApps for V2 task runtime'
 
 Write-Host "Admin Broker V2 publisher bootstrap contract assertions PASS: $script:Assertions"
 Write-Host "REVIEW_MANIFEST_INSTALL_SHA256=$manifestInstallPin"
 Write-Host "REVIEW_MANIFEST_WORKER_SHA256=$manifestWorkerPin"
+Write-Host "REVIEW_MANIFEST_FILE_SHA256=$manifestFileSha"
 Write-Host "GIT_TREE_INSTALL_SHA256=$installSha"

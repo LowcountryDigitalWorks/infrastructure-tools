@@ -145,6 +145,38 @@ function Release-OperationLock {
     }
 }
 
+function Parse-V2WorkerRequestObject([byte[]]$Bytes) {
+    if ($Bytes.Length -lt 2 -or $Bytes.Length -gt 16384) { throw 'INVALID_REQUEST' }
+    $text = [Text.Encoding]::UTF8.GetString($Bytes)
+    if ($text.IndexOf([char]0) -ge 0) { throw 'INVALID_REQUEST' }
+    try { $root = $text | ConvertFrom-Json -ErrorAction Stop } catch { throw 'INVALID_REQUEST' }
+    if ($null -eq $root) { throw 'INVALID_REQUEST' }
+    $names = @($root.PSObject.Properties.Name)
+    if ($names.Count -ne 3 -or @(Compare-Object @('schema', 'correlationId', 'operationId') $names -CaseSensitive).Count) {
+        throw 'INVALID_REQUEST'
+    }
+    if ($root.schema -ne 1) { throw 'INVALID_REQUEST' }
+    $corrId = [string]$root.correlationId
+    [Guid]$parsedId = [Guid]::Empty
+    if (-not [Guid]::TryParseExact($corrId, 'D', [ref]$parsedId)) { throw 'INVALID_REQUEST' }
+    $opId = [string]$root.operationId
+    if ([string]::IsNullOrWhiteSpace($opId) -or $opId -cnotmatch '^[A-Z0-9_]{1,64}$') { throw 'INVALID_REQUEST' }
+    return [pscustomobject]@{ CorrelationId = $corrId; OperationId = $opId }
+}
+
+function Get-V2WorkerResultState([byte[]]$Bytes, [string]$ExpectedCorrelationId) {
+    if ($Bytes.Length -lt 2 -or $Bytes.Length -gt 16384) { throw 'INVALID_ADAPTER_RESULT' }
+    $text = [Text.Encoding]::UTF8.GetString($Bytes)
+    if ($text.IndexOf([char]0) -ge 0) { throw 'INVALID_ADAPTER_RESULT' }
+    try { $root = $text | ConvertFrom-Json -ErrorAction Stop } catch { throw 'INVALID_ADAPTER_RESULT' }
+    if ($null -eq $root) { throw 'INVALID_ADAPTER_RESULT' }
+    if ($root.schema -ne 1) { throw 'INVALID_ADAPTER_RESULT' }
+    if ([string]$root.correlationId -cne $ExpectedCorrelationId) { throw 'INVALID_ADAPTER_RESULT' }
+    $state = [string]$root.resultState
+    if ([string]::IsNullOrWhiteSpace($state)) { throw 'INVALID_ADAPTER_RESULT' }
+    return $state
+}
+
 function Read-Request {
     Assert-NoReparse $requestRoot
     Assert-NoReparse $requestPath
@@ -152,89 +184,42 @@ function Read-Request {
         return $null
     }
     $bytes = [IO.File]::ReadAllBytes($requestPath)
-    if ($bytes.Length -lt 2 -or $bytes.Length -gt 16384) {
-        throw 'INVALID_REQUEST'
-    }
-    [System.ReadOnlyMemory[byte]]$jsonMemory = $bytes
-    $document = [Text.Json.JsonDocument]::Parse($jsonMemory)
-    try {
-        $root = $document.RootElement
-        if ($root.ValueKind -ne [Text.Json.JsonValueKind]::Object) {
-            throw 'INVALID_REQUEST'
-        }
-        $names = @($root.EnumerateObject() | ForEach-Object Name)
-        if ($names.Count -ne 3 -or @($names | Group-Object | Where-Object Count -ne 1).Count -or
-            @(Compare-Object @('schema', 'correlationId', 'operationId') $names -CaseSensitive).Count) {
-            throw 'INVALID_REQUEST'
-        }
-        if ($root.GetProperty('schema').GetInt32() -ne 1) {
-            throw 'INVALID_REQUEST'
-        }
-        $corrId = $root.GetProperty('correlationId').GetString()
-        [Guid]$parsedId = [Guid]::Empty
-        if (-not [Guid]::TryParseExact($corrId, 'D', [ref]$parsedId)) {
-            throw 'INVALID_REQUEST'
-        }
-        $opId = $root.GetProperty('operationId').GetString()
-        if ([string]::IsNullOrWhiteSpace($opId) -or $opId -cnotmatch '^[A-Z0-9_]{1,64}$') {
-            throw 'INVALID_REQUEST'
-        }
+    $parsed = Parse-V2WorkerRequestObject $bytes
+    $corrId = $parsed.CorrelationId
+    $opId = $parsed.OperationId
 
-        # Durable in-flight / completed check
-        $targetResultPath = Join-Path $resultRoot ($corrId + '.json')
-        if (Test-Path -LiteralPath $targetResultPath) {
-            $existingBytes = [IO.File]::ReadAllBytes($targetResultPath)
-            if ($existingBytes.Length -lt 2 -or $existingBytes.Length -gt 16384) {
-                throw 'INVALID_ADAPTER_RESULT'
+    # Durable in-flight / completed check
+    $targetResultPath = Join-Path $resultRoot ($corrId + '.json')
+    if (Test-Path -LiteralPath $targetResultPath) {
+        $existingBytes = [IO.File]::ReadAllBytes($targetResultPath)
+        $existingState = Get-V2WorkerResultState $existingBytes $corrId
+        if ($existingState -ceq 'STARTED') {
+            $resultItem = Get-Item -LiteralPath $targetResultPath -Force
+            $resultAge = [DateTime]::UtcNow - $resultItem.LastWriteTimeUtc
+            if ($resultAge.TotalMinutes -lt 15) {
+                return $null
             }
-            [System.ReadOnlyMemory[byte]]$existingMem = $existingBytes
-            $existingDoc = [Text.Json.JsonDocument]::Parse($existingMem)
-            try {
-                $existingRoot = $existingDoc.RootElement
-                if ($existingRoot.ValueKind -ne [Text.Json.JsonValueKind]::Object -or
-                    $existingRoot.GetProperty('schema').GetInt32() -ne 1 -or
-                    $existingRoot.GetProperty('correlationId').GetString() -cne $corrId) {
-                    throw 'INVALID_ADAPTER_RESULT'
-                }
-                $existingState = $existingRoot.GetProperty('resultState').GetString()
-                if ($existingState -ceq 'STARTED') {
-                    $resultItem = Get-Item -LiteralPath $targetResultPath -Force
-                    $resultAge = [DateTime]::UtcNow - $resultItem.LastWriteTimeUtc
-                    if ($resultAge.TotalMinutes -lt 15) {
-                        # In-flight younger than timeout: do not re-execute, preserve bounded STARTED state
-                        return $null
-                    }
-                    # In-flight at or beyond timeout: reconcile to terminal TIMEOUT without action re-execution
-                    $script:CorrelationId = $corrId
-                    $script:OperationId = $opId
-                    Write-Result -Success $false -State 'FAILED' -Reason 'TIMEOUT' -Details @{ timeoutReason = 'IN_FLIGHT_CRASH_OR_TIMEOUT' }
-                    Remove-RequestSlot
-                    return $null
-                } else {
-                    # Terminal result already exists: completed => never execute again
-                    Remove-RequestSlot
-                    return $null
-                }
-            } finally {
-                $existingDoc.Dispose()
-            }
-        }
-
-        # Result does not exist; check if request is expired
-        $item = Get-Item -LiteralPath $requestPath -Force
-        $age = [DateTime]::UtcNow - $item.LastWriteTimeUtc
-        if ($age.TotalMinutes -ge 15) {
             $script:CorrelationId = $corrId
             $script:OperationId = $opId
-            Write-Result -Success $false -State 'FAILED' -Reason 'TIMEOUT' -Details @{ timeoutReason = 'REQUEST_EXPIRED' }
+            Write-Result -Success $false -State 'FAILED' -Reason 'TIMEOUT' -Details @{ timeoutReason = 'IN_FLIGHT_CRASH_OR_TIMEOUT' }
             Remove-RequestSlot
             return $null
         }
-
-        [pscustomobject]@{ CorrelationId = $corrId; OperationId = $opId }
-    } finally {
-        $document.Dispose()
+        Remove-RequestSlot
+        return $null
     }
+
+    $item = Get-Item -LiteralPath $requestPath -Force
+    $age = [DateTime]::UtcNow - $item.LastWriteTimeUtc
+    if ($age.TotalMinutes -ge 15) {
+        $script:CorrelationId = $corrId
+        $script:OperationId = $opId
+        Write-Result -Success $false -State 'FAILED' -Reason 'TIMEOUT' -Details @{ timeoutReason = 'REQUEST_EXPIRED' }
+        Remove-RequestSlot
+        return $null
+    }
+
+    return [pscustomobject]@{ CorrelationId = $corrId; OperationId = $opId }
 }
 
 function Write-Result([bool]$Success, [string]$State, [string]$Reason, [hashtable]$Details = $null) {

@@ -59,12 +59,14 @@ function Get-OwnerSid {
 }
 
 function Get-SystemPowerShellExecutable {
-    $sysDir = [Environment]::GetFolderPath('System')
-    if ([string]::IsNullOrWhiteSpace($sysDir)) { throw 'SYSTEM_DIRECTORY_REQUIRED' }
-    $candidate = [IO.Path]::Combine($sysDir, 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    if (-not [Environment]::Is64BitProcess) { throw 'POWERSHELL_HOST_BITNESS_REFUSED' }
+    $windir = [Environment]::GetEnvironmentVariable('WINDIR', 'Machine')
+    if ([string]::IsNullOrWhiteSpace($windir)) { throw 'WINDIR_REQUIRED' }
+    $candidate = Join-Path (Join-Path $windir 'System32') 'WindowsPowerShell\v1.0\powershell.exe'
     $full = [IO.Path]::GetFullPath($candidate)
-    if ($full -notmatch '\\WindowsPowerShell\\v1\.0\\powershell\.exe$') { throw 'SYSTEM_POWERSHELL_PATH_REFUSED' }
-    if ($full -match 'WindowsApps' -or $full -match 'AppData\\Local\\Microsoft\\WindowsApps') {
+    if ($full -notmatch '(?i)\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe$') { throw 'SYSTEM_POWERSHELL_PATH_REFUSED' }
+    if ($full -match '(?i)SysWOW64') { throw 'SYSWOW64_RUNTIME_REFUSED' }
+    if ($full -match '(?i)WindowsApps' -or $full -match '(?i)AppData\\Local\\Microsoft\\WindowsApps') {
         throw 'WINDOWSAPPS_RUNTIME_REFUSED'
     }
     if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { throw 'SYSTEM_POWERSHELL_REQUIRED' }
@@ -77,9 +79,10 @@ function Assert-WindowsAppsRuntimeRefused([string]$Path) {
     if ($norm -match 'WindowsApps' -or $norm -match 'AppData\\Local\\Microsoft\\WindowsApps') {
         throw 'WINDOWSAPPS_RUNTIME_REFUSED'
     }
-    if ($norm -notmatch '\\WindowsPowerShell\\v1\.0\\powershell\.exe$') {
+    if ($norm -notmatch '(?i)\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe$') {
         throw 'V2_TASK_RUNTIME_PATH_REFUSED'
     }
+    if ($norm -match '(?i)SysWOW64') { throw 'SYSWOW64_RUNTIME_REFUSED' }
 }
 
 function New-ProtectedDirectoryAcl([string]$Path) {
@@ -272,40 +275,37 @@ function Read-ReviewManifest {
     Assert-NoReparse $path
     $bytes = [IO.File]::ReadAllBytes($path)
     if ($bytes.Length -lt 2 -or $bytes.Length -gt 8192) { throw 'REVIEW_MANIFEST_INVALID' }
+    $text = [Text.Encoding]::UTF8.GetString($bytes)
+    if ($text.IndexOf([char]0) -ge 0) { throw 'REVIEW_MANIFEST_INVALID' }
     try {
-        [System.ReadOnlyMemory[byte]]$jsonMemory = $bytes
-        $doc = [Text.Json.JsonDocument]::Parse($jsonMemory)
+        $doc = $text | ConvertFrom-Json -ErrorAction Stop
     } catch {
         throw 'REVIEW_MANIFEST_INVALID'
     }
-    try {
-        $root = $doc.RootElement
-        if ($root.ValueKind -ne [Text.Json.JsonValueKind]::Object) { throw 'REVIEW_MANIFEST_INVALID' }
-        if ($root.GetProperty('schema').GetInt32() -ne 1) { throw 'REVIEW_MANIFEST_INVALID' }
-        if ($root.GetProperty('protocol').GetString() -cne 'ldw.admin-broker.v2-bootstrap.review-manifest.v1') {
-            throw 'REVIEW_MANIFEST_INVALID'
-        }
-        $items = $root.GetProperty('artifacts')
-        if ($items.ValueKind -ne [Text.Json.JsonValueKind]::Array -or $items.GetArrayLength() -ne 2) {
-            throw 'REVIEW_MANIFEST_INVALID'
-        }
-        $map = @{}
-        foreach ($item in $items.EnumerateArray()) {
-            if ($item.ValueKind -ne [Text.Json.JsonValueKind]::Object) { throw 'REVIEW_MANIFEST_INVALID' }
-            $name = $item.GetProperty('name').GetString()
-            $sha = $item.GetProperty('sha256').GetString()
-            if ($name -cnotin @($bootstrapFileName, $workerBundleName)) { throw 'REVIEW_MANIFEST_INVALID' }
-            if ($sha -cnotmatch '^[a-f0-9]{64}$') { throw 'REVIEW_MANIFEST_INVALID' }
-            if ($map.ContainsKey($name)) { throw 'REVIEW_MANIFEST_INVALID' }
-            $map[$name] = $sha.ToLowerInvariant()
-        }
-        if ($map.Count -ne 2) { throw 'REVIEW_MANIFEST_INVALID' }
-        return [pscustomobject]@{
-            BootstrapSha256 = $map[$bootstrapFileName]
-            WorkerSha256 = $map[$workerBundleName]
-        }
-    } finally {
-        $doc.Dispose()
+    if ($null -eq $doc) { throw 'REVIEW_MANIFEST_INVALID' }
+    $topProps = @($doc.PSObject.Properties.Name)
+    if (@(Compare-Object @('schema', 'protocol', 'artifacts') $topProps -CaseSensitive).Count) {
+        throw 'REVIEW_MANIFEST_INVALID'
+    }
+    if ($doc.schema -ne 1) { throw 'REVIEW_MANIFEST_INVALID' }
+    if ($doc.protocol -cne 'ldw.admin-broker.v2-bootstrap.review-manifest.v1') { throw 'REVIEW_MANIFEST_INVALID' }
+    $items = @($doc.artifacts)
+    if ($items.Count -ne 2) { throw 'REVIEW_MANIFEST_INVALID' }
+    $map = @{}
+    foreach ($item in $items) {
+        $itemProps = @($item.PSObject.Properties.Name)
+        if (@(Compare-Object @('name', 'sha256') $itemProps -CaseSensitive).Count) { throw 'REVIEW_MANIFEST_INVALID' }
+        $name = [string]$item.name
+        $sha = [string]$item.sha256
+        if ($name -cnotin @($bootstrapFileName, $workerBundleName)) { throw 'REVIEW_MANIFEST_INVALID' }
+        if ($sha -cnotmatch '^[a-f0-9]{64}$') { throw 'REVIEW_MANIFEST_INVALID' }
+        if ($map.ContainsKey($name)) { throw 'REVIEW_MANIFEST_INVALID' }
+        $map[$name] = $sha.ToLowerInvariant()
+    }
+    if ($map.Count -ne 2) { throw 'REVIEW_MANIFEST_INVALID' }
+    return [pscustomobject]@{
+        BootstrapSha256 = $map[$bootstrapFileName]
+        WorkerSha256 = $map[$workerBundleName]
     }
 }
 
@@ -397,8 +397,14 @@ try {
 } catch {
     $msg = $_.Exception.Message
     if ($msg -eq 'V2_TASK_READBACK_AMBIGUOUS') {
-        try { Disable-TaskHold } catch { }
-        Write-Journal 'HOLD' @{ reason = 'TASK_UPDATE_AMBIGUOUS' }
+        try { Remove-StagedV2Worker } catch { }
+        if ($null -ne $script:V1Snapshot) {
+            try {
+                $v1ShaRollback = Assert-V1WorkerInstalled
+                Restore-V1Task $ownerSid $script:V1Snapshot $v1ShaRollback
+            } catch { }
+        }
+        Write-Journal 'HOLD' @{ reason = 'TASK_UPDATE_AMBIGUOUS_V1_RESTORED' }
         throw 'HOLD_TASK_UPDATE_AMBIGUOUS'
     }
     try { Remove-StagedV2Worker } catch { }
