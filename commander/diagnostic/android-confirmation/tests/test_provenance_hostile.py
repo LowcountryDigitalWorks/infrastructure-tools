@@ -119,29 +119,26 @@ class ProvenanceHostileTests(unittest.TestCase):
     def test_symlink_escape_is_rejected(self) -> None:
         if not hasattr(pathlib.Path, "symlink_to"):
             self.skipTest("platform cannot create symlinks")
-        outside = self.tmp / "outside.apk"
-        outside.write_bytes(b"outside")
-        link = self.tmp / "app" / "build" / "outputs" / "apk" / "debug" / "app-debug.apk"
-        link.parent.mkdir(parents=True, exist_ok=True)
-        if link.exists():
-            link.unlink()
-        try:
-            link.symlink_to(outside)
-        except OSError:
-            self.skipTest("symlink creation blocked")
-        # build_release_neutral_manifest resolves under diagnostic_root; symlink target may still be outside.
-        wrapper_dir = self.tmp / "gradle" / "wrapper"
-        wrapper_dir.mkdir(parents=True)
-        wrapper_dir.joinpath("gradle-wrapper.jar").write_bytes(WRAPPER.read_bytes())
-        with self.assertRaises(ProvenanceValidationError):
-            build_release_neutral_manifest(
-                git_commit=COMMIT,
-                git_tree=TREE,
-                pr_source_head=PR_HEAD,
-                apk_path=link,
-                diagnostic_root=self.tmp,
-                source_manifest_path=SOURCE_MANIFEST,
-            )
+        with tempfile.TemporaryDirectory() as outer_name:
+            outside = pathlib.Path(outer_name) / "outside.apk"
+            outside.write_bytes(b"outside")
+            link = self.tmp / "app" / "build" / "outputs" / "apk" / "debug" / "app-debug.apk"
+            if link.exists() or link.is_symlink():
+                link.unlink()
+            try:
+                link.symlink_to(outside)
+            except OSError:
+                self.skipTest("symlink creation blocked")
+            with self.assertRaises(ProvenanceValidationError) as ctx:
+                build_release_neutral_manifest(
+                    git_commit=COMMIT,
+                    git_tree=TREE,
+                    pr_source_head=PR_HEAD,
+                    apk_path=link,
+                    diagnostic_root=self.tmp,
+                    source_manifest_path=SOURCE_MANIFEST,
+                )
+            self.assertEqual(ctx.exception.code, "PROV_ERR_PATH_ESCAPE")
 
     def test_manifest_json_is_canonical_and_immutable_keys(self) -> None:
         manifest = self._build_under_tmp()
