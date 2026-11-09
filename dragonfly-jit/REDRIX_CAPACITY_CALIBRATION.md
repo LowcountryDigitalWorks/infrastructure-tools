@@ -1,5 +1,16 @@
 # REDRIX capacity calibration — observer only
 
+## Required interpretation — ChromeOS is not RAM-starved based on Crostini alone
+
+The [owning REDRIX #96 top-of-issue policy](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/96) is canonical. REDRIX has **32 GB physical RAM**, and Eddie has **consistently observed ~17–20 GB available RAM on ChromeOS**, rather than a one-time peak. This recurring owner-side historical observation is useful planning evidence, not a same-time attested host telemetry sample. Never add it to guest-visible `MemAvailable` or claim it can all be immediately assigned to a nested guest.
+
+Crostini has separately reported ~9,378 MiB Linux `MemAvailable` with no observed short-window PSI pressure and a present virtio balloon driver. The accepted Linux controller has an idle threshold of **2 GiB nested guest + 8 GiB Linux reserve = 10,240 MiB**. Being below this guest-visible threshold must be described as `GUEST_FLOOR_BELOW_POLICY_NOT_HOST_EXHAUSTION`, **not** as "the Dragonfly has insufficient physical RAM", "ChromeOS has no free memory", "Crostini can never serve JIT", or a reason to stop source/hosted validation, demand additional owner memory screenshots/SSH work, or purchase a new asset. A valid **above-floor** guest reading is likewise not evidence of ChromeOS host capacity or runtime admission.
+
+The passive report codifies the distinction in `memory_sample_scope=CROSTINI_GUEST_VISIBLE_ONLY`, `chromeos_physical_ram_shortage_from_guest=NOT_INFERABLE`, and `guest_idle_memory_floor_disposition`; it always keeps `chromeos_host_corroboration=UNVERIFIED` without an independently accepted host source. Synthetic tests cover both floor outcomes and missing evidence. **The actual protected controller must still refuse launching a 2 GiB guest if its accepted 10,240 MiB guest-visible admission threshold is unmet at that instant.** This observer is not a workaround or permission to overcommit, lower the reserve to 6 GiB, force balloon changes, or consume the Gate B canary.
+
+When guest-only admission blocks an eligible task, **continue the independent source/test and bounded offline load-proof lanes** rather than relabeling the hardware as RAM-starved. Next accepted proof must correlate *during* a bounded workload the ChromeOS host memory/interactivity with Linux pressure, RAM/RSS/OOM, observed balloon activity and cleanup. Only a separately reviewed exact controller/profile/publisher change may revise admission policy. Keep ChromeOS, avoid new spend, and do not re-ask Eddie to explain the same host RAM observation.
+
+
 Owner: infrastructure-tools #96 / #192; controller #10; Gate B #139.
 
 The original 2 GiB guest plus 8 GiB untouched host reserve was an **initial conservative smoke envelope**, not an empirically optimized allocation for every future CI job. Do not lower the accepted controller limits merely because one idle snapshot has low Linux memory pressure.
