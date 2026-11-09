@@ -131,7 +131,7 @@ class InboundTransferV2Tests(unittest.TestCase):
             if record["path"] == path:
                 record["sha256"] = new_sha
                 break
-        canonical = json.dumps(payload["manifest"], sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\\n"
+        canonical = json.dumps(payload["manifest"], sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
         payload["manifest_sha256"] = hashlib.sha256(canonical).hexdigest()
         with self.assertRaisesRegex(transfer.TransferError, "TRANSFER_FILE_PROVENANCE_MISMATCH"):
             transfer.validate_transfer_envelope(payload)
