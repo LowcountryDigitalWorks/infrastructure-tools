@@ -21,7 +21,7 @@ Sanitized JSON (`schema_version` `ldw.tooling_version_inventory.v1`):
 - `observed_at` (UTC)
 - `classification`: `TOOL_VERSION_INVENTORY_ONLY`
 - `disposition`: `INVENTORY_EVIDENCE_ONLY` (does not prove updater completion or Watch materiality)
-- `apps[]`: `app_id`, `install_state` (`found` / `not_found` / `unverified` / `error`), PE versions when found, `authenticode_state`, `trusted_publisher_policy` (no certificate subject or path), `running_state` (`yes` / `no` / `unknown`), `updater_state` (`in_progress_evidence` / `idle_evidence` / `unknown`)
+- `apps[]`: `app_id`, `install_state` (`found` / `not_found` / `unverified` / `error`), PE versions when found, `authenticode_state`, `trusted_publisher_policy` (`PINNED_SIGNER_MATCH` / `EXPECTED_UNSIGNED` / `UNVERIFIED` only — no certificate subject, thumbprint, or path), `running_state` (`observed_name_in_owner_session` / `not_observed_in_owner_session` / `unknown`), `running_scope` (`owner_session_process_name_only`), `updater_state` (`in_progress_evidence` / `unknown` only; absent markers never prove idle)
 
 ## Invocation (owner LDW01, post-review only unless ORCH directs pinned readback)
 
@@ -39,6 +39,11 @@ powershell -NoProfile -File .\tooling-version-inventory\tests\Test-LdwToolVersio
 ```
 
 Synthetic fixtures only on CI/author host; deterministic; no live machine requirement.
+
+## Trust boundaries
+
+- Authenticode `Valid` alone never implies vendor trust. Orca/Cursor require **reviewed pinned signer thumbprints** in source; any other signer remains `UNVERIFIED`.
+- Install probe refuses reparse/symlink hops under the fixed current-user install tree (`INSTALL_IDENTITY_REFUSED`).
 
 ## Boundaries
 
