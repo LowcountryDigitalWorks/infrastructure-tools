@@ -97,6 +97,21 @@ Assert-True (Test-SourceContains $installSource 'POWERSHELL_HOST_BITNESS_REFUSED
 Assert-True (Test-SourceContains $installSource 'SYSWOW64_RUNTIME_REFUSED') 'Install refuses SysWOW64 runtime'
 Assert-True (Test-SourceContains $installSource 'Restore-V1Task') 'Install can restore V1 task'
 Assert-True (Test-SourceContains $installSource 'TASK_UPDATE_AMBIGUOUS_V1_RESTORED') 'Ambiguous readback restores V1'
+Assert-True (Test-SourceContains $installSource 'Assert-V1OperationsQuiescent') 'Install asserts V1 operations quiescent'
+Assert-True (Test-SourceContains $installSource 'Invoke-V1TaskRollback') 'Install uses explicit V1 rollback'
+Assert-True (Test-SourceContains $installSource 'TASK_MUST_BE_HELD_BEFORE_UPDATE') 'Install refuses task update while enabled'
+Assert-True (Test-SourceContains $installSource 'TASK_DISABLE_HOLD_FAILED') 'Install verifies task disable hold'
+Assert-True (Test-SourceContains $installSource 'V1_TASK_RESTORE_AMBIGUOUS') 'Install verifies V1 restore readback'
+Assert-True (Test-SourceContains $installSource 'V1_ROLLBACK_DISABLE_FAILED') 'Install exposes rollback disable failure code'
+Assert-True (Test-SourceContains $installSource 'FAILURE_ROLLBACK_FAILED') 'Install journals rollback failure without swallowing'
+Assert-True (Test-SourceContains $installSource 'V1_TASK_HELD_BEFORE_MUTATION') 'Install journals task hold before mutation'
+$mainMarker = '    Acquire-BootstrapLock'
+$mainStart = $installSource.IndexOf($mainMarker, [StringComparison]::Ordinal)
+$mainSlice = if ($mainStart -ge 0) { $installSource.Substring($mainStart) } else { $installSource }
+$holdBeforeRegister = $mainSlice.IndexOf('Disable-TaskHold', [StringComparison]::Ordinal)
+$registerCall = $mainSlice.IndexOf('$update = Register-V2Task', [StringComparison]::Ordinal)
+Assert-True ($holdBeforeRegister -ge 0 -and $registerCall -gt $holdBeforeRegister) 'Disable-TaskHold precedes Register-V2Task in main transaction'
+Assert-True (-not (Test-SourceContains $installSource 'Restore-V1Task $ownerSid $script:V1Snapshot')) 'Install does not call Restore-V1Task without rollback wrapper in catch'
 
 if (Test-Path -LiteralPath (Join-Path $repoRoot '.git')) {
     $gitInstallBlob = (git -C $repoRoot rev-parse "HEAD:host-agent/deploy/Install-AdminBrokerV2PublisherBootstrap.ps1" 2>$null).Trim()
@@ -189,6 +204,81 @@ try {
     }
 } finally {
     Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+$opsSandbox = Join-Path $env:TEMP ('LDW_V2OpsQuiescence_' + [guid]::NewGuid().ToString('N'))
+$null = New-Item -ItemType Directory -Path $opsSandbox -Force
+try {
+    $noReparseOps = $installAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-NoReparse' }, $false)
+    $opsFn = $installAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-V1OperationsQuiescent' }, $false)
+    $lockIdleFn = $installAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Test-OperationLockIdle' }, $false)
+    if ($null -eq $noReparseOps -or $null -eq $opsFn -or $null -eq $lockIdleFn) {
+        throw 'FUNCTION_REQUIRED: V1 operations quiescence helpers'
+    }
+
+    $controlRoot = $opsSandbox
+    $lockRoot = Join-Path $opsSandbox 'lock'
+    $requestRoot = Join-Path $opsSandbox 'requests'
+    $resultRoot = Join-Path $opsSandbox 'results'
+    $operationLockPath = Join-Path $lockRoot 'operation.lock'
+    $taskName = '\LDW-ADMIN-REVIEWED-OPERATION'
+    $v1InFlightMinutes = 15
+    $v1ResultsScanMaxFiles = 64
+
+    $global:LdwV2MockSchedulerState = 3
+    $global:LdwV2MockFolder = $null
+    function Get-TaskService {
+        $global:LdwV2MockFolder = New-Object PSObject
+        $global:LdwV2MockFolder | Add-Member -MemberType ScriptMethod -Name GetTask -Value {
+            param([string]$Name)
+            [pscustomobject]@{ State = $global:LdwV2MockSchedulerState }
+        }
+        $mockService = New-Object PSObject
+        $mockService | Add-Member -MemberType ScriptMethod -Name GetFolder -Value {
+            param([string]$Path)
+            $global:LdwV2MockFolder
+        }
+        $mockService
+    }
+
+    function Assert-ProtectedDirectory([string]$Path) {
+        Assert-NoReparse $Path
+        if (-not (Test-Path -LiteralPath $Path)) { throw 'PROTECTED_PATH_MISSING' }
+    }
+    . ([scriptblock]::Create($noReparseOps.Extent.Text))
+    . ([scriptblock]::Create($lockIdleFn.Extent.Text))
+    . ([scriptblock]::Create($opsFn.Extent.Text))
+
+    $null = New-Item -ItemType Directory -Path $requestRoot -Force
+    Assert-V1OperationsQuiescent
+
+    [IO.File]::WriteAllText((Join-Path $requestRoot 'request.json'), '{"schema":1}', [Text.UTF8Encoding]::new($false))
+    Assert-Refused { Assert-V1OperationsQuiescent } 'PENDING_REQUEST_REFUSED'
+    Remove-Item -LiteralPath (Join-Path $requestRoot 'request.json') -Force
+
+    $null = New-Item -ItemType Directory -Path $resultRoot -Force
+    $corrId = [guid]::NewGuid().ToString('D')
+    $startedPath = Join-Path $resultRoot ($corrId + '.json')
+    $startedPayload = '{"schema":1,"correlationId":"' + $corrId + '","resultState":"STARTED"}'
+    [IO.File]::WriteAllText($startedPath, $startedPayload, [Text.UTF8Encoding]::new($false))
+    (Get-Item -LiteralPath $startedPath).LastWriteTimeUtc = [DateTime]::UtcNow.AddMinutes(-5)
+    Assert-Refused { Assert-V1OperationsQuiescent } 'ACTIVE_OPERATION_REFUSED'
+    (Get-Item -LiteralPath $startedPath).LastWriteTimeUtc = [DateTime]::UtcNow.AddMinutes(-20)
+    Assert-V1OperationsQuiescent
+
+    $null = New-Item -ItemType Directory -Path $lockRoot -Force
+    $lockStream = [IO.File]::Open($operationLockPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    try {
+        Assert-Refused { Assert-V1OperationsQuiescent } 'V1_OPERATION_LOCK_HELD'
+    } finally {
+        $lockStream.Dispose()
+        Remove-Item -LiteralPath $operationLockPath -Force
+    }
+
+    $global:LdwV2MockSchedulerState = 4
+    Assert-Refused { Assert-V1OperationsQuiescent } 'ACTIVE_TASK_REFUSED'
+} finally {
+    Remove-Item -LiteralPath $opsSandbox -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 $installBody = ($installSource -split "`n" | Select-Object -Skip 2) -join "`n"

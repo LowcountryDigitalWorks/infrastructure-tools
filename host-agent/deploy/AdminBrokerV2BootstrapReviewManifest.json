@@ -4,7 +4,7 @@
   "artifacts": [
     {
       "name": "Install-AdminBrokerV2PublisherBootstrap.ps1",
-      "sha256": "98829fcfea8a1ce96ea7edf9bbc286686bd79722238627214cd8fb5e62967b78"
+      "sha256": "4e14986198531436672c659b556461b790321a18344981dbfa0c743680790c85"
     },
     {
       "name": "Invoke-AdminBrokerV2PublisherWorker.ps1",

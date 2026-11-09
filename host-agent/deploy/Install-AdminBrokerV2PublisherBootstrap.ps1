@@ -19,6 +19,11 @@ $v1WorkerInstalled = Join-Path $binRoot 'Invoke-AdminPrivilegedOperation.ps1'
 $v2WorkerInstalled = Join-Path $binRoot ('v2/' + $v2WorkerIdentity + '/' + $workerBundleName)
 $protectedStagingRoot = Join-Path $controlRoot ('bootstrap-staging/' + $bootstrapStagingLeaf)
 $expectedBootstrapPath = Join-Path $protectedStagingRoot $bootstrapFileName
+$requestRoot = Join-Path $controlRoot 'requests'
+$resultRoot = Join-Path $controlRoot 'results'
+$operationLockPath = Join-Path $lockRoot 'operation.lock'
+$v1InFlightMinutes = 15
+$v1ResultsScanMaxFiles = 64
 $lockPath = Join-Path $lockRoot 'v2-publisher-bootstrap.lock'
 $journalPath = Join-Path $journalRoot 'v2-publisher-bootstrap.jsonl'
 $receiptPath = Join-Path $journalRoot 'v2-bootstrap-consumed.receipt'
@@ -167,11 +172,60 @@ function Assert-V1WorkerInstalled {
     $sha
 }
 
-function Assert-V1TaskQuiescent([string]$OwnerSid, [string]$V1Sha) {
+function Test-OperationLockIdle {
+    Assert-NoReparse $lockRoot
+    if (-not (Test-Path -LiteralPath $operationLockPath -PathType Leaf)) { return }
+    try {
+        $probe = [IO.File]::Open($operationLockPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+        $probe.Dispose()
+    } catch {
+        throw 'V1_OPERATION_LOCK_HELD'
+    }
+}
+
+function Assert-V1OperationsQuiescent {
+    Test-OperationLockIdle
+    if (Test-Path -LiteralPath $requestRoot) {
+        Assert-NoReparse $requestRoot
+        if (Test-Path -LiteralPath (Join-Path $requestRoot 'request.json') -PathType Leaf) {
+            throw 'PENDING_REQUEST_REFUSED'
+        }
+    }
+    if (Test-Path -LiteralPath $resultRoot) {
+        Assert-ProtectedDirectory $resultRoot
+        $cutoff = [DateTime]::UtcNow.AddMinutes(-$v1InFlightMinutes)
+        $guidPattern = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$'
+        $files = @(Get-ChildItem -LiteralPath $resultRoot -File -ErrorAction Stop)
+        if ($files.Count -gt $v1ResultsScanMaxFiles) { throw 'V1_RESULTS_BOUND_EXCEEDED' }
+        foreach ($file in $files) {
+            if ($file.Name -cnotmatch $guidPattern) { continue }
+            if ($file.LastWriteTimeUtc -le $cutoff) { continue }
+            $bytes = [IO.File]::ReadAllBytes($file.FullName)
+            if ($bytes.Length -lt 2 -or $bytes.Length -gt 16384) { throw 'V1_RESULT_INVALID' }
+            $text = [Text.Encoding]::UTF8.GetString($bytes)
+            try {
+                $doc = $text | ConvertFrom-Json -ErrorAction Stop
+            } catch {
+                throw 'V1_RESULT_INVALID'
+            }
+            $state = [string]$doc.resultState
+            if ($state -ceq 'STARTED') { throw 'ACTIVE_OPERATION_REFUSED' }
+        }
+    }
     $service = Get-TaskService
     $folder = $service.GetFolder('\')
     $task = $folder.GetTask($taskName)
-  if (-not $task) { throw 'V1_TASK_MISSING' }
+    if (-not $task) { throw 'V1_TASK_MISSING' }
+    $runState = [int]$task.State
+    if ($runState -eq 4 -or $runState -eq 2) { throw 'ACTIVE_TASK_REFUSED' }
+}
+
+function Assert-V1TaskQuiescent([string]$OwnerSid, [string]$V1Sha) {
+    Assert-V1OperationsQuiescent
+    $service = Get-TaskService
+    $folder = $service.GetFolder('\')
+    $task = $folder.GetTask($taskName)
+    if (-not $task) { throw 'V1_TASK_MISSING' }
     $definition = $task.Definition
     if ($definition.Triggers.Count -ne 0) { throw 'TASK_TRIGGER_REFUSED' }
     if ($definition.Actions.Count -ne 1) { throw 'TASK_ACTION_COUNT_REFUSED' }
@@ -217,7 +271,8 @@ function Register-V2Task([string]$OwnerSid, [string]$V2Sha) {
     $folder = $service.GetFolder('\')
     $task = $folder.GetTask($taskName)
     $definition = $task.Definition
-    $priorEnabled = [bool]$definition.Settings.Enabled
+    if ([bool]$definition.Settings.Enabled) { throw 'TASK_MUST_BE_HELD_BEFORE_UPDATE' }
+    $priorEnabled = if ($null -ne $script:V1Snapshot) { [bool]$script:V1Snapshot.Enabled } else { [bool]$definition.Settings.Enabled }
     $action = $definition.Actions.Item(1)
     $priorPath = [string]$action.Path
     $priorArgs = [string]$action.Arguments
@@ -225,6 +280,7 @@ function Register-V2Task([string]$OwnerSid, [string]$V2Sha) {
     $action.Path = $powershellPath
     $action.Arguments = $newArgs
     $action.WorkingDirectory = ''
+    $definition.Settings.Enabled = $true
     $taskSddl = $task.GetSecurityDescriptor(0xF)
     $name = $taskName.TrimStart('\')
     $folder.RegisterTaskDefinition($name, $definition, 0x06, $OwnerSid, $null, 3, $taskSddl) | Out-Null
@@ -234,6 +290,7 @@ function Register-V2Task([string]$OwnerSid, [string]$V2Sha) {
     if ([string]$rbAction.Path -cne $powershellPath -or [string]$rbAction.Arguments -cne $newArgs) {
         throw 'V2_TASK_READBACK_AMBIGUOUS'
     }
+    if (-not [bool]$rbDef.Settings.Enabled) { throw 'V2_TASK_READBACK_AMBIGUOUS' }
     Assert-WindowsAppsRuntimeRefused ([string]$rbAction.Path)
     [pscustomobject]@{
         PriorEnabled = $priorEnabled
@@ -245,7 +302,9 @@ function Register-V2Task([string]$OwnerSid, [string]$V2Sha) {
 }
 
 function Restore-V1Task([string]$OwnerSid, [object]$Snapshot, [string]$V1Sha) {
-    if ($null -eq $Snapshot) { return }
+    if ($null -eq $Snapshot) { throw 'V1_SNAPSHOT_MISSING' }
+    $expectedV1 = Get-ExpectedV1Arguments $V1Sha $v1WorkerInstalled
+    if ($Snapshot.ActionArguments -cne $expectedV1) { throw 'V1_TASK_RESTORE_PROVENANCE_MISMATCH' }
     $service = Get-TaskService
     $folder = $service.GetFolder('\')
     $task = $folder.GetTask($taskName)
@@ -255,11 +314,28 @@ function Restore-V1Task([string]$OwnerSid, [object]$Snapshot, [string]$V1Sha) {
     $action.Path = $Snapshot.ActionPath
     $action.Arguments = $Snapshot.ActionArguments
     $action.WorkingDirectory = ''
-    $expectedV1 = Get-ExpectedV1Arguments $V1Sha $v1WorkerInstalled
-    if ($action.Arguments -cne $expectedV1) { $action.Arguments = $Snapshot.ActionArguments }
     $taskSddl = $task.GetSecurityDescriptor(0xF)
     $name = $taskName.TrimStart('\')
     $folder.RegisterTaskDefinition($name, $definition, 0x06, $OwnerSid, $null, 3, $taskSddl) | Out-Null
+    $readback = $folder.GetTask($taskName)
+    $rbDef = $readback.Definition
+    $rbAction = $rbDef.Actions.Item(1)
+    if ([string]$rbAction.Path -cne [string]$Snapshot.ActionPath -or [string]$rbAction.Arguments -cne $expectedV1) {
+        throw 'V1_TASK_RESTORE_AMBIGUOUS'
+    }
+    if ([bool]$rbDef.Settings.Enabled -cne [bool]$Snapshot.Enabled) {
+        throw 'V1_TASK_RESTORE_AMBIGUOUS'
+    }
+}
+
+function Invoke-V1TaskRollback([string]$OwnerSid, [string]$V1Sha) {
+    if ($null -eq $script:V1Snapshot) { throw 'V1_ROLLBACK_SNAPSHOT_MISSING' }
+    try {
+        Disable-TaskHold
+    } catch {
+        throw 'V1_ROLLBACK_DISABLE_FAILED'
+    }
+    Restore-V1Task $OwnerSid $script:V1Snapshot $V1Sha
 }
 
 function Remove-StagedV2Worker {
@@ -318,15 +394,17 @@ function Assert-ProtectedArtifactSha256([string]$Path, [string]$ExpectedSha256, 
 }
 
 function Disable-TaskHold {
+    $ownerSid = Get-OwnerSid
     $service = Get-TaskService
     $folder = $service.GetFolder('\')
     $task = $folder.GetTask($taskName)
     $definition = $task.Definition
     $definition.Settings.Enabled = $false
-    $ownerSid = Get-OwnerSid
     $taskSddl = $task.GetSecurityDescriptor(0xF)
     $name = $taskName.TrimStart('\')
     $folder.RegisterTaskDefinition($name, $definition, 0x06, $ownerSid, $null, 3, $taskSddl) | Out-Null
+    $readback = $folder.GetTask($taskName)
+    if ([bool]$readback.Definition.Settings.Enabled) { throw 'TASK_DISABLE_HOLD_FAILED' }
 }
 
 function Assert-BootstrapProvenance {
@@ -379,6 +457,9 @@ try {
     $script:V1Snapshot = Assert-V1TaskQuiescent $ownerSid $v1Sha
     Write-Journal 'SNAPSHOT' @{ v1WorkerSha256 = $v1Sha; v1TaskActionPath = $script:V1Snapshot.ActionPath }
 
+    Disable-TaskHold
+    Write-Journal 'HOLD' @{ reason = 'V1_TASK_HELD_BEFORE_MUTATION' }
+
     $v2Sha = Install-V2WorkerFromBundle $script:ReviewedWorkerSha256
     Write-Journal 'PREPARED' @{ v2WorkerSha256 = $v2Sha; v2WorkerPath = $v2WorkerInstalled }
 
@@ -397,24 +478,36 @@ try {
 } catch {
     $msg = $_.Exception.Message
     if ($msg -eq 'V2_TASK_READBACK_AMBIGUOUS') {
-        try { Remove-StagedV2Worker } catch { }
+        try { Remove-StagedV2Worker } catch { throw 'V2_STAGED_REMOVE_FAILED' }
         if ($null -ne $script:V1Snapshot) {
+            $v1ShaRollback = Assert-V1WorkerInstalled
             try {
-                $v1ShaRollback = Assert-V1WorkerInstalled
-                Restore-V1Task $ownerSid $script:V1Snapshot $v1ShaRollback
-            } catch { }
+                Invoke-V1TaskRollback $ownerSid $v1ShaRollback
+            } catch {
+                $rollbackCode = $_.Exception.Message
+                if ($rollbackCode -notmatch '^[A-Z0-9_]+$') { $rollbackCode = 'V1_ROLLBACK_FAILED' }
+                Write-Journal 'HOLD' @{ reason = 'TASK_UPDATE_AMBIGUOUS_ROLLBACK_FAILED'; rollbackCode = $rollbackCode }
+                throw $rollbackCode
+            }
         }
         Write-Journal 'HOLD' @{ reason = 'TASK_UPDATE_AMBIGUOUS_V1_RESTORED' }
         throw 'HOLD_TASK_UPDATE_AMBIGUOUS'
     }
     try { Remove-StagedV2Worker } catch { }
     if ($null -ne $script:V1Snapshot) {
+        $v1ShaRollback = Assert-V1WorkerInstalled
         try {
-            $v1ShaRollback = Assert-V1WorkerInstalled
-            Restore-V1Task $ownerSid $script:V1Snapshot $v1ShaRollback
-        } catch { }
+            Invoke-V1TaskRollback $ownerSid $v1ShaRollback
+            Write-Journal 'HOLD' @{ reason = 'FAILURE_V1_ROLLBACK_VERIFIED' }
+        } catch {
+            $rollbackCode = $_.Exception.Message
+            if ($rollbackCode -notmatch '^[A-Z0-9_]+$') { $rollbackCode = 'V1_ROLLBACK_FAILED' }
+            Write-Journal 'HOLD' @{ reason = 'FAILURE_ROLLBACK_FAILED'; rollbackCode = $rollbackCode }
+            throw $rollbackCode
+        }
+    } else {
+        Write-Journal 'HOLD' @{ reason = $msg }
     }
-    Write-Journal 'HOLD' @{ reason = $msg }
     throw
 } finally {
     Release-BootstrapLock

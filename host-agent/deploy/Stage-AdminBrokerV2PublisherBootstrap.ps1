@@ -9,8 +9,8 @@ $reviewManifestFileName = 'AdminBrokerV2BootstrapReviewManifest.json'
 $reviewDownloadRoot = Join-Path $env:USERPROFILE 'Downloads\LDW-V2-Publisher-Bootstrap-Review'
 $stagingLeaf = 'v2-publisher-once'
 # Independently reviewed byte pins (not supplied by the untrusted Downloads manifest).
-$trustedReviewManifestFileSha256 = 'b222d178f0be880e2f3b15427f786acbea33f56f6096d4f230375b4583e7473b'
-$trustedBootstrapSha256 = '98829fcfea8a1ce96ea7edf9bbc286686bd79722238627214cd8fb5e62967b78'
+$trustedReviewManifestFileSha256 = 'bc774896b562a6574f340dd46560814f5ef1b3a50ead19286688bb732dc552de'
+$trustedBootstrapSha256 = '4e14986198531436672c659b556461b790321a18344981dbfa0c743680790c85'
 $trustedWorkerSha256 = '051124b03f88694f19f557954e844ffe1f71c24187c7998a4cf6e8ce55aaa4f1'
 
 function Assert-Elevated {
