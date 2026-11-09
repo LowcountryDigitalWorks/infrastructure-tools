@@ -249,7 +249,7 @@ class GuestExecutorTests(unittest.TestCase):
             replacement.write_bytes(b"same-uid replace of staged inode")
             def swap_staged_inode(_fd):
                 os.replace(replacement, staged)
-            with mock.patch.object(exe, "EXPECTED_BASE_SHA512", hashlib.sha512(data).hexdigest()), \\
+            with mock.patch.object(exe, "EXPECTED_BASE_SHA512", hashlib.sha512(data).hexdigest()), \
                  mock.patch.object(exe.os, "fsync", side_effect=swap_staged_inode):
                 self.assertEqual(
                     exe.stage_pinned_private_base(source, staged),
