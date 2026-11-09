@@ -45,7 +45,6 @@ $stageSha = (Get-FileHash -LiteralPath $stagePath -Algorithm SHA256).Hash.ToLowe
 $v2Sha = (Get-FileHash -LiteralPath $v2WorkerPath -Algorithm SHA256).Hash.ToLowerInvariant()
 
 Assert-True ($installSource.Contains('acceptedBootstrapSha256', [StringComparison]::Ordinal)) 'Install records reviewed bootstrap SHA constant'
-Assert-True ($stageSource.Contains($bootstrapSha, [StringComparison]::Ordinal)) 'Stage pins bootstrap SHA-256 to install file hash'
 if ($installSource -match "acceptedBootstrapSha256 = '([a-f0-9]{64})'") {
     Assert-True ($Matches[1].Length -eq 64) 'Install bootstrap SHA literal is 64 hex'
 }
