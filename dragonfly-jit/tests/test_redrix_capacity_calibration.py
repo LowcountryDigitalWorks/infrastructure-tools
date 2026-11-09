@@ -356,13 +356,13 @@ class CalibrationTest(unittest.TestCase):
         from contextlib import redirect_stdout
         from io import StringIO
         output = StringIO()
-        with mock.patch.object(module, "controller_memory_contract", return_value=(2048, 8192)), \\
-             mock.patch.object(module, "observe_virtio_balloon_sysfs", return_value="PRESENT"), \\
-             mock.patch.object(module, "read_available_mib", return_value=9400), \\
-             mock.patch.object(module, "read_memory_pressure_avg10", return_value=(0.0, 0.0)), \\
-             mock.patch.object(module, "read_oom_events", return_value=None), \\
-             mock.patch.object(module, "read_balloon_vmstat_pages", return_value=(100, 50)), \\
-             mock.patch("sys.argv", ["calibration", "--interval-seconds", "0"]), \\
+        with mock.patch.object(module, "controller_memory_contract", return_value=(2048, 8192)), \
+             mock.patch.object(module, "observe_virtio_balloon_sysfs", return_value="PRESENT"), \
+             mock.patch.object(module, "read_available_mib", return_value=9400), \
+             mock.patch.object(module, "read_memory_pressure_avg10", return_value=(0.0, 0.0)), \
+             mock.patch.object(module, "read_oom_events", return_value=None), \
+             mock.patch.object(module, "read_balloon_vmstat_pages", return_value=(100, 50)), \
+             mock.patch("sys.argv", ["calibration", "--interval-seconds", "0"]), \
              redirect_stdout(output):
             self.assertEqual(module.main(), 0)
         info = json.loads(output.getvalue())
