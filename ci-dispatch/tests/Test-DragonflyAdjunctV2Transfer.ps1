@@ -9,6 +9,8 @@ try {
         Write-Output 'SKIP_ELEVATED_SESSION'
         exit 0
     }
+    $builder = Get-Command Build-LdwDragonflyAdjunctV2TransferEnvelope -ErrorAction Stop
+    if ($builder.Parameters.ContainsKey('PackageRoot')) { throw 'TRANSFER_CALLER_SELECTED_ROOT_REFUSED' }
     $expectedRoot = Get-LdwDragonflyAdjunctV2TransferPackageRoot
     if ($expectedRoot -notmatch 'normal-user-staging') { throw 'TRANSFER_PACKAGE_ROOT_SHAPE_INVALID' }
     if ($expectedRoot -notmatch '^[a-f0-9]{40}-[a-f0-9]{40}$') {
