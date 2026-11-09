@@ -170,6 +170,13 @@ class InboundTransferV2Tests(unittest.TestCase):
     def test_unknown_manifest_field_and_bounded_reader_refuse(self):
         payload = _build_envelope()
         payload["manifest"]["unexpectedCommand"] = "untrusted"
+        with self.assertRaisesRegex(transfer.TransferError, "TRANSFER_MANIFEST_OBJECT_DRIFT"):
+            transfer.validate_transfer_envelope(payload)
+        # Even if the attacker recomputes the manifest blob+hash, the frozen
+        # manifest allowlist rejects an unknown command/metadata field.
+        raw = json.dumps(payload["manifest"], separators=(",", ":")).encode("utf-8") + b"\n"
+        payload["manifest_content"] = base64.b64encode(raw).decode("ascii")
+        payload["manifest_sha256"] = hashlib.sha256(raw).hexdigest()
         with self.assertRaisesRegex(transfer.TransferError, "TRANSFER_MANIFEST_INVALID"):
             transfer.validate_transfer_envelope(payload)
         with self.assertRaisesRegex(transfer.TransferError, "TRANSFER_PAYLOAD_TOO_LARGE"):
