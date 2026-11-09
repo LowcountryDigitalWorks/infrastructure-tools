@@ -107,6 +107,11 @@ class InboundTransferV2Tests(unittest.TestCase):
             with self.assertRaises(transfer.TransferError):
                 transfer.install_transfer_bundle(envelope, install_root=install_root, state_root=state_root)
 
+    def test_forced_receiver_pins_exact_current_hardened_transfer_source(self):
+        actual = transfer._git_blob_sha1((ROOT / "inbound_transfer_v2.py").read_bytes())
+        receiver = (ROOT / "ssh_forced_receiver.py").read_text(encoding="utf-8")
+        self.assertIn(f'EXPECTED_INBOUND_TRANSFER_GIT_BLOB = "{actual}"', receiver)
+
     def test_forged_manifest_or_digest_fails_closed(self):
         payload = _build_envelope()
         payload["manifest_sha256"] = "b" * 64
