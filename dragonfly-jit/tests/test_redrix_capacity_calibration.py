@@ -317,6 +317,63 @@ class CalibrationTest(unittest.TestCase):
         self.assertNotIn('tailscale', blob)
         self.assertNotIn('virtio5', blob)
 
+    def test_bounded_utc_capture_window_is_observational_only(self):
+        from datetime import datetime, timedelta, timezone
+        start = datetime(2026, 11, 8, 23, 40, 12, 123000, tzinfo=timezone.utc)
+        report = module.classify([_sample(9400, (0, 0), None, (10, 5))] * 3, (2048, 8192))
+        report["chromeos_host_corroboration"] = "UNTRUSTED_CALLER_PASS"
+        stamped = module.attach_utc_capture_window(report, start, start + timedelta(seconds=3))
+        self.assertEqual(stamped["capture_started_utc"], "2026-11-08T23:40:12.123Z")
+        self.assertEqual(stamped["capture_finished_utc"], "2026-11-08T23:40:15.123Z")
+        self.assertEqual(stamped["capture_elapsed_ms"], 3000)
+        self.assertEqual(stamped["capture_clock_source"], "PENGUIN_UTC_WALLCLOCK_UNATTESTED")
+        self.assertEqual(stamped["chromeos_host_corroboration"], "UNVERIFIED")
+        self.assertFalse(stamped["jit_admission_authorized"])
+        self.assertFalse(stamped["ci_dispatch_authorized"])
+        self.assertFalse(stamped["candidate_is_policy"])
+        self.assertNotIn("capture_started_utc", report)
+
+    def test_invalid_stale_or_reversed_capture_clock_holds(self):
+        from datetime import datetime, timedelta, timezone
+        utc = datetime(2026, 11, 8, 23, 40, tzinfo=timezone.utc)
+        naive = datetime(2026, 11, 8, 23, 40)
+        report = module.classify([_sample(9400, (0, 0), None, (1, 1))] * 3, (2048, 8192))
+        for begin, end, reason in (
+            (utc, naive, "CAPTURE_CLOCK_UNAVAILABLE"),
+            (naive, utc, "CAPTURE_CLOCK_UNAVAILABLE"),
+            (None, utc, "CAPTURE_CLOCK_UNAVAILABLE"),
+            (utc, utc - timedelta(milliseconds=1), "CAPTURE_CLOCK_UNRELIABLE"),
+            (utc, utc + timedelta(seconds=61), "CAPTURE_CLOCK_UNRELIABLE"),
+        ):
+            with self.subTest(reason=reason, begin=begin, end=end):
+                out = module.attach_utc_capture_window(report, begin, end)
+                self.assertEqual(out["classification"], "HOLD")
+                self.assertEqual(out["reason"], reason)
+                self.assertNotIn("capture_started_utc", out)
+                self.assertFalse(out["jit_admission_authorized"])
+
+    def test_cli_report_includes_same_linux_capture_window_not_host_attestation(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        output = StringIO()
+        with mock.patch.object(module, "controller_memory_contract", return_value=(2048, 8192)), \\
+             mock.patch.object(module, "observe_virtio_balloon_sysfs", return_value="PRESENT"), \\
+             mock.patch.object(module, "read_available_mib", return_value=9400), \\
+             mock.patch.object(module, "read_memory_pressure_avg10", return_value=(0.0, 0.0)), \\
+             mock.patch.object(module, "read_oom_events", return_value=None), \\
+             mock.patch.object(module, "read_balloon_vmstat_pages", return_value=(100, 50)), \\
+             mock.patch("sys.argv", ["calibration", "--interval-seconds", "0"]), \\
+             redirect_stdout(output):
+            self.assertEqual(module.main(), 0)
+        info = json.loads(output.getvalue())
+        self.assertEqual(info["classification"], "MEASURED_NOT_AUTHORIZED")
+        self.assertIn("capture_started_utc", info)
+        self.assertIn("capture_finished_utc", info)
+        self.assertLessEqual(info["capture_elapsed_ms"], 60000)
+        self.assertEqual(info["chromeos_host_corroboration"], "UNVERIFIED")
+        self.assertFalse(info["candidate_is_policy"])
+        self.assertFalse(info["jit_admission_authorized"])
+
     def test_sampling_error_is_sanitized(self):
         from contextlib import redirect_stdout
         from io import StringIO
