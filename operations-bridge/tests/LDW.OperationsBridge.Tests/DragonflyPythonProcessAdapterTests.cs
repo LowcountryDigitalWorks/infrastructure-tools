@@ -6,6 +6,18 @@ internal static class DragonflyPythonProcessAdapterTests
 {
     public static void Run()
     {
+        if (OperatingSystem.IsLinux())
+            RunLinuxProcessLaunchContracts();
+        else
+            ContractTestPlatform.SkipLinuxOnly(
+                nameof(DragonflyPythonProcessAdapterTests) + " process-launch",
+                "POSIX owner home, fixed /usr/bin/python3 argv/env, and adapter symlink refusal require Linux.");
+
+        RunCrossPlatformAdapterContracts();
+    }
+
+    private static void RunLinuxProcessLaunchContracts()
+    {
         const string home = "/home/eddie";
         var startInfo = PythonDragonflyRunnerAdapter.CreateStartInfo(home, "dragonfly.runner.status");
 
@@ -46,12 +58,15 @@ internal static class DragonflyPythonProcessAdapterTests
         AssertThrows<ArgumentOutOfRangeException>(
             () => PythonDragonflyRunnerAdapter.CreateStartInfo(home, "dragonfly.runner.recover"),
             "Python adapter rejects non-owner-control operation");
+
+        VerifySymlinkRefusal();
+    }
+
+    private static void RunCrossPlatformAdapterContracts()
+    {
         AssertThrows<ArgumentOutOfRangeException>(
             () => PythonDragonflyRunnerAdapter.BuildRequest("dragonfly.runner.smoke"),
             "Python adapter cannot build smoke/recover/generic request");
-
-        if (OperatingSystem.IsLinux())
-            VerifySymlinkRefusal();
 
         const string statusJson = "{\"base_present\":true,\"free_disk_gib\":81,\"load_fraction\":0.021,\"marker\":\"DRAGONFLY-BRIDGE-001\",\"mem_available_mib\":12361,\"operation\":\"dragonfly.runner.status\",\"reason\":null,\"residue_count\":0,\"state\":\"STOPPED\",\"visible_cpus\":12}";
         var status = PythonDragonflyRunnerAdapter.ParseStatusResult(statusJson, "dragonfly.runner.status");
