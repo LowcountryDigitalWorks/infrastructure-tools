@@ -7,6 +7,7 @@ const net = require("node:net");
 const crypto = require("node:crypto");
 const { chromium } = require("playwright");
 const { inspectRendererKernel, VALID: KERNEL_CODES } = require("./kernel_attestation");
+const { classifyActualLaunchFailure } = require("./launch_class");
 let phase = "INIT";
 
 async function inspectBrowserSandbox(context) {
@@ -219,32 +220,7 @@ main().catch(err=>{
     // Parse the ACTUAL Playwright chromium.launch({channel:"chromium",
     // chromiumSandbox:true}) failure, not a different executablePath binary.
     // Never print raw stderr, launcher argv, host paths, browser data or URLs.
-    const raw = String(err && err.message || "").toLowerCase();
-    const signatures = [
-      ["NO_USABLE_SANDBOX", "no usable sandbox"],
-      ["NAMESPACE_DENIED", "failed to move to new namespace"],
-      ["OPERATION_DENIED", "operation not permitted"],
-      ["PERMISSION_DENIED", "permission denied"],
-      ["READ_ONLY_FILESYSTEM", "read-only file system"],
-      ["SHARED_LIBRARY", "error while loading shared libraries"],
-      ["ZYGOTE_LAUNCH_FAILED", "failed to launch zygote process"],
-      ["ZYGOTE_INVALID_BOOT_PID", "received invalid process id for zygote"],
-      ["ZYGOTE_FORK_FAILED", "failed to fork zygote"],
-      ["ZYGOTE_HOST", "zygote_host_impl_linux.cc"],
-      ["ZYGOTE_MAIN", "zygote_main_linux.cc"],
-      ["ZYGOTE_COMMUNICATION", "zygote_communication_linux.cc"],
-      ["ZYGOTE", "zygote"],
-      ["SECCOMP", "seccomp"],
-      ["CHROME_SANDBOX_HELPER", "chrome-sandbox"],
-      ["PARENT_CLOSED", "target page, context or browser has been closed"],
-    ];
-    reason = "GUEST_BROWSER_LAUNCH_ACTUAL_UNKNOWN";
-    for (const [category, needle] of signatures) {
-      if (raw.includes(needle)) {
-        reason = "GUEST_BROWSER_LAUNCH_ACTUAL_" + category;
-        break;
-      }
-    }
+    reason = classifyActualLaunchFailure(err && err.message);
   }
   fail(reason);
 }).finally(()=>clearTimeout(timer));

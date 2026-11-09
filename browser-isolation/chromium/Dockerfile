@@ -5,7 +5,7 @@ FROM mcr.microsoft.com/playwright:v1.64.1-noble@sha256:2f05f8a734509a7b3f26a9126
 WORKDIR /opt/ldw-browser-proof
 RUN npm install --no-save --ignore-scripts --no-audit --no-fund --omit=dev playwright@1.64.1 \
     && useradd --create-home --uid 10001 --shell /usr/sbin/nologin ldwprobe
-COPY --chmod=0444 probe.js kernel_attestation.js /opt/ldw-browser-proof/
+COPY --chmod=0444 probe.js launch_class.js kernel_attestation.js /opt/ldw-browser-proof/
 USER 10001:10001
 ENV HOME=/tmp
 ENTRYPOINT ["node", "/opt/ldw-browser-proof/probe.js"]

@@ -214,6 +214,11 @@ class RealBrowserGuestGateTests(unittest.TestCase):
                       "GUEST_BROWSER_LAUNCH_ACTUAL_ZYGOTE_LAUNCH_FAILED",
                       "GUEST_BROWSER_LAUNCH_ACTUAL_ZYGOTE_INVALID_BOOT_PID",
                       "GUEST_BROWSER_LAUNCH_ACTUAL_ZYGOTE_FORK_FAILED",
+                      "GUEST_BROWSER_LAUNCH_ACTUAL_ZYGOTE_PREMATURE_EXIT_NAMESPACE",
+                      "GUEST_BROWSER_LAUNCH_ACTUAL_ZYGOTE_PREMATURE_EXIT_SETUID",
+                      "GUEST_BROWSER_LAUNCH_ACTUAL_ZYGOTE_BOOT_MESSAGE_MISSING",
+                      "GUEST_BROWSER_LAUNCH_ACTUAL_ZYGOTE_HELLO_MESSAGE_MISSING",
+                      "GUEST_BROWSER_LAUNCH_ACTUAL_ZYGOTE_PREMATURE_EXIT",
                       "GUEST_BROWSER_LAUNCH_ACTUAL_ZYGOTE",
                       "GUEST_BROWSER_LAUNCH_ACTUAL_UNKNOWN",
                       "GUEST_LOCAL_NAVIGATION_ERROR", "GUEST_SERVICE_WORKER_ERROR"):
@@ -226,6 +231,34 @@ class RealBrowserGuestGateTests(unittest.TestCase):
         with self.assertRaisesRegex(BoundaryError, "UNCLASSIFIED"):
             verify_guest({"result":"NO_START",
                           "reason":"GUEST_BROWSER_LAUNCH_DIRECT_ZYGOTE"},1)
+
+    def test_launch_classification_cannot_start_or_change_policy(self):
+        phases = (
+            "GUEST_BROWSER_LAUNCH_ACTUAL_ZYGOTE_PREMATURE_EXIT_NAMESPACE",
+            "GUEST_BROWSER_LAUNCH_ACTUAL_ZYGOTE_PREMATURE_EXIT_SETUID",
+            "GUEST_BROWSER_LAUNCH_ACTUAL_ZYGOTE_BOOT_MESSAGE_MISSING",
+            "GUEST_BROWSER_LAUNCH_ACTUAL_ZYGOTE_HELLO_MESSAGE_MISSING",
+            "GUEST_BROWSER_LAUNCH_ACTUAL_ZYGOTE_PREMATURE_EXIT",
+            "GUEST_BROWSER_LAUNCH_ACTUAL_UNKNOWN",
+        )
+        for phase in phases:
+            with self.subTest(phase=phase):
+                with self.assertRaises(BoundaryError) as caught:
+                    verify_guest({"result": "NO_START", "reason": phase}, 0)
+                self.assertEqual(str(caught.exception), "CHROMIUM_NO_START_" + phase)
+                self.assertNotIn("PASS", str(caught.exception))
+        with self.assertRaises(BoundaryError) as caught:
+            verify_guest({"result": "NO_START",
+                          "reason": "errno=1 /tmp/secret https://example.invalid"}, 0)
+        self.assertEqual(str(caught.exception), "CHROMIUM_NO_START_UNCLASSIFIED")
+        with patch("host_proof.verified_seccomp_path", return_value="/tmp/synthetic"):
+            args = command("/usr/bin/docker", self.image, "172.17.0.1", 32001, nonce=self.nonce)
+        self.assertIn("--network=none", args)
+        self.assertIn("--security-opt=seccomp=/tmp/synthetic", args)
+        self.assertIn("--user=10001:10001", args)
+        self.assertNotIn("--privileged", args)
+        self.assertNotIn("--network=host", args)
+        self.assertNotIn("--security-opt=seccomp=unconfined", args)
 
     def test_guest_proof_must_reject_skipped_vectors(self):
         valid = {
