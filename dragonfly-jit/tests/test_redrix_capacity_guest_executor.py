@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import hashlib
 import importlib.util
+import os
 import json
 import sys
 import tempfile
@@ -161,6 +163,107 @@ class GuestExecutorTests(unittest.TestCase):
         self.assertFalse(report["provider_admission_authorized"])
         self.assertFalse(report["production_policy_changed"])
         self.assertEqual(report["production_reserve_mib"], 8192)
+
+    @unittest.skipUnless(
+        sys.platform == "linux" and hasattr(os, "O_NOFOLLOW"),
+        "Linux no-follow descriptor proof only",
+    )
+    def test_stage_pinned_private_base_uses_verified_private_copy(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            private = root / "private"
+            private.mkdir(mode=0o700)
+            source = root / "external.qcow2"
+            data = b"LDW synthetic base image bytes, not bootable" * 1024
+            source.write_bytes(data)
+            staged = private / "pinned-base.qcow2"
+            digest = hashlib.sha512(data).hexdigest()
+            with mock.patch.object(exe, "EXPECTED_BASE_SHA512", digest):
+                self.assertIsNone(exe.stage_pinned_private_base(source, staged))
+                self.assertEqual(staged.read_bytes(), data)
+                self.assertEqual(staged.stat().st_mode & 0o077, 0)
+                # The original path can change without changing staged bytes.
+                source.write_bytes(b"changed after verified staging")
+                self.assertEqual(staged.read_bytes(), data)
+                self.assertEqual(
+                    exe.stage_pinned_private_base(source, staged),
+                    "BASE_STAGE_UNVERIFIED",
+                )
+            self.assertFalse(exe.PHYSICAL_EXECUTION_ENABLED)
+
+    @unittest.skipUnless(
+        sys.platform == "linux" and hasattr(os, "O_NOFOLLOW"),
+        "Linux no-follow descriptor proof only",
+    )
+    def test_stage_refuses_changed_base_symlink_and_unsafe_root(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "original.qcow2"
+            data = b"synthetic-good-pinned" * 128
+            source.write_bytes(data)
+            good_digest = hashlib.sha512(data).hexdigest()
+            private = root / "private"
+            private.mkdir(mode=0o700)
+            staged = private / "pinned-base.qcow2"
+            with mock.patch.object(exe, "EXPECTED_BASE_SHA512", good_digest):
+                # Source replaced between preflight and private staging.
+                source.write_bytes(b"changed source after preflight")
+                self.assertEqual(
+                    exe.stage_pinned_private_base(source, staged),
+                    "BASE_STAGE_UNVERIFIED",
+                )
+                source.write_bytes(data)
+                link = root / "source-symlink.qcow2"
+                link.symlink_to(source)
+                self.assertEqual(
+                    exe.stage_pinned_private_base(link, staged),
+                    "BASE_STAGE_UNVERIFIED",
+                )
+                private.chmod(0o777)
+                self.assertEqual(
+                    exe.stage_pinned_private_base(source, staged),
+                    "BASE_STAGE_UNVERIFIED",
+                )
+                private.chmod(0o700)
+                with mock.patch.object(exe, "MAX_STAGED_BASE_BYTES", 16):
+                    self.assertEqual(
+                        exe.stage_pinned_private_base(source, staged),
+                        "BASE_STAGE_UNVERIFIED",
+                    )
+            self.assertFalse(exe.PHYSICAL_EXECUTION_ENABLED)
+
+    @unittest.skipUnless(
+        sys.platform == "linux" and hasattr(os, "O_NOFOLLOW"),
+        "Linux no-follow descriptor proof only",
+    )
+    def test_stage_rechecks_private_inode_and_content_before_overlay(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            private = root / "private"
+            private.mkdir(mode=0o700)
+            source = root / "external.qcow2"
+            data = b"LDW stage before overlay" * 1024
+            source.write_bytes(data)
+            staged = private / "pinned-base.qcow2"
+            replacement = private / "replacement.qcow2"
+            replacement.write_bytes(b"same-uid replace of staged inode")
+            def swap_staged_inode(_fd):
+                os.replace(replacement, staged)
+            with mock.patch.object(exe, "EXPECTED_BASE_SHA512", hashlib.sha512(data).hexdigest()), \\
+                 mock.patch.object(exe.os, "fsync", side_effect=swap_staged_inode):
+                self.assertEqual(
+                    exe.stage_pinned_private_base(source, staged),
+                    "BASE_STAGE_UNVERIFIED",
+                )
+            self.assertFalse(exe.PHYSICAL_EXECUTION_ENABLED)
+
+    def test_source_never_routes_external_base_path_to_qemu_img(self):
+        code = MODULE_PATH.read_text(encoding="utf-8")
+        self.assertIn('private_base = work_root / "pinned-base.qcow2"', code)
+        self.assertIn("stage_pinned_private_base(run_ctx.base_image_path, private_base)", code)
+        self.assertIn("str(private_base),", code)
+        self.assertNotIn("str(run_ctx.base_image_path),", code)
+        self.assertFalse(exe.PHYSICAL_EXECUTION_ENABLED)
 
     def test_controller_pin_matches_live_source(self):
         identity = exe.read_controller_identity(CONTROLLER)
