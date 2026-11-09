@@ -21,4 +21,6 @@ Pinned toolchain, from Android's AGP 8.13 compatibility notes and the official d
 
 CI checks the checked-in Gradle wrapper jar SHA-256 before it runs that jar. It then builds a debug APK and checks the packaged manifest. The log prints two commits: `CHECKOUT_SHA` is the workflow checkout, which for a pull request is GitHub's synthetic merge commit, and `PR_SOURCE_HEAD` is the branch head from the pull request event. The printed APK SHA-256 is the ephemeral debug-signed file from that runner. It is not stable across debug signers, it is not uploaded, and it is not an installable release. Installation stays on hold. No handset was queried by this source task.
 
+After the existing digest line, CI writes a **release-neutral provenance manifest** JSON (runner temp only; not committed) capturing accepted `git_commit`, `git_tree`, `pr_source_head`, allowed `application_id`, permission-negative manifest policy, pinned Gradle wrapper SHA-256, ephemeral debug APK path/name/size/digest, and toolchain versions. `release_neutral.install_approved` and `protected_confirmation_claimed` remain false; artifact scan and explicit owner approval are required before any sideload. Hostile-input unit tests fail closed with explicit `PROV_ERR_*` codes.
+
 Cost: $0.

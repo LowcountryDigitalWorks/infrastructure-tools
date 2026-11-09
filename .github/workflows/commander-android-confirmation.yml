@@ -82,3 +82,16 @@ jobs:
           echo "CHECKOUT_SHA=$(git rev-parse HEAD)"
           echo "PR_SOURCE_HEAD=${PR_SOURCE_HEAD:?missing pull request source head}"
           sha256sum "$apk"
+          manifest_path="$RUNNER_TEMP/android-confirmation-provenance.json"
+          python commander/diagnostic/android-confirmation/tests/write_provenance_manifest.py \
+            --git-commit "$(git rev-parse HEAD)" \
+            --git-tree "$(git rev-parse "HEAD^{tree}")" \
+            --pr-source-head "${PR_SOURCE_HEAD}" \
+            --apk "$apk" > "$manifest_path"
+          python commander/diagnostic/android-confirmation/tests/write_provenance_manifest.py \
+            --validate-only "$manifest_path" \
+            --git-commit "$(git rev-parse HEAD)" \
+            --git-tree "$(git rev-parse "HEAD^{tree}")" \
+            --pr-source-head "${PR_SOURCE_HEAD}" \
+            --apk "$apk"
+          wc -c "$manifest_path"
