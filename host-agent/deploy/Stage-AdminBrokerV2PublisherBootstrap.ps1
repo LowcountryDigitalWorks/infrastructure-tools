@@ -58,7 +58,8 @@ function Read-ReviewManifest([string]$ManifestPath) {
     $bytes = [IO.File]::ReadAllBytes($ManifestPath)
     if ($bytes.Length -lt 2 -or $bytes.Length -gt 8192) { throw 'REVIEW_MANIFEST_INVALID' }
     try {
-        $doc = [Text.Json.JsonDocument]::Parse($bytes)
+        [System.ReadOnlyMemory[byte]]$jsonMemory = $bytes
+        $doc = [Text.Json.JsonDocument]::Parse($jsonMemory)
     } catch {
         throw 'REVIEW_MANIFEST_INVALID'
     }

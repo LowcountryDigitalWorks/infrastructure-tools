@@ -107,24 +107,23 @@ try {
     $workerBundleName = 'Invoke-AdminBrokerV2PublisherWorker.ps1'
     $reviewManifestFileName = 'AdminBrokerV2BootstrapReviewManifest.json'
 
+    $noReparseFn = $installAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-NoReparse' }, $false)
     $readFn = $installAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Read-ReviewManifest' }, $false)
     $assertFn = $installAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-ProtectedArtifactSha256' }, $false)
-    if ($null -eq $readFn -or $null -eq $assertFn) { throw 'FUNCTION_REQUIRED: manifest helpers' }
+    if ($null -eq $noReparseFn -or $null -eq $readFn -or $null -eq $assertFn) { throw 'FUNCTION_REQUIRED: manifest helpers' }
 
-    & {
-        param([string]$ReadSource, [string]$AssertSource)
-        . ([scriptblock]::Create($ReadSource))
-        . ([scriptblock]::Create($AssertSource))
-        $first = Read-ReviewManifest
-        $second = Read-ReviewManifest
-        Assert-True ($first.BootstrapSha256 -ceq $second.BootstrapSha256) 'manifest read idempotent'
-        Assert-ProtectedArtifactSha256 $sandboxInstall $first.BootstrapSha256 'BOOTSTRAP_SHA256_MISMATCH' | Out-Null
-        [IO.File]::WriteAllBytes($sandboxInstall, $tampered)
-        Assert-Refused { Assert-ProtectedArtifactSha256 $sandboxInstall $first.BootstrapSha256 'BOOTSTRAP_SHA256_MISMATCH' } 'BOOTSTRAP_SHA256_MISMATCH'
-    } ($readFn.Extent.Text, $assertFn.Extent.Text)
+    . ([scriptblock]::Create($noReparseFn.Extent.Text))
+    . ([scriptblock]::Create($readFn.Extent.Text))
+    . ([scriptblock]::Create($assertFn.Extent.Text))
 
-    $badManifest = $manifestJson | ConvertTo-Json -Depth 5 -Compress
-    $badManifest = $badManifest.Replace($manifestInstallPin, ('0' * 64))
+    $first = Read-ReviewManifest
+    $second = Read-ReviewManifest
+    Assert-True ($first.BootstrapSha256 -ceq $second.BootstrapSha256) 'manifest read idempotent'
+    Assert-ProtectedArtifactSha256 $sandboxInstall $first.BootstrapSha256 'BOOTSTRAP_SHA256_MISMATCH' | Out-Null
+    [IO.File]::WriteAllBytes($sandboxInstall, $tampered)
+    Assert-Refused { Assert-ProtectedArtifactSha256 $sandboxInstall $first.BootstrapSha256 'BOOTSTRAP_SHA256_MISMATCH' } 'BOOTSTRAP_SHA256_MISMATCH'
+
+    $badManifest = (Get-Content -LiteralPath $manifestPath -Raw).Replace($manifestInstallPin, ('0' * 64))
     [IO.File]::WriteAllText($sandboxManifest, $badManifest, [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllBytes($sandboxInstall, $rawBytes)
     $bad = Read-ReviewManifest
