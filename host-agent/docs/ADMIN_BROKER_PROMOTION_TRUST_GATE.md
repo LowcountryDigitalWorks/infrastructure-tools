@@ -5,6 +5,20 @@
 **Purpose:** isolate the smallest independently reviewable trust decision before writing any privileged `DRAGONFLY_V2_PUBLISH_REVIEWED` operation or protected promotion code.
 **Cash/data boundary:** $0 incremental; no new secret, owner credential, customer data, system mutation, or provider write in this document.
 
+## Owner-selected Candidate C: one-time closed-verifier bootstrap
+
+**Owner authorization:** [#186 comment 6734055516](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/186#issuecomment-6734055516) authorizes one out-of-band install of a fixed verifier by Eddie under his existing owner-admin account. The owner explicitly prefers this bounded path over switching accounts or requiring a second GitHub reviewer.
+
+This is a **single-owner trust model**. The environment approval is a deliberate owner acknowledgment, not independent review. If the dedicated `redrix-protected-publish` environment is used, the proposed controls are: Eddie-LowcountryDigitalWorks as the required reviewer; **Prevent self-review off**; administrator bypass disabled; deployment limited to the reviewed `main` branch. This setting does not make the owner an independent reviewer and does not authorize caller-selected bytes.
+
+The bootstrap must install one exact, source-reviewed closed verifier into a fixed protected Windows location using an explicit owner-admin action. Before implementation, the PR must freeze the exact package commit, tree, per-file Git blob and SHA-256 identities; fixed target path and ACL; fixed entrypoint; accepted operation and immutable package identity; staging/atomic replacement; preserved V1 behavior; failure rollback; and exact post-install readback. The installer and verifier must reject caller-provided refs, paths, URLs, digests, commands, arguments, environments and mutable checkout files. No arbitrary PowerShell or generic package installer may cross the boundary.
+
+The installed verifier may perform only the exact fixed REDRIX V2 publication needed for the separately authorized one-shot canary. It must use the accepted #115 forced-command transport and never place GitHub credentials in Crostini or the disposable guest. It must record bounded sanitized receipt data and verify the installed verifier/package hashes, owner/ACL, operation identity and rollback state. Any mismatch, stale source, unavailable or ambiguous provider, race, replay, partial write, rollback ambiguity, or incomplete readback returns HOLD.
+
+This authorization covers **one bootstrap operation only**. It creates no scheduled task, recurrence, standing publisher, self-update path, new PAT/App/OAuth/private key, or reusable install authority. Any changed verifier or package requires a new exact-source review and a separate owner decision. The owner accepts the resulting single-person control risk; this design does not claim protection from compromise of the owner's GitHub/admin account or from a malicious owner action. A separate ChatGPT reviewer may provide author-excluded technical findings, but that review is evidence, not a distinct GitHub identity or approval.
+
+**Status:** owner-selected architecture candidate; **D0 remains OPEN / CHANGES_REQUIRED** until the exact fixed artifact, install path, atomic rollback, and acceptance tests below are specified and independently challenged. This section does not authorize installation, source promotion, environment creation, V2 publication, A4 PASS, or canary dispatch.
+
 ## Current evidence and non-authority
 
 1. The deployed V1 Admin Broker has one closed privileged operation, `ELEVATED_IDENTITY_PROOF`. The [#176 first live proof](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/176#issuecomment-6571074628) was accepted; [#52's newer correction](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/52#issuecomment-6717819365) supersedes its older issue-body claim that proof is pending. The no-trigger protected task does not expose an arbitrary shell, installer or permission to add new operations.
@@ -57,9 +71,11 @@ Protected SYSTEM/Administrators-only roots, closed current registry, immutable i
 
 ## The first-install/bootstrap paradox
 
-The already deployed V1 privileged registry only executes `ELEVATED_IDENTITY_PROOF`. Neither a new data-only request shape nor a GitHub ledger record can introduce a new privileged executable safely. Before a new fixed operation can run, a separately accepted protected promotion primitive or one-time trusted bootstrap must exist. A normal-user write to a protected path, owner-writable script, temporary broad SYSTEM updater or fallback to generic PowerShell is **not** an acceptable workaround.
+The already deployed V1 privileged registry only executes `ELEVATED_IDENTITY_PROOF`. Neither a new data-only request shape nor a GitHub ledger record can introduce a new privileged executable safely. The owner has now authorized Candidate C's one-time out-of-band bootstrap, so the *identity of the initial trust authority* is decided: Eddie's owner-admin action. The **technical bootstrap remains unimplemented and unaccepted**.
 
-The implementation design must explicitly identify *who can install the first verified immutable promotion verifier*, how that installer is reviewed/authorized, how the currently installed V1 worker and task/ACL remain unchanged or are transactionally replaced, and how failure reverts to exact V1 without becoming a generic privileged launcher. If an already installed trusted path cannot prove that chain, report `BOOTSTRAP_AUTHORITY_MISSING` rather than pretending a new task operation is live.
+The D1 implementation must still identify and freeze the exact verifier/package bytes, fixed protected Windows path and ACL, fixed no-argument entrypoint, atomic install and rollback, preserved V1 worker/task behavior, exact receipt/readback, and one-shot use. The bootstrap itself must never run from a mutable owner-writable checkout as elevated code. It may not accept caller-selected paths, refs, URLs, hashes, commands, arguments, environments or package locations. A temporary SYSTEM updater, generic privileged installer, new scheduled poller, or generic PowerShell fallback remains rejected.
+
+Until those details have exact source and an author-excluded design/source review, report `BOOTSTRAP_AUTHORITY_NOT_IMPLEMENTED`; the owner authorization alone is not an installed trust root.
 
 ## Proposed validation vectors (future Gate A and source-only tests)
 
@@ -84,7 +100,7 @@ Tests must prove *refusals*, protected state consistency, retained audit/readbac
 
 ## Sequenced acceptance gates
 
-- **D0 — authority choice:** independent security/architecture review of Candidate A versus **one explicitly selected B suboption**; freeze exact accepted decision issuer and independence proof, first-install bootstrap, protected read/verification endpoint or signature/workflow predicate, review acceptance, revocation/rollback policy and threat assumptions. For A, distinguish anonymous TLS server authentication from API-user authentication and prove issuer authorization separately. **Current: OPEN / CHANGES_REQUIRED**.
+- **D0 — Candidate C design freeze:** the owner selected a one-time owner-admin bootstrap and same-account owner acknowledgment. Before D1, an author-excluded architecture challenge must accept an exact first-install procedure, immutable package identity, fixed protected path/ACL, atomic replacement and exact rollback/readback, one-shot disable/retirement, and explicit single-owner threat assumptions. Candidate A and Candidate B remain unselected; no GitHub comment, GITHUB_TOKEN, or Actions attestation is an issuer. **Current: OPEN / CHANGES_REQUIRED**.
 - **D1 — exact closed source:** only after D0, source PR for fixed `DRAGONFLY_V2_PUBLISH_REVIEWED` contract and immutable helper verifier; preserve V1 operation and closed task. Adversarial deterministic tests, mandatory source/security CI, influence-clean independent exact-head review.
 - **D2 — protected synthetic promotion:** preapproved isolated Windows fixture, complete denial/atomicity/replay/rollback/receipt, no real host mutation.
 - **D3 — LDW01 protected publication:** separate one-time #139 owner-authorized exact package/installed binary/ACL readback, A4 and source head gates; no elevated GitHub CLI.
