@@ -1,34 +1,35 @@
 # ci-hosted-fallback
 
-Source-only, fail-closed eligibility planner for **owner-approved included-only** GitHub-hosted fallback under [business-operations #552](https://github.com/LowcountryDigitalWorks/business-operations/issues/552) comment `6731519036`.
+Source-only, fail-closed eligibility planner for **owner-approved included-only** GitHub-hosted fallback under [business-operations #552](https://github.com/LowcountryDigitalWorks/business-operations/issues/552) comment `6731519036`, with provider-positive billing evidence in comment `6731618313`.
 
 This module **does not** dispatch, cancel, rerun, or modify workflows, runners, billing, or branch protection. It returns `execute: false` always.
 
+## Trusted provenance boundary
+
+Cost and billing fields are accepted only as **TRUSTED_ORCHESTRATOR_ATTESTATION** when
+`billing_evidence_source` is exactly `GITHUB_ORG_ADMIN_READ` (authenticated admin read, not model output).
+
+- **No model-writable tools** may populate billing attestation fields.
+- Caller/model-supplied `billing_read_status=OK` or invented `included_compute_remaining_usd` values are **rejected** without trusted provenance.
+- **No runtime admission** from this planner alone; a trusted upstream adapter must supply closed DTO values.
+
 ## Scope
 
+- Closed DTO: **exact key set only** (schema `1.1`); no extra fields (including free-text overrides).
 - Workload class **`SECRETLESS_DETERMINISTIC_VALIDATION` only**
-- Closed input DTO (no arbitrary URL, path, callback, or token fields)
-- Source allowlisted workflow/profile/repository identities only
-- Exact PR/run/job correlation and live queued attempt required
-- Private capacity must be provider-positive blocked with **no** runner assigned and **no** duplicate active local/JIT job
-- Data classification **`CLEAN_SECRETLESS`** only
-- Standard hosted labels: `ubuntu-latest`, `windows-latest`
-- Billing read **`OK`** with `included_compute_remaining >= bounded_required_cost` and `overage_allowed: false`
-- Billing **`UNKNOWN`** or **`403`** ⇒ `HOLD_BILLING_UNKNOWN`
+- One bound **workflow + profile + repository** triple (not independent allowlist unions)
+- Positive PR/run/job IDs, `run_attempt >= 1`, 40-char lowercase non-zero `head_sha`
+- Exact `bool` types for flag fields
+- Protected Betterleaks / secret-scan / WQT / Royal / JIT workflows remain **HOLD_PROTECTED_WORKFLOW**
 
-Never eligible: Betterleaks, isolated secret-scan, WQT, Royal, JIT validation, or other protected workflows (#10 / #92 / #264 residues).
+## Cost / budget planning (plan-only)
 
-Included compute headroom must come from an **authenticated GitHub billing read** supplied in the DTO; this planner does not call GitHub and does not assume static minute allowances.
+Two trusted plan routes (never `execute: true`):
 
-## API
+1. **`HOSTED_CLEAN_ELIGIBLE`** — trusted admin read, `billing_read_status=OK`, finite `included_compute_remaining_usd >= bounded_required_cost`, with `0 < bounded_required_cost <= 2` USD.
+2. **`HOSTED_CLEAN_PLAN_BUDGET_CAPPED`** — trusted admin read documents organization Actions **`$0` budget with `prevent_further_usage=true`** (provider hard stop). May apply when included remaining is unknown; **does not** prove private included minutes remain or that dispatch will succeed; only that PAYG overage should be hard-stopped per owner-verified org settings ([#552 comment 6731618313](https://github.com/LowcountryDigitalWorks/business-operations/issues/552#issuecomment-6731618313)).
 
-```python
-from plan_fallback import plan_fallback
-
-decision = plan_fallback(closed_request_dict)
-# decision["execute"] is always False
-# decision["recommended_route"] is HOSTED_CLEAN_ELIGIBLE or HOLD_*
-```
+Otherwise `HOLD_BILLING_UNKNOWN` / `HOLD_UNTRUSTED_BILLING` / `HOLD_BILLING_INSUFFICIENT`.
 
 ## Tests
 
@@ -38,4 +39,4 @@ python -m unittest discover -s ci-hosted-fallback -p 'test_*.py' -v
 
 ## Relationship to ci-dispatch
 
-Disjoint from `ci-dispatch/` and `.github/workflows/`. No runtime rollout in this PR. After independent review/merge, owning #552 lanes may admit **individual proven secretless deterministic workflows** to a separate hosted path under explicit gates.
+Disjoint from `ci-dispatch/` and `.github/workflows/`. Protected BO PR775/777 `LDW secret scan` jobs **must not** be planned for hosted fallback by this module.

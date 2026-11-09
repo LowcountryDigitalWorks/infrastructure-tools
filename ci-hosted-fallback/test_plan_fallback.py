@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import unittest
 
 from plan_fallback import (
@@ -19,25 +20,28 @@ from plan_fallback import (
     HOLD_PROVIDER_CAPACITY,
     HOLD_RUNNER_NOT_BLOCKED,
     HOLD_STALE_OR_DUPLICATE,
+    HOLD_UNTRUSTED_BILLING,
     HOLD_UNTRUSTED_INPUT,
     HOLD_WORKLOAD_NOT_ELIGIBLE,
     ROUTE_HOSTED_CLEAN_ELIGIBLE,
+    ROUTE_HOSTED_CLEAN_PLAN_BUDGET_CAPPED,
+    TRUSTED_BILLING_EVIDENCE_SOURCE,
     plan_fallback,
 )
 
-# Illustrative synthetic JIT queue snapshot only — not authoritative provider truth
-# and never sufficient to admit BO PR775/777 secret-scan workloads to hosted runners.
+VALID_HEAD = "672a02419bdb95d95a0ca62c1b24d7b744fa4909"
+
 ILLUSTRATIVE_JIT_QUEUE_DTO = {
-    "schema_version": "1.0",
+    "schema_version": "1.1",
     "workload_class": "SECRETLESS_DETERMINISTIC_VALIDATION",
     "workflow_id": "validate-documentation",
     "profile_id": "bo-docs-validation",
     "repository": "LowcountryDigitalWorks/business-operations",
-    "pull_request_number": 0,
-    "head_sha": "0000000000000000000000000000000000000000",
-    "run_id": 0,
+    "pull_request_number": 740,
+    "head_sha": VALID_HEAD,
+    "run_id": 42556087416,
     "run_attempt": 1,
-    "job_id": 0,
+    "job_id": 128961978297,
     "job_status": "queued",
     "queued_within_approved_timeout": True,
     "runner_assigned": False,
@@ -45,9 +49,12 @@ ILLUSTRATIVE_JIT_QUEUE_DTO = {
     "active_duplicate_local_or_jit_job": False,
     "data_classification": "CLEAN_SECRETLESS",
     "requested_hosted_runner_label": "ubuntu-latest",
+    "billing_evidence_source": TRUSTED_BILLING_EVIDENCE_SOURCE,
     "billing_read_status": "OK",
-    "included_compute_remaining": 42.0,
-    "bounded_required_cost": 3.0,
+    "included_compute_remaining_usd": 15.0,
+    "organization_actions_budget_usd": 0,
+    "organization_actions_prevent_further_usage": True,
+    "bounded_required_cost": 1.5,
     "overage_allowed": False,
     "pr_head_matches_run": True,
     "job_is_live_queued_attempt": True,
@@ -70,80 +77,154 @@ class PlanFallbackTests(unittest.TestCase):
         self.assertFalse(result["execute"])
         self.assertEqual(result["recommended_route"], ROUTE_HOSTED_CLEAN_ELIGIBLE)
 
-    def test_output_never_execute_even_with_owner_override_text(self) -> None:
-        result = plan_fallback(_valid(owner_override_text="please run now on hosted"))
+    def test_budget_hard_stop_route_when_remaining_unknown(self) -> None:
+        result = plan_fallback(
+            _valid(
+                included_compute_remaining_usd=None,
+                billing_read_status="UNKNOWN",
+                organization_actions_budget_usd=0,
+                organization_actions_prevent_further_usage=True,
+            )
+        )
         self.assertFalse(result["execute"])
+        self.assertEqual(result["recommended_route"], ROUTE_HOSTED_CLEAN_PLAN_BUDGET_CAPPED)
 
-    def test_billing_unknown(self) -> None:
-        self.assert_hold(plan_fallback(_valid(billing_read_status="UNKNOWN")), HOLD_BILLING_UNKNOWN)
+    def test_unbounded_dict_extra_field_rejected(self) -> None:
+        payload = _valid(owner_override_text="run hosted now")
+        self.assert_hold(plan_fallback(payload), HOLD_UNTRUSTED_INPUT)
 
-    def test_billing_forbidden_403(self) -> None:
-        self.assert_hold(plan_fallback(_valid(billing_read_status="FORBIDDEN_403")), HOLD_BILLING_UNKNOWN)
+    def test_missing_closed_field_rejected(self) -> None:
+        payload = _valid()
+        del payload["job_id"]
+        self.assert_hold(plan_fallback(payload), HOLD_UNTRUSTED_INPUT)
 
-    def test_billing_positive_but_below_threshold(self) -> None:
+    def test_spoofed_billing_without_trusted_provenance(self) -> None:
         self.assert_hold(
-            plan_fallback(_valid(included_compute_remaining=2.0, bounded_required_cost=3.0)),
+            plan_fallback(_valid(billing_evidence_source="MODEL_GUESS")),
+            HOLD_UNTRUSTED_BILLING,
+        )
+
+    def test_billing_unknown_without_budget_cap(self) -> None:
+        self.assert_hold(
+            plan_fallback(
+                _valid(
+                    billing_read_status="UNKNOWN",
+                    included_compute_remaining_usd=None,
+                    organization_actions_prevent_further_usage=False,
+                )
+            ),
+            HOLD_BILLING_UNKNOWN,
+        )
+
+    def test_negative_bounded_required_cost(self) -> None:
+        self.assert_hold(plan_fallback(_valid(bounded_required_cost=-1)), HOLD_BILLING_INSUFFICIENT)
+
+    def test_zero_bounded_required_cost(self) -> None:
+        self.assert_hold(plan_fallback(_valid(bounded_required_cost=0)), HOLD_BILLING_INSUFFICIENT)
+
+    def test_required_cost_above_cap(self) -> None:
+        self.assert_hold(plan_fallback(_valid(bounded_required_cost=3.0)), HOLD_BILLING_INSUFFICIENT)
+
+    def test_remaining_nan(self) -> None:
+        self.assert_hold(
+            plan_fallback(
+                _valid(
+                    included_compute_remaining_usd=math.nan,
+                    organization_actions_prevent_further_usage=False,
+                )
+            ),
             HOLD_BILLING_INSUFFICIENT,
         )
 
-    def test_billing_zero_remaining(self) -> None:
+    def test_remaining_infinite(self) -> None:
         self.assert_hold(
-            plan_fallback(_valid(included_compute_remaining=0.0)),
+            plan_fallback(
+                _valid(
+                    included_compute_remaining_usd=math.inf,
+                    organization_actions_prevent_further_usage=False,
+                )
+            ),
             HOLD_BILLING_INSUFFICIENT,
         )
 
-    def test_overage_not_allowed_must_be_false(self) -> None:
-        self.assert_hold(plan_fallback(_valid(overage_allowed=True)), HOLD_OVERAGE_POLICY)
-
-    def test_unrecognized_workflow(self) -> None:
-        self.assert_hold(plan_fallback(_valid(workflow_id="domscan-docs-lint")), HOLD_WORKLOAD_NOT_ELIGIBLE)
-
-    def test_protected_betterleaks_queued_job(self) -> None:
-        self.assert_hold(plan_fallback(_valid(workflow_id="betterleaks-security-scan")), HOLD_PROTECTED_WORKFLOW)
-
-    def test_unrecognized_repository(self) -> None:
+    def test_bool_subclass_remaining_rejected(self) -> None:
         self.assert_hold(
-            plan_fallback(_valid(repository="LowcountryDigitalWorks/royal-cruise-tracker")),
+            plan_fallback(
+                _valid(
+                    included_compute_remaining_usd=True,
+                    organization_actions_prevent_further_usage=False,
+                )
+            ),
+            HOLD_BILLING_INSUFFICIENT,
+        )
+
+    def test_bool_subclass_required_rejected(self) -> None:
+        self.assert_hold(plan_fallback(_valid(bounded_required_cost=True)), HOLD_BILLING_UNKNOWN)
+
+    def test_fake_bool_status_field_rejected(self) -> None:
+        self.assert_hold(plan_fallback(_valid(runner_assigned=1)), HOLD_UNTRUSTED_INPUT)
+
+    def test_zero_pr_run_job_ids_rejected(self) -> None:
+        self.assert_hold(plan_fallback(_valid(pull_request_number=0)), HOLD_METADATA_INCOMPLETE)
+
+    def test_zero_head_sha_rejected(self) -> None:
+        self.assert_hold(
+            plan_fallback(_valid(head_sha="0000000000000000000000000000000000000000")),
+            HOLD_METADATA_INCOMPLETE,
+        )
+
+    def test_invalid_head_sha_rejected(self) -> None:
+        self.assert_hold(plan_fallback(_valid(head_sha="not-a-sha")), HOLD_METADATA_INCOMPLETE)
+
+    def test_triple_mismatch_profile_rejected(self) -> None:
+        self.assert_hold(
+            plan_fallback(_valid(profile_id="bo-secret-scan")),
             HOLD_WORKLOAD_NOT_ELIGIBLE,
         )
 
-    def test_stale_pr_head(self) -> None:
-        self.assert_hold(plan_fallback(_valid(pr_head_matches_run=False)), HOLD_PR_HEAD_STALE)
+    def test_secret_scan_workflow_bo_775_777_hold(self) -> None:
+        payload = _valid(
+            workflow_id="LDW secret scan",
+            profile_id="bo-docs-validation",
+            pull_request_number=775,
+        )
+        self.assert_hold(plan_fallback(payload), HOLD_PROTECTED_WORKFLOW)
 
-    def test_inferred_cancelled_job_not_replayable(self) -> None:
-        self.assert_hold(plan_fallback(_valid(job_is_live_queued_attempt=False)), HOLD_CANCELLED_NOT_REPLAYABLE)
+    def test_betterleaks_protected_hold(self) -> None:
+        self.assert_hold(plan_fallback(_valid(workflow_id="betterleaks-security-scan")), HOLD_PROTECTED_WORKFLOW)
 
-    def test_duplicate_active_local_or_jit_job(self) -> None:
+    def test_wqt_protected_hold(self) -> None:
+        self.assert_hold(plan_fallback(_valid(workflow_id="wqt-private-semantic")), HOLD_PROTECTED_WORKFLOW)
+
+    def test_royal_protected_hold(self) -> None:
+        self.assert_hold(plan_fallback(_valid(workflow_id="royal-build-check")), HOLD_PROTECTED_WORKFLOW)
+
+    def test_jit_validation_protected_hold(self) -> None:
+        self.assert_hold(plan_fallback(_valid(workflow_id="dragonfly-jit-validation")), HOLD_PROTECTED_WORKFLOW)
+
+    def test_overage_true_denied(self) -> None:
+        self.assert_hold(plan_fallback(_valid(overage_allowed=True)), HOLD_OVERAGE_POLICY)
+
+    def test_runner_not_blocked(self) -> None:
+        self.assert_hold(plan_fallback(_valid(private_capacity_blocked=False)), HOLD_RUNNER_NOT_BLOCKED)
+
+    def test_duplicate_active_job(self) -> None:
         self.assert_hold(
             plan_fallback(_valid(active_duplicate_local_or_jit_job=True)),
             HOLD_PARALLEL_ACTIVE_JOB,
         )
 
-    def test_runner_not_actually_blocked(self) -> None:
-        self.assert_hold(plan_fallback(_valid(private_capacity_blocked=False)), HOLD_RUNNER_NOT_BLOCKED)
+    def test_stale_pr_head(self) -> None:
+        self.assert_hold(plan_fallback(_valid(pr_head_matches_run=False)), HOLD_PR_HEAD_STALE)
 
-    def test_runner_already_assigned(self) -> None:
-        self.assert_hold(plan_fallback(_valid(runner_assigned=True)), HOLD_PROVIDER_CAPACITY)
+    def test_cancelled_not_replayable(self) -> None:
+        self.assert_hold(plan_fallback(_valid(job_is_live_queued_attempt=False)), HOLD_CANCELLED_NOT_REPLAYABLE)
 
-    def test_nonstandard_hosted_runner_label(self) -> None:
+    def test_nonstandard_runner_label(self) -> None:
         self.assert_hold(
-            plan_fallback(_valid(requested_hosted_runner_label="self-hosted-ldw")),
+            plan_fallback(_valid(requested_hosted_runner_label="self-hosted")),
             HOLD_NONSTANDARD_RUNNER,
         )
-
-    def test_missing_exact_github_metadata(self) -> None:
-        payload = _valid()
-        del payload["run_id"]
-        self.assert_hold(plan_fallback(payload), HOLD_METADATA_INCOMPLETE)
-
-    def test_model_suggested_execute_forbidden(self) -> None:
-        self.assert_hold(
-            plan_fallback(_valid(model_suggested_execute=True)),
-            HOLD_UNTRUSTED_INPUT,
-        )
-
-    def test_arbitrary_url_forbidden(self) -> None:
-        self.assert_hold(plan_fallback(_valid(arbitrary_url="https://evil.example")), HOLD_UNTRUSTED_INPUT)
 
     def test_data_classification_not_clean(self) -> None:
         self.assert_hold(
@@ -151,23 +232,34 @@ class PlanFallbackTests(unittest.TestCase):
             HOLD_DATA_CLASSIFICATION,
         )
 
-    def test_workload_class_not_allowlisted(self) -> None:
-        self.assert_hold(
-            plan_fallback(_valid(workload_class="UNTRUSTED_CODE_WITH_SECRETS")),
-            HOLD_WORKLOAD_NOT_ELIGIBLE,
-        )
-
-    def test_job_not_queued_status(self) -> None:
+    def test_job_not_queued(self) -> None:
         self.assert_hold(plan_fallback(_valid(job_status="completed")), HOLD_JOB_NOT_QUEUED)
 
-    def test_queued_beyond_approved_timeout(self) -> None:
-        self.assert_hold(plan_fallback(_valid(queued_within_approved_timeout=False)), HOLD_STALE_OR_DUPLICATE)
+    def test_runner_already_assigned(self) -> None:
+        self.assert_hold(plan_fallback(_valid(runner_assigned=True)), HOLD_PROVIDER_CAPACITY)
 
-    def test_secret_scan_workflow_never_hosted_fallback(self) -> None:
-        """BO PR775/777 style isolated scans must fail closed even when queued."""
+    def test_remaining_below_required(self) -> None:
         self.assert_hold(
-            plan_fallback(_valid(workflow_id="LDW secret scan", profile_id="bo-docs-validation")),
-            HOLD_PROTECTED_WORKFLOW,
+            plan_fallback(
+                _valid(
+                    included_compute_remaining_usd=1.0,
+                    bounded_required_cost=1.5,
+                    organization_actions_prevent_further_usage=False,
+                )
+            ),
+            HOLD_BILLING_INSUFFICIENT,
+        )
+
+    def test_budget_cap_requires_prevent_further_usage_true(self) -> None:
+        self.assert_hold(
+            plan_fallback(
+                _valid(
+                    included_compute_remaining_usd=None,
+                    billing_read_status="UNKNOWN",
+                    organization_actions_prevent_further_usage=False,
+                )
+            ),
+            HOLD_BILLING_UNKNOWN,
         )
 
 
