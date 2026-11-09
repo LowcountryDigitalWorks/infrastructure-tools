@@ -159,3 +159,51 @@ Tests (future implementation) must assert **terminal classifications**, not stri
 - Adversarial feasibility: [#139 comment 6676287868](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/139#issuecomment-6676287868).
 
 References: [#139](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/139), [#96](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/96), [#115](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/115), [#10](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/10), [#52](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/52), [#186](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/186).
+
+
+## Live bounded kernel evidence module — candidate source, not accepted privilege (Nov 8, 2026)
+
+This candidate adds `tools/dragonfly_gate_a4_live_evidence.py` and
+`tests/dragonfly-canary-publication/test_gate_a4_live_evidence.py`. The
+module has **no CLI, launcher, sudo call, setter, service, network
+connection, or permission mutation**. Its public `collect_live_evidence()`
+has no input paths or arbitrary invocation parameters and references only
+fixed Linux `/proc`. It **always** returns `a4Pass=false`,
+`runtimeAuthority=false`, and `jitAdmissionAuthorized=false`,
+including when full kernel readback is technically successful. It does not
+create a valid issuer, protected channel, runtime A4 proof or canary.
+
+The bounded source candidate specifically requires:
+- An actually executing effective UID 0 **plus both effective and bounded**
+  `CAP_SYS_PTRACE` and `CAP_DAC_READ_SEARCH`; UID 0 by itself fails.
+- Equality of current process and PID1 **user and PID namespaces**;
+  every UID-1000-associated process in the snapshot must match.
+- Exactly two full snapshots of the bounded numeric `/proc` PID set,
+  paired with `pidfd_open` held until both passes finish, with nonblocking
+  pidfd liveness checks and repeated PID/starttime/four-UID identity checks.
+- The kernel-mediated `/proc/PID/exe` and **every** `/proc/PID/fd/N`
+  `readlink` call to actually succeed for the selected process scope.
+  Denied links and exited/reused PIDs yield `HOLD`, never a zero-FD
+  claim. This uses read-only readlink permissions (read-fscreds kernel
+  check), **not** `pidfd_getfd`, ptrace attach or modified sysctls.
+- An unchanged PID/FD identity set, no observed QEMU process or
+  `/dev/kvm` FD, no more than 4,096 processes/4,096 per-process FDs,
+  and a max six-second paired capture. Any race or ambiguity yields
+  sanitized `HOLD`; result outputs aggregate counts only, no PIDs,
+  network addresses, argv, environment, FD targets or credential bytes.
+
+These checks are a **source-only candidate to address the H1/M2 design
+questions**, not an accepted runtime design. The closed-code provenance,
+first installation via a separately controlled trusted issuer, immutable
+launcher/process identity, one-time authenticated channel, A0/A4 receipt
+pairing, broader arbitrary-comm QEMU evasion resistance, and protected
+rollback are still OPEN under #52/#186/#139. A source test or a root
+invocation of this module may **not** promote its DATA_ONLY result to PASS.
+Any verification of actual device behavior requires a separately accepted,
+source-pinned, protected installer and complete independent review.
+
+There is no memory admission change: the accepted production nested-guest
+2 GiB + 8 GiB Crostini-visible reserve remains. Eddie's repeatedly
+observed ChromeOS-host available memory of 17–20 GiB is a separate ledger
+and must never be misdiagnosed as physical host exhaustion by the
+Crostini-only observation.

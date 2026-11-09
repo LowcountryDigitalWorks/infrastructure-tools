@@ -51,6 +51,11 @@ SUITE_PROFILES = {
     ),
 }
 
+# Exactly these reviewed profiles, in fixed order. This is one source-only
+# checkout, not an arbitrary test selector or JIT/workflow admission.
+ALL_SUITE_ORDER = ("dragonfly", "chat-relay", "browser-static")
+SUITE_CHOICES = (*ALL_SUITE_ORDER, "all")
+
 
 class SourceCiHold(RuntimeError):
     """Reason is one fixed public-safe code; no raw process output is exposed."""
@@ -128,9 +133,9 @@ def proof(head: str, suite: str = "dragonfly") -> dict[str, object]:
         "no_guest": True,
         "no_persistent_install": True,
         "source_head": head if SHA_RE.fullmatch(head) else "INVALID",
-        "suite": suite if suite in SUITE_PROFILES else "INVALID",
+        "suite": suite if suite in SUITE_CHOICES else "INVALID",
     }
-    if suite not in SUITE_PROFILES:
+    if suite not in SUITE_CHOICES:
         result["reason"] = "SUITE_NOT_ALLOWLISTED"
         return result
     if SHA_RE.fullmatch(head) is None or not sys.platform.startswith("linux") or os.geteuid() == 0:
@@ -156,16 +161,26 @@ def proof(head: str, suite: str = "dragonfly") -> dict[str, object]:
             recorded = git(("rev-parse", "HEAD"), cwd=root, env=env)
             if recorded.returncode != 0 or recorded.stdout.strip() != head:
                 raise SourceCiHold("HEAD_MISMATCH")
-            if not private_sources(root, SUITE_PROFILES[suite][1]):
-                raise SourceCiHold("PRIVATE_SOURCE_REQUIRED")
-            tests = run(SUITE_PROFILES[suite][0], cwd=root, env=env, timeout=120)
-            match = COUNT_RE.search(tests.stderr + "\n" + tests.stdout)
-            if tests.returncode != 0 or match is None or int(match.group(1)) < 1:
-                raise SourceCiHold("SOURCE_TESTS_FAILED")
+            selected = ALL_SUITE_ORDER if suite == "all" else (suite,)
+            # Verify every selected source file before running any profile.
+            # Unknown suites never become reachable through this fixed order.
+            for name in selected:
+                if not private_sources(root, SUITE_PROFILES[name][1]):
+                    raise SourceCiHold("PRIVATE_SOURCE_REQUIRED")
+            counts: dict[str, int] = {}
+            for name in selected:
+                command = SUITE_PROFILES[name][0]
+                tests = run(command, cwd=root, env=env, timeout=120)
+                match = COUNT_RE.search(tests.stderr + "\n" + tests.stdout)
+                if tests.returncode != 0 or match is None or int(match.group(1)) < 1:
+                    raise SourceCiHold("SOURCE_TESTS_FAILED")
+                counts[name] = int(match.group(1))
             if remote_main(cwd=root, env=env) != head:
                 raise SourceCiHold("MAIN_MOVED")
             result["result"] = "PASS_SOURCE_ONLY"
-            result["tests_passed"] = int(match.group(1))
+            result["tests_passed"] = sum(counts.values())
+            if suite == "all":
+                result["suite_counts"] = counts
             result["private_checkout"] = True
     except SourceCiHold as exc:
         result["reason"] = str(exc)
@@ -179,7 +194,7 @@ def proof(head: str, suite: str = "dragonfly") -> dict[str, object]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--head", required=True, help="Exact accepted public main commit SHA")
-    parser.add_argument("--suite", choices=tuple(SUITE_PROFILES), default="dragonfly",
+    parser.add_argument("--suite", choices=SUITE_CHOICES, default="dragonfly",
                         help="One of the fixed, reviewed source-only test profiles")
     args = parser.parse_args(argv)
     report = proof(args.head, args.suite)
