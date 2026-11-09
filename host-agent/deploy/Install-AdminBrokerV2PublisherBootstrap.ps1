@@ -3,7 +3,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$acceptedBootstrapSha256 = '86f8f7ac74fb9c6db5ce752202705dfaf59bf36000bf89ccf28b0426ce85abab'
+$acceptedBootstrapSha256 = 'cdc03905f8730934d9c5f93234fe7d54243a4b502effef27fe338ccf2742fabf'
 $acceptedV2WorkerSha256 = '75788c05edcf14199e53de239ef333dcefb9bc09385ba22de2b99cfda91bcabe'
 $acceptedV1WorkerSha256 = 'db71da0a73f2943eb8837e7c1e7070a22251478e4acfba91338837c7fc699605'
 $v2WorkerIdentity = 'v2-publisher-reviewed-1'
