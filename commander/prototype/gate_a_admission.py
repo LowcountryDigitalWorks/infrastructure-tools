@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from canonical_command_batch import (
+    MAX_DOCUMENT_BYTES,
     PRIVILEGE_MODE,
     BatchRefused,
     parse_canonical_batch,
@@ -51,6 +52,9 @@ _FORBIDDEN_MODES = frozenset({
     "FULL_ADMIN",
     "UNKNOWN",
 })
+MAX_PAYLOAD_BYTES = MAX_DOCUMENT_BYTES
+MAX_DECISION_TOKEN_CHARS = 16000
+MAX_SHORT_TEXT_CHARS = 128
 
 
 class GateARefused(ValueError):
@@ -109,17 +113,31 @@ def _reject_untrusted_markers(value: object) -> None:
             raise GateARefused("MODE_NOT_AUTHORIZED")
 
 
-def _scan_request_text(candidate: object) -> None:
-    if isinstance(candidate, (str, bytes)):
-        text = candidate.decode("utf-8", "replace") if isinstance(candidate, bytes) else candidate
+def _bounded_short_text(value: object, *, field: str) -> str:
+    if type(value) is not str or not value or len(value) > MAX_SHORT_TEXT_CHARS:
+        raise GateARefused("SCHEMA_MISMATCH")
+    _reject_untrusted_markers(value)
+    return value
+
+
+def _bounded_bytes(value: object, *, limit: int, too_large_reason: str) -> bytes:
+    if type(value) is not bytes or not value:
+        raise GateARefused("SCHEMA_MISMATCH")
+    if len(value) > limit:
+        raise GateARefused(too_large_reason)
+    return value
+
+
+def _bounded_token(value: object) -> str:
+    if type(value) is not str or not value or len(value) > MAX_DECISION_TOKEN_CHARS:
+        raise GateARefused("SCHEMA_MISMATCH")
+    return value
+
+
+def _scan_bounded_request_strings(contract: str, privilege_mode: str, command_id: str) -> None:
+    """Scan only closed short string fields; never walk batch bytes or payloads."""
+    for text in (contract, privilege_mode, command_id):
         _reject_untrusted_markers(text)
-    elif isinstance(candidate, dict):
-        for key, item in candidate.items():
-            _reject_untrusted_markers(str(key))
-            _scan_request_text(item)
-    elif isinstance(candidate, list):
-        for item in candidate:
-            _scan_request_text(item)
 
 
 class GateAAdmission:
@@ -143,27 +161,26 @@ class GateAAdmission:
     def admit(self, proposed: object) -> dict[str, object]:
         if type(proposed) is not dict or set(proposed) != _EXPECTED_REQUEST_FIELDS:
             raise GateARefused("SCHEMA_MISMATCH")
-        if proposed["contract"] != ADMISSION_CONTRACT:
+        contract = _bounded_short_text(proposed["contract"], field="contract")
+        if contract != ADMISSION_CONTRACT:
             raise GateARefused("WRONG_CONTRACT")
         execute = proposed["execute"]
         if type(execute) is not bool or execute is not False:
             raise GateARefused("EXECUTE_FORBIDDEN")
-        privilege_mode = proposed["privilege_mode"]
-        if type(privilege_mode) is not str or privilege_mode != ADMISSION_MODE:
+        privilege_mode = _bounded_short_text(proposed["privilege_mode"], field="privilege_mode")
+        if privilege_mode != ADMISSION_MODE:
             raise GateARefused("MODE_NOT_AUTHORIZED")
-        batch_raw = proposed["batch_raw"]
-        if type(batch_raw) is not bytes or not batch_raw:
-            raise GateARefused("SCHEMA_MISMATCH")
-        decision_token = proposed["decision_token"]
-        if type(decision_token) is not str or not decision_token:
-            raise GateARefused("SCHEMA_MISMATCH")
+        batch_raw = _bounded_bytes(
+            proposed["batch_raw"], limit=MAX_DOCUMENT_BYTES, too_large_reason="SCHEMA_MISMATCH",
+        )
+        decision_token = _bounded_token(proposed["decision_token"])
         command_id = _uuid_text(proposed["command_id"])
-        payload = proposed["payload"]
-        if type(payload) is not bytes:
-            raise GateARefused("SCHEMA_MISMATCH")
+        payload = _bounded_bytes(
+            proposed["payload"], limit=MAX_PAYLOAD_BYTES, too_large_reason="PAYLOAD_TOO_LARGE",
+        )
+        _scan_bounded_request_strings(contract, privilege_mode, command_id)
         if FORBIDDEN_BROKER_OPERATION.encode("ascii") in payload:
             raise GateARefused("BROKER_OPERATION_REFUSED")
-        _scan_request_text(proposed)
         now_unix = int(self._clock())
         context = self._context
         try:

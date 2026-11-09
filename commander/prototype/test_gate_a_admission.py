@@ -11,11 +11,14 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import test_canonical_command_batch as batch_fixture
 from canonical_command_batch import ENVELOPE_VERSION, PRIVILEGE_MODE
+from canonical_command_batch import MAX_DOCUMENT_BYTES
 from gate_a_admission import (
     ADMISSION_CONTRACT,
     ADMISSION_MODE,
     ADMITTED_STATUS,
     FORBIDDEN_BROKER_OPERATION,
+    MAX_DECISION_TOKEN_CHARS,
+    MAX_PAYLOAD_BYTES,
     GateAAdmission,
     GateARefused,
     SplitBrainRegistry,
@@ -237,6 +240,33 @@ class GateAAdmissionTests(unittest.TestCase):
         with self.assertRaises(GateARefused) as refused:
             gate.admit(_proposal(self.token, self.batch_raw))
         self.assertEqual(refused.exception.reason, "REPLAY")
+
+    def test_oversized_batch_raw_then_valid_same_token(self) -> None:
+        ledger = SyntheticNonceLedger()
+        gate = GateAAdmission(_context(self.private, ledger), clock=lambda: NOW)
+        huge_batch = self.batch_raw + (b"x" * (MAX_DOCUMENT_BYTES + 1))
+        with self.assertRaises(GateARefused) as refused:
+            gate.admit(_proposal(self.token, huge_batch))
+        self.assertEqual(refused.exception.reason, "SCHEMA_MISMATCH")
+        gate.admit(_proposal(self.token, self.batch_raw))
+
+    def test_oversized_payload_then_valid_same_token(self) -> None:
+        ledger = SyntheticNonceLedger()
+        gate = GateAAdmission(_context(self.private, ledger), clock=lambda: NOW)
+        huge_payload = b"x" * (MAX_PAYLOAD_BYTES + 1)
+        with self.assertRaises(GateARefused) as refused:
+            gate.admit(_proposal(self.token, self.batch_raw, payload=huge_payload))
+        self.assertEqual(refused.exception.reason, "PAYLOAD_TOO_LARGE")
+        gate.admit(_proposal(self.token, self.batch_raw))
+
+    def test_oversized_decision_token_then_valid_same_token(self) -> None:
+        ledger = SyntheticNonceLedger()
+        gate = GateAAdmission(_context(self.private, ledger), clock=lambda: NOW)
+        huge_token = self.token + ("x" * (MAX_DECISION_TOKEN_CHARS + 1))
+        with self.assertRaises(GateARefused) as refused:
+            gate.admit(_proposal(huge_token, self.batch_raw))
+        self.assertEqual(refused.exception.reason, "SCHEMA_MISMATCH")
+        gate.admit(_proposal(self.token, self.batch_raw))
 
 
 if __name__ == "__main__":
