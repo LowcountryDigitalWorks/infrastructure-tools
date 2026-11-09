@@ -9,14 +9,12 @@ internal static class DragonflyLinuxRuntimeTests
         Assert(DragonflyBridgeRuntime.HealthInterval == TimeSpan.FromSeconds(10), "Dragonfly Bridge health pulse is fixed");
         Assert(DragonflyBridgeRuntime.ReconnectBackoffSeconds.SequenceEqual(new[] { 2, 4, 8, 16, 30 }), "Dragonfly Bridge reconnect backoff is fixed and bounded");
 
-        Assert(DragonflyBridgeSingleInstanceLock.RuntimeDirectoryForUid(1000) == "/run/user/1000", "Dragonfly Bridge runtime directory derives only from effective uid");
-        Assert(DragonflyBridgeSingleInstanceLock.LockPathForUid(1000) == "/run/user/1000/ldw-operations-bridge-dragonfly.lock", "Dragonfly Bridge lock path is fixed under private user runtime directory");
-        AssertThrows<InvalidOperationException>(
-            () => DragonflyBridgeSingleInstanceLock.RuntimeDirectoryForUid(0),
-            "Dragonfly Bridge refuses root runtime identity");
-
         if (OperatingSystem.IsLinux())
-            VerifyStatePathHardening();
+            RunLinuxRuntimePathContracts();
+        else
+            ContractTestPlatform.SkipLinuxOnly(
+                nameof(DragonflyLinuxRuntimeTests) + " runtime-path contracts",
+                "/run/user lock paths, root uid refusal, and POSIX state-directory hardening require Linux.");
 
         var now = DateTimeOffset.Parse("2026-10-27T18:00:00Z");
         var exact = JsonSerializer.Serialize(new
@@ -61,6 +59,17 @@ internal static class DragonflyLinuxRuntimeTests
             version = BridgeProtocol.BridgeRuntimeVersion
         });
         Assert(DragonflyBridgeHealthStore.Interpret(future, now) == "stale", "Dragonfly Bridge health rejects implausible future timestamps");
+    }
+
+    private static void RunLinuxRuntimePathContracts()
+    {
+        Assert(DragonflyBridgeSingleInstanceLock.RuntimeDirectoryForUid(1000) == "/run/user/1000", "Dragonfly Bridge runtime directory derives only from effective uid");
+        Assert(DragonflyBridgeSingleInstanceLock.LockPathForUid(1000) == "/run/user/1000/ldw-operations-bridge-dragonfly.lock", "Dragonfly Bridge lock path is fixed under private user runtime directory");
+        AssertThrows<InvalidOperationException>(
+            () => DragonflyBridgeSingleInstanceLock.RuntimeDirectoryForUid(0),
+            "Dragonfly Bridge refuses root runtime identity");
+
+        VerifyStatePathHardening();
     }
 
     private static void VerifyStatePathHardening()

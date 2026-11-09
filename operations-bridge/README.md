@@ -54,6 +54,8 @@ dotnet run --project tests/LDW.OperationsBridge.Tests/LDW.OperationsBridge.Tests
 node --test relay-cloudflare/tests/*.test.mjs
 ```
 
+On Windows, the deterministic .NET suite runs the LDW01 portable contract slice (relay protocol, Codync/browser adapters, runner configuration, and Dragonfly JSON parse boundaries). Suites that depend on Linux POSIX owner paths, `/usr/bin/python3` process launch, Secret Service lookup, or Dragonfly state-path hardening emit `SKIPPED_LINUX_ONLY` markers locally; hosted Linux workflows (`security-codeql-csharp`, `dragonfly-package-validation`) still execute the full Dragonfly contract without weakening assertions.
+
 Optional (no deploy): `npx wrangler deploy --dry-run` / `npx wrangler check` when wrangler is available.
 
 ## REDRIX self-contained package
