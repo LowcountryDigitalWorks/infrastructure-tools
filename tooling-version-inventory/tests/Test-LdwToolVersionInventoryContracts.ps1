@@ -44,7 +44,7 @@ $found = New-LdwToolVersionInventoryAppRecordFromSnapshot -Snapshot @{
     trusted_publisher_policy = 'PINNED_SIGNER_MATCH'
     running_state            = 'observed_name_in_owner_session'
     updater_state            = 'in_progress_evidence'
-    running_scope            = 'owner_session_process_name_only'
+    running_scope            = 'invoking_process_session'
 }
 Assert-True ($found.trusted_publisher_policy -eq 'PINNED_SIGNER_MATCH') 'snapshot policy'
 
@@ -84,8 +84,39 @@ finally {
 $missingPendingDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ldw-tvi-miss-" + [guid]::NewGuid().ToString('n'))
 Assert-True ((Get-LdwToolVersionUpdaterState -PendingDir $missingPendingDir -Markers @('installer.exe')) -eq 'unknown') 'missing pending dir unknown'
 
-Assert-True ((Get-LdwToolVersionRunningState -ProcessName '__nope__' -OwnerSessionId 1) -eq 'not_observed_in_owner_session') 'empty process list scoped'
-Assert-True ((Get-LdwToolVersionRunningState -ProcessName $null) -eq 'unknown') 'blank process name'
+Assert-True ((Get-LdwToolVersionRunningState -ProcessName '__nope__' -OwnerSessionId 1 -SessionObservationMode 'interactive') -eq 'not_observed_in_owner_session') 'empty process list scoped'
+Assert-True ((Get-LdwToolVersionRunningState -ProcessName '__nope__' -OwnerSessionId 0 -SessionObservationMode 'noninteractive') -eq 'unknown') 'session0 cannot claim not observed'
+Assert-True ((Get-LdwToolVersionRunningState -ProcessName 'Orca' -OwnerSessionId 0 -SessionObservationMode 'noninteractive' -ProcessSnapshot @(
+        [pscustomobject]@{ ProcessName = 'Orca'; SessionId = 1 }
+    )) -eq 'unknown') 'session0 ignores processes in other sessions'
+Assert-True ((Get-LdwToolVersionRunningState -ProcessName '   ') -eq 'unknown') 'blank process name'
+Assert-True ((Get-LdwToolVersionRunningState -ProcessName 'Cursor' -OwnerSessionId 0 -SessionObservationMode 'noninteractive') -eq 'unknown') 'noninteractive session cannot claim observed'
+
+$snapOne = @([pscustomobject]@{ ProcessName = 'Orca'; SessionId = 2 })
+$oneArgs = @{
+    ProcessName             = 'Orca'
+    OwnerSessionId          = 2
+    SessionObservationMode  = 'interactive'
+    ProcessSnapshot         = $snapOne
+}
+$one = Get-LdwToolVersionRunningState @oneArgs
+Assert-True ($one -eq 'observed_name_in_owner_session') 'one exact name in scoped session'
+
+$snapDup = @(
+    [pscustomobject]@{ ProcessName = 'Orca'; SessionId = 2 },
+    [pscustomobject]@{ ProcessName = 'Orca'; SessionId = 2 }
+)
+$dupArgs = @{
+    ProcessName             = 'Orca'
+    OwnerSessionId          = 2
+    SessionObservationMode  = 'interactive'
+    ProcessSnapshot         = $snapDup
+}
+$dup = Get-LdwToolVersionRunningState @dupArgs
+Assert-True ($dup -eq 'unknown') 'multiple same-name processes stay unknown'
+
+$ctxInteractive = Get-LdwToolVersionInvocationSessionContext
+Assert-True ($ctxInteractive.running_scope -eq 'invoking_process_session') 'running_scope is invoking-only'
 
 $authMissing = Get-LdwToolVersionAuthenticodeSummary -Path '__missing__' -AppId 'orca' -ExpectedUnsignedPolicy $false -InstallIdentityTrusted $true
 Assert-True ($authMissing.trusted_publisher_policy -eq 'UNVERIFIED') 'missing auth'
