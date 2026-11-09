@@ -66,6 +66,21 @@ function Get-LdwToolVersionOwnerSessionId {
     }
 }
 
+function Get-LdwToolVersionInvocationSessionContext {
+    <#
+      Observes only the invoking process session. Session 0 and other non-interactive
+      host contexts cannot truthfully assert owner-desktop absence. SessionId > 0 is not
+      independent proof of the owner interactive desktop; running_scope stays invoking-only.
+    #>
+    $sessionId = Get-LdwToolVersionOwnerSessionId
+    $interactive = ($null -ne $sessionId -and $sessionId -gt 0)
+    return [pscustomobject] @{
+        session_id              = $sessionId
+        interactive_observation = $interactive
+        running_scope           = 'invoking_process_session'
+    }
+}
+
 function Get-LdwToolVersionInventoryCatalog {
     $local = [Environment]::GetFolderPath('LocalApplicationData')
     return @(
@@ -251,21 +266,46 @@ function Test-LdwToolVersionInstallPathIdentity {
 }
 
 function Get-LdwToolVersionRunningState {
+    [CmdletBinding()]
     param(
-        [string] $ProcessName,
-        [AllowNull()] [int] $OwnerSessionId = $null
+        [Parameter(Position = 0)]
+        [AllowNull()] [string] $ProcessName,
+        [Parameter()] [AllowNull()] [object[]] $ProcessSnapshot = $null,
+        [Parameter()] [AllowNull()] [int] $OwnerSessionId = $null,
+        [Parameter()]
+        [ValidateSet('interactive', 'noninteractive')]
+        [AllowNull()]
+        [string] $SessionObservationMode = $null
     )
+    if ($null -eq $ProcessName) { $ProcessName = [string]::Empty }
     if ([string]::IsNullOrWhiteSpace($ProcessName)) { return 'unknown' }
-    if ($null -eq $OwnerSessionId) {
-        $OwnerSessionId = Get-LdwToolVersionOwnerSessionId
+    $interactive = $null
+    if ($null -eq $OwnerSessionId -or [string]::IsNullOrWhiteSpace($SessionObservationMode)) {
+        $ctx = Get-LdwToolVersionInvocationSessionContext
+        if ($null -eq $OwnerSessionId) { $OwnerSessionId = $ctx.session_id }
+        if ([string]::IsNullOrWhiteSpace($SessionObservationMode)) {
+            $interactive = $ctx.interactive_observation
+        }
     }
-    if ($null -eq $OwnerSessionId) { return 'unknown' }
+    if ($SessionObservationMode -eq 'interactive') { $interactive = $true }
+    if ($SessionObservationMode -eq 'noninteractive') { $interactive = $false }
+    if ($null -eq $OwnerSessionId -or $interactive -ne $true) {
+        return 'unknown'
+    }
     try {
-        $sessionMatches = @(
-            Get-Process -Name $ProcessName -ErrorAction SilentlyContinue |
-                Where-Object { $_.SessionId -eq $OwnerSessionId }
-        )
-        if ($sessionMatches.Count -eq 0) {
+        $sessionMatches = if ($null -ne $ProcessSnapshot) {
+            @($ProcessSnapshot | Where-Object {
+                    $_.ProcessName -eq $ProcessName -and $_.SessionId -eq $OwnerSessionId
+                })
+        }
+        else {
+            @(
+                Get-Process -Name $ProcessName -ErrorAction SilentlyContinue |
+                    Where-Object { $_.SessionId -eq $OwnerSessionId }
+            )
+        }
+        $sessionMatches = @($sessionMatches)
+        if ($sessionMatches.Count -eq 0 -or $null -eq $sessionMatches[0]) {
             return 'not_observed_in_owner_session'
         }
         if ($sessionMatches.Count -eq 1) {
@@ -362,6 +402,7 @@ function Get-LdwToolVersionInstallProbe {
 function New-LdwToolVersionInventoryAppRecord {
     param([hashtable] $CatalogEntry)
     $probe = Get-LdwToolVersionInstallProbe -CatalogEntry $CatalogEntry
+    $sessionCtx = Get-LdwToolVersionInvocationSessionContext
     $record = [ordered]@{
         app_id                   = $CatalogEntry.app_id
         probe_key                = $CatalogEntry.probe_key
@@ -370,9 +411,11 @@ function New-LdwToolVersionInventoryAppRecord {
         product_version          = $probe.product_version
         authenticode_state       = $probe.authenticode_state
         trusted_publisher_policy = $probe.trusted_publisher_policy
-        running_state            = Get-LdwToolVersionRunningState -ProcessName $CatalogEntry.running_process_name
+        running_state            = Get-LdwToolVersionRunningState -ProcessName $CatalogEntry.running_process_name `
+            -OwnerSessionId $sessionCtx.session_id `
+            -SessionObservationMode $(if ($sessionCtx.interactive_observation) { 'interactive' } else { 'noninteractive' })
         updater_state            = Get-LdwToolVersionUpdaterState -PendingDir $CatalogEntry.updater_pending_dir -Markers $CatalogEntry.updater_pending_markers
-        running_scope              = 'owner_session_process_name_only'
+        running_scope            = $sessionCtx.running_scope
     }
     if ($probe.ContainsKey('install_identity_trusted')) {
         $record.install_identity_trusted = $probe.install_identity_trusted
@@ -380,8 +423,11 @@ function New-LdwToolVersionInventoryAppRecord {
     if ($probe.ContainsKey('error_code')) {
         $record.error_code = $probe.error_code
     }
-    if ($CatalogEntry.app_id -eq 'codync') {
-        if ($record.running_state -eq 'not_observed_in_owner_session' -and $probe.install_state -eq 'found') {
+    if ($CatalogEntry.app_id -eq 'codync' -and $probe.install_state -eq 'found') {
+        if ($record.running_state -eq 'not_observed_in_owner_session') {
+            $record.running_state_note = 'HOST_WORKERS_MAY_BE_AMBIGUOUS'
+        }
+        elseif ($record.running_state -eq 'unknown' -and $record.running_scope -eq 'invoking_process_session') {
             $record.running_state_note = 'HOST_WORKERS_MAY_BE_AMBIGUOUS'
         }
     }
