@@ -268,6 +268,16 @@ class GateAAdmissionTests(unittest.TestCase):
         self.assertEqual(refused.exception.reason, "SCHEMA_MISMATCH")
         gate.admit(_proposal(self.token, self.batch_raw))
 
+    def test_oversized_many_keys_then_valid_same_token(self) -> None:
+        ledger = SyntheticNonceLedger()
+        gate = GateAAdmission(_context(self.private, ledger), clock=lambda: NOW)
+        bloated = _proposal(self.token, self.batch_raw)
+        bloated.update({f"extra_{i}": "x" for i in range(4096)})
+        with self.assertRaises(GateARefused) as refused:
+            gate.admit(bloated)
+        self.assertEqual(refused.exception.reason, "SCHEMA_MISMATCH")
+        gate.admit(_proposal(self.token, self.batch_raw))
+
 
 if __name__ == "__main__":
     unittest.main()

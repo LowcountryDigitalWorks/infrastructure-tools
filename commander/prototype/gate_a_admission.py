@@ -159,7 +159,11 @@ class GateAAdmission:
         self._split_brain = split_brain if split_brain is not None else SplitBrainRegistry()
 
     def admit(self, proposed: object) -> dict[str, object]:
-        if type(proposed) is not dict or set(proposed) != _EXPECTED_REQUEST_FIELDS:
+        if (
+            type(proposed) is not dict
+            or len(proposed) != len(_EXPECTED_REQUEST_FIELDS)
+            or set(proposed) != _EXPECTED_REQUEST_FIELDS
+        ):
             raise GateARefused("SCHEMA_MISMATCH")
         contract = _bounded_short_text(proposed["contract"], field="contract")
         if contract != ADMISSION_CONTRACT:
