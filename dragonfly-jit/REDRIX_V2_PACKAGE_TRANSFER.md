@@ -15,7 +15,7 @@ This document describes the **separate** normal-user package transfer profile fo
 
 ## Source modules
 
-- `ci-dispatch/DragonflyAdjunctV2Transfer.psm1` — builds a bounded transfer envelope from `%LOCALAPPDATA%\LDW\DragonflyCanaryAdjunct\normal-user-staging\<release>` after normal-user staging; refuses elevation.
+- `ci-dispatch/DragonflyAdjunctV2Transfer.psm1` — builds a bounded transfer envelope from the **one fixed** `%LOCALAPPDATA%\LDW\DragonflyCanaryAdjunct\normal-user-staging\<release>` path after separate normal-user staging; no caller-selected package path, refuses elevation. It validates the accepted identity, full file set, source Git blobs and dispatch Windows SHA256 but **does not** call the protected elevated-publisher ACL/owner verifier, which would reject user-owned staging. The receiver independently revalidates the same source pins; neither a self-consistent manifest nor the sender output is promotion authority.
 - `dragonfly-jit/inbound_transfer_v2.py` — validates manifest pins, decodes bounded payloads, stages `0700` / `0600`, atomic install, sender/receiver manifest SHA256 readback, replay refusal.
 - `dragonfly-jit/ssh_transport_contract.py` — `build_openssh_transfer_plan()` for the closed transfer remote command (no agent forwarding, stdin envelope only).
 
