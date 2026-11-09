@@ -79,6 +79,15 @@ Assert-True (Test-SourceContains $stageSource 'trustedBootstrapSha256') 'Stage e
 Assert-True (Test-SourceContains $stageSource 'trustedWorkerSha256') 'Stage embeds reviewed worker pin'
 Assert-True (Test-SourceContains $stageSource 'trustedReviewManifestFileSha256') 'Stage embeds reviewed manifest file pin'
 Assert-True (Test-SourceContains $stageSource 'REVIEWED_MANIFEST_PIN_MISMATCH') 'Stage rejects self-consistent forged manifest'
+if ($stageSource -match "trustedReviewManifestFileSha256\s*=\s*'([a-f0-9]{64})'") {
+    Assert-True ($Matches[1] -ceq $manifestFileSha) 'Stage manifest file pin equals materialized manifest SHA256'
+} else { throw 'STAGE_PIN_PARSE_FAILED: trustedReviewManifestFileSha256' }
+if ($stageSource -match "trustedBootstrapSha256\s*=\s*'([a-f0-9]{64})'") {
+    Assert-True ($Matches[1] -ceq $installSha) 'Stage bootstrap pin equals materialized install SHA256'
+} else { throw 'STAGE_PIN_PARSE_FAILED: trustedBootstrapSha256' }
+if ($stageSource -match "trustedWorkerSha256\s*=\s*'([a-f0-9]{64})'") {
+    Assert-True ($Matches[1] -ceq $v2Sha) 'Stage worker pin equals materialized worker SHA256'
+} else { throw 'STAGE_PIN_PARSE_FAILED: trustedWorkerSha256' }
 Assert-True (-not (Test-SourceContains $installSource 'JsonDocument')) 'Install avoids System.Text.Json'
 Assert-True (-not (Test-SourceContains $stageSource 'JsonDocument')) 'Stage avoids System.Text.Json'
 Assert-True (-not (Test-SourceContains $v2Source 'JsonDocument')) 'Worker avoids System.Text.Json'
