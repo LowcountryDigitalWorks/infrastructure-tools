@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -297,6 +298,36 @@ def classify(
     return report
 
 
+def attach_utc_capture_window(report: dict, started: datetime, finished: datetime) -> dict:
+    """Attach bounded penguin clock context, never ChromeOS host attestation.
+
+    The two UTC wall-clock readings help align a future owner-visible
+    ChromeOS measurement. They do not attest either clock or establish
+    current balloon size, host spare memory, or runtime admission.
+    """
+    result = dict(report)
+    result["capture_clock_source"] = "PENGUIN_UTC_WALLCLOCK_UNATTESTED"
+    result["chromeos_host_corroboration"] = "UNVERIFIED"
+    if (
+        not isinstance(started, datetime)
+        or not isinstance(finished, datetime)
+        or started.tzinfo != timezone.utc
+        or finished.tzinfo != timezone.utc
+    ):
+        result["classification"] = "HOLD"
+        result["reason"] = "CAPTURE_CLOCK_UNAVAILABLE"
+        return result
+    seconds = (finished - started).total_seconds()
+    if not 0 <= seconds <= 60:
+        result["classification"] = "HOLD"
+        result["reason"] = "CAPTURE_CLOCK_UNRELIABLE"
+        return result
+    result["capture_started_utc"] = started.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    result["capture_finished_utc"] = finished.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    result["capture_elapsed_ms"] = int(seconds * 1000)
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--samples", type=int, default=3)
@@ -305,6 +336,7 @@ def main(argv: list[str] | None = None) -> int:
     if not MIN_SAMPLES <= args.samples <= MAX_SAMPLES or not 0 <= args.interval_seconds <= 5:
         parser.error("samples must be 3..6 and interval 0..5")
     try:
+        started = datetime.now(timezone.utc)
         contract = controller_memory_contract(Path(__file__).with_name("dragonfly_jit.py"))
         balloon_sysfs = observe_virtio_balloon_sysfs()
         samples = []
@@ -320,6 +352,7 @@ def main(argv: list[str] | None = None) -> int:
             if n + 1 < args.samples:
                 time.sleep(args.interval_seconds)
         report = classify(samples, contract, virtio_balloon_sysfs=balloon_sysfs)
+        report = attach_utc_capture_window(report, started, datetime.now(timezone.utc))
     except (Exception, KeyboardInterrupt):
         report = classify([], None)
         report["reason"] = "SAMPLING_FAILED"
