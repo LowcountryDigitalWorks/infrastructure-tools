@@ -45,12 +45,13 @@ $stageSha = (Get-FileHash -LiteralPath $stagePath -Algorithm SHA256).Hash.ToLowe
 $v2Sha = (Get-FileHash -LiteralPath $v2WorkerPath -Algorithm SHA256).Hash.ToLowerInvariant()
 
 Assert-True ($installSource.Contains('acceptedBootstrapSha256', [StringComparison]::Ordinal)) 'Install records reviewed bootstrap SHA constant'
-if ($installSource -match "acceptedBootstrapSha256 = '([a-f0-9]{64})'") {
-    Assert-True ($Matches[1].Length -eq 64) 'Install bootstrap SHA literal is 64 hex'
-}
-if ($stageSource -match "acceptedBootstrapSha256 = '([a-f0-9]{64})'") {
-    Assert-True ($Matches[1] -ceq $bootstrapSha) 'Stage bootstrap pin equals live install file hash'
-}
+$installPin = if ($installSource -match "acceptedBootstrapSha256 = '([a-f0-9]{64})'") { $Matches[1] } else { '' }
+$stagePin = if ($stageSource -match "acceptedBootstrapSha256 = '([a-f0-9]{64})'") { $Matches[1] } else { '' }
+Assert-True ($installPin.Length -eq 64) 'Install bootstrap SHA literal is 64 hex'
+Assert-True ($stagePin.Length -eq 64) 'Stage bootstrap SHA literal is 64 hex'
+Assert-True ($installPin -ceq $stagePin) 'Stage and Install bootstrap SHA pins match'
+Write-Host "REVIEWED_BOOTSTRAP_SHA256=$installPin"
+Write-Host "LIVE_INSTALL_SHA256=$bootstrapSha"
 Assert-True ($stageSource.Contains($v2Sha, [StringComparison]::Ordinal)) 'Stage pins V2 worker SHA-256'
 Assert-True ($installSource.Contains($v2Sha, [StringComparison]::Ordinal)) 'Install pins V2 worker SHA-256'
 Assert-True ($installSource.Contains('db71da0a73f2943eb8837e7c1e7070a22251478e4acfba91338837c7fc699605', [StringComparison]::Ordinal)) 'Install pins V1 worker SHA-256'
