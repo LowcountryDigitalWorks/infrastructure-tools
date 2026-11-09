@@ -29,6 +29,14 @@ PINNED_FILE_PATHS = (
     "ci-dispatch/Invoke-DragonflyCanaryProduction.ps1",
     "ci-dispatch/Dispatch.psm1",
 )
+# Immutable source blobs independently frozen by the reviewed V2 publisher.
+# Manifest-provided sha256 is integrity metadata, NOT package authority.
+PINNED_FILE_BLOBS = {
+    "ci-dispatch/DragonflyCanary.psm1": "893c89ae65bd85464f404fa4a4ff762344915520",
+    "ci-dispatch/DragonflyCanaryRuntime.psm1": "7730f473d2588e885fa6a4f3aec1b486b408dbda",
+    "ci-dispatch/Invoke-DragonflyCanaryProduction.ps1": "2068368b6ba91a476d8a1f05fc6b0792dca2d263",
+    "ci-dispatch/Dispatch.psm1": DISPATCH_BLOB,
+}
 MAX_TRANSFER_BYTES = 2 * 1024 * 1024
 MAX_FILE_BYTES = 512 * 1024
 MANIFEST_FILENAME = "manifest.json"
@@ -42,11 +50,15 @@ def _sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _git_blob_sha1(data: bytes) -> str:
+    return hashlib.sha1(f"blob {len(data)}\0".encode("ascii") + data).hexdigest()
+
+
 def _read_bounded(stream, limit: int) -> bytes:
     chunks: list[bytes] = []
     total = 0
     while True:
-        block = stream.read(min(65536, limit - total))
+        block = stream.read(min(65536, limit + 1 - total))
         if not block:
             break
         total += len(block)
@@ -59,7 +71,16 @@ def _read_bounded(stream, limit: int) -> bytes:
 
 
 def _assert_private_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
+    # Reject symlink ancestors before and after creation; fail closed on
+    # group/world-readable existing directories rather than chmoding them.
+    cursor = Path(path.anchor)
+    for part in path.parts[1:]:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise TransferError("TRANSFER_STAGING_INVALID")
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if path.is_symlink():
+        raise TransferError("TRANSFER_STAGING_INVALID")
     mode = path.stat().st_mode
     if not stat.S_ISDIR(mode):
         raise TransferError("TRANSFER_STAGING_INVALID")
@@ -100,6 +121,8 @@ def validate_transfer_manifest(manifest: object) -> dict:
         "containsBootstrap": False,
         "containsPrivateEndpoint": False,
     }
+    if set(manifest) != set(required) | {"dispatchAuthority", "files"}:
+        raise TransferError("TRANSFER_MANIFEST_INVALID")
     for key, value in required.items():
         if manifest.get(key) != value:
             raise TransferError("TRANSFER_MANIFEST_PIN_MISMATCH")
@@ -114,6 +137,8 @@ def validate_transfer_manifest(manifest: object) -> dict:
         "windowsSha256": DISPATCH_WINDOWS_SHA256,
         "materialization": "crlf",
     }
+    if set(authority) != set(authority_checks):
+        raise TransferError("TRANSFER_MANIFEST_INVALID")
     for key, value in authority_checks.items():
         if authority.get(key) != value:
             raise TransferError("TRANSFER_MANIFEST_PIN_MISMATCH")
@@ -124,12 +149,20 @@ def validate_transfer_manifest(manifest: object) -> dict:
     for entry in files:
         if not isinstance(entry, dict):
             raise TransferError("TRANSFER_MANIFEST_FILES_INVALID")
+        if set(entry) != {"path", "sourceCommit", "sourceTree", "gitBlob", "representation", "sha256"}:
+            raise TransferError("TRANSFER_MANIFEST_FILES_INVALID")
         path = entry.get("path")
         sha = entry.get("sha256")
         if not isinstance(path, str) or path not in PINNED_FILE_PATHS:
             raise TransferError("TRANSFER_MANIFEST_FILES_INVALID")
         if not isinstance(sha, str) or len(sha) != 64 or any(ch not in "0123456789abcdef" for ch in sha):
             raise TransferError("TRANSFER_MANIFEST_FILES_INVALID")
+        expected_commit = DISPATCH_COMMIT if path == "ci-dispatch/Dispatch.psm1" else (ENTRY_COMMIT if path == "ci-dispatch/Invoke-DragonflyCanaryProduction.ps1" else CANARY_COMMIT)
+        expected_tree = DISPATCH_TREE if path == "ci-dispatch/Dispatch.psm1" else (ENTRY_TREE if path == "ci-dispatch/Invoke-DragonflyCanaryProduction.ps1" else CANARY_TREE)
+        representation = "crlf" if path == "ci-dispatch/Dispatch.psm1" else "raw"
+        if (entry["sourceCommit"] != expected_commit or entry["sourceTree"] != expected_tree
+                or entry["gitBlob"] != PINNED_FILE_BLOBS[path] or entry["representation"] != representation):
+            raise TransferError("TRANSFER_MANIFEST_PIN_MISMATCH")
         paths.append(path)
     if sorted(paths) != sorted(PINNED_FILE_PATHS):
         raise TransferError("TRANSFER_MANIFEST_FILES_INVALID")
@@ -138,6 +171,8 @@ def validate_transfer_manifest(manifest: object) -> dict:
 
 def validate_transfer_envelope(payload: object) -> dict:
     if not isinstance(payload, dict):
+        raise TransferError("TRANSFER_ENVELOPE_INVALID")
+    if set(payload) != {"schema", "marker", "release_identity", "manifest_sha256", "manifest", "files"}:
         raise TransferError("TRANSFER_ENVELOPE_INVALID")
     if payload.get("schema") != TRANSFER_SCHEMA or payload.get("marker") != TRANSFER_MARKER:
         raise TransferError("TRANSFER_ENVELOPE_MARKER_INVALID")
@@ -156,6 +191,8 @@ def validate_transfer_envelope(payload: object) -> dict:
         if not isinstance(entry, dict):
             raise TransferError("TRANSFER_FILE_ENTRY_INVALID")
         expected_sha = next(item["sha256"] for item in manifest["files"] if item["path"] == path)
+        if set(entry) != {"sha256", "content"}:
+            raise TransferError("TRANSFER_FILE_ENTRY_INVALID")
         if entry.get("sha256") != expected_sha:
             raise TransferError("TRANSFER_FILE_SHA_MISMATCH")
         content = entry.get("content")
@@ -169,6 +206,13 @@ def validate_transfer_envelope(payload: object) -> dict:
             raise TransferError("TRANSFER_FILE_TOO_LARGE")
         if _sha256_hex(data) != expected_sha:
             raise TransferError("TRANSFER_FILE_DIGEST_MISMATCH")
+        # A forged, internally self-consistent manifest must NEVER choose
+        # arbitrary bytes. Cross-check independently reviewed source pins.
+        if path == "ci-dispatch/Dispatch.psm1":
+            if _sha256_hex(data) != DISPATCH_WINDOWS_SHA256:
+                raise TransferError("TRANSFER_FILE_PROVENANCE_MISMATCH")
+        elif _git_blob_sha1(data) != PINNED_FILE_BLOBS[path]:
+            raise TransferError("TRANSFER_FILE_PROVENANCE_MISMATCH")
         decoded[path] = data
     manifest_blob = json.dumps(
         manifest,
