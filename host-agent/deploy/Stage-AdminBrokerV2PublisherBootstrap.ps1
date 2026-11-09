@@ -3,10 +3,9 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$acceptedBootstrapSha256 = 'f3df596c88cdef40ef8b2bb3ff2561ce83a545ebb678e884d3aae5829facb1e4'
-$acceptedV2WorkerSha256 = '75788c05edcf14199e53de239ef333dcefb9bc09385ba22de2b99cfda91bcabe'
 $bootstrapFileName = 'Install-AdminBrokerV2PublisherBootstrap.ps1'
 $workerBundleName = 'Invoke-AdminBrokerV2PublisherWorker.ps1'
+$reviewManifestFileName = 'AdminBrokerV2BootstrapReviewManifest.json'
 $reviewDownloadRoot = Join-Path $env:USERPROFILE 'Downloads\LDW-V2-Publisher-Bootstrap-Review'
 $stagingLeaf = 'v2-publisher-once'
 
@@ -53,6 +52,54 @@ function New-ProtectedDirectoryAcl([string]$Path) {
     Set-Acl -LiteralPath $Path -AclObject $acl
 }
 
+function Read-ReviewManifest([string]$ManifestPath) {
+    if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) { throw 'REVIEW_MANIFEST_MISSING' }
+    Assert-NoReparse $ManifestPath
+    $bytes = [IO.File]::ReadAllBytes($ManifestPath)
+    if ($bytes.Length -lt 2 -or $bytes.Length -gt 8192) { throw 'REVIEW_MANIFEST_INVALID' }
+    try {
+        $doc = [Text.Json.JsonDocument]::Parse($bytes)
+    } catch {
+        throw 'REVIEW_MANIFEST_INVALID'
+    }
+    try {
+        $root = $doc.RootElement
+        if ($root.ValueKind -ne [Text.Json.JsonValueKind]::Object) { throw 'REVIEW_MANIFEST_INVALID' }
+        if ($root.GetProperty('schema').GetInt32() -ne 1) { throw 'REVIEW_MANIFEST_INVALID' }
+        if ($root.GetProperty('protocol').GetString() -cne 'ldw.admin-broker.v2-bootstrap.review-manifest.v1') {
+            throw 'REVIEW_MANIFEST_INVALID'
+        }
+        $items = $root.GetProperty('artifacts')
+        if ($items.ValueKind -ne [Text.Json.JsonValueKind]::Array -or $items.GetArrayLength() -ne 2) {
+            throw 'REVIEW_MANIFEST_INVALID'
+        }
+        $map = @{}
+        foreach ($item in $items.EnumerateArray()) {
+            if ($item.ValueKind -ne [Text.Json.JsonValueKind]::Object) { throw 'REVIEW_MANIFEST_INVALID' }
+            $name = $item.GetProperty('name').GetString()
+            $sha = $item.GetProperty('sha256').GetString()
+            if ($name -cnotin @($bootstrapFileName, $workerBundleName)) { throw 'REVIEW_MANIFEST_INVALID' }
+            if ($sha -cnotmatch '^[a-f0-9]{64}$') { throw 'REVIEW_MANIFEST_INVALID' }
+            if ($map.ContainsKey($name)) { throw 'REVIEW_MANIFEST_INVALID' }
+            $map[$name] = $sha.ToLowerInvariant()
+        }
+        if ($map.Count -ne 2) { throw 'REVIEW_MANIFEST_INVALID' }
+        return [pscustomobject]@{
+            BootstrapSha256 = $map[$bootstrapFileName]
+            WorkerSha256 = $map[$workerBundleName]
+        }
+    } finally {
+        $doc.Dispose()
+    }
+}
+
+function Assert-FileSha256([string]$Path, [string]$ExpectedSha256, [string]$MismatchCode) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw 'ARTIFACT_MISSING' }
+    Assert-NoReparse $Path
+    $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -cne $ExpectedSha256) { throw $MismatchCode }
+}
+
 Assert-Elevated
 $ldwRoot = Join-Path $env:ProgramData 'LDW'
 if (-not (Test-Path -LiteralPath $ldwRoot -PathType Container)) { throw 'LDW_ROOT_MISSING' }
@@ -62,23 +109,34 @@ $stagingRoot = Join-Path $ldwRoot ('PrivilegedControl/bootstrap-staging/' + $sta
 if (Test-Path -LiteralPath $stagingRoot) { throw 'STAGING_ALREADY_EXISTS' }
 New-ProtectedDirectoryAcl $stagingRoot
 
+$downloadManifest = Join-Path $reviewDownloadRoot $reviewManifestFileName
 $downloadBootstrap = Join-Path $reviewDownloadRoot $bootstrapFileName
 $downloadWorker = Join-Path $reviewDownloadRoot $workerBundleName
-if (-not (Test-Path -LiteralPath $downloadBootstrap -PathType Leaf)) { throw 'REVIEWED_BOOTSTRAP_MISSING' }
-if (-not (Test-Path -LiteralPath $downloadWorker -PathType Leaf)) { throw 'REVIEWED_WORKER_MISSING' }
-$dlBootstrapSha = (Get-FileHash -LiteralPath $downloadBootstrap -Algorithm SHA256).Hash.ToLowerInvariant()
-$dlWorkerSha = (Get-FileHash -LiteralPath $downloadWorker -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($dlBootstrapSha -cne $acceptedBootstrapSha256) { throw 'REVIEWED_BOOTSTRAP_SHA256_MISMATCH' }
-if ($dlWorkerSha -cne $acceptedV2WorkerSha256) { throw 'REVIEWED_WORKER_SHA256_MISMATCH' }
+foreach ($path in @($downloadManifest, $downloadBootstrap, $downloadWorker)) {
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'REVIEWED_BUNDLE_INCOMPLETE' }
+}
+$manifest = Read-ReviewManifest $downloadManifest
+Assert-FileSha256 $downloadBootstrap $manifest.BootstrapSha256 'REVIEWED_BOOTSTRAP_SHA256_MISMATCH'
+Assert-FileSha256 $downloadWorker $manifest.WorkerSha256 'REVIEWED_WORKER_SHA256_MISMATCH'
 
 $protectedBootstrap = Join-Path $stagingRoot $bootstrapFileName
 $protectedWorker = Join-Path $stagingRoot $workerBundleName
+$protectedManifest = Join-Path $stagingRoot $reviewManifestFileName
 Copy-Item -LiteralPath $downloadBootstrap -Destination $protectedBootstrap -Force
 Copy-Item -LiteralPath $downloadWorker -Destination $protectedWorker -Force
-$copyBootstrapSha = (Get-FileHash -LiteralPath $protectedBootstrap -Algorithm SHA256).Hash.ToLowerInvariant()
-$copyWorkerSha = (Get-FileHash -LiteralPath $protectedWorker -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($copyBootstrapSha -cne $acceptedBootstrapSha256 -or $copyWorkerSha -cne $acceptedV2WorkerSha256) {
-    throw 'PROTECTED_COPY_HASH_MISMATCH'
+Copy-Item -LiteralPath $downloadManifest -Destination $protectedManifest -Force
+Assert-FileSha256 $protectedBootstrap $manifest.BootstrapSha256 'PROTECTED_COPY_HASH_MISMATCH'
+Assert-FileSha256 $protectedWorker $manifest.WorkerSha256 'PROTECTED_COPY_HASH_MISMATCH'
+$manifestBytesBefore = [IO.File]::ReadAllBytes($downloadManifest)
+$manifestBytesAfter = [IO.File]::ReadAllBytes($protectedManifest)
+if ($manifestBytesBefore.Length -ne $manifestBytesAfter.Length) { throw 'PROTECTED_MANIFEST_DRIFT' }
+for ($i = 0; $i -lt $manifestBytesBefore.Length; $i++) {
+    if ($manifestBytesBefore[$i] -ne $manifestBytesAfter[$i]) { throw 'PROTECTED_MANIFEST_DRIFT' }
+}
+$manifestAfterCopy = Read-ReviewManifest $protectedManifest
+if ($manifestAfterCopy.BootstrapSha256 -cne $manifest.BootstrapSha256 -or
+    $manifestAfterCopy.WorkerSha256 -cne $manifest.WorkerSha256) {
+    throw 'PROTECTED_MANIFEST_DRIFT'
 }
 
 $powershellExe = Get-SystemPowerShellExecutable

@@ -3,9 +3,8 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$acceptedBootstrapSha256 = 'f3df596c88cdef40ef8b2bb3ff2561ce83a545ebb678e884d3aae5829facb1e4'
-$acceptedV2WorkerSha256 = '75788c05edcf14199e53de239ef333dcefb9bc09385ba22de2b99cfda91bcabe'
 $acceptedV1WorkerSha256 = 'db71da0a73f2943eb8837e7c1e7070a22251478e4acfba91338837c7fc699605'
+$reviewManifestFileName = 'AdminBrokerV2BootstrapReviewManifest.json'
 $v2WorkerIdentity = 'v2-publisher-reviewed-1'
 $bootstrapStagingLeaf = 'v2-publisher-once'
 $bootstrapFileName = 'Install-AdminBrokerV2PublisherBootstrap.ps1'
@@ -27,6 +26,8 @@ $receiptPath = Join-Path $journalRoot 'v2-bootstrap-consumed.receipt'
 $script:LockStream = $null
 $script:JournalEnabled = $false
 $script:V1Snapshot = $null
+$script:ReviewedBootstrapSha256 = $null
+$script:ReviewedWorkerSha256 = $null
 
 function Assert-Elevated {
     if ($env:OS -ne 'Windows_NT') { throw 'WINDOWS_REQUIRED' }
@@ -193,17 +194,16 @@ function Assert-V1TaskQuiescent([string]$OwnerSid, [string]$V1Sha) {
     }
 }
 
-function Install-V2WorkerFromBundle {
+function Install-V2WorkerFromBundle([string]$ExpectedWorkerSha256) {
     $bundleWorker = Join-Path $protectedStagingRoot $workerBundleName
     if (-not (Test-Path -LiteralPath $bundleWorker -PathType Leaf)) { throw 'V2_WORKER_BUNDLE_MISSING' }
-    $bundleSha = (Get-FileHash -LiteralPath $bundleWorker -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($bundleSha -cne $acceptedV2WorkerSha256) { throw 'V2_WORKER_PROVENANCE_MISMATCH' }
+    $bundleSha = Assert-ProtectedArtifactSha256 $bundleWorker $ExpectedWorkerSha256 'V2_WORKER_PROVENANCE_MISMATCH'
     $targetDir = Split-Path $v2WorkerInstalled -Parent
     if (Test-Path -LiteralPath $targetDir) { throw 'V2_WORKER_ALREADY_STAGED' }
     New-ProtectedDirectoryAcl $targetDir
     Copy-Item -LiteralPath $bundleWorker -Destination $v2WorkerInstalled -Force
     $installedSha = (Get-FileHash -LiteralPath $v2WorkerInstalled -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($installedSha -cne $acceptedV2WorkerSha256) { throw 'V2_WORKER_INSTALL_MISMATCH' }
+    if ($installedSha -cne $ExpectedWorkerSha256) { throw 'V2_WORKER_INSTALL_MISMATCH' }
     $installedSha
 }
 
@@ -266,6 +266,56 @@ function Remove-StagedV2Worker {
     }
 }
 
+function Read-ReviewManifest {
+    $path = Join-Path $protectedStagingRoot $reviewManifestFileName
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'REVIEW_MANIFEST_MISSING' }
+    Assert-NoReparse $path
+    $bytes = [IO.File]::ReadAllBytes($path)
+    if ($bytes.Length -lt 2 -or $bytes.Length -gt 8192) { throw 'REVIEW_MANIFEST_INVALID' }
+    try {
+        $doc = [Text.Json.JsonDocument]::Parse($bytes)
+    } catch {
+        throw 'REVIEW_MANIFEST_INVALID'
+    }
+    try {
+        $root = $doc.RootElement
+        if ($root.ValueKind -ne [Text.Json.JsonValueKind]::Object) { throw 'REVIEW_MANIFEST_INVALID' }
+        if ($root.GetProperty('schema').GetInt32() -ne 1) { throw 'REVIEW_MANIFEST_INVALID' }
+        if ($root.GetProperty('protocol').GetString() -cne 'ldw.admin-broker.v2-bootstrap.review-manifest.v1') {
+            throw 'REVIEW_MANIFEST_INVALID'
+        }
+        $items = $root.GetProperty('artifacts')
+        if ($items.ValueKind -ne [Text.Json.JsonValueKind]::Array -or $items.GetArrayLength() -ne 2) {
+            throw 'REVIEW_MANIFEST_INVALID'
+        }
+        $map = @{}
+        foreach ($item in $items.EnumerateArray()) {
+            if ($item.ValueKind -ne [Text.Json.JsonValueKind]::Object) { throw 'REVIEW_MANIFEST_INVALID' }
+            $name = $item.GetProperty('name').GetString()
+            $sha = $item.GetProperty('sha256').GetString()
+            if ($name -cnotin @($bootstrapFileName, $workerBundleName)) { throw 'REVIEW_MANIFEST_INVALID' }
+            if ($sha -cnotmatch '^[a-f0-9]{64}$') { throw 'REVIEW_MANIFEST_INVALID' }
+            if ($map.ContainsKey($name)) { throw 'REVIEW_MANIFEST_INVALID' }
+            $map[$name] = $sha.ToLowerInvariant()
+        }
+        if ($map.Count -ne 2) { throw 'REVIEW_MANIFEST_INVALID' }
+        return [pscustomobject]@{
+            BootstrapSha256 = $map[$bootstrapFileName]
+            WorkerSha256 = $map[$workerBundleName]
+        }
+    } finally {
+        $doc.Dispose()
+    }
+}
+
+function Assert-ProtectedArtifactSha256([string]$Path, [string]$ExpectedSha256, [string]$MismatchCode) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw 'ARTIFACT_MISSING' }
+    Assert-NoReparse $Path
+    $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -cne $ExpectedSha256) { throw $MismatchCode }
+    $actual
+}
+
 function Disable-TaskHold {
     $service = Get-TaskService
     $folder = $service.GetFolder('\')
@@ -285,7 +335,12 @@ function Assert-BootstrapProvenance {
         throw 'BOOTSTRAP_PATH_REFUSED'
     }
     Assert-ProtectedDirectory $protectedStagingRoot
-    if (-not (Test-Path -LiteralPath $actual -PathType Leaf)) { throw 'BOOTSTRAP_FILE_MISSING' }
+    $manifest = Read-ReviewManifest
+    $script:ReviewedBootstrapSha256 = $manifest.BootstrapSha256
+    $script:ReviewedWorkerSha256 = $manifest.WorkerSha256
+    Assert-ProtectedArtifactSha256 $actual $manifest.BootstrapSha256 'BOOTSTRAP_SHA256_MISMATCH' | Out-Null
+    $bundleWorker = Join-Path $protectedStagingRoot $workerBundleName
+    Assert-ProtectedArtifactSha256 $bundleWorker $manifest.WorkerSha256 'V2_WORKER_BUNDLE_MISMATCH' | Out-Null
 }
 
 function Assert-NoReplay {
@@ -293,12 +348,15 @@ function Assert-NoReplay {
 }
 
 function Write-ConsumedReceipt([string]$V1Sha, [string]$V2Sha) {
+    if (-not $script:ReviewedBootstrapSha256 -or $script:ReviewedBootstrapSha256 -cnotmatch '^[a-f0-9]{64}$') {
+        throw 'REVIEW_MANIFEST_REQUIRED'
+    }
     $payload = [ordered]@{
         schema = 1
         consumedUtc = [DateTime]::UtcNow.ToString('o')
         v1WorkerSha256 = $V1Sha
         v2WorkerSha256 = $V2Sha
-        bootstrapSha256 = $acceptedBootstrapSha256
+        bootstrapSha256 = $script:ReviewedBootstrapSha256
     } | ConvertTo-Json -Compress
     [IO.File]::WriteAllText($receiptPath, $payload + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
 }
@@ -320,7 +378,7 @@ try {
     $script:V1Snapshot = Assert-V1TaskQuiescent $ownerSid $v1Sha
     Write-Journal 'SNAPSHOT' @{ v1WorkerSha256 = $v1Sha; v1TaskActionPath = $script:V1Snapshot.ActionPath }
 
-    $v2Sha = Install-V2WorkerFromBundle
+    $v2Sha = Install-V2WorkerFromBundle $script:ReviewedWorkerSha256
     Write-Journal 'PREPARED' @{ v2WorkerSha256 = $v2Sha; v2WorkerPath = $v2WorkerInstalled }
 
     $update = Register-V2Task $ownerSid $v2Sha

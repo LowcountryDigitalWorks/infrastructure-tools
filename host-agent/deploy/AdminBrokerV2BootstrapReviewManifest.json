@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "protocol": "ldw.admin-broker.v2-bootstrap.review-manifest.v1",
+  "artifacts": [
+    {
+      "name": "Install-AdminBrokerV2PublisherBootstrap.ps1",
+      "sha256": "3eb87bf2fe592651503affb82edf586b2df3d365de10c791b2f79a96bcb59031"
+    },
+    {
+      "name": "Invoke-AdminBrokerV2PublisherWorker.ps1",
+      "sha256": "75788c05edcf14199e53de239ef333dcefb9bc09385ba22de2b99cfda91bcabe"
+    }
+  ]
+}
