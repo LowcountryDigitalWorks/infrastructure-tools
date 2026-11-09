@@ -219,6 +219,79 @@ def _abort_install_transaction(state_root: Path) -> None:
         pass
 
 
+def _release_tree_matches_envelope(release_root: Path, envelope: dict) -> str:
+    if release_root.is_symlink():
+        raise TransferError("TRANSFER_INSTALL_INCOMPLETE")
+    manifest_path = release_root / MANIFEST_FILENAME
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        raise TransferError("TRANSFER_INSTALL_INCOMPLETE")
+    manifest_bytes = manifest_path.read_bytes()
+    receiver_sha = _sha256_hex(manifest_bytes)
+    if receiver_sha != envelope["manifest_sha256"]:
+        raise TransferError("TRANSFER_INSTALL_INCOMPLETE")
+    for rel_path in PINNED_FILE_PATHS:
+        target = release_root / rel_path
+        if target.is_symlink() or not target.is_file():
+            raise TransferError("TRANSFER_INSTALL_INCOMPLETE")
+        data = target.read_bytes()
+        expected = envelope["files"].get(rel_path)
+        if not isinstance(expected, (bytes, bytearray)) or data != bytes(expected):
+            raise TransferError("TRANSFER_INSTALL_INCOMPLETE")
+    return receiver_sha
+
+
+def _install_evidence_from_release(release_root: Path, envelope: dict, receiver_sha: str) -> dict:
+    file_evidence = []
+    for rel_path in PINNED_FILE_PATHS:
+        data = (release_root / rel_path).read_bytes()
+        file_evidence.append({"path": rel_path, "sha256": _sha256_hex(data)})
+    return {
+        "outcome": "TRANSFER_INSTALLED",
+        "release_identity": RELEASE_IDENTITY,
+        "manifest_sha256_sender": envelope["manifest_sha256"],
+        "manifest_sha256_receiver": receiver_sha,
+        "files": file_evidence,
+    }
+
+
+def _reconcile_orphan_release_if_valid(
+    release_root: Path,
+    state_root: Path,
+    envelope: dict,
+) -> dict:
+    manifest_sha256 = envelope["manifest_sha256"]
+    _assert_private_dir(state_root)
+    receiver_sha = _release_tree_matches_envelope(release_root, envelope)
+    claims = _load_committed_claims(state_root)
+    if RELEASE_IDENTITY in claims:
+        if claims[RELEASE_IDENTITY] == manifest_sha256:
+            raise TransferError("TRANSFER_REPLAY_REFUSED")
+        raise TransferError("TRANSFER_INSTALL_INCOMPLETE")
+    if manifest_sha256 in claims.values():
+        raise TransferError("TRANSFER_REPLAY_REFUSED")
+    pending = _load_pending_claim(state_root)
+    if pending is not None:
+        if pending["release_identity"] != RELEASE_IDENTITY or pending["manifest_sha256"] != manifest_sha256:
+            raise TransferError("TRANSFER_CLAIM_PENDING_CONFLICT")
+    _commit_install_transaction(state_root, manifest_sha256)
+    return _install_evidence_from_release(release_root, envelope, receiver_sha)
+
+
+def _release_installed_matches_pending_commit(
+    release_root: Path,
+    manifest_sha256: str,
+) -> bool:
+    if not release_root.exists():
+        return False
+    try:
+        manifest_path = release_root / MANIFEST_FILENAME
+        if not manifest_path.is_file() or manifest_path.is_symlink():
+            return False
+        return _sha256_hex(manifest_path.read_bytes()) == manifest_sha256
+    except OSError:
+        return False
+
+
 def validate_transfer_manifest(manifest: object) -> dict:
     if not isinstance(manifest, dict):
         raise TransferError("TRANSFER_MANIFEST_INVALID")
@@ -364,7 +437,7 @@ def install_transfer_bundle(
 ) -> dict:
     release_root = install_root / "releases" / RELEASE_IDENTITY
     if release_root.exists():
-        raise TransferError("TRANSFER_RELEASE_ALREADY_PRESENT")
+        return _reconcile_orphan_release_if_valid(release_root, state_root, envelope)
     manifest_sha256 = envelope["manifest_sha256"]
     _begin_install_transaction(state_root, manifest_sha256)
     install_committed = False
@@ -388,7 +461,10 @@ def install_transfer_bundle(
         install_committed = True
     except Exception:
         if not install_committed:
-            _abort_install_transaction(state_root)
+            if _release_installed_matches_pending_commit(release_root, manifest_sha256):
+                pass
+            else:
+                _abort_install_transaction(state_root)
         raise
     finally:
         if staging is not None and staging.exists():
@@ -398,17 +474,7 @@ def install_transfer_bundle(
                 elif child.is_dir():
                     child.rmdir()
             staging.rmdir()
-    file_evidence = []
-    for rel_path in PINNED_FILE_PATHS:
-        data = (release_root / rel_path).read_bytes()
-        file_evidence.append({"path": rel_path, "sha256": _sha256_hex(data)})
-    return {
-        "outcome": "TRANSFER_INSTALLED",
-        "release_identity": RELEASE_IDENTITY,
-        "manifest_sha256_sender": envelope["manifest_sha256"],
-        "manifest_sha256_receiver": receiver_sha,
-        "files": file_evidence,
-    }
+    return _install_evidence_from_release(release_root, envelope, receiver_sha)
 
 
 def run_inbound_transfer(

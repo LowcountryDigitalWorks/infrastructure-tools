@@ -234,7 +234,94 @@ class InboundTransferV2Tests(unittest.TestCase):
                 state_root=state_root,
             )
             self.assertEqual(evidence["outcome"], "TRANSFER_INSTALLED")
-            with self.assertRaisesRegex(transfer.TransferError, "TRANSFER_RELEASE_ALREADY_PRESENT"):
+            with self.assertRaisesRegex(transfer.TransferError, "TRANSFER_REPLAY_REFUSED"):
+                transfer.install_transfer_bundle(
+                    envelope,
+                    install_root=install_root,
+                    state_root=state_root,
+                )
+
+    def test_post_replace_commit_failure_reconciles_orphan_then_refuses_replay(self):
+        payload = _build_envelope()
+        envelope = transfer.validate_transfer_envelope(payload)
+        calls = {"count": 0}
+        real_commit = transfer._commit_install_transaction
+
+        def flaky_commit(state_root, manifest_sha256):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise OSError("synthetic claim commit failure")
+            return real_commit(state_root, manifest_sha256)
+
+        with tempfile.TemporaryDirectory() as temp:
+            install_root = Path(temp) / "adjunct-v2"
+            state_root = Path(temp) / "state"
+            with mock.patch.object(transfer, "_commit_install_transaction", side_effect=flaky_commit):
+                with self.assertRaises(OSError):
+                    transfer.install_transfer_bundle(
+                        envelope,
+                        install_root=install_root,
+                        state_root=state_root,
+                    )
+            self.assertTrue((state_root / transfer.PENDING_CLAIM_FILENAME).exists())
+            release_root = install_root / "releases" / transfer.RELEASE_IDENTITY
+            self.assertTrue(release_root.exists())
+            evidence = transfer.install_transfer_bundle(
+                envelope,
+                install_root=install_root,
+                state_root=state_root,
+            )
+            self.assertEqual(evidence["outcome"], "TRANSFER_INSTALLED")
+            self.assertFalse((state_root / transfer.PENDING_CLAIM_FILENAME).exists())
+            with self.assertRaisesRegex(transfer.TransferError, "TRANSFER_REPLAY_REFUSED"):
+                transfer.install_transfer_bundle(
+                    envelope,
+                    install_root=install_root,
+                    state_root=state_root,
+                )
+
+    def test_orphan_release_with_forged_bytes_refused(self):
+        payload = _build_envelope()
+        envelope = transfer.validate_transfer_envelope(payload)
+        with tempfile.TemporaryDirectory() as temp:
+            install_root = Path(temp) / "adjunct-v2"
+            state_root = Path(temp) / "state"
+            release_root = install_root / "releases" / transfer.RELEASE_IDENTITY
+            release_root.mkdir(parents=True, mode=0o700)
+            forged_path = release_root / transfer.PINNED_FILE_PATHS[0]
+            forged_path.parent.mkdir(parents=True, exist_ok=True)
+            forged_path.write_bytes(b"forged-orphan-tree")
+            manifest_bytes = envelope["files"]["manifest.json"]
+            (release_root / transfer.MANIFEST_FILENAME).write_bytes(manifest_bytes)
+            state_root.mkdir(mode=0o700)
+            transfer._begin_install_transaction(state_root, envelope["manifest_sha256"])
+            with self.assertRaisesRegex(transfer.TransferError, "TRANSFER_INSTALL_INCOMPLETE"):
+                transfer.install_transfer_bundle(
+                    envelope,
+                    install_root=install_root,
+                    state_root=state_root,
+                )
+
+    def test_orphan_release_pending_conflict_refused(self):
+        payload = _build_envelope()
+        envelope = transfer.validate_transfer_envelope(payload)
+        with tempfile.TemporaryDirectory() as temp:
+            install_root = Path(temp) / "adjunct-v2"
+            state_root = Path(temp) / "state"
+            state_root.mkdir(mode=0o700)
+            release_root = install_root / "releases" / transfer.RELEASE_IDENTITY
+            for rel_path, data in envelope["files"].items():
+                target = release_root / rel_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+            transfer._atomic_write_private_json(
+                state_root / transfer.PENDING_CLAIM_FILENAME,
+                {
+                    "release_identity": transfer.RELEASE_IDENTITY,
+                    "manifest_sha256": "a" * 64,
+                },
+            )
+            with self.assertRaisesRegex(transfer.TransferError, "TRANSFER_CLAIM_PENDING_CONFLICT"):
                 transfer.install_transfer_bundle(
                     envelope,
                     install_root=install_root,
