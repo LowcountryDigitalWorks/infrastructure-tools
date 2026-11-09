@@ -13,6 +13,8 @@ Cost and billing fields are accepted only as **TRUSTED_ORCHESTRATOR_ATTESTATION*
 - Caller/model-supplied `billing_read_status=OK` or invented `included_compute_remaining_usd` values are **rejected** without trusted provenance.
 - **No runtime admission** from this planner alone; a trusted upstream adapter must supply closed DTO values.
 
+`provider_readback.py` is the host-side **GET-only** GitHub read adapter (fixed org `LowcountryDigitalWorks`, fixed BO docs-validation tuple). It uses the host `gh` binary without `shell=True`, redacts failures to fixed `readback_code` values, and never returns tokens, env paths, or raw API bodies. Runtime orchestrators must set `trusted_caller=LDW_HOST_GH_ADAPTER`; models must not populate billing fields.
+
 ## Scope
 
 - Closed DTO: **exact key set only** (schema `1.1`); no extra fields (including free-text overrides).
