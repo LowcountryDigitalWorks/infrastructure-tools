@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,9 +21,9 @@ def _manifest_file_records():
         data = f"synthetic:{path}".encode("utf-8")
         rows.append({
             "path": path,
-            "sourceCommit": transfer.CANARY_COMMIT if path != "ci-dispatch/Dispatch.psm1" else transfer.DISPATCH_COMMIT,
-            "sourceTree": transfer.CANARY_TREE if path != "ci-dispatch/Dispatch.psm1" else transfer.DISPATCH_TREE,
-            "gitBlob": "a" * 40,
+            "sourceCommit": transfer.DISPATCH_COMMIT if path == "ci-dispatch/Dispatch.psm1" else (transfer.ENTRY_COMMIT if path == "ci-dispatch/Invoke-DragonflyCanaryProduction.ps1" else transfer.CANARY_COMMIT),
+            "sourceTree": transfer.DISPATCH_TREE if path == "ci-dispatch/Dispatch.psm1" else (transfer.ENTRY_TREE if path == "ci-dispatch/Invoke-DragonflyCanaryProduction.ps1" else transfer.CANARY_TREE),
+            "gitBlob": transfer.PINNED_FILE_BLOBS[path],
             "representation": "crlf" if path == "ci-dispatch/Dispatch.psm1" else "raw",
             "sha256": hashlib.sha256(data).hexdigest(),
         })
@@ -77,6 +78,19 @@ def _build_envelope(**overrides):
 
 
 class InboundTransferV2Tests(unittest.TestCase):
+    def setUp(self):
+        # Synthetic suite bytes are NOT the real trusted V2 package. Override
+        # immutable pins only within these deterministic offline tests.
+        records = {p: f"synthetic:{p}".encode("utf-8") for p in transfer.PINNED_FILE_PATHS}
+        pins = {p: transfer._git_blob_sha1(data) for p, data in records.items()}
+        changes = (
+            mock.patch.object(transfer, "PINNED_FILE_BLOBS", pins),
+            mock.patch.object(transfer, "DISPATCH_WINDOWS_SHA256", hashlib.sha256(records["ci-dispatch/Dispatch.psm1"]).hexdigest()),
+        )
+        for change in changes:
+            change.start()
+            self.addCleanup(change.stop)
+
     def test_positive_install_emits_sender_receiver_manifest_pair(self):
         payload = _build_envelope()
         envelope = transfer.validate_transfer_envelope(payload)
@@ -103,6 +117,46 @@ class InboundTransferV2Tests(unittest.TestCase):
         bad["sha256"] = "b" * 64
         with self.assertRaises(transfer.TransferError):
             transfer.validate_transfer_envelope(payload)
+
+    def test_forged_self_consistent_manifest_and_file_are_not_authority(self):
+        payload = _build_envelope()
+        path = "ci-dispatch/DragonflyCanary.psm1"
+        forged = b"not-the-accepted-v2-package"
+        new_sha = hashlib.sha256(forged).hexdigest()
+        payload["files"][path] = {
+            "sha256": new_sha,
+            "content": base64.b64encode(forged).decode("ascii"),
+        }
+        for record in payload["manifest"]["files"]:
+            if record["path"] == path:
+                record["sha256"] = new_sha
+                break
+        canonical = json.dumps(payload["manifest"], sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\\n"
+        payload["manifest_sha256"] = hashlib.sha256(canonical).hexdigest()
+        with self.assertRaisesRegex(transfer.TransferError, "TRANSFER_FILE_PROVENANCE_MISMATCH"):
+            transfer.validate_transfer_envelope(payload)
+
+    def test_unknown_manifest_field_and_bounded_reader_refuse(self):
+        payload = _build_envelope()
+        payload["manifest"]["unexpectedCommand"] = "untrusted"
+        with self.assertRaisesRegex(transfer.TransferError, "TRANSFER_MANIFEST_INVALID"):
+            transfer.validate_transfer_envelope(payload)
+        with self.assertRaisesRegex(transfer.TransferError, "TRANSFER_PAYLOAD_TOO_LARGE"):
+            transfer._read_bounded(io.BytesIO(b"1" * 17), 16)
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX directory modes")
+    def test_preexisting_world_readable_state_root_refused(self):
+        payload = _build_envelope()
+        envelope = transfer.validate_transfer_envelope(payload)
+        with tempfile.TemporaryDirectory() as temp:
+            state_root = Path(temp) / "state"
+            state_root.mkdir(mode=0o755)
+            with self.assertRaisesRegex(transfer.TransferError, "TRANSFER_STAGING_INVALID"):
+                transfer.install_transfer_bundle(
+                    envelope,
+                    install_root=Path(temp) / "adjunct-v2",
+                    state_root=state_root,
+                )
 
     def test_wrong_release_repo_or_missing_file_rejected(self):
         with self.assertRaises(transfer.TransferError):
