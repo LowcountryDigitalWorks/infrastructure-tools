@@ -6,6 +6,7 @@ MANUAL_OR_TOOL_POLL_REQUIRED.
 """
 from __future__ import annotations
 
+import math
 import re
 import time
 from typing import Protocol
@@ -23,7 +24,6 @@ UI_REPRESENTATION = "IN_MAILBOX"
 POLL_NOTICE = "MANUAL_OR_TOOL_POLL_REQUIRED"
 MAX_PREVIEW_CHARS = 120
 MAX_ROWS = 20
-TTL_REFERENCE_SECONDS = 900
 
 INBOX_ROW_KEYS = frozenset({
     "message_id",
@@ -40,6 +40,7 @@ INBOX_ROW_KEYS = frozenset({
     "poll_notice",
 })
 
+# Synthetic test-fixture guard only; not universal credential or customer-data redaction.
 BEARER_LIKE = re.compile(r"(?i)(bearer\s+[0-9a-f]{16,}|[0-9a-f]{64}|sk-[A-Za-z0-9]{20,})")
 FORBIDDEN_SURPRISE_KEYS = frozenset({
     "raw", "token", "bearer", "wake", "auto_woken", "chat_started", "ir_pass", "state",
@@ -113,20 +114,35 @@ class MessageBoardUiV0:
         return compact
 
     @staticmethod
+    def _finite_numeric(value: object) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        try:
+            numeric = float(value)
+        except (OverflowError, ValueError):
+            return None
+        if not math.isfinite(numeric):
+            return None
+        return numeric
+
+    @staticmethod
     def _age_seconds(created_at: object, *, now: float) -> int | str:
-        if not isinstance(created_at, (int, float)):
+        created = MessageBoardUiV0._finite_numeric(created_at)
+        clock = MessageBoardUiV0._finite_numeric(now)
+        if created is None or clock is None:
             return "UNKNOWN"
-        delta = int(now - float(created_at))
+        try:
+            delta = int(clock - created)
+        except (OverflowError, ValueError):
+            return "UNKNOWN"
         if delta < 0:
             return 0
         return delta
 
     @staticmethod
-    def _ttl_remaining(age: int | str) -> int | str:
-        if age == "UNKNOWN":
-            return "UNKNOWN"
-        remaining = TTL_REFERENCE_SECONDS - int(age)
-        return max(0, remaining)
+    def _ttl_seconds_remaining() -> str:
+        # Relay expiry is monotonic server-side; accepted envelopes expose created_at only.
+        return "UNKNOWN"
 
     def _project_row(self, envelope: dict, *, now: float) -> dict:
         if not isinstance(envelope, dict):
@@ -160,7 +176,7 @@ class MessageBoardUiV0:
             "reply_to": reply_to,
             "preview": preview,
             "age_seconds": age,
-            "ttl_seconds_remaining": self._ttl_remaining(age),
+            "ttl_seconds_remaining": self._ttl_seconds_remaining(),
             "delivery_state": "IN_MAILBOX",
             "ack_state": "UNACKED_IN_MAILBOX",
             "correlation_id": mid,

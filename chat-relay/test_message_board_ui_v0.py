@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import threading
 import unittest
 import uuid
@@ -76,6 +77,7 @@ class MessageBoardUiV0Tests(unittest.TestCase):
         self.assertEqual(row["recipient_role"], "ir_ui")
         self.assertEqual(row["delivery_state"], "IN_MAILBOX")
         self.assertEqual(row["ack_state"], "UNACKED_IN_MAILBOX")
+        self.assertEqual(row["ttl_seconds_remaining"], "UNKNOWN")
         self.assertNotIn("body", json.dumps(polled))
         self.assertNotIn("CHAT_STARTED", json.dumps(polled))
 
@@ -226,6 +228,60 @@ class MessageBoardUiV0Tests(unittest.TestCase):
         with self.assertRaises(MessageBoardUiError) as ctx:
             promoted.poll_rows()
         self.assertEqual(ctx.exception.code, "FORBIDDEN_PROMOTION_STATE")
+
+    def _row_for_created_at(self, created_at, *, now=1_700_000_000.0):
+        ir = self.board("ir_ui")
+        return ir._project_row(
+            {
+                "message_id": mid(),
+                "sender": "gm_ui",
+                "recipient": "ir_ui",
+                "body": "clock probe",
+                "reply_to": None,
+                "created_at": created_at,
+            },
+            now=now,
+        )
+
+    def test_nonfinite_created_at_fails_closed(self):
+        for bad in (float("nan"), float("inf"), float("-inf"), True, False):
+            row = self._row_for_created_at(bad)
+            self.assertEqual(row["age_seconds"], "UNKNOWN")
+            self.assertEqual(row["ttl_seconds_remaining"], "UNKNOWN")
+
+    def test_finite_created_at_age_without_ttl_authority(self):
+        row = self._row_for_created_at(1_699_999_850.0, now=1_700_000_000.0)
+        self.assertEqual(row["age_seconds"], 150)
+        self.assertEqual(row["ttl_seconds_remaining"], "UNKNOWN")
+
+    def test_wall_clock_skew_future_created_at_clamps_age_not_ttl(self):
+        row = self._row_for_created_at(1_700_000_100.0, now=1_700_000_000.0)
+        self.assertEqual(row["age_seconds"], 0)
+        self.assertEqual(row["ttl_seconds_remaining"], "UNKNOWN")
+
+    def test_nonfinite_poll_clock_unknown_age(self):
+        ir = MessageBoardUiV0(
+            "ir_ui",
+            SiteHttpsMessageAdapter(
+                "ir_ui",
+                self.box.token_for_role("ir_ui"),
+                SyntheticLoopbackGatewayTransport(host="127.0.0.1", port=self.port),
+            ),
+            clock=lambda: math.nan,
+        )
+        row = ir._project_row(
+            {
+                "message_id": mid(),
+                "sender": "gm_ui",
+                "recipient": "ir_ui",
+                "body": "skew",
+                "reply_to": None,
+                "created_at": 1_700_000_000.0,
+            },
+            now=math.nan,
+        )
+        self.assertEqual(row["age_seconds"], "UNKNOWN")
+        self.assertEqual(row["ttl_seconds_remaining"], "UNKNOWN")
 
     def test_preview_truncation_bounded(self):
         ir = self.board("ir_ui")

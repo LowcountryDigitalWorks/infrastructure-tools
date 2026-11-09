@@ -19,7 +19,7 @@ Never emit `CHAT_STARTED`, `IR_PASS`, `AUTO_WOKEN`, or fabricated delivery.
 
 ## Row schema (`poll_rows`)
 
-Each row includes: `message_id`, `sender_role`, `recipient_role`, `reply_to`, bounded `preview` (no raw body), `age_seconds` or `UNKNOWN`, `ttl_seconds_remaining` (reference TTL or `UNKNOWN`), `delivery_state`=`IN_MAILBOX`, `ack_state`=`UNACKED_IN_MAILBOX`, `correlation_id` (= message_id), plus UI labels above.
+Each row includes: `message_id`, `sender_role`, `recipient_role`, `reply_to`, bounded `preview` (no raw body; synthetic fixture regex only — not universal secret redaction), `age_seconds` or `UNKNOWN` (nonfinite/bool timestamps fail closed), `ttl_seconds_remaining` always `UNKNOWN` (relay TTL is monotonic server-side; envelopes carry `created_at` only), `delivery_state`=`IN_MAILBOX`, `ack_state`=`UNACKED_IN_MAILBOX`, `correlation_id` (= message_id), plus UI labels above.
 
 ## Future plugin sidebar/panel tools (not deployed)
 
