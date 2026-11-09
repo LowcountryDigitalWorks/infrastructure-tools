@@ -8,8 +8,11 @@ import uuid
 
 from relay import LocalRelay, Mailbox
 from site_https_adapter import (
-    FORBIDDEN_PROMOTION,
+    ACTUAL_WIRE_SCHEME_LOOPBACK,
+    DELIVERY_NOTICE,
+    FORBIDDEN_PROMOTION_STATES,
     SITE_PROTOCOL,
+    TARGET_INTENT_SCHEME,
     SiteHttpsMessageAdapter,
     SiteTransportError,
     SyntheticLoopbackGatewayTransport,
@@ -59,7 +62,8 @@ class SiteGatewayTransportTests(unittest.TestCase):
         self.assertEqual(receipt["state"], "IN_MAILBOX")
         self.assertEqual(receipt["delivery_notice"], "IN_MAILBOX / NOT_AUTO_WOKEN")
         self.assertNotIn("CHAT_STARTED", json.dumps(receipt))
-        self.assertEqual(transport.calls[0]["scheme"], "https")
+        self.assertEqual(transport.calls[0]["actual_wire_scheme"], ACTUAL_WIRE_SCHEME_LOOPBACK)
+        self.assertEqual(transport.calls[0]["target_intent_scheme"], TARGET_INTENT_SCHEME)
         self.assertEqual(transport.calls[0]["method"], "POST")
         self.assertEqual(transport.calls[0]["path"], "/v1/send")
 
@@ -71,6 +75,8 @@ class SiteGatewayTransportTests(unittest.TestCase):
         self.assertIn(message_id, ids)
         ack = ir.invoke("ack_message", {"message_id": message_id})
         self.assertEqual(ack["state"], "ACKNOWLEDGED")
+        self.assertEqual(ack["delivery_notice"], DELIVERY_NOTICE)
+        self.assertEqual(list(ack), ["message_id", "state", "delivery_notice"])
         self.assertEqual(ir.invoke("receive_messages", {})["messages"], [])
 
     def test_tool_catalog_is_fixed_and_minimal(self):
@@ -141,19 +147,115 @@ class SiteGatewayTransportTests(unittest.TestCase):
                 "body": "x" * 9000,
             })
 
-    def test_forbidden_promotion_states_rejected_if_injected(self):
-        class PoisonTransport:
-            def request(self, method, path, *, role, bearer, body):
-                return 200, {"message_id": mid(), "state": "CHAT_STARTED"}
+    def test_compromised_gateway_responses_fail_closed(self):
+        message_id = mid()
 
-        poison = SiteHttpsMessageAdapter("gm22", self.box.token_for_role("gm22"), PoisonTransport())
+        class PoisonSend:
+            def request(self, method, path, *, role, bearer, body):
+                return 200, {
+                    "message_id": message_id,
+                    "state": "IN_MAILBOX",
+                    "duplicate": False,
+                    "wake": True,
+                }
+
         with self.assertRaises(SiteTransportError) as err:
-            poison.invoke("send_message", {
-                "message_id": mid(), "recipient": "ir07", "body": "x",
+            SiteHttpsMessageAdapter(
+                "gm22", self.box.token_for_role("gm22"), PoisonSend(),
+            ).invoke("send_message", {
+                "message_id": message_id, "recipient": "ir07", "body": "x",
+            })
+        self.assertEqual(err.exception.code, "FORBIDDEN_RESPONSE_FIELD")
+
+        class WrongMid:
+            def request(self, method, path, *, role, bearer, body):
+                return 200, {
+                    "message_id": mid(), "state": "IN_MAILBOX", "duplicate": False,
+                }
+
+        with self.assertRaises(SiteTransportError) as err:
+            SiteHttpsMessageAdapter(
+                "gm22", self.box.token_for_role("gm22"), WrongMid(),
+            ).invoke("send_message", {
+                "message_id": message_id, "recipient": "ir07", "body": "x",
+            })
+        self.assertEqual(err.exception.code, "MESSAGE_ID_MISMATCH")
+
+        class PoisonReceive:
+            def request(self, method, path, *, role, bearer, body):
+                return 200, {
+                    "state": "MAILBOX_READ",
+                    "messages": [{
+                        "message_id": message_id,
+                        "sender": "gm22",
+                        "recipient": "ir07",
+                        "body": "x",
+                        "reply_to": None,
+                        "created_at": 1.0,
+                        "ir_pass": True,
+                    }],
+                }
+
+        with self.assertRaises(SiteTransportError) as err:
+            SiteHttpsMessageAdapter(
+                "ir07", self.box.token_for_role("ir07"), PoisonReceive(),
+            ).invoke("receive_messages", {})
+        self.assertEqual(err.exception.code, "FORBIDDEN_RESPONSE_FIELD")
+
+        class CrossRole:
+            def request(self, method, path, *, role, bearer, body):
+                return 200, {
+                    "state": "MAILBOX_READ",
+                    "messages": [{
+                        "message_id": message_id,
+                        "sender": "ir07",
+                        "recipient": "ir07",
+                        "body": "x",
+                        "reply_to": None,
+                        "created_at": 1.0,
+                    }],
+                }
+
+        with self.assertRaises(SiteTransportError) as err:
+            SiteHttpsMessageAdapter(
+                "ir07", self.box.token_for_role("ir07"), CrossRole(),
+            ).invoke("receive_messages", {})
+        self.assertEqual(err.exception.code, "CROSS_ROLE_MESSAGE")
+
+        class PromotionState:
+            def request(self, method, path, *, role, bearer, body):
+                return 200, {"message_id": message_id, "state": "CHAT_STARTED"}
+
+        with self.assertRaises(SiteTransportError) as err:
+            SiteHttpsMessageAdapter(
+                "gm22", self.box.token_for_role("gm22"), PromotionState(),
+            ).invoke("send_message", {
+                "message_id": message_id, "recipient": "ir07", "body": "x",
             })
         self.assertEqual(err.exception.code, "FORBIDDEN_PROMOTION_STATE")
-        self.assertIn("CHAT_STARTED", FORBIDDEN_PROMOTION)
-        self.assertIn("IR_PASS", FORBIDDEN_PROMOTION)
+        self.assertIn("CHAT_STARTED", FORBIDDEN_PROMOTION_STATES)
+        self.assertIn("IR_PASS", FORBIDDEN_PROMOTION_STATES)
+
+    def test_malformed_receive_list_and_items_rejected(self):
+        class BadList:
+            def request(self, method, path, *, role, bearer, body):
+                return 200, {"state": "MAILBOX_READ", "messages": "not-a-list"}
+
+        with self.assertRaises(SiteTransportError) as err:
+            SiteHttpsMessageAdapter(
+                "ir07", self.box.token_for_role("ir07"), BadList(),
+            ).invoke("receive_messages", {})
+        self.assertEqual(err.exception.code, "INVALID_MESSAGE_LIST")
+
+        class BadItem:
+            def request(self, method, path, *, role, bearer, body):
+                return 200, {"state": "MAILBOX_READ", "messages": ["string-item"]}
+
+        with self.assertRaises(SiteTransportError) as err:
+            SiteHttpsMessageAdapter(
+                "ir07", self.box.token_for_role("ir07"), BadItem(),
+            ).invoke("receive_messages", {})
+        self.assertEqual(err.exception.code, "INVALID_MESSAGE_ENVELOPE")
 
     def test_gateway_host_binding_refuses_public_listener_pattern(self):
         with self.assertRaises(ValueError):

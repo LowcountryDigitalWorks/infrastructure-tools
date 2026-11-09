@@ -5,7 +5,8 @@ Status: **SYNTHETIC / SOURCE-ONLY**. Not installed in ChatGPT, not deployed, not
 ## Scope
 
 - Fixed Site tool surface: `send_message`, `receive_messages`, `ack_message` only.
-- Owner-private **HTTPS** gateway boundary (`SyntheticLoopbackGatewayTransport` in tests).
+- Owner-private **HTTPS** gateway boundary is the **future target** (`target_intent_scheme=https`).
+- Tests use `SyntheticLoopbackGatewayTransport` with **`actual_wire_scheme=http_loopback_only`** (plaintext loopback). This is **not** TLS proof.
 - Same HMAC role bearer and `/v1/*` envelope semantics as loopback `relay.py`.
 - Successful delivery states remain `IN_MAILBOX`, `MAILBOX_READ`, `ACKNOWLEDGED`.
 - Adapter adds `delivery_notice: IN_MAILBOX / NOT_AUTO_WOKEN` on send/receive; never `CHAT_STARTED` or `IR_PASS`.
