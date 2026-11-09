@@ -25,6 +25,7 @@ The script checks that the supplied commit is exactly the current public `Lowcou
 | `dragonfly` (default) | Existing Dragonfly Python source contract tests | Source-only local, no QEMU or provider |
 | `chat-relay` | Standard-library Chat Relay tests | Temporary `127.0.0.1` loopback-only sockets close during tests; no public listener or standing service |
 | `browser-static` | Static Browser Isolation boundary tests | No Docker container, network probe or live browser |
+| `all` | All three exact reviewed suites in fixed Dragonfly → Chat Relay → Browser-static order, one private checkout | Preflights all pinned source files before tests, then runs each in a bounded (120s) subprocess; no JIT/provider action |
 
 Examples from a reviewed helper checkout, replacing the hash with exact current verified main:
 
@@ -33,7 +34,13 @@ Examples from a reviewed helper checkout, replacing the hash with exact current 
 /usr/bin/python3 dragonfly-jit/redrix_native_source_ci.py --head <verified-40-char-main-sha> --suite browser-static
 ```
 
-The `--suite` argument uses a closed parser choice, **not** a caller-selected script, executable, test directory, URL, checkout or environment. Each profile has a fixed `/usr/bin/python3 -m unittest discover` command and fixed source ownership/mode/symlink pins, with the existing one-time, private uncredentialed checkout/cleanup. All profiles emit one sanitized result without raw test stderr/stdout and **never grant GitHub/JIT authority**. The limited source file-mode checks are not equivalent to verifying an arbitrary repository tree and must not be reused as untrusted-PR admission.
+The The fixed `--suite all` option is intended for routine one-shot REDRIX source CI: one exact current-main checkout, **all three** approved file/ownership checks *before* any tests, three fixed commands, one final main-identity recheck, and one sanitized aggregate report. It returns `suite_counts` and `tests_passed` only after every suite passes; a single failed/missing/changed source or a moved main returns `HOLD` with no partial PASS. No new GitHub runner, scheduler, credential or mutable workflow authority is created.
+
+```bash
+/usr/bin/python3 dragonfly-jit/redrix_native_source_ci.py --head <verified-40-char-main-sha> --suite all
+```
+
+`--suite` argument uses a closed parser choice, **not** a caller-selected script, executable, test directory, URL, checkout or environment. Each profile has a fixed `/usr/bin/python3 -m unittest discover` command and fixed source ownership/mode/symlink pins, with the existing one-time, private uncredentialed checkout/cleanup. All profiles emit one sanitized result without raw test stderr/stdout and **never grant GitHub/JIT authority**. The limited source file-mode checks are not equivalent to verifying an arbitrary repository tree and must not be reused as untrusted-PR admission.
 
 The script:
 - refuses root, non-Linux systems, invalid hashes and any moved main;
