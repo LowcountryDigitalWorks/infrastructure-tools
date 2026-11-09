@@ -235,6 +235,9 @@ def classify(
         "ci_dispatch_authorized": False,
         "jit_admission_authorized": False,
         "chromeos_host_corroboration": "UNVERIFIED",
+        "chromeos_physical_ram_shortage_from_guest": "NOT_INFERABLE",
+        "memory_sample_scope": "CROSTINI_GUEST_VISIBLE_ONLY",
+        "guest_idle_memory_floor_disposition": "UNAVAILABLE",
         "guest_memory_peak": "UNMEASURED",
         "candidate_is_policy": False,
         "virtio_balloon_sysfs": virtio_balloon_sysfs,
@@ -261,6 +264,15 @@ def classify(
     report["maximum_psi_some_avg10_pct"] = max(p[0] for p in pressures)
     report["maximum_psi_full_avg10_pct"] = max(p[1] for p in pressures)
     report["accepted_memory_floor_met_all_samples"] = min(available) >= guest + reserve
+    # This is a guest-visible, idle policy comparison ONLY. Crostini's balloon
+    # allocation can differ from available ChromeOS host RAM, so a below-floor
+    # result must not be reported as a physical memory shortage or hardware
+    # unsuitability. The production controller admission guard remains intact.
+    report["guest_idle_memory_floor_disposition"] = (
+        "GUEST_FLOOR_OBSERVED_NOT_AUTHORIZED"
+        if report["accepted_memory_floor_met_all_samples"]
+        else "GUEST_FLOOR_BELOW_POLICY_NOT_HOST_EXHAUSTION"
+    )
     report["research_only_floor_met_all_samples"] = min(available) >= guest + RESEARCH_RESERVE_MIB
     oom_pairs = [o for _, _, o, _ in samples]
     # Validate all present values BEFORE treating any missing sample as
