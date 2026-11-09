@@ -92,7 +92,8 @@ def _assert_private_dir(path: Path) -> None:
 
 
 def _write_private_file(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    # Create the nested directory privately from the outset, not with a
+    # transient default 0755 mode that a later check cannot repair.
     _assert_private_dir(path.parent)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
