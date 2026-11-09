@@ -56,7 +56,9 @@ def _build_manifest():
 
 def _build_envelope(**overrides):
     manifest = overrides.pop("manifest", _build_manifest())
-    manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
+    manifest_bytes = overrides.pop("manifest_bytes", None)
+    if manifest_bytes is None:
+        manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
     manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
     files = {}
     for entry in manifest["files"]:
@@ -71,6 +73,7 @@ def _build_envelope(**overrides):
         "release_identity": transfer.RELEASE_IDENTITY,
         "manifest_sha256": manifest_sha256,
         "manifest": manifest,
+        "manifest_content": base64.b64encode(manifest_bytes).decode("ascii"),
         "files": files,
     }
     payload.update(overrides)
@@ -138,7 +141,30 @@ class InboundTransferV2Tests(unittest.TestCase):
                 break
         canonical = json.dumps(payload["manifest"], sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
         payload["manifest_sha256"] = hashlib.sha256(canonical).hexdigest()
+        payload["manifest_content"] = base64.b64encode(canonical).decode("ascii")
         with self.assertRaisesRegex(transfer.TransferError, "TRANSFER_FILE_PROVENANCE_MISMATCH"):
+            transfer.validate_transfer_envelope(payload)
+
+    def test_windows_crlf_manifest_bytes_preserved_and_hash_matched(self):
+        manifest = _build_manifest()
+        raw = json.dumps(manifest, separators=(",", ":"), ensure_ascii=False).encode("utf-8") + b"\r\n"
+        payload = _build_envelope(manifest=manifest, manifest_bytes=raw)
+        envelope = transfer.validate_transfer_envelope(payload)
+        self.assertEqual(envelope["files"]["manifest.json"], raw)
+        with tempfile.TemporaryDirectory() as temp:
+            proof = transfer.install_transfer_bundle(
+                envelope,
+                install_root=Path(temp) / "adjunct-v2",
+                state_root=Path(temp) / "state",
+            )
+            self.assertEqual(proof["manifest_sha256_sender"], proof["manifest_sha256_receiver"])
+            release = Path(temp) / "adjunct-v2" / "releases" / transfer.RELEASE_IDENTITY
+            self.assertEqual((release / "manifest.json").read_bytes(), raw)
+
+    def test_manifest_object_and_actual_publisher_bytes_must_agree(self):
+        payload = _build_envelope()
+        payload["manifest"]["artifact"] = "other-artifact"
+        with self.assertRaisesRegex(transfer.TransferError, "TRANSFER_MANIFEST_OBJECT_DRIFT"):
             transfer.validate_transfer_envelope(payload)
 
     def test_unknown_manifest_field_and_bounded_reader_refuse(self):
