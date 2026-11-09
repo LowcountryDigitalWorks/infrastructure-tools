@@ -13,6 +13,20 @@ Cost and billing fields are accepted only as **TRUSTED_ORCHESTRATOR_ATTESTATION*
 - Caller/model-supplied `billing_read_status=OK` or invented `included_compute_remaining_usd` values are **rejected** without trusted provenance.
 - **No runtime admission** from this planner alone; a trusted upstream adapter must supply closed DTO values.
 
+`provider_readback.py` is the host-side **GET-only** GitHub read adapter (fixed org `LowcountryDigitalWorks`, fixed BO docs-validation tuple). It uses the host `gh` binary without `shell=True`, redacts failures to fixed `readback_code` values, and never returns tokens, env paths, or raw API bodies.
+
+**Identity / trust (readback schema `1.2`):**
+
+- `trusted_caller=LDW_HOST_GH_ADAPTER` is a **label only** — it does **not** prove protected host/OS identity.
+- **V0:** request JSON must not carry host trust proofs (`host_trusted_context` is not a request field). Capacity attestations require non-serializable injected `TrustedHostEvidence` from protected orchestrator code (`trusted_host_evidence=` on the adapter entrypoints). Absent injection → `READ_UNTRUSTED_CALLER`.
+- **V0 admits only** `LDW_PROTECTED_HOST_SYNTHETIC` injection (unit tests). `LDW_PROTECTED_HOST_RUNTIME` is **rejected** until a separate runtime attestation mechanism exists — **no production runtime trust proof** in this revision.
+- Caller-supplied `private_capacity_blocked` / `active_duplicate_local_or_jit_job` claims cannot be elevated to planner **TRUE** without matching injected attestations; otherwise `READ_CAPACITY_UNVERIFIED`.
+- Job adapter accepts provider jobs with **literal** `status==queued` only (never maps `in_progress` / `waiting` / `pending` to queued).
+- PR head must include `head.repo.full_name` exactly `LowcountryDigitalWorks/business-operations` (missing/null/fork → fail closed).
+- Queue freshness is derived from provider `run.created_at` and host UTC clock (`QUEUED_TIMEOUT_MAX_SECONDS`), not from caller booleans.
+- Org Actions budgets use provider fields `budget_product_sku=actions` and `budget_scope=organization` (exactly one row or fail closed).
+- `gh` path resolution via `shutil.which` is **unverified** unless pinned/validated by trusted host policy outside this module.
+
 ## Scope
 
 - Closed DTO: **exact key set only** (schema `1.1`); no extra fields (including free-text overrides).
