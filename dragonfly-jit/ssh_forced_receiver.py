@@ -99,7 +99,7 @@ def _load_handoff_contract():
 
 INBOUND_TRANSFER_MODULE_NAME = "ldw_dragonfly_inbound_transfer_v2"
 INBOUND_TRANSFER_FILENAME = "inbound_transfer_v2.py"
-EXPECTED_INBOUND_TRANSFER_GIT_BLOB = "269b208674cecaeca347cec44bd2a86571440f28"
+EXPECTED_INBOUND_TRANSFER_GIT_BLOB = "5b1a341b51b5dbb153b837df69b8aa00e02f40a6"
 
 
 def _load_inbound_transfer_v2():

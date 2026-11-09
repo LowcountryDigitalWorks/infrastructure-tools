@@ -5,6 +5,44 @@ $ErrorActionPreference = 'Stop'
 
 . "$PSScriptRoot\DragonflyCanaryAdjunctV2Publisher.psm1"
 
+$script:TransferStagingMaxDirectoryEntries = 32
+$script:TransferStagingMaxFileBytes = 524288
+$script:TransferStagingMaxAggregateBytes = 2621440
+
+function Get-LdwDragonflyAdjunctV2TransferRelativePath {
+    param([Parameter(Mandatory)][string]$Root,[Parameter(Mandatory)][string]$Path)
+    $rootFull = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar)
+    $pathFull = [IO.Path]::GetFullPath($Path)
+    $prefix = $rootFull + [IO.Path]::DirectorySeparatorChar
+    if (-not $pathFull.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)) { throw 'TRANSFER_FILE_SET_DRIFT' }
+    return $pathFull.Substring($prefix.Length).Replace('\','/')
+}
+
+function Get-LdwDragonflyAdjunctV2BoundedStagingPaths {
+    param([Parameter(Mandatory)][string]$Root)
+    $discovered = [System.Collections.Generic.List[string]]::new()
+    $aggregate = 0L
+    $queue = [System.Collections.Generic.Queue[string]]::new()
+    $queue.Enqueue([IO.Path]::GetFullPath($Root))
+    while ($queue.Count -gt 0) {
+        $current = $queue.Dequeue()
+        foreach ($child in Get-ChildItem -LiteralPath $current -Force -ErrorAction Stop) {
+            if ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'TRANSFER_REPARSE_PATH_REFUSED' }
+            if ($discovered.Count -ge $script:TransferStagingMaxDirectoryEntries) { throw 'TRANSFER_STAGING_ENTRY_CAP_EXCEEDED' }
+            $rel = Get-LdwDragonflyAdjunctV2TransferRelativePath -Root $Root -Path $child.FullName
+            if ($child.PSIsContainer) {
+                $queue.Enqueue($child.FullName)
+            } else {
+                if ($child.Length -gt $script:TransferStagingMaxFileBytes) { throw 'TRANSFER_STAGING_FILE_TOO_LARGE' }
+                $aggregate += $child.Length
+                if ($aggregate -gt $script:TransferStagingMaxAggregateBytes) { throw 'TRANSFER_STAGING_AGGREGATE_TOO_LARGE' }
+            }
+            $discovered.Add($rel)
+        }
+    }
+    return $discovered
+}
+
 function Assert-LdwDragonflyAdjunctV2TransferPrincipal {
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { throw 'TRANSFER_WINDOWS_REQUIRED' }
     $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -49,11 +87,8 @@ function Assert-LdwDragonflyAdjunctV2NormalUserPackage {
         $authority.windowsSha256 -cne $script:DispatchWindowsSha256 -or
         $authority.materialization -cne 'crlf') { throw 'TRANSFER_DISPATCH_PIN_MISMATCH' }
     if (@($Manifest.files).Count -ne $script:Files.Count) { throw 'TRANSFER_FILE_SET_DRIFT' }
-    $expectedPaths = @($script:Files.path) + @('manifest.json','ci-dispatch')
-    $actualPaths = @(Get-ChildItem -LiteralPath $Root -Recurse -Force -ErrorAction Stop | ForEach-Object {
-        if ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'TRANSFER_REPARSE_PATH_REFUSED' }
-        Get-LdwAdjunctRelativePath -Root $Root -Path $_.FullName
-    })
+    $expectedPaths = @($script:Files.path) + @('manifest.json', 'ci-dispatch')
+    $actualPaths = @(Get-LdwDragonflyAdjunctV2BoundedStagingPaths -Root $Root)
     if (@(Compare-Object $expectedPaths $actualPaths -CaseSensitive).Count) { throw 'TRANSFER_FILE_SET_DRIFT' }
     foreach ($source in $script:Files) {
         $entry = @($Manifest.files | Where-Object path -CEQ $source.path)
@@ -131,4 +166,4 @@ function Build-LdwDragonflyAdjunctV2TransferEnvelope {
     }
 }
 
-Export-ModuleMember -Function Assert-LdwDragonflyAdjunctV2TransferPrincipal,Get-LdwDragonflyAdjunctV2TransferPackageRoot,Build-LdwDragonflyAdjunctV2TransferEnvelope
+Export-ModuleMember -Function Assert-LdwDragonflyAdjunctV2TransferPrincipal,Get-LdwDragonflyAdjunctV2TransferPackageRoot,Build-LdwDragonflyAdjunctV2TransferEnvelope,Get-LdwDragonflyAdjunctV2BoundedStagingPaths

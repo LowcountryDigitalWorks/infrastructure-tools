@@ -40,6 +40,8 @@ PINNED_FILE_BLOBS = {
 MAX_TRANSFER_BYTES = 2 * 1024 * 1024
 MAX_FILE_BYTES = 512 * 1024
 MANIFEST_FILENAME = "manifest.json"
+CLAIMS_FILENAME = "v2-transfer-claims.json"
+PENDING_CLAIM_FILENAME = "v2-transfer-pending.json"
 
 
 class TransferError(RuntimeError):
@@ -105,6 +107,116 @@ def _write_private_file(path: Path, data: bytes) -> None:
         except OSError:
             pass
         raise
+
+
+def _atomic_write_private_json(path: Path, obj: dict) -> None:
+    _assert_private_dir(path.parent)
+    payload = json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    handle_fd, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        text=False,
+    )
+    temp_path = Path(temp_name)
+    try:
+        os.chmod(temp_path, stat.S_IRUSR | stat.S_IWUSR)
+        with os.fdopen(handle_fd, "wb") as handle:
+            handle.write(payload)
+        handle_fd = -1
+        os.replace(temp_path, path)
+        temp_path = None  # type: ignore[assignment]
+    finally:
+        if handle_fd >= 0:
+            try:
+                os.close(handle_fd)
+            except OSError:
+                pass
+        if temp_path is not None and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+
+def _load_committed_claims(state_root: Path) -> dict[str, str]:
+    claim_path = state_root / CLAIMS_FILENAME
+    if not claim_path.exists():
+        return {}
+    try:
+        loaded = json.loads(claim_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise TransferError("TRANSFER_CLAIM_STATE_INVALID") from exc
+    if not isinstance(loaded, dict):
+        raise TransferError("TRANSFER_CLAIM_STATE_INVALID")
+    claims: dict[str, str] = {}
+    for key, value in loaded.items():
+        if not isinstance(key, str) or not isinstance(value, str) or len(value) != 64:
+            raise TransferError("TRANSFER_CLAIM_STATE_INVALID")
+        if any(ch not in "0123456789abcdef" for ch in value):
+            raise TransferError("TRANSFER_CLAIM_STATE_INVALID")
+        claims[key] = value
+    return claims
+
+
+def _load_pending_claim(state_root: Path) -> dict[str, str] | None:
+    pending_path = state_root / PENDING_CLAIM_FILENAME
+    if not pending_path.exists():
+        return None
+    try:
+        loaded = json.loads(pending_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise TransferError("TRANSFER_CLAIM_STATE_INVALID") from exc
+    if not isinstance(loaded, dict):
+        raise TransferError("TRANSFER_CLAIM_STATE_INVALID")
+    release = loaded.get("release_identity")
+    manifest_sha = loaded.get("manifest_sha256")
+    if not isinstance(release, str) or not isinstance(manifest_sha, str) or len(manifest_sha) != 64:
+        raise TransferError("TRANSFER_CLAIM_STATE_INVALID")
+    if any(ch not in "0123456789abcdef" for ch in manifest_sha):
+        raise TransferError("TRANSFER_CLAIM_STATE_INVALID")
+    return {"release_identity": release, "manifest_sha256": manifest_sha}
+
+
+def _clear_pending_claim(state_root: Path) -> None:
+    pending_path = state_root / PENDING_CLAIM_FILENAME
+    if pending_path.exists():
+        try:
+            pending_path.unlink()
+        except OSError as exc:
+            raise TransferError("TRANSFER_CLAIM_STATE_INVALID") from exc
+
+
+def _begin_install_transaction(state_root: Path, manifest_sha256: str) -> None:
+    _assert_private_dir(state_root)
+    claims = _load_committed_claims(state_root)
+    if manifest_sha256 in claims.values() or RELEASE_IDENTITY in claims:
+        raise TransferError("TRANSFER_REPLAY_REFUSED")
+    pending = _load_pending_claim(state_root)
+    if pending is not None:
+        if pending["release_identity"] != RELEASE_IDENTITY or pending["manifest_sha256"] != manifest_sha256:
+            raise TransferError("TRANSFER_CLAIM_PENDING_CONFLICT")
+        return
+    _atomic_write_private_json(
+        state_root / PENDING_CLAIM_FILENAME,
+        {"release_identity": RELEASE_IDENTITY, "manifest_sha256": manifest_sha256},
+    )
+
+
+def _commit_install_transaction(state_root: Path, manifest_sha256: str) -> None:
+    claims = _load_committed_claims(state_root)
+    if manifest_sha256 in claims.values() or RELEASE_IDENTITY in claims:
+        raise TransferError("TRANSFER_REPLAY_REFUSED")
+    claims[RELEASE_IDENTITY] = manifest_sha256
+    _atomic_write_private_json(state_root / CLAIMS_FILENAME, claims)
+    _clear_pending_claim(state_root)
+
+
+def _abort_install_transaction(state_root: Path) -> None:
+    try:
+        _clear_pending_claim(state_root)
+    except TransferError:
+        pass
 
 
 def validate_transfer_manifest(manifest: object) -> dict:
@@ -244,23 +356,6 @@ def validate_transfer_envelope(payload: object) -> dict:
     }
 
 
-def _claim_manifest_once(state_root: Path, manifest_sha256: str) -> None:
-    _assert_private_dir(state_root)
-    claim_path = state_root / "v2-transfer-claims.json"
-    claims: dict[str, str] = {}
-    if claim_path.exists():
-        try:
-            claims = json.loads(claim_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            raise TransferError("TRANSFER_CLAIM_STATE_INVALID") from exc
-        if not isinstance(claims, dict):
-            raise TransferError("TRANSFER_CLAIM_STATE_INVALID")
-    if manifest_sha256 in claims.values():
-        raise TransferError("TRANSFER_REPLAY_REFUSED")
-    claims[RELEASE_IDENTITY] = manifest_sha256
-    _write_private_file(claim_path, json.dumps(claims, sort_keys=True, separators=(",", ":")).encode("utf-8"))
-
-
 def install_transfer_bundle(
     envelope: dict,
     *,
@@ -270,10 +365,14 @@ def install_transfer_bundle(
     release_root = install_root / "releases" / RELEASE_IDENTITY
     if release_root.exists():
         raise TransferError("TRANSFER_RELEASE_ALREADY_PRESENT")
-    _claim_manifest_once(state_root, envelope["manifest_sha256"])
-    _assert_private_dir(install_root)
-    staging = Path(tempfile.mkdtemp(prefix="ldw-v2-transfer-", dir=install_root))
+    manifest_sha256 = envelope["manifest_sha256"]
+    _begin_install_transaction(state_root, manifest_sha256)
+    install_committed = False
+    receiver_sha = ""
+    staging = None
     try:
+        _assert_private_dir(install_root)
+        staging = Path(tempfile.mkdtemp(prefix="ldw-v2-transfer-", dir=install_root))
         _assert_private_dir(staging)
         for rel_path, data in envelope["files"].items():
             target = staging / rel_path
@@ -281,6 +380,16 @@ def install_transfer_bundle(
         _assert_private_dir(release_root.parent)
         os.replace(staging, release_root)
         staging = None
+        receiver_manifest = (release_root / MANIFEST_FILENAME).read_bytes()
+        receiver_sha = _sha256_hex(receiver_manifest)
+        if receiver_sha != manifest_sha256:
+            raise TransferError("TRANSFER_READBACK_MISMATCH")
+        _commit_install_transaction(state_root, manifest_sha256)
+        install_committed = True
+    except Exception:
+        if not install_committed:
+            _abort_install_transaction(state_root)
+        raise
     finally:
         if staging is not None and staging.exists():
             for child in sorted(staging.rglob("*"), reverse=True):
@@ -289,10 +398,6 @@ def install_transfer_bundle(
                 elif child.is_dir():
                     child.rmdir()
             staging.rmdir()
-    receiver_manifest = (release_root / MANIFEST_FILENAME).read_bytes()
-    receiver_sha = _sha256_hex(receiver_manifest)
-    if receiver_sha != envelope["manifest_sha256"]:
-        raise TransferError("TRANSFER_READBACK_MISMATCH")
     file_evidence = []
     for rel_path in PINNED_FILE_PATHS:
         data = (release_root / rel_path).read_bytes()

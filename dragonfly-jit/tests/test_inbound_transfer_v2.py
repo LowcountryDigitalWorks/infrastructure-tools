@@ -204,6 +204,101 @@ class InboundTransferV2Tests(unittest.TestCase):
         with self.assertRaises(transfer.TransferError):
             transfer.validate_transfer_envelope(_build_envelope(manifest=manifest))
 
+    def test_precommit_write_failure_allows_successful_retry(self):
+        payload = _build_envelope()
+        envelope = transfer.validate_transfer_envelope(payload)
+        original_write = transfer._write_private_file
+        attempts = {"count": 0}
+
+        def flaky_write(path, data):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise OSError("synthetic precommit write failure")
+            return original_write(path, data)
+
+        with tempfile.TemporaryDirectory() as temp:
+            install_root = Path(temp) / "adjunct-v2"
+            state_root = Path(temp) / "state"
+            with mock.patch.object(transfer, "_write_private_file", side_effect=flaky_write):
+                with self.assertRaises(OSError):
+                    transfer.install_transfer_bundle(
+                        envelope,
+                        install_root=install_root,
+                        state_root=state_root,
+                    )
+            pending = state_root / transfer.PENDING_CLAIM_FILENAME
+            self.assertFalse(pending.exists())
+            evidence = transfer.install_transfer_bundle(
+                envelope,
+                install_root=install_root,
+                state_root=state_root,
+            )
+            self.assertEqual(evidence["outcome"], "TRANSFER_INSTALLED")
+            with self.assertRaisesRegex(transfer.TransferError, "TRANSFER_RELEASE_ALREADY_PRESENT"):
+                transfer.install_transfer_bundle(
+                    envelope,
+                    install_root=install_root,
+                    state_root=state_root,
+                )
+
+    def test_os_replace_failure_rolls_back_pending_claim(self):
+        payload = _build_envelope()
+        envelope = transfer.validate_transfer_envelope(payload)
+        calls = {"count": 0}
+        real_replace = os.replace
+
+        def flaky_replace(src, dst):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise OSError("synthetic rename failure")
+            return real_replace(src, dst)
+
+        with tempfile.TemporaryDirectory() as temp:
+            install_root = Path(temp) / "adjunct-v2"
+            state_root = Path(temp) / "state"
+            with mock.patch.object(transfer.os, "replace", side_effect=flaky_replace):
+                with self.assertRaises(OSError):
+                    transfer.install_transfer_bundle(
+                        envelope,
+                        install_root=install_root,
+                        state_root=state_root,
+                    )
+            self.assertFalse((state_root / transfer.PENDING_CLAIM_FILENAME).exists())
+            self.assertFalse((state_root / transfer.CLAIMS_FILENAME).exists())
+            transfer.install_transfer_bundle(
+                envelope,
+                install_root=install_root,
+                state_root=state_root,
+            )
+
+    def test_malformed_committed_claim_refused(self):
+        payload = _build_envelope()
+        envelope = transfer.validate_transfer_envelope(payload)
+        with tempfile.TemporaryDirectory() as temp:
+            state_root = Path(temp) / "state"
+            state_root.mkdir(mode=0o700)
+            (state_root / transfer.CLAIMS_FILENAME).write_text("{not-json", encoding="utf-8")
+            with self.assertRaisesRegex(transfer.TransferError, "TRANSFER_CLAIM_STATE_INVALID"):
+                transfer.install_transfer_bundle(
+                    envelope,
+                    install_root=Path(temp) / "adjunct-v2",
+                    state_root=state_root,
+                )
+
+    def test_malformed_pending_claim_refused(self):
+        payload = _build_envelope()
+        envelope = transfer.validate_transfer_envelope(payload)
+        with tempfile.TemporaryDirectory() as temp:
+            state_root = Path(temp) / "state"
+            state_root.mkdir(mode=0o700)
+            (state_root / transfer.PENDING_CLAIM_FILENAME).write_text("[]", encoding="utf-8")
+            with self.assertRaisesRegex(transfer.TransferError, "TRANSFER_CLAIM_STATE_INVALID"):
+                transfer.install_transfer_bundle(
+                    envelope,
+                    install_root=Path(temp) / "adjunct-v2",
+                    state_root=state_root,
+                )
+
     def test_run_inbound_transfer_stdout_evidence(self):
         payload = _build_envelope()
         stdout = io.BytesIO()
