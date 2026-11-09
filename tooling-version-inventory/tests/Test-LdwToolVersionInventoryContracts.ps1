@@ -44,7 +44,7 @@ $found = New-LdwToolVersionInventoryAppRecordFromSnapshot -Snapshot @{
     trusted_publisher_policy = 'PINNED_SIGNER_MATCH'
     running_state            = 'observed_name_in_owner_session'
     updater_state            = 'in_progress_evidence'
-    running_scope            = 'owner_session_process_name_only'
+    running_scope            = 'invoking_process_session'
 }
 Assert-True ($found.trusted_publisher_policy -eq 'PINNED_SIGNER_MATCH') 'snapshot policy'
 
@@ -93,30 +93,30 @@ Assert-True ((Get-LdwToolVersionRunningState -ProcessName '   ') -eq 'unknown') 
 Assert-True ((Get-LdwToolVersionRunningState -ProcessName 'Cursor' -OwnerSessionId 0 -SessionObservationMode 'noninteractive') -eq 'unknown') 'noninteractive session cannot claim observed'
 
 $snapOne = @([pscustomobject]@{ ProcessName = 'Orca'; SessionId = 2 })
-$one = Get-LdwToolVersionRunningState @(
-    @{
-        ProcessName             = 'Orca'
-        OwnerSessionId          = 2
-        SessionObservationMode = 'interactive'
-        ProcessSnapshot         = $snapOne
-    })
+$oneArgs = @{
+    ProcessName             = 'Orca'
+    OwnerSessionId          = 2
+    SessionObservationMode  = 'interactive'
+    ProcessSnapshot         = $snapOne
+}
+$one = Get-LdwToolVersionRunningState @oneArgs
 Assert-True ($one -eq 'observed_name_in_owner_session') 'one exact name in scoped session'
 
 $snapDup = @(
     [pscustomobject]@{ ProcessName = 'Orca'; SessionId = 2 },
     [pscustomobject]@{ ProcessName = 'Orca'; SessionId = 2 }
 )
-$dup = Get-LdwToolVersionRunningState @(
-    @{
-        ProcessName             = 'Orca'
-        OwnerSessionId          = 2
-        SessionObservationMode = 'interactive'
-        ProcessSnapshot         = $snapDup
-    })
+$dupArgs = @{
+    ProcessName             = 'Orca'
+    OwnerSessionId          = 2
+    SessionObservationMode  = 'interactive'
+    ProcessSnapshot         = $snapDup
+}
+$dup = Get-LdwToolVersionRunningState @dupArgs
 Assert-True ($dup -eq 'unknown') 'multiple same-name processes stay unknown'
 
 $ctxInteractive = Get-LdwToolVersionInvocationSessionContext
-Assert-True ($ctxInteractive.running_scope -in @('owner_session_process_name_only', 'invoking_process_session')) 'running_scope bounded'
+Assert-True ($ctxInteractive.running_scope -eq 'invoking_process_session') 'running_scope is invoking-only'
 
 $authMissing = Get-LdwToolVersionAuthenticodeSummary -Path '__missing__' -AppId 'orca' -ExpectedUnsignedPolicy $false -InstallIdentityTrusted $true
 Assert-True ($authMissing.trusted_publisher_policy -eq 'UNVERIFIED') 'missing auth'

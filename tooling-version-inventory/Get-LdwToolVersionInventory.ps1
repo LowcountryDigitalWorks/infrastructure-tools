@@ -69,14 +69,15 @@ function Get-LdwToolVersionOwnerSessionId {
 function Get-LdwToolVersionInvocationSessionContext {
     <#
       Observes only the invoking process session. Session 0 and other non-interactive
-      host contexts cannot truthfully assert owner-desktop absence; running_scope labels that limit.
+      host contexts cannot truthfully assert owner-desktop absence. SessionId > 0 is not
+      independent proof of the owner interactive desktop; running_scope stays invoking-only.
     #>
     $sessionId = Get-LdwToolVersionOwnerSessionId
     $interactive = ($null -ne $sessionId -and $sessionId -gt 0)
     return [pscustomobject] @{
         session_id              = $sessionId
         interactive_observation = $interactive
-        running_scope           = if ($interactive) { 'owner_session_process_name_only' } else { 'invoking_process_session' }
+        running_scope           = 'invoking_process_session'
     }
 }
 
