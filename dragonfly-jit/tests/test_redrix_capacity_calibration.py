@@ -192,6 +192,43 @@ class CalibrationTest(unittest.TestCase):
         self.assertEqual(out["balloon_inflate_pages_delta"], 23)
         self.assertEqual(out["balloon_deflate_pages_delta"], 62)
 
+    def test_below_guest_idle_floor_is_not_a_chromeos_ram_shortage(self):
+        # Physical REDRIX penguin was ~9,378 MiB available; owner separately
+        # reports ~17-20 GiB ChromeOS available. These are different ledgers.
+        samples = [_sample(9378, (0.0, 0.0), None, (6612023, 1872062)) for _ in range(3)]
+        out = module.classify(samples, (2048, 8192), virtio_balloon_sysfs="PRESENT")
+        self.assertEqual(out["classification"], "MEASURED_NOT_AUTHORIZED")
+        self.assertFalse(out["accepted_memory_floor_met_all_samples"])
+        self.assertTrue(out["research_only_floor_met_all_samples"])
+        self.assertEqual(out["guest_idle_memory_floor_disposition"],
+                         "GUEST_FLOOR_BELOW_POLICY_NOT_HOST_EXHAUSTION")
+        self.assertEqual(out["memory_sample_scope"], "CROSTINI_GUEST_VISIBLE_ONLY")
+        self.assertEqual(out["chromeos_physical_ram_shortage_from_guest"], "NOT_INFERABLE")
+        self.assertEqual(out["chromeos_host_corroboration"], "UNVERIFIED")
+        self.assertFalse(out["jit_admission_authorized"])
+        self.assertFalse(out["ci_dispatch_authorized"])
+        self.assertFalse(out["candidate_is_policy"])
+        self.assertNotIn("chromeos_available_mib", out)
+
+    def test_guest_floor_met_does_not_claim_chromeos_safety_or_authorize(self):
+        samples = [_sample(12288, (0.0, 0.0), (1, 0), (100, 50)) for _ in range(3)]
+        out = module.classify(samples, (2048, 8192))
+        self.assertTrue(out["accepted_memory_floor_met_all_samples"])
+        self.assertEqual(out["guest_idle_memory_floor_disposition"],
+                         "GUEST_FLOOR_OBSERVED_NOT_AUTHORIZED")
+        self.assertEqual(out["chromeos_physical_ram_shortage_from_guest"], "NOT_INFERABLE")
+        self.assertEqual(out["chromeos_host_corroboration"], "UNVERIFIED")
+        self.assertFalse(out["jit_admission_authorized"])
+        self.assertFalse(out["candidate_is_policy"])
+
+    def test_missing_guest_evidence_cannot_infer_host_or_pass_floor(self):
+        samples = [_sample(None, (0.0, 0.0), None, None) for _ in range(3)]
+        out = module.classify(samples, (2048, 8192))
+        self.assertEqual(out["classification"], "HOLD")
+        self.assertEqual(out["guest_idle_memory_floor_disposition"], "UNAVAILABLE")
+        self.assertEqual(out["chromeos_physical_ram_shortage_from_guest"], "NOT_INFERABLE")
+        self.assertFalse(out["jit_admission_authorized"])
+
     def test_candidate_is_not_approved_even_when_memory_passes(self):
         s = [_sample(9625, (0, 0), (1, 0), (1, 0)) for _ in range(3)]
         out = module.classify(s, (2048, 8192))
