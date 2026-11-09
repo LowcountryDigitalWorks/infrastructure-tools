@@ -166,8 +166,89 @@ class PrivateSourceCiTests(unittest.TestCase):
         self.assertEqual(current, original)
 
 
+    def test_all_profile_runs_each_fixed_suite_in_one_checkout(self):
+        counts = (136, 68, 6)
+        fixtures = [
+            subprocess.CompletedProcess((), 0, "", f"Ran {count} tests in 0.1s\\n\\nOK\\n")
+            for count in counts
+        ]
+        with (
+            mock.patch.object(ci, "remote_main", side_effect=[HEAD, HEAD]) as remote,
+            mock.patch.object(ci, "git", side_effect=self.git_ok) as git,
+            mock.patch.object(ci, "private_sources", return_value=True) as private,
+            mock.patch.object(ci, "run", side_effect=fixtures) as runner,
+        ):
+            result = ci.proof(HEAD, suite="all")
+        self.assertEqual(result["result"], "PASS_SOURCE_ONLY")
+        self.assertEqual(result["suite"], "all")
+        self.assertEqual(result["tests_passed"], sum(counts))
+        self.assertEqual(result["suite_counts"], dict(zip(ci.ALL_SUITE_ORDER, counts)))
+        self.assertTrue(result["private_checkout"])
+        self.assertTrue(result["no_runner"] and result["no_jit_authority"])
+        self.assertEqual(remote.call_count, 2)
+        self.assertEqual(git.call_count, 5)
+        self.assertEqual(private.call_count, 3)
+        self.assertEqual(
+            [call.args[0] for call in runner.call_args_list],
+            [ci.SUITE_PROFILES[name][0] for name in ci.ALL_SUITE_ORDER],
+        )
+        self.assertEqual(
+            [call.kwargs["paths"] if "paths" in call.kwargs else call.args[1]
+             for call in private.call_args_list],
+            [ci.SUITE_PROFILES[name][1] for name in ci.ALL_SUITE_ORDER],
+        )
+
+    def test_all_profile_bad_source_fails_before_running_any_suite(self):
+        with (
+            mock.patch.object(ci, "remote_main", return_value=HEAD) as remote,
+            mock.patch.object(ci, "git", side_effect=self.git_ok),
+            mock.patch.object(ci, "private_sources", side_effect=[True, False]),
+            mock.patch.object(ci, "run") as runner,
+        ):
+            result = ci.proof(HEAD, suite="all")
+        self.assertEqual(result["result"], "HOLD")
+        self.assertEqual(result["reason"], "PRIVATE_SOURCE_REQUIRED")
+        self.assertNotIn("tests_passed", result)
+        self.assertNotIn("suite_counts", result)
+        remote.assert_called_once()
+        runner.assert_not_called()
+
+    def test_all_profile_second_suite_failure_cannot_emit_partial_pass(self):
+        failed = subprocess.CompletedProcess((), 1, "SENSITIVE_DETAILS", "Ran 68 tests in 0.1s")
+        with (
+            mock.patch.object(ci, "remote_main", return_value=HEAD) as remote,
+            mock.patch.object(ci, "git", side_effect=self.git_ok),
+            mock.patch.object(ci, "private_sources", return_value=True),
+            mock.patch.object(ci, "run", side_effect=[PASSED, failed]) as runner,
+        ):
+            result = ci.proof(HEAD, suite="all")
+        self.assertEqual(result["result"], "HOLD")
+        self.assertEqual(result["reason"], "SOURCE_TESTS_FAILED")
+        self.assertNotIn("suite_counts", result)
+        self.assertNotIn("tests_passed", result)
+        self.assertNotIn("SENSITIVE_DETAILS", str(result))
+        self.assertEqual(runner.call_count, 2)
+        remote.assert_called_once()
+
+    def test_all_profile_main_movement_after_tests_refuses_pass(self):
+        with (
+            mock.patch.object(ci, "remote_main", side_effect=[HEAD, "b" * 40]) as remote,
+            mock.patch.object(ci, "git", side_effect=self.git_ok),
+            mock.patch.object(ci, "private_sources", return_value=True),
+            mock.patch.object(ci, "run", return_value=PASSED) as runner,
+        ):
+            result = ci.proof(HEAD, suite="all")
+        self.assertEqual(result["reason"], "MAIN_MOVED")
+        self.assertEqual(result["result"], "HOLD")
+        self.assertNotIn("suite_counts", result)
+        self.assertNotIn("tests_passed", result)
+        self.assertEqual(runner.call_count, 3)
+        self.assertEqual(remote.call_count, 2)
+
     def test_suite_registry_is_closed_fixed_python_only(self):
         self.assertEqual(set(ci.SUITE_PROFILES), {"dragonfly", "chat-relay", "browser-static"})
+        self.assertEqual(ci.ALL_SUITE_ORDER, ("dragonfly", "chat-relay", "browser-static"))
+        self.assertEqual(ci.SUITE_CHOICES, (*ci.ALL_SUITE_ORDER, "all"))
         for name, (command, paths) in ci.SUITE_PROFILES.items():
             with self.subTest(suite=name):
                 self.assertEqual(command[0], "/usr/bin/python3")
