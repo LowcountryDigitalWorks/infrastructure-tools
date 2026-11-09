@@ -34,7 +34,7 @@ Examples from a reviewed helper checkout, replacing the hash with exact current 
 /usr/bin/python3 dragonfly-jit/redrix_native_source_ci.py --head <verified-40-char-main-sha> --suite browser-static
 ```
 
-The The fixed `--suite all` option is intended for routine one-shot REDRIX source CI: one exact current-main checkout, **all three** approved file/ownership checks *before* any tests, three fixed commands, one final main-identity recheck, and one sanitized aggregate report. It returns `suite_counts` and `tests_passed` only after every suite passes; a single failed/missing/changed source or a moved main returns `HOLD` with no partial PASS. No new GitHub runner, scheduler, credential or mutable workflow authority is created.
+The fixed `--suite all` option is intended for routine one-shot REDRIX source CI: one exact current-main checkout, **all three** approved file/ownership checks *before* any tests, three fixed commands, one final main-identity recheck, and one sanitized aggregate report. It returns `suite_counts` and `tests_passed` only after every suite passes; a single failed/missing/changed source or a moved main returns `HOLD` with no partial PASS. No new GitHub runner, scheduler, credential or mutable workflow authority is created.
 
 ```bash
 /usr/bin/python3 dragonfly-jit/redrix_native_source_ci.py --head <verified-40-char-main-sha> --suite all
