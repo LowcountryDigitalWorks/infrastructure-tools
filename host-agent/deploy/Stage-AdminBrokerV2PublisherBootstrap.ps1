@@ -10,8 +10,8 @@ $workerBundleName = 'Invoke-AdminBrokerV2PublisherWorker.ps1'
 $reviewManifestFileName = 'AdminBrokerV2BootstrapReviewManifest.json'
 $stagingLeaf = 'v2-publisher-once'
 # Independently reviewed byte pins for the install bundle (issuer manifest cross-checks these literals; Stage has no self-digest pin).
-$trustedReviewManifestFileSha256 = 'fb2dd7b2f495d67edb7b72da35f14b83f1976d0054fe2d76530dbc3330664feb'
-$trustedBootstrapSha256 = '688a795dccfdbb4df7e9fb9fe5ba9cc7834c7144cc6da3a6bd7302346bae335c'
+$trustedReviewManifestFileSha256 = '49571d8ed47764d2b5aa5a82ee2f9f63cd877c44114532289db2adcbad3e47b2'
+$trustedBootstrapSha256 = '1794ea3198a52978366bade9d279efdc30b5fc3f3636ba6be8bbfd4cf026527e'
 $trustedWorkerSha256 = '051124b03f88694f19f557954e844ffe1f71c24187c7998a4cf6e8ce55aaa4f1'
 
 function Assert-Elevated {
@@ -51,11 +51,11 @@ function Assert-WindowsProgramDataRootBaselineAcl([string]$ProgramDataRoot) {
         [Security.AccessControl.FileSystemRights]::Delete -bor
         [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
         [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-        [Security.AccessControl.FileSystemRights]::TakeOwnership -bor
-        [Security.AccessControl.FileSystemRights]::FullControl)
+        [Security.AccessControl.FileSystemRights]::TakeOwnership)
     $genericAll = 268435456
     $stockUsersWrite = 278
     $stockUsersRx = 1179817
+    $fullControlMask = [int][Security.AccessControl.FileSystemRights]::FullControl
     $usersSid = 'S-1-5-32-545'
     $creatorOwnerSid = 'S-1-3-0'
     $trustedSids = @('S-1-5-18', 'S-1-5-32-544')
@@ -72,18 +72,18 @@ function Assert-WindowsProgramDataRootBaselineAcl([string]$ProgramDataRoot) {
         $inh = $rule.InheritanceFlags
         $prop = $rule.PropagationFlags
         if ($sid -in $trustedSids) { continue }
-        if ($rights -band $dangerous) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
-        if ($rights -eq $genericAll) {
-            if ($sid -ceq $creatorOwnerSid -and ($prop -band $inheritOnly) -ne 0) { continue }
-            throw 'PROGRAMDATA_ROOT_BASELINE_HOLD'
-        }
-        if ($sid -ceq $creatorOwnerSid) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
         if ($sid -ceq $usersSid) {
             if (($inh -band $containerInherit) -eq 0) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
             if (($prop -band $inheritOnly) -ne 0) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
             if ($rights -eq $stockUsersWrite -or $rights -eq $stockUsersRx) { continue }
             throw 'PROGRAMDATA_ROOT_BASELINE_HOLD'
         }
+        if ($sid -ceq $creatorOwnerSid) {
+            if (($prop -band $inheritOnly) -ne 0 -and $rights -eq $genericAll) { continue }
+            throw 'PROGRAMDATA_ROOT_BASELINE_HOLD'
+        }
+        if ($rights -band $dangerous) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+        if ($rights -eq $genericAll -or $rights -eq $fullControlMask) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
         if ($rights -band $writeSurface) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
     }
 }

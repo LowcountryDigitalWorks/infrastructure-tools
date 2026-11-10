@@ -72,11 +72,11 @@ function Assert-WindowsProgramDataRootBaselineAcl([string]$ProgramDataRoot) {
         [Security.AccessControl.FileSystemRights]::Delete -bor
         [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
         [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-        [Security.AccessControl.FileSystemRights]::TakeOwnership -bor
-        [Security.AccessControl.FileSystemRights]::FullControl)
+        [Security.AccessControl.FileSystemRights]::TakeOwnership)
     $genericAll = 268435456
     $stockUsersWrite = 278
     $stockUsersRx = 1179817
+    $fullControlMask = [int][Security.AccessControl.FileSystemRights]::FullControl
     $usersSid = 'S-1-5-32-545'
     $creatorOwnerSid = 'S-1-3-0'
     $trustedSids = @('S-1-5-18', 'S-1-5-32-544')
@@ -93,18 +93,18 @@ function Assert-WindowsProgramDataRootBaselineAcl([string]$ProgramDataRoot) {
         $inh = $rule.InheritanceFlags
         $prop = $rule.PropagationFlags
         if ($sid -in $trustedSids) { continue }
-        if ($rights -band $dangerous) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
-        if ($rights -eq $genericAll) {
-            if ($sid -ceq $creatorOwnerSid -and ($prop -band $inheritOnly) -ne 0) { continue }
-            throw 'PROGRAMDATA_ROOT_BASELINE_HOLD'
-        }
-        if ($sid -ceq $creatorOwnerSid) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
         if ($sid -ceq $usersSid) {
             if (($inh -band $containerInherit) -eq 0) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
             if (($prop -band $inheritOnly) -ne 0) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
             if ($rights -eq $stockUsersWrite -or $rights -eq $stockUsersRx) { continue }
             throw 'PROGRAMDATA_ROOT_BASELINE_HOLD'
         }
+        if ($sid -ceq $creatorOwnerSid) {
+            if (($prop -band $inheritOnly) -ne 0 -and $rights -eq $genericAll) { continue }
+            throw 'PROGRAMDATA_ROOT_BASELINE_HOLD'
+        }
+        if ($rights -band $dangerous) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+        if ($rights -eq $genericAll -or $rights -eq $fullControlMask) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
         if ($rights -band $writeSurface) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
     }
 }
