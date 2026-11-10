@@ -10,7 +10,7 @@ $workerBundleName = 'Invoke-AdminBrokerV2PublisherWorker.ps1'
 $reviewManifestFileName = 'AdminBrokerV2BootstrapReviewManifest.json'
 $stagingLeaf = 'v2-publisher-once'
 # Independently reviewed byte pins for the install bundle (issuer manifest cross-checks these literals; Stage has no self-digest pin).
-$trustedReviewManifestFileSha256 = '65ecded7bc8cdb3db43d36c2a2dc5a8576a4f3ef3f1cb1dcd771d95e081e5ba7'
+$trustedReviewManifestFileSha256 = 'ea7d2ed037ba0bd4f3418020174b4e3e1f0f2768cec06a7f033b46315ffe6b17'
 $trustedBootstrapSha256 = '4ecb1d07bdc267af299dc4ff093d5b962aa72207b90911060848b1026ec181e7'
 $trustedWorkerSha256 = '051124b03f88694f19f557954e844ffe1f71c24187c7998a4cf6e8ce55aaa4f1'
 

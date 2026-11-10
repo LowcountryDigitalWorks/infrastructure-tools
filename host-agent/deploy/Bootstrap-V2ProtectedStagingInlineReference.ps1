@@ -18,11 +18,11 @@ $workerBundleName = 'Invoke-AdminBrokerV2PublisherWorker.ps1'
 $reviewManifestFileName = 'AdminBrokerV2BootstrapReviewManifest.json'
 $stagingLeaf = 'v2-publisher-once'
 $fixedReviewDownloadSuffix = 'Downloads\LDW-V2-Publisher-Bootstrap-Review'
-$trustedIssuerManifestFileSha256 = 'cbee01cc9539de647205fdbd63f4b4999cc4e27480a40bfaf1d7aaded88f57d0'
-$trustedReviewManifestFileSha256 = '65ecded7bc8cdb3db43d36c2a2dc5a8576a4f3ef3f1cb1dcd771d95e081e5ba7'
+$trustedIssuerManifestFileSha256 = 'adafa0968d2a6bf4edea63c2aeb032154844a4179bf7cee0452e4076d294ecd0'
+$trustedReviewManifestFileSha256 = 'ea7d2ed037ba0bd4f3418020174b4e3e1f0f2768cec06a7f033b46315ffe6b17'
 $trustedBootstrapSha256 = '4ecb1d07bdc267af299dc4ff093d5b962aa72207b90911060848b1026ec181e7'
 $trustedWorkerSha256 = '051124b03f88694f19f557954e844ffe1f71c24187c7998a4cf6e8ce55aaa4f1'
-$trustedStageSha256 = 'fb4e5722f340b24639536b12f5292cf80a8d3ed60199e3461a2bd82d621250b3'
+$trustedStageSha256 = '6b922f05000ab39fb04521971d06c45b996519fad931d7222d8dad4ac13a7351'
 
 function Assert-ElevatedInline {
     if ($env:OS -ne 'Windows_NT') { throw 'WINDOWS_REQUIRED' }
