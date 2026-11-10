@@ -117,6 +117,9 @@ jobs:
       - name: REDRIX LDW parent ACL synthetic in-memory target (Windows PowerShell 5.1)
         shell: powershell
         run: powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./host-agent/deploy/tests/Test-RedrixLdwParentAclSyntheticTarget.ps1
+      - name: REDRIX LDW parent ACL migration transaction rehearsal (Windows PowerShell 5.1)
+        shell: powershell
+        run: powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./host-agent/deploy/tests/Test-RedrixLdwParentAclMigrationTransaction.ps1
 
       - name: Run tray autostart contract tests
         shell: pwsh

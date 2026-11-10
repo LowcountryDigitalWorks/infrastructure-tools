@@ -43,6 +43,8 @@ Earlier challenger pin `a11c28fd…` for the same nominal string is **incorrect*
 
 Pure in-memory proof: `host-agent/deploy/RedrixLdwParentAclSyntheticTarget.ps1` and `host-agent/deploy/tests/Test-RedrixLdwParentAclSyntheticTarget.ps1`.
 
+Non-executing migration **rehearsal** (mock ledger, `BLOCKED_APPROVAL` apply boundary): `host-agent/docs/REDRIX_LDW_PARENT_ACL_MIGRATION_TRANSACTION_REHEARSAL.md`, `host-agent/deploy/RedrixLdwParentAclMigrationTransaction.ps1`.
+
 ## Future physical transaction (NOT in this artifact)
 
 Any owner-only host change remains a **separate** gate after independent H0/M0 review:
