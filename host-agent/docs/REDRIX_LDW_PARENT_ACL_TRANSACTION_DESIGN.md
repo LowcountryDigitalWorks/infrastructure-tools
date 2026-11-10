@@ -2,7 +2,7 @@
 
 **Classification: DESIGN / NOT EXECUTABLE / NOT OWNER-AUTHORIZED**
 
-**Authority:** `NOT_PHYSICAL_AUTHORITY` — in-memory synthetic candidate only.  
+**Authority:** `NOT_PHYSICAL_AUTHORITY` — in-memory synthetic candidate only.
 **Verification:** `SOURCE_SYNTHETIC_VERIFIED` when WinPS 5.1 tests pin canonical UTF-8 `.Sddl` SHA `d0d4816b…` (not an authorized host ACL).
 
 Owning issue: https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/186
