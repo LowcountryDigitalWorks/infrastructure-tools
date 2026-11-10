@@ -31,18 +31,24 @@ $preimage = Get-RedrixLdwParentAclPreimageSecurityDescriptor
 Assert (Test-RedrixLdwParentAclHasUntrustedUsersRights $preimage) 'PREIMAGE_HAS_USERS_WRITE_SURFACE'
 Assert (Test-RedrixLdwParentAclHasCreatorOwnerGenericAll $preimage) 'PREIMAGE_HAS_CREATOR_OWNER_GENERIC_ALL'
 Assert (-not $preimage.AreAccessRulesProtected) 'PREIMAGE_IS_UNPROTECTED'
+$literalHash = Get-RedrixUtf8LiteralSha256 $script:RedrixLdwParentAclPreimageSddlLiteral
+$normalizedHash = Get-RedrixSddlUtf8Sha256 $preimage
+Assert ($literalHash -cne $normalizedHash) 'PREIMAGE_LITERAL_NOT_CANONICAL_SDDL'
+Assert ($normalizedHash -cne $script:RedrixLdwParentAclLivePreimageSha256) 'SYNTHETIC_FIXTURE_NOT_LIVE_PREIMAGE_SHA'
+Assert ($preimage.Sddl -match 'DCLCRPCR') 'PREIMAGE_USERS_WRITE_NORMALIZED_MASK'
 
 $bad = New-RedrixLdwParentAclBadCopyRemoveSecurityDescriptor
 Assert (Test-RedrixLdwParentAclHasUntrustedUsersRights $bad) 'BAD_TRANSFORM_RETAINS_USERS_WRITE_OR_FORBIDDEN'
-Assert ($bad.Sddl -notmatch 'O:SYG:SYD:PAI\(A;OICI;FA;;;SY\)\(A;OICI;FA;;;BA\)\(A;OICI;0x1200a9;;;BU\)') `
-    'BAD_TRANSFORM_NOT_EXACT_TARGET'
+Assert ($bad.Sddl -cne $script:RedrixLdwParentAclCanonicalTargetSddl) 'BAD_TRANSFORM_NOT_CANONICAL_TARGET'
 
 $candidate = New-RedrixLdwParentAclExplicitTargetSecurityDescriptor
 Assert-RedrixLdwParentAclExplicitTargetShape $candidate
-$pin = Test-RedrixLdwParentAclReviewerHypothesisPin $candidate
-Assert (-not $pin.sddlMatchesHypothesis) 'EXPLICIT_BUILD_SDDL_DIFFERS_FROM_LITERATURE_STRING'
-Assert ($pin.literaturePinStatus -eq 'BLOCKED_TARGET_MISMATCH') 'REVIEWER_SHA_PIN_UNVERIFIED_ON_HOST'
-Assert ($pin.candidateSha256.Length -eq 64) 'CANDIDATE_SHA_PRESENT'
+$pin = Test-RedrixLdwParentAclCanonicalPin $candidate
+Assert $pin.sddlMatchesCanonical 'CANONICAL_SDDL_VERIFIED'
+Assert $pin.shaMatchesCanonical 'CANONICAL_SHA_VERIFIED'
+Assert $pin.invalidLiteratureRejected 'INVALID_LITERATURE_SHA_a11c_REJECTED'
+Assert ($pin.candidateSha256 -ceq 'd0d4816b0b001698a7f49ee24dab0eff49f784bcd9164ad5504b6e45f47f0a41') 'PIN_D0D4816B'
+Assert ($pin.candidateSha256 -cne $pin.invalidLiteratureSha256) 'A11C_NOT_ACCEPTED'
 
 if ($candidate.Sddl -cmatch ';;;CO\)') { throw 'ASSERTION_FAILED_TARGET_OMITS_CREATOR_OWNER' }
 Assert ($true) 'TARGET_OMITS_CREATOR_OWNER'
@@ -74,18 +80,7 @@ catch {
     Assert ($true) 'USERS_WRITE_SURFACE_REJECTED'
 }
 
-$hypothesis = New-Object System.Security.AccessControl.DirectorySecurity
-$hypothesis.SetSecurityDescriptorSddlForm($script:RedrixLdwParentAclReviewerHypothesisSddl)
-try {
-    Assert-RedrixLdwParentAclExplicitTargetShape $hypothesis
-    Assert ($true) 'HYPOTHESIS_SDDL_PASSES_SHAPE_WHEN_LOADED'
-}
-catch {
-    throw ('HYPOTHESIS_SDDL_SHAPE_FAILED_' + $_.Exception.Message)
-}
-
 Write-Host ('REDRIX_LDW_PARENT_ACL_SYNTHETIC_TESTS=PASS assertions=' + $checks)
 Write-Host ('REDRIX_LDW_PARENT_ACL_CANDIDATE_SHA256=' + $pin.candidateSha256)
 Write-Host ('REDRIX_LDW_PARENT_ACL_CANDIDATE_SDDL=' + $pin.candidateSddl)
-Write-Host ('REDRIX_LDW_PARENT_ACL_LITERATURE_PIN_STATUS=' + $pin.literaturePinStatus)
-Write-Host ('REDRIX_LDW_PARENT_ACL_HYPOTHESIS_HOST_SHA256=' + $pin.reviewerHypothesisSha256)
+Write-Host ('REDRIX_LDW_PARENT_ACL_CANONICAL_PIN_STATUS=VERIFIED')

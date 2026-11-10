@@ -1,8 +1,10 @@
 {
   "schema": "REDRIX_LDW_PARENT_ACL_SYNTHETIC_V1",
   "classification": "NON_EXECUTABLE_REFERENCE_ONLY",
-  "preimageSddl": "O:SYG:SYD:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIIOID;GA;;;CO)(A;OICIID;0x1200a9;;;BU)(A;CIID;0x116;;;BU)",
-  "reviewerHypothesisTargetSddl": "O:SYG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)",
-  "reviewerHypothesisTargetSha256Utf8SddlProperty": "a11c28fd0fceea6c13d29661318b95bdb55ca0cd4ad3a0d5f5a3ceb42ce2f7c8",
-  "note": "Hypothesis pin is not trusted until independently verified on WinPS 5.1 via DirectorySecurity.Sddl UTF-8 SHA-256."
+  "preimageSddlLiteral": "O:SYG:SYD:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIIOID;GA;;;CO)(A;OICIID;0x1200a9;;;BU)(A;CIID;0x116;;;BU)",
+  "preimageNote": "Literal Users-write ACE 0x116 normalizes in .NET DirectorySecurity.Sddl to DCLCRPCR; do not hash the unnormalized literal against live observer pins.",
+  "livePreimageSha256Utf8SddlProperty": "d7262f4d667814fce0820acbabe2613e352c22614ae7de2105879459c7fbb2a9",
+  "canonicalTargetSddl": "O:SYG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)",
+  "canonicalTargetSha256Utf8SddlProperty": "d0d4816b0b001698a7f49ee24dab0eff49f784bcd9164ad5504b6e45f47f0a41",
+  "rejectedLiteratureSha256": "a11c28fd0fceea6c13d29661318b95bdb55ca0cd4ad3a0d5f5a3ceb42ce2f7c8"
 }

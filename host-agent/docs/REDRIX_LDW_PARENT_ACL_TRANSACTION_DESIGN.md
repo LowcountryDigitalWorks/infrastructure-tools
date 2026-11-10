@@ -30,11 +30,13 @@ Synthetic preimage for negative tests (historical LDW parent shape):
 
 `O:SYG:SYD:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIIOID;GA;;;CO)(A;OICIID;0x1200a9;;;BU)(A;CIID;0x116;;;BU)`
 
-Reviewer **hypothesis** target SDDL (literature only — verify before any future pin):
+**Canonical target** (in-memory WinPS 5.1 on LDW01, UTF-8 hash of `DirectorySecurity.Sddl`):
 
 `O:SYG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)`
 
-SHA-256 pins must use UTF-8 of `DirectorySecurity.Sddl` on the exact WinPS 5.1 host. If literature SHA `a11c28fd…` does not match an independently built explicit candidate on that host, status is **`BLOCKED_TARGET_MISMATCH`** — do not treat the literature pin as authoritative.
+SHA-256: `d0d4816b0b001698a7f49ee24dab0eff49f784bcd9164ad5504b6e45f47f0a41`
+
+Earlier challenger pin `a11c28fd…` for the same nominal string is **incorrect** for these exact bytes — tests must reject it. Synthetic preimage literal `(A;CIID;0x116;;;BU)` normalizes in .NET to `(A;CIID;DCLCRPCR;;;BU)`; hash the `.Sddl` property, not the unnormalized literal. Live LDW01 preimage observer pin `d7262f4d…` (PR300) remains independent from this synthetic fixture.
 
 Pure in-memory proof: `host-agent/deploy/RedrixLdwParentAclSyntheticTarget.ps1` and `host-agent/deploy/tests/Test-RedrixLdwParentAclSyntheticTarget.ps1`.
 

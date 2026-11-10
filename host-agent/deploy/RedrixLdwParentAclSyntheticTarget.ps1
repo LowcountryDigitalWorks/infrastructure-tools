@@ -6,13 +6,15 @@ Never calls Set-Acl, icacls, or mutates a host path.
 #>
 Set-StrictMode -Version Latest
 
-$script:RedrixLdwParentAclPreimageSddl = 'O:SYG:SYD:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIIOID;GA;;;CO)(A;OICIID;0x1200a9;;;BU)(A;CIID;0x116;;;BU)'
-$script:RedrixLdwParentAclReviewerHypothesisSddl = 'O:SYG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)'
-$script:RedrixLdwParentAclReviewerHypothesisSha256 = 'a11c28fd0fceea6c13d29661318b95bdb55ca0cd4ad3a0d5f5a3ceb42ce2f7c8'
+$script:RedrixLdwParentAclPreimageSddlLiteral = 'O:SYG:SYD:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIIOID;GA;;;CO)(A;OICIID;0x1200a9;;;BU)(A;CIID;0x116;;;BU)'
+$script:RedrixLdwParentAclCanonicalTargetSddl = 'O:SYG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)'
+$script:RedrixLdwParentAclCanonicalTargetSha256 = 'd0d4816b0b001698a7f49ee24dab0eff49f784bcd9164ad5504b6e45f47f0a41'
+$script:RedrixLdwParentAclInvalidLiteratureSha256 = 'a11c28fd0fceea6c13d29661318b95bdb55ca0cd4ad3a0d5f5a3ceb42ce2f7c8'
+$script:RedrixLdwParentAclLivePreimageSha256 = 'd7262f4d667814fce0820acbabe2613e352c22614ae7de2105879459c7fbb2a9'
 
 function Get-RedrixLdwParentAclPreimageSecurityDescriptor {
     $acl = New-Object System.Security.AccessControl.DirectorySecurity
-    $acl.SetSecurityDescriptorSddlForm($script:RedrixLdwParentAclPreimageSddl)
+    $acl.SetSecurityDescriptorSddlForm($script:RedrixLdwParentAclPreimageSddlLiteral)
     return $acl
 }
 
@@ -25,34 +27,78 @@ function Get-RedrixSddlUtf8Sha256([Security.AccessControl.FileSystemSecurity]$Ac
     finally { $hash.Dispose() }
 }
 
+function Get-RedrixUtf8LiteralSha256([string]$Text) {
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes($Text)
+        return ([BitConverter]::ToString($hash.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+    }
+    finally { $hash.Dispose() }
+}
+
+function Get-RedrixLdwParentAclTargetRuleMap([Security.AccessControl.FileSystemSecurity]$Acl) {
+    $map = [ordered]@{}
+    foreach ($rule in $Acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -ne 'Allow') { continue }
+        $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        if ($map.Contains($sid)) { throw 'RULE_MAP_DUPLICATE_PRINCIPAL' }
+        $map[$sid] = [int]$rule.FileSystemRights
+    }
+    return $map
+}
+
+function Assert-RedrixLdwParentAclTargetRuleParity(
+    [Security.AccessControl.FileSystemSecurity]$Left,
+    [Security.AccessControl.FileSystemSecurity]$Right) {
+    $leftMap = Get-RedrixLdwParentAclTargetRuleMap $Left
+    $rightMap = Get-RedrixLdwParentAclTargetRuleMap $Right
+    if ($leftMap.Count -ne $rightMap.Count) { throw 'RULE_PARITY_COUNT' }
+    foreach ($sid in $leftMap.Keys) {
+        if (-not $rightMap.Contains($sid)) { throw 'RULE_PARITY_MISSING_SID' }
+        if ($leftMap[$sid] -ne $rightMap[$sid]) { throw 'RULE_PARITY_MASK' }
+    }
+}
+
 function New-RedrixLdwParentAclExplicitTargetSecurityDescriptor {
-    $acl = New-Object System.Security.AccessControl.DirectorySecurity
-    $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-18'))
-    $acl.SetGroup([Security.Principal.SecurityIdentifier]::new('S-1-5-18'))
-    $acl.SetAccessRuleProtection($true, $false)
+    $draft = New-Object System.Security.AccessControl.DirectorySecurity
+    $draft.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-18'))
+    $draft.SetGroup([Security.Principal.SecurityIdentifier]::new('S-1-5-18'))
+    $draft.SetAccessRuleProtection($true, $false)
     $inherit = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
         [Security.AccessControl.InheritanceFlags]::ObjectInherit
     $prop = [Security.AccessControl.PropagationFlags]::None
-    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+    $draft.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
             [Security.Principal.SecurityIdentifier]::new('S-1-5-18'),
             [Security.AccessControl.FileSystemRights]::FullControl,
             $inherit,
             $prop,
             [Security.AccessControl.AccessControlType]::Allow))
-    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+    $draft.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
             [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'),
             [Security.AccessControl.FileSystemRights]::FullControl,
             $inherit,
             $prop,
             [Security.AccessControl.AccessControlType]::Allow))
     $rxSync = [Security.AccessControl.FileSystemRights]0x1200a9
-    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+    $draft.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
             [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545'),
             $rxSync,
             $inherit,
             $prop,
             [Security.AccessControl.AccessControlType]::Allow))
-    return $acl
+    Assert-RedrixLdwParentAclExplicitTargetShape $draft
+
+    $canonical = New-Object System.Security.AccessControl.DirectorySecurity
+    $canonical.SetSecurityDescriptorSddlForm($script:RedrixLdwParentAclCanonicalTargetSddl)
+    Assert-RedrixLdwParentAclTargetRuleParity $draft $canonical
+    Assert-RedrixLdwParentAclExplicitTargetShape $canonical
+    if ($canonical.Sddl -cne $script:RedrixLdwParentAclCanonicalTargetSddl) {
+        throw 'CANONICAL_SDDL_DRIFT'
+    }
+    if ((Get-RedrixSddlUtf8Sha256 $canonical) -cne $script:RedrixLdwParentAclCanonicalTargetSha256) {
+        throw 'CANONICAL_SHA_DRIFT'
+    }
+    return $canonical
 }
 
 function New-RedrixLdwParentAclBadCopyRemoveSecurityDescriptor {
@@ -135,21 +181,18 @@ function Assert-RedrixLdwParentAclExplicitTargetShape([Security.AccessControl.Fi
     if (0x1200a9 -ne $allowed['S-1-5-32-545']) { throw 'TARGET_BU_NOT_RX_SYNC' }
 }
 
-function Test-RedrixLdwParentAclReviewerHypothesisPin([Security.AccessControl.FileSystemSecurity]$Candidate) {
-    $actual = Get-RedrixSddlUtf8Sha256 $Candidate
-    $hypothesisLoad = New-Object System.Security.AccessControl.DirectorySecurity
-    $hypothesisLoad.SetSecurityDescriptorSddlForm($script:RedrixLdwParentAclReviewerHypothesisSddl)
-    $hypothesisSha = Get-RedrixSddlUtf8Sha256 $hypothesisLoad
-    $builtMatchesHypothesisSddl = ($Candidate.Sddl -ceq $hypothesisLoad.Sddl)
-    $builtMatchesReviewerPin = ($actual -ceq $script:RedrixLdwParentAclReviewerHypothesisSha256)
+function Test-RedrixLdwParentAclCanonicalPin([Security.AccessControl.FileSystemSecurity]$Candidate) {
+    $actualSha = Get-RedrixSddlUtf8Sha256 $Candidate
+    $shaOk = ($actualSha -ceq $script:RedrixLdwParentAclCanonicalTargetSha256)
+    $sddlOk = ($Candidate.Sddl -ceq $script:RedrixLdwParentAclCanonicalTargetSddl)
     return [ordered]@{
         candidateSddl = $Candidate.Sddl
-        candidateSha256 = $actual
-        reviewerHypothesisSddl = $hypothesisLoad.Sddl
-        reviewerHypothesisSha256 = $hypothesisSha
-        reviewerLiteratureSha256Pin = $script:RedrixLdwParentAclReviewerHypothesisSha256
-        sddlMatchesHypothesis = $builtMatchesHypothesisSddl
-        shaMatchesLiteraturePin = $builtMatchesReviewerPin
-        literaturePinStatus = if ($builtMatchesReviewerPin) { 'VERIFIED_LITERATURE_PIN' } else { 'BLOCKED_TARGET_MISMATCH' }
+        candidateSha256 = $actualSha
+        canonicalSddl = $script:RedrixLdwParentAclCanonicalTargetSddl
+        canonicalSha256 = $script:RedrixLdwParentAclCanonicalTargetSha256
+        invalidLiteratureSha256 = $script:RedrixLdwParentAclInvalidLiteratureSha256
+        shaMatchesCanonical = $shaOk
+        sddlMatchesCanonical = $sddlOk
+        invalidLiteratureRejected = ($actualSha -cne $script:RedrixLdwParentAclInvalidLiteratureSha256)
     }
 }
