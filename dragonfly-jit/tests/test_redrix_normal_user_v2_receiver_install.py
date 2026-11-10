@@ -526,6 +526,50 @@ class InstallFixtureTests(unittest.TestCase):
             finally:
                 lock.release()
 
+    def test_kernel_lock_path_identity_stable_through_acquisition(self):
+        if sys.platform == "win32":
+            raise unittest.SkipTest("POSIX flock semantics")
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            home.mkdir()
+            state = home / ".local/state/ldw-dragonfly-jit/v2-receiver-install"
+            state.mkdir(parents=True, mode=0o700)
+            lock_path = state / "invoke.kernel.lock"
+            lock = mod._KernelLock()
+            lock.acquire(home=home, path=lock_path, uid=TEST_UID, operation_id="9" * 32)
+            try:
+                path_before = lock_path.lstat()
+                lock.reverify_locked_inode(home=home, path=lock_path, uid=TEST_UID)
+                path_after = lock_path.lstat()
+                self.assertEqual(
+                    (path_before.st_dev, path_before.st_ino),
+                    (path_after.st_dev, path_after.st_ino),
+                )
+                self.assertEqual(lock._identity, (path_after.st_dev, path_after.st_ino))
+            finally:
+                lock.release()
+
+    def test_kernel_lock_reverify_fails_after_path_swap(self):
+        if sys.platform == "win32":
+            raise unittest.SkipTest("POSIX flock semantics")
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            home.mkdir()
+            state = home / ".local/state/ldw-dragonfly-jit/v2-receiver-install"
+            state.mkdir(parents=True, mode=0o700)
+            lock_path = state / "invoke.kernel.lock"
+            lock = mod._KernelLock()
+            lock.acquire(home=home, path=lock_path, uid=TEST_UID, operation_id="a" * 32)
+            try:
+                swap = home / "invoke.kernel.lock.swap"
+                swap.write_bytes(b"swap\n")
+                os.chmod(swap, 0o600)
+                os.replace(swap, lock_path)
+                with self.assertRaisesRegex(mod.InstallError, "LOCK_PATH_INVALID"):
+                    lock.reverify_locked_inode(home=home, path=lock_path, uid=TEST_UID)
+            finally:
+                lock.release()
+
     def test_replay_refused(self):
         if sys.platform == "win32":
             raise unittest.SkipTest("POSIX atomic install semantics")

@@ -12,7 +12,7 @@ Provide a closed, fail-closed **plan and offline tests** for installing the pinn
 This does **not** replace the accepted #115 synthetic handoff proof, does **not** authorize
 `authorized_keys`, sshd, or Tailscale changes, and does **not** admit live JIT.
 
-Machine contract: `redrix_normal_user_v2_receiver_install.json`  
+Machine contract: `redrix_normal_user_v2_receiver_install.json`
 Installer module: `redrix_normal_user_v2_receiver_install.py` (`PHYSICAL_INSTALL_ENABLED = false`)
 
 Source safety (this PR): nonblocking `flock` kernel lock (no age-based lock unlink); durable transaction journal

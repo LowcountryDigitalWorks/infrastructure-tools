@@ -50,9 +50,54 @@ class InstallError(RuntimeError):
     pass
 
 
+_MAX_LOCK_RECORD_BYTES = 4096
+
+
+def _assert_lock_inode_identity(path: Path, fd: int) -> tuple[int, int]:
+    """Fail closed if the public path does not name the same inode as the held fd."""
+    path_stat = path.lstat()
+    fd_stat = os.fstat(fd)
+    identity = (fd_stat.st_dev, fd_stat.st_ino)
+    if (path_stat.st_dev, path_stat.st_ino) != identity:
+        raise InstallError("LOCK_PATH_INVALID")
+    return identity
+
+
+def _read_kernel_lock_record(fd: int) -> dict[str, Any] | None:
+    os.lseek(fd, 0, os.SEEK_SET)
+    raw = os.read(fd, _MAX_LOCK_RECORD_BYTES)
+    if not raw.strip():
+        return None
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise InstallError("LOCK_PATH_INVALID") from exc
+    if not isinstance(value, dict):
+        raise InstallError("LOCK_PATH_INVALID")
+    return value
+
+
 class _KernelLock:
+    """Advisory flock on a regular file. Same-UID path replace can swap inodes after open;
+    inode/path reconciliation limits cooperating-tamper races but cannot fully exclude them."""
+
     def __init__(self) -> None:
         self._fd: int | None = None
+        self._path: Path | None = None
+        self._identity: tuple[int, int] | None = None
+
+    def reverify_locked_inode(self, *, home: Path, path: Path, uid: int) -> None:
+        if self._fd is None:
+            raise InstallError("KERNEL_LOCK_UNAVAILABLE")
+        if self._path is not None and path != self._path:
+            raise InstallError("LOCK_PATH_INVALID")
+        home = _assert_home(home, uid)
+        _assert_path_chain(home, path, uid)
+        if path.is_symlink():
+            raise InstallError("LOCK_PATH_INVALID")
+        identity = _assert_lock_inode_identity(path, self._fd)
+        if self._identity is not None and identity != self._identity:
+            raise InstallError("LOCK_PATH_INVALID")
 
     def acquire(self, *, home: Path, path: Path, uid: int, operation_id: str) -> None:
         if sys.platform == "win32" or fcntl is None:
@@ -88,6 +133,17 @@ class _KernelLock:
                 if (locked_stat.st_dev, locked_stat.st_ino) != (refreshed.st_dev, refreshed.st_ino):
                     raise InstallError("LOCK_PATH_INVALID")
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            identity = _assert_lock_inode_identity(path, fd)
+            existing = _read_kernel_lock_record(fd)
+            if existing is not None:
+                if existing.get("marker") != MARKER:
+                    raise InstallError("LOCK_PATH_INVALID")
+                pid = existing.get("pid")
+                op = existing.get("operationId")
+                if not isinstance(pid, int) or not isinstance(op, str):
+                    raise InstallError("LOCK_PATH_INVALID")
+                if pid != os.getpid():
+                    raise InstallError("CONCURRENT_INVOKE_REFUSED")
         except (BlockingIOError, OSError) as exc:
             os.close(fd)
             raise InstallError("CONCURRENT_INVOKE_REFUSED") from exc
@@ -103,7 +159,10 @@ class _KernelLock:
         os.ftruncate(fd, 0)
         os.write(fd, record)
         os.fsync(fd)
+        _assert_lock_inode_identity(path, fd)
         self._fd = fd
+        self._path = path
+        self._identity = identity
 
     def release(self) -> None:
         if self._fd is None:
@@ -113,6 +172,8 @@ class _KernelLock:
         finally:
             os.close(self._fd)
             self._fd = None
+            self._path = None
+            self._identity = None
 
 
 def load_contract() -> dict[str, Any]:
@@ -566,8 +627,13 @@ def install_fixture(
     lock = _KernelLock()
     stage_root: Path | None = None
     receipt_written = False
+
+    def _reverify_kernel_lock() -> None:
+        lock.reverify_locked_inode(home=home, path=kernel_lock_path, uid=uid)
+
     try:
         lock.acquire(home=home, path=kernel_lock_path, uid=uid, operation_id=operation_id)
+        _reverify_kernel_lock()
         plan = build_install_plan(home=home, uid=uid, package_root=package_root, contract=contract)
         if not plan["receiverInboundPinCoherent"]:
             raise InstallError("RECEIVER_INBOUND_PIN_INCOHERENT")
@@ -593,6 +659,7 @@ def install_fixture(
             "inboundGitBlob": inbound_entry["git_blob"],
             "receiverGitBlob": receiver_entry["git_blob"],
         }
+        _reverify_kernel_lock()
         _write_transaction(transaction_path, transaction)
         _atomic_write(rollback_archive, prior_receiver, 0o600)
 
@@ -618,6 +685,7 @@ def install_fixture(
 
         inbound_target = home / Path(inbound_entry["target_relpath"])
         _assert_path_chain(home, inbound_target, uid)
+        _reverify_kernel_lock()
         _atomic_write(inbound_target, inbound_bytes, int(inbound_entry["mode"], 8))
         inbound_readback = _assert_owned_regular(inbound_target, uid, int(inbound_entry["mode"], 8))
         if inbound_readback != inbound_bytes or _git_blob(inbound_readback) != inbound_entry["git_blob"]:
@@ -629,6 +697,7 @@ def install_fixture(
 
         receiver_target = home / Path(receiver_entry["target_relpath"])
         _assert_path_chain(home, receiver_target, uid)
+        _reverify_kernel_lock()
         _atomic_write(receiver_target, receiver_bytes, int(receiver_entry["mode"], 8))
         receiver_readback = _assert_owned_regular(receiver_target, uid, int(receiver_entry["mode"], 8))
         if receiver_readback != receiver_bytes or _git_blob(receiver_readback) != receiver_entry["git_blob"]:
@@ -651,6 +720,7 @@ def install_fixture(
             "forcedCommand": FORCED_COMMAND,
             "authorizedKeysSha256": None,
         }
+        _reverify_kernel_lock()
         _atomic_write(receipt_path, _canonical(receipt), 0o600)
         receipt_written = True
         if fault_after == "receipt":
