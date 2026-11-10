@@ -4,6 +4,15 @@ Status: **SOURCE-ONLY DRAFT**. Distinct from `redrix_capacity_guest_benchmark.py
 
 This module implements a **fixed one-shot** offline nested-KVM experiment for research **2+6** floor (8192 MiB) only. It never sets `jit_admission_authorized`, `provider_admission_authorized`, or `production_policy_changed`. ChromeOS host headroom is **UNVERIFIED**.
 
+## HW&VM product admission (source-only; issue #139 / owner #96)
+
+- **Research profile is explicit 2 GiB guest + 6 GiB Linux reserve (8192 MiB floor).** Production controller policy remains **2 GiB + 8 GiB (10240 MiB)** and is unchanged.
+- Machine-readable contract: `redrix_capacity_guest_executor_admission.json`. Readiness evaluator: `redrix_capacity_guest_executor_admission.py` → `READY_FOR_HW_VM_INDEPENDENT_REVIEW` only while `PHYSICAL_EXECUTION_ENABLED` stays false.
+- `RUNTIME_NO_START` reports embed `product_admission_readiness` (pins, required pre/during/post evidence phases, ChromeOS **UNVERIFIED**, owner-interactivity corroboration required). This is **not** provider/JIT admission.
+- **Runtime enablement gate:** a **separate reviewed source commit** must flip `PHYSICAL_EXECUTION_ENABLED` after independent H0/M0 security review and Product ORCH acceptance. No environment-variable or context bypass exists.
+- **Same-UID limitation:** staged private base mitigates external-path reuse only; hostile co-resident same-UID write/race risk remains disclosed in source and must not be overstated in review.
+- **One `guest.lock`:** non-blocking exclusive flock on `~/.local/state/ldw-dragonfly-jit/guest.lock` (controller path); no parent mkdir on physical path; no `status.json` / `runs/` writes.
+
 ## Invocation
 
 - Only `python3 redrix_capacity_guest_executor.py --run-once-local` is accepted; any other argv is refused.
