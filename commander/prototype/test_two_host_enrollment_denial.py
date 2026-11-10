@@ -14,10 +14,12 @@ from two_host_enrollment_denial import (
     HOST_A,
     HOST_B,
     NOW_UNIX,
+    EnrollmentRefused,
     TwoHostEnrollmentDenialProbe,
 )
 
 PINNED_DECISION_A = "33333333-3333-4333-8333-33333333330a"
+UNKNOWN_HOST = "host:synthetic-unknown"
 
 
 class TwoHostEnrollmentDenialTests(unittest.TestCase):
@@ -34,6 +36,34 @@ class TwoHostEnrollmentDenialTests(unittest.TestCase):
         with self.assertRaises(GateARefused) as wrong_host:
             self.probe.admit_synthetic(HOST_B, artifacts)
         self.assertEqual(wrong_host.exception.reason, "WRONG_HOST")
+
+    def test_unknown_host_refused_before_gate_or_session(self) -> None:
+        with self.assertRaises(EnrollmentRefused) as unknown:
+            self.probe.build_signed_batch(UNKNOWN_HOST)
+        self.assertEqual(unknown.exception.reason, "ENROLLED_HOST_UNKNOWN")
+        artifacts = self.probe.build_signed_batch(HOST_A)
+        with self.assertRaises(EnrollmentRefused) as admit:
+            self.probe.admit_synthetic(UNKNOWN_HOST, artifacts)
+        self.assertEqual(admit.exception.reason, "ENROLLED_HOST_UNKNOWN")
+        with self.assertRaises(EnrollmentRefused):
+            self.probe.issue_observe_session(UNKNOWN_HOST, 10)
+
+    def test_revoked_enrollment_refused_for_batch_and_gate(self) -> None:
+        self.probe.revoke_enrollment(HOST_A)
+        with self.assertRaises(EnrollmentRefused) as revoked:
+            self.probe.build_signed_batch(HOST_A)
+        self.assertEqual(revoked.exception.reason, "ENROLLMENT_REVOKED")
+        artifacts = self.probe.build_signed_batch(HOST_B)
+        self.probe.revoke_enrollment(HOST_B)
+        with self.assertRaises(EnrollmentRefused) as gate:
+            self.probe.admit_synthetic(HOST_B, artifacts)
+        self.assertEqual(gate.exception.reason, "ENROLLMENT_REVOKED")
+
+    def test_signer_generation_mismatch_refused(self) -> None:
+        artifacts = self.probe.build_signed_batch(HOST_A)
+        with self.assertRaises(EnrollmentRefused) as mismatch:
+            self.probe.verify_batch_binding(HOST_A, artifacts, signer_generation=9)
+        self.assertEqual(mismatch.exception.reason, "SIGNER_GENERATION_MISMATCH")
 
     def test_cross_host_session_grant_is_refused(self) -> None:
         token_a = self.probe.issue_observe_session(HOST_A, 30)
@@ -52,7 +82,18 @@ class TwoHostEnrollmentDenialTests(unittest.TestCase):
             self.probe.verify_batch_binding(HOST_A, artifacts, generation=1)
         self.assertEqual(stale.exception.reason, "STALE_GENERATION")
         with self.assertRaises(BatchDecisionRefused) as bad_signer:
-            self.probe.verify_batch_binding(HOST_A, artifacts, signer_generation=9)
+            verify_signed_batch(
+                artifacts.decision_token,
+                self.probe._signer_public,
+                artifacts.batch_raw,
+                host_id=HOST_A,
+                operator="owner-synthetic",
+                signer_key_id="signer-key:public-ref-1",
+                signer_generation=9,
+                generation=3,
+                now_unix=NOW_UNIX,
+                ledger=SyntheticNonceLedger(),
+            )
         self.assertEqual(bad_signer.exception.reason, "WRONG_SIGNER")
         token = self.probe.issue_observe_session(HOST_A, 20)
         self.probe.rotate_epoch(HOST_A, 2)
@@ -113,7 +154,10 @@ class TwoHostEnrollmentDenialTests(unittest.TestCase):
         )
         conflict_parsed = batch_fixture._parse(conflicting_raw, host_id=HOST_A)
         conflict = split_probe.sign_batch_raw(
-            HOST_A, conflicting_raw, conflict_parsed, nonce=str(uuid.uuid4()),
+            split_probe.require_enrolled_host(HOST_A),
+            conflicting_raw,
+            conflict_parsed,
+            nonce=str(uuid.uuid4()),
         )
         with self.assertRaises(GateARefused) as split:
             split_probe.admit_synthetic(HOST_A, conflict)

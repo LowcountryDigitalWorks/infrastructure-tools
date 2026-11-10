@@ -2,7 +2,9 @@
 
 Status: **SOURCE-ONLY** / **SYNTHETIC_NO_EXECUTION** / independent security review required.
 
-Composes existing `canonical_command_batch`, `signed_batch_binding`, `gate_a_admission`, and `session` fixtures to prove that host **A** and host **B** enrollments are cryptographically distinct:
+Composes existing `canonical_command_batch`, `signed_batch_binding`, `gate_a_admission`, and `session` fixtures behind a **closed immutable registry** of exactly two enrolled host IDs (`host:synthetic-a`, `host:synthetic-b`). Unknown host IDs and revoked enrollments are refused (`ENROLLED_HOST_UNKNOWN`, `ENROLLMENT_REVOKED`) before Gate A or session helpers run. Each record pins `owner_signer_generation`, `session_epoch`, and `revoked` state used by admission and session operations.
+
+Proves host **A** and **B** enrollments are cryptographically distinct:
 
 - Per-host batch binding and Gate A admission (`WRONG_HOST` cross-host).
 - Cross-host session grant refusal on the synthetic agent.
