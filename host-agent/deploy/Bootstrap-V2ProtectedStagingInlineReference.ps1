@@ -18,11 +18,11 @@ $workerBundleName = 'Invoke-AdminBrokerV2PublisherWorker.ps1'
 $reviewManifestFileName = 'AdminBrokerV2BootstrapReviewManifest.json'
 $stagingLeaf = 'v2-publisher-once'
 $fixedReviewDownloadSuffix = 'Downloads\LDW-V2-Publisher-Bootstrap-Review'
-$trustedIssuerManifestFileSha256 = '5f5ff47a18d842b18a90b99a7b37bf8631788538ef3538f6236df85f6ee52fc3'
-$trustedReviewManifestFileSha256 = '498a5365b54d216d41f52ab0472eeb51446c8f6cceb4891e11088d9a73c75103'
-$trustedBootstrapSha256 = '1794ea3198a52978366bade9d279efdc30b5fc3f3636ba6be8bbfd4cf026527e'
+$trustedIssuerManifestFileSha256 = '934ff71fc03c05fabc2a76a11f5ade3ad334284232ad39c59fc79ee7ffbdba5c'
+$trustedReviewManifestFileSha256 = '59be27057046f7eefdabed7dda8e236b1d6afd6c8c6d2f91c442f07e6a299df7'
+$trustedBootstrapSha256 = '53ed786c404a39da7ba7d3cbb73e50cb59dcec7545bd389101bf808b3e9f36aa'
 $trustedWorkerSha256 = '051124b03f88694f19f557954e844ffe1f71c24187c7998a4cf6e8ce55aaa4f1'
-$trustedStageSha256 = '2d3030daeb6bc8a9dff862f9500c7f94cbaedbadf81d4cc8a834dcb3d560c196'
+$trustedStageSha256 = 'ee6ad309abed3b924bdf7a55d6d4f073796b273b4bb42f658140cd21ce473cd7'
 
 function Assert-ElevatedInline {
     if ($env:OS -ne 'Windows_NT') { throw 'WINDOWS_REQUIRED' }
@@ -75,12 +75,14 @@ function Assert-WindowsProgramDataRootBaselineAclInline([string]$ProgramDataRoot
     if (-not $acl.AreAccessRulesProtected) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
     $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
     if ($owner -notin @('S-1-5-18', 'S-1-5-32-544')) { throw 'LDW_PARENT_OWNER_REFUSED' }
+    $win32GenericWrite = 0x40000000
+    $win32GenericAll = 0x10000000
     $dangerous = [int](
         [Security.AccessControl.FileSystemRights]::Delete -bor
         [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
         [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
         [Security.AccessControl.FileSystemRights]::TakeOwnership)
-    $genericAll = 268435456
+    $genericAll = $win32GenericAll
     $stockUsersWrite = 278
     $stockUsersRx = 1179817
     $fullControlMask = [int][Security.AccessControl.FileSystemRights]::FullControl
@@ -110,9 +112,12 @@ function Assert-WindowsProgramDataRootBaselineAclInline([string]$ProgramDataRoot
             if (($prop -band $inheritOnly) -ne 0 -and $rights -eq $genericAll) { continue }
             throw 'PROGRAMDATA_ROOT_BASELINE_HOLD'
         }
+        if (($rights -band $win32GenericWrite) -ne 0) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+        if (($rights -band $win32GenericAll) -ne 0) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
         if ($rights -band $dangerous) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
-        if ($rights -eq $genericAll -or $rights -eq $fullControlMask) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+        if ($rights -eq $fullControlMask) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
         if ($rights -band $writeSurface) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+        throw 'PROGRAMDATA_ROOT_BASELINE_HOLD'
     }
 }
 
@@ -123,18 +128,24 @@ function Assert-TrustedDirectoryAclInline([string]$Path) {
     $acl = Get-Acl -LiteralPath $resolved
     $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
     if ($owner -notin @('S-1-5-18', 'S-1-5-32-544')) { throw 'LDW_PARENT_OWNER_REFUSED' }
-    $forbidden = [Security.AccessControl.FileSystemRights]::Write -bor
+    $win32GenericWrite = 0x40000000
+    $win32GenericAll = 0x10000000
+    $forbidden = [int](
+        [Security.AccessControl.FileSystemRights]::Write -bor
         [Security.AccessControl.FileSystemRights]::CreateFiles -bor
         [Security.AccessControl.FileSystemRights]::CreateDirectories -bor
         [Security.AccessControl.FileSystemRights]::Delete -bor
         [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
         [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-        [Security.AccessControl.FileSystemRights]::TakeOwnership
+        [Security.AccessControl.FileSystemRights]::TakeOwnership)
     foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
         if ($rule.AccessControlType -ne 'Allow') { continue }
         $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
         if ($sid -in @('S-1-5-18', 'S-1-5-32-544')) { continue }
-        if ($rule.FileSystemRights -band $forbidden) { throw 'LDW_PARENT_ACL_HOLD' }
+        $rights = [int][Security.AccessControl.FileSystemRights]$rule.FileSystemRights
+        if (($rights -band $win32GenericWrite) -ne 0) { throw 'LDW_PARENT_ACL_HOLD' }
+        if (($rights -band $win32GenericAll) -ne 0) { throw 'LDW_PARENT_ACL_HOLD' }
+        if (($rights -band $forbidden) -ne 0) { throw 'LDW_PARENT_ACL_HOLD' }
     }
 }
 

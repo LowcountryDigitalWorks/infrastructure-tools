@@ -68,12 +68,14 @@ function Assert-WindowsProgramDataRootBaselineAcl([string]$ProgramDataRoot) {
     if (-not $acl.AreAccessRulesProtected) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
     $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
     if ($owner -notin @('S-1-5-18', 'S-1-5-32-544')) { throw 'LDW_PARENT_OWNER_REFUSED' }
+    $win32GenericWrite = 0x40000000
+    $win32GenericAll = 0x10000000
     $dangerous = [int](
         [Security.AccessControl.FileSystemRights]::Delete -bor
         [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
         [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
         [Security.AccessControl.FileSystemRights]::TakeOwnership)
-    $genericAll = 268435456
+    $genericAll = $win32GenericAll
     $stockUsersWrite = 278
     $stockUsersRx = 1179817
     $fullControlMask = [int][Security.AccessControl.FileSystemRights]::FullControl
@@ -103,9 +105,12 @@ function Assert-WindowsProgramDataRootBaselineAcl([string]$ProgramDataRoot) {
             if (($prop -band $inheritOnly) -ne 0 -and $rights -eq $genericAll) { continue }
             throw 'PROGRAMDATA_ROOT_BASELINE_HOLD'
         }
+        if (($rights -band $win32GenericWrite) -ne 0) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+        if (($rights -band $win32GenericAll) -ne 0) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
         if ($rights -band $dangerous) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
-        if ($rights -eq $genericAll -or $rights -eq $fullControlMask) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+        if ($rights -eq $fullControlMask) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
         if ($rights -band $writeSurface) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+        throw 'PROGRAMDATA_ROOT_BASELINE_HOLD'
     }
 }
 
@@ -116,18 +121,24 @@ function Assert-TrustedDirectoryAcl([string]$Path) {
     $acl = Get-Acl -LiteralPath $resolved
     $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
     if ($owner -notin @('S-1-5-18', 'S-1-5-32-544')) { throw 'LDW_PARENT_OWNER_REFUSED' }
-    $forbidden = [Security.AccessControl.FileSystemRights]::Write -bor
+    $win32GenericWrite = 0x40000000
+    $win32GenericAll = 0x10000000
+    $forbidden = [int](
+        [Security.AccessControl.FileSystemRights]::Write -bor
         [Security.AccessControl.FileSystemRights]::CreateFiles -bor
         [Security.AccessControl.FileSystemRights]::CreateDirectories -bor
         [Security.AccessControl.FileSystemRights]::Delete -bor
         [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
         [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-        [Security.AccessControl.FileSystemRights]::TakeOwnership
+        [Security.AccessControl.FileSystemRights]::TakeOwnership)
     foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
         if ($rule.AccessControlType -ne 'Allow') { continue }
         $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
         if ($sid -in @('S-1-5-18', 'S-1-5-32-544')) { continue }
-        if ($rule.FileSystemRights -band $forbidden) { throw 'LDW_PARENT_ACL_HOLD' }
+        $rights = [int][Security.AccessControl.FileSystemRights]$rule.FileSystemRights
+        if (($rights -band $win32GenericWrite) -ne 0) { throw 'LDW_PARENT_ACL_HOLD' }
+        if (($rights -band $win32GenericAll) -ne 0) { throw 'LDW_PARENT_ACL_HOLD' }
+        if (($rights -band $forbidden) -ne 0) { throw 'LDW_PARENT_ACL_HOLD' }
     }
 }
 

@@ -342,6 +342,10 @@ Assert-True (Test-SourceContains $installSource 'Get-MachineProgramDataRoot') 'I
 Assert-True (Test-SourceContains $installSource 'PROGRAMDATA_ENV_SPOOFED') 'Install refuses ProgramData env spoof'
 Assert-True (Test-SourceContains $installSource 'Assert-WindowsProgramDataRootBaselineAcl') 'Install uses stock ProgramData root baseline'
 Assert-True (Test-SourceContains $installSource 'LDW_PARENT_ACL_HOLD') 'Install preflight refuses weak LDW parent DACL'
+Assert-True (Test-SourceContains $stageSource '0x40000000') 'Stage rejects Win32 GENERIC_WRITE ACE bits'
+Assert-True (Test-SourceContains $stageSource '0x10000000') 'Stage rejects Win32 GENERIC_ALL ACE bits'
+Assert-True (Test-SourceContains $installSource '0x40000000') 'Install rejects Win32 GENERIC_WRITE ACE bits'
+Assert-True (Test-SourceContains $inlineSource '0x40000000') 'Inline rejects Win32 GENERIC_WRITE ACE bits'
 Assert-True (-not (Test-SourceContains $stageSource 'Join-Path $env:ProgramData')) 'Stage does not join paths from process ProgramData env'
 Assert-True (-not (Test-SourceContains $inlineSource 'Join-Path $env:ProgramData')) 'Inline does not join paths from process ProgramData env'
 Assert-True (Test-SourceContains $stageSource 'PROGRAMDATA_ENV_SPOOFED') 'Stage compares process ProgramData to machine known folder'
@@ -480,17 +484,38 @@ try {
     Remove-Item -LiteralPath $aclSandbox -Recurse -Force -ErrorAction SilentlyContinue
 }
 if ($isAdmin) {
-    $null = New-Item -ItemType Directory -Path $ldwShape -Force
-    try {
-        $ldwAcl = Get-Acl -LiteralPath $ldwShape
-        $ldwAcl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
-        $usersSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
-        $ldwAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
-            $usersSid, 'Write', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
-        Set-Acl -LiteralPath $ldwShape -AclObject $ldwAcl
-        Assert-Refused { Assert-TrustedDirectoryAcl $ldwShape } 'LDW_PARENT_ACL_HOLD'
-    } finally {
-        Remove-Item -LiteralPath $ldwShape -Recurse -Force -ErrorAction SilentlyContinue
+    $genericWriteMask = [Security.AccessControl.FileSystemRights]0x40000000
+    $genericAllMask = [Security.AccessControl.FileSystemRights]0x10000000
+    $combinedGenericMask = [Security.AccessControl.FileSystemRights](0x40000000 -bor 0x10000000)
+    $usersSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
+    $authUsersSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-11')
+    foreach ($probe in @(
+        @{ Name = 'generic-write'; Mask = $genericWriteMask; Sid = $usersSid },
+        @{ Name = 'generic-all'; Mask = $genericAllMask; Sid = $usersSid },
+        @{ Name = 'generic-combined'; Mask = $combinedGenericMask; Sid = $usersSid },
+        @{ Name = 'auth-users-generic-write'; Mask = $genericWriteMask; Sid = $authUsersSid }
+    )) {
+        $dir = Join-Path $env:TEMP ('LDW_V2Generic_' + $probe.Name + '_' + [guid]::NewGuid().ToString('N'))
+        $null = New-Item -ItemType Directory -Path $dir -Force
+        try {
+            $ldwAcl = Get-Acl -LiteralPath $dir
+            $ldwAcl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+            $ldwAcl.SetAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'),
+                'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+            $ldwAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                $probe.Sid, $probe.Mask, 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+            Set-Acl -LiteralPath $dir -AclObject $ldwAcl
+            $materialized = [int](Get-Acl -LiteralPath $dir).GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]) |
+                Where-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq $probe.Sid.Value } |
+                Select-Object -First 1 |
+                ForEach-Object { [int]$_.FileSystemRights }
+            Assert-True (($materialized -band 0x40000000) -ne 0 -or ($materialized -band 0x10000000) -ne 0) (
+                "generic ACE materialized for $($probe.Name)")
+            Assert-Refused { Assert-TrustedDirectoryAcl $dir } 'LDW_PARENT_ACL_HOLD'
+        } finally {
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
