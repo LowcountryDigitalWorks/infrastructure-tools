@@ -206,9 +206,14 @@ class MessageBoardUiV0:
             raise MessageBoardUiError(exc.code) from None
         if received.get("state") != "MAILBOX_READ":
             raise MessageBoardUiError("UNEXPECTED_MAILBOX_STATE")
+        messages = received.get("messages")
+        if not isinstance(messages, list):
+            raise MessageBoardUiError("INVALID_MESSAGE_LIST")
+        if len(messages) > limit or len(messages) > MAX_ROWS:
+            raise MessageBoardUiError("RECEIVE_ROW_CARDINALITY_EXCEEDED")
         now = self._clock()
         rows = []
-        for item in received.get("messages", []):
+        for item in messages:
             rows.append(self._project_row(item, now=now))
         return {
             "protocol": UI_PROTOCOL,

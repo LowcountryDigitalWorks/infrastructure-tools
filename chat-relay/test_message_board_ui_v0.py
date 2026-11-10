@@ -189,6 +189,72 @@ class MessageBoardUiV0Tests(unittest.TestCase):
         with self.assertRaises(MessageBoardUiError):
             ir.poll_rows(limit=21)
 
+    def test_receive_row_cardinality_exceeded_refused(self):
+        message_id = mid()
+        gm = self.board("gm_ui")
+        gm._adapter.invoke(
+            "send_message",
+            {"message_id": message_id, "recipient": "ir_ui", "body": "bounded inbox"},
+        )
+
+        class OverReturnTransport(SyntheticLoopbackGatewayTransport):
+            def __init__(self, *, extra_count: int, **kwargs):
+                super().__init__(**kwargs)
+                self._extra_count = extra_count
+
+            def request(self, method, path, *, role, bearer, body):
+                status, payload = super().request(method, path, role=role, bearer=bearer, body=body)
+                if path.startswith("/v1/receive") and status == 200 and isinstance(payload, dict):
+                    payload = dict(payload)
+                    messages = list(payload.get("messages") or [])
+                    if messages:
+                        template = messages[0]
+                        for _ in range(self._extra_count):
+                            clone = dict(template)
+                            clone["message_id"] = mid()
+                            messages.append(clone)
+                    payload["messages"] = messages
+                return status, payload
+
+        ir_one = MessageBoardUiV0(
+            "ir_ui",
+            SiteHttpsMessageAdapter(
+                "ir_ui",
+                self.box.token_for_role("ir_ui"),
+                OverReturnTransport(extra_count=1, host="127.0.0.1", port=self.port),
+            ),
+            clock=lambda: 1_700_000_000.0,
+        )
+        with self.assertRaises(MessageBoardUiError) as ctx:
+            ir_one.poll_rows(limit=1)
+        self.assertEqual(ctx.exception.code, "RECEIVE_ROW_CARDINALITY_EXCEEDED")
+
+        ir_max = MessageBoardUiV0(
+            "ir_ui",
+            SiteHttpsMessageAdapter(
+                "ir_ui",
+                self.box.token_for_role("ir_ui"),
+                OverReturnTransport(extra_count=20, host="127.0.0.1", port=self.port),
+            ),
+            clock=lambda: 1_700_000_000.0,
+        )
+        with self.assertRaises(MessageBoardUiError) as ctx:
+            ir_max.poll_rows(limit=20)
+        self.assertEqual(ctx.exception.code, "RECEIVE_ROW_CARDINALITY_EXCEEDED")
+
+    def test_poll_limits_one_through_twenty_accepted(self):
+        ir = self.board("ir_ui")
+        gm = self.board("gm_ui")
+        for i in range(3):
+            gm._adapter.invoke(
+                "send_message",
+                {"message_id": mid(), "recipient": "ir_ui", "body": f"row-{i}"},
+            )
+        for limit in range(1, 21):
+            polled = ir.poll_rows(limit=limit)
+            self.assertEqual(polled["row_count"], min(3, limit))
+            self.assertLessEqual(len(polled["rows"]), limit)
+
     def test_future_plugin_tools_fixed(self):
         names = [t["name"] for t in MessageBoardUiV0.future_plugin_tools()]
         self.assertEqual(names, ["list_inbox_rows", "inbox_status"])
