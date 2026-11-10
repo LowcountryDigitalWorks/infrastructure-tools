@@ -107,19 +107,21 @@ def _capabilities(proc: Path) -> bool:
     return all((caps[key] & needed) == needed for key in ("Eff", "Bnd"))
 
 
-def _namespaces(proc: Path) -> tuple[str, str]:
+def _namespaces(proc: Path) -> tuple[str, str, str]:
     current = (
         os.readlink(proc / "self" / "ns" / "user"),
         os.readlink(proc / "self" / "ns" / "pid"),
+        os.readlink(proc / "self" / "ns" / "mnt"),
     )
     target = (
         os.readlink(proc / "1" / "ns" / "user"),
         os.readlink(proc / "1" / "ns" / "pid"),
+        os.readlink(proc / "1" / "ns" / "mnt"),
     )
     if current != target:
         _fail("A4_LIVE_NAMESPACE_MISMATCH")
     if not all(value.startswith(prefix) and value.endswith("]")
-               for value, prefix in zip(current, ("user:[", "pid:["))):
+               for value, prefix in zip(current, ("user:[", "pid:[", "mnt:["))):
         _fail("A4_LIVE_NAMESPACE_UNVERIFIED")
     return current
 
@@ -131,7 +133,7 @@ def _alive_pidfd(fd: int) -> bool:
     return not watcher.poll(0)
 
 
-def _snapshot(proc: Path, ns: tuple[str, str], pins: dict[int, int],
+def _snapshot(proc: Path, ns: tuple[str, str, str], pins: dict[int, int],
               resources: ExitStack) -> tuple[tuple[int, ...], tuple[tuple, ...]]:
     names = os.listdir(proc)
     pids = sorted(int(n) for n in names if _NAME_RE.fullmatch(n))
@@ -154,7 +156,8 @@ def _snapshot(proc: Path, ns: tuple[str, str], pins: dict[int, int],
             _fail("A4_LIVE_PID_EXITED")
         userns = os.readlink(proc / str(pid) / "ns" / "user")
         pidns = os.readlink(proc / str(pid) / "ns" / "pid")
-        if (userns, pidns) != ns:
+        mountns = os.readlink(proc / str(pid) / "ns" / "mnt")
+        if (userns, pidns, mountns) != ns:
             _fail("A4_LIVE_NAMESPACE_MISMATCH")
         # exe readlink itself is a kernel ptrace READ_FSCREDS-gated lookup.
         # FD symlink readlink similarly requires a real kernel authorization.
