@@ -413,7 +413,12 @@ try {
 $aclSandbox = Join-Path $env:TEMP ('LDW_V2Acl_' + [guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path $aclSandbox -Force
 try {
-    Assert-Refused { Assert-TrustedDirectoryAcl $aclSandbox } 'LDW_PARENT_OWNER_REFUSED'
+    $probeOwner = (Get-Acl -LiteralPath $aclSandbox).GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if ($probeOwner -notin @('S-1-5-18', 'S-1-5-32-544')) {
+        Assert-Refused { Assert-TrustedDirectoryAcl $aclSandbox } 'LDW_PARENT_OWNER_REFUSED'
+    } else {
+        Assert-Refused { Assert-TrustedDirectoryAcl $aclSandbox } 'LDW_PARENT_ACL_HOLD'
+    }
     $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator)
     if ($isAdmin) {
