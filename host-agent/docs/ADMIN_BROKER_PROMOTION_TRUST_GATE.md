@@ -66,7 +66,7 @@ Protected SYSTEM/Administrators-only roots, closed current registry, immutable i
 
 V2 task argument hashing and a staged worker file digest alone do **not** prove immutable origin: a party who already controls the protected task definition and ACL could retarget both together. Accepted bootstrap still requires independently reviewed Stage source pins, protected-copy manifest verification, task principal/signer/ACL review (#186), and influence-clean exact-head IR—never GitHub comment text, PR metadata, or model summaries as cryptographic authorization.
 
-**Stage issuer (D1 follow-on):** the merged bootstrap lane must publish a fixed owner-admin launcher (`OwnerAdmin-InvokeV2BootstrapProtectedStage.ps1`), an issuer manifest without circular self-digest, and protected-path-only Stage execution. See `host-agent/docs/OWNER_V2_BOOTSTRAP_FIRST_INSTALL_STAGE.md`.
+**Stage issuer (D1 follow-on):** the merged bootstrap lane must publish a fixed **elevated inline** owner transaction (no `-File` from Downloads), an issuer manifest without circular self-digest, and protected-path-only Stage execution. See `host-agent/docs/OWNER_V2_BOOTSTRAP_FIRST_INSTALL_STAGE.md` and `host-agent/deploy/Bootstrap-V2ProtectedStagingInlineReference.ps1`.
 
 ## Candidate A: pinned GitHub App-authored, fixed-issue generation ledger
 

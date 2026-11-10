@@ -11,7 +11,8 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
 $deployRoot = Split-Path -Parent $PSScriptRoot
 $installPath = Join-Path $deployRoot 'Install-AdminBrokerV2PublisherBootstrap.ps1'
 $stagePath = Join-Path $deployRoot 'Stage-AdminBrokerV2PublisherBootstrap.ps1'
-$ownerPath = Join-Path $deployRoot 'OwnerAdmin-InvokeV2BootstrapProtectedStage.ps1'
+$inlinePath = Join-Path $deployRoot 'Bootstrap-V2ProtectedStagingInlineReference.ps1'
+$ownerDocPath = Join-Path $deployRoot '../docs/OWNER_V2_BOOTSTRAP_FIRST_INSTALL_STAGE.md'
 $v2WorkerPath = Join-Path $deployRoot 'Invoke-AdminBrokerV2PublisherWorker.ps1'
 $manifestPath = Join-Path $deployRoot 'AdminBrokerV2BootstrapReviewManifest.json'
 $issuerPath = Join-Path $deployRoot 'AdminBrokerV2BootstrapIssuerManifest.json'
@@ -48,7 +49,7 @@ function Get-BytesSha256([byte[]]$Bytes) {
     }
 }
 
-foreach ($scriptPath in @($installPath, $stagePath, $ownerPath, $v2WorkerPath)) {
+foreach ($scriptPath in @($installPath, $stagePath, $inlinePath, $v2WorkerPath)) {
     $errors = $null
     [void][Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$errors)
     Assert-True ($errors.Count -eq 0) "Parse OK: $(Split-Path -Leaf $scriptPath)"
@@ -62,21 +63,22 @@ Assert-True ($null -ne $issuerParsed) 'Parse OK: AdminBrokerV2BootstrapIssuerMan
 
 $installAst = [Management.Automation.Language.Parser]::ParseFile($installPath, [ref]$null, [ref]$null)
 $stageAst = [Management.Automation.Language.Parser]::ParseFile($stagePath, [ref]$null, [ref]$null)
-$ownerAst = [Management.Automation.Language.Parser]::ParseFile($ownerPath, [ref]$null, [ref]$null)
+$inlineAst = [Management.Automation.Language.Parser]::ParseFile($inlinePath, [ref]$null, [ref]$null)
 Assert-True ($null -eq ($installAst.Find({ param($n) $n -is [Management.Automation.Language.ParamBlockAst] }, $false))) 'Install has no param block'
 Assert-True ($null -eq ($stageAst.Find({ param($n) $n -is [Management.Automation.Language.ParamBlockAst] }, $false))) 'Stage has no param block'
-Assert-True ($null -eq ($ownerAst.Find({ param($n) $n -is [Management.Automation.Language.ParamBlockAst] }, $false))) 'Owner launcher has no param block'
+Assert-True ($null -eq ($inlineAst.Find({ param($n) $n -is [Management.Automation.Language.ParamBlockAst] }, $false))) 'Inline reference has no param block'
 
 $installSource = Get-Content -LiteralPath $installPath -Raw
 $stageSource = Get-Content -LiteralPath $stagePath -Raw
-$ownerSource = Get-Content -LiteralPath $ownerPath -Raw
+$inlineSource = Get-Content -LiteralPath $inlinePath -Raw
+$ownerDocSource = Get-Content -LiteralPath $ownerDocPath -Raw
 $v2Source = Get-Content -LiteralPath $v2WorkerPath -Raw
 $manifestJson = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $issuerJson = Get-Content -LiteralPath $issuerPath -Raw | ConvertFrom-Json
 
 $installSha = (Get-FileHash -LiteralPath $installPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $stageSha = (Get-FileHash -LiteralPath $stagePath -Algorithm SHA256).Hash.ToLowerInvariant()
-$ownerSha = (Get-FileHash -LiteralPath $ownerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$inlineSha = (Get-FileHash -LiteralPath $inlinePath -Algorithm SHA256).Hash.ToLowerInvariant()
 $issuerFileSha = (Get-FileHash -LiteralPath $issuerPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $v2Sha = (Get-FileHash -LiteralPath $v2WorkerPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $manifestFileSha = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -89,11 +91,10 @@ Assert-True ($manifestInstallPin -ceq $installSha) 'manifest install pin equals 
 Assert-True ($manifestWorkerPin -ceq $v2Sha) 'manifest worker pin equals materialized file SHA256'
 Assert-True ($issuerJson.schema -eq 1) 'issuer manifest schema'
 Assert-True ($issuerJson.protocol -ceq 'ldw.admin-broker.v2-bootstrap.issuer-manifest.v1') 'issuer manifest protocol'
-Assert-True (@($issuerJson.artifacts).Count -eq 5) 'issuer manifest lists five artifacts'
+Assert-True (@($issuerJson.artifacts).Count -eq 4) 'issuer manifest lists four artifacts'
 $issuerStagePin = @($issuerJson.artifacts | Where-Object { $_.name -ceq 'Stage-AdminBrokerV2PublisherBootstrap.ps1' }).sha256.ToLowerInvariant()
-$issuerOwnerPin = @($issuerJson.artifacts | Where-Object { $_.name -ceq 'OwnerAdmin-InvokeV2BootstrapProtectedStage.ps1' }).sha256.ToLowerInvariant()
 Assert-True ($issuerStagePin -ceq $stageSha) 'issuer manifest stage pin equals materialized Stage SHA256'
-Assert-True ($issuerOwnerPin -ceq $ownerSha) 'issuer manifest owner pin equals materialized owner launcher SHA256'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $deployRoot 'OwnerAdmin-InvokeV2BootstrapProtectedStage.ps1'))) 'Downloads owner launcher removed from source'
 Assert-True (-not (@($issuerJson.artifacts | Where-Object { $_.name -ceq 'AdminBrokerV2BootstrapIssuerManifest.json' }))) 'issuer manifest has no circular self-entry'
 Assert-True (Test-SourceContains $stageSource 'trustedBootstrapSha256') 'Stage embeds reviewed bootstrap pin'
 Assert-True (Test-SourceContains $stageSource 'trustedWorkerSha256') 'Stage embeds reviewed worker pin'
@@ -138,13 +139,13 @@ if (Test-Path -LiteralPath (Join-Path $repoRoot '.git')) {
     $gitWorkerBlob = (git -C $repoRoot rev-parse "HEAD:host-agent/deploy/Invoke-AdminBrokerV2PublisherWorker.ps1" 2>$null).Trim()
     $gitManifestBlob = (git -C $repoRoot rev-parse "HEAD:host-agent/deploy/AdminBrokerV2BootstrapReviewManifest.json" 2>$null).Trim()
     $gitStageBlob = (git -C $repoRoot rev-parse "HEAD:host-agent/deploy/Stage-AdminBrokerV2PublisherBootstrap.ps1" 2>$null).Trim()
-    $gitOwnerBlob = (git -C $repoRoot rev-parse "HEAD:host-agent/deploy/OwnerAdmin-InvokeV2BootstrapProtectedStage.ps1" 2>$null).Trim()
+    $gitInlineBlob = (git -C $repoRoot rev-parse "HEAD:host-agent/deploy/Bootstrap-V2ProtectedStagingInlineReference.ps1" 2>$null).Trim()
     $gitIssuerBlob = (git -C $repoRoot rev-parse "HEAD:host-agent/deploy/AdminBrokerV2BootstrapIssuerManifest.json" 2>$null).Trim()
     Assert-True ($gitInstallBlob -match '^[a-f0-9]{40}$') 'git install blob identity'
     Assert-True ($gitWorkerBlob -match '^[a-f0-9]{40}$') 'git worker blob identity'
     Assert-True ($gitManifestBlob -match '^[a-f0-9]{40}$') 'git manifest blob identity'
     Assert-True ($gitStageBlob -match '^[a-f0-9]{40}$') 'git stage blob identity'
-    Assert-True ($gitOwnerBlob -match '^[a-f0-9]{40}$') 'git owner launcher blob identity'
+    Assert-True ($gitInlineBlob -match '^[a-f0-9]{40}$') 'git inline reference blob identity'
     Assert-True ($gitIssuerBlob -match '^[a-f0-9]{40}$') 'git issuer manifest blob identity'
     $gitInstallSha = (git -C $repoRoot hash-object $installPath).Trim().ToLowerInvariant()
     Assert-True ($gitInstallBlob -ceq $gitInstallSha) 'install git blob matches working tree object'
@@ -322,11 +323,70 @@ Assert-True (Test-SourceContains $stageSource 'STAGE_PROTECTED_PATH_REQUIRED') '
 Assert-True (Test-SourceContains $stageSource 'STAGE_ISSUER_PIN_MISMATCH') 'Stage verifies self via issuer manifest'
 Assert-True (Test-SourceContains $stageSource 'ISSUER_REVIEWED_PIN_MISMATCH') 'Stage cross-checks issuer against embedded review pins'
 Assert-True (-not (Test-SourceContains $stageSource 'LDW-V2-Publisher-Bootstrap-Review')) 'Stage does not read Downloads bundle'
-Assert-True (Test-SourceContains $ownerSource 'OWNER_LAUNCH_PATH_REFUSED') 'Owner launcher pins fixed Downloads path'
-Assert-True (Test-SourceContains $ownerSource 'OWNER_LAUNCH_SHA256_MISMATCH') 'Owner launcher verifies self via issuer content'
-Assert-True (Test-SourceContains $ownerSource 'DOWNLOAD_BUNDLE_ROOT_REFUSED') 'Owner launcher refuses mutable bundle root'
-Assert-True (-not (Test-SourceContains $ownerSource 'trustedOwnerLaunchSha256')) 'Owner launcher has no self-embedded digest pin'
+Assert-True (Test-SourceContains $inlineSource 'INLINE_REFERENCE_NOT_FILE_INVOKABLE') 'Inline reference refuses -File invocation'
+Assert-True (Test-SourceContains $inlineSource 'ReadAllBytes') 'Inline transaction treats Downloads as byte DATA'
+Assert-True (Test-SourceContains $inlineSource 'DOWNLOADS_DATA_HASH_MISMATCH') 'Inline transaction refuses download DATA tamper'
+Assert-True (Test-SourceContains $inlineSource 'STAGING_ALREADY_EXISTS') 'Inline transaction refuses concurrent staging'
+Assert-True (Test-SourceContains $inlineSource 'DOWNLOAD_BUNDLE_ROOT_REFUSED') 'Inline transaction pins Downloads bundle root'
+Assert-True (Test-SourceContains $inlineSource 'Invoke-LdwV2BootstrapProtectedStagingInlineTransaction') 'Inline transaction entry function published'
+Assert-True (Test-SourceContains $ownerDocSource 'Invoke-LdwV2BootstrapProtectedStagingInlineTransaction') 'Owner doc names inline transaction entry'
+Assert-True (-not (Test-SourceContains $ownerDocSource 'OwnerAdmin-InvokeV2BootstrapProtectedStage.ps1')) 'Owner doc does not reference Downloads launcher'
+Assert-True (Test-SourceContains $ownerDocSource 'Never `powershell -File` a path under Downloads while elevated') 'Owner doc states elevated -File Downloads prohibition'
+Assert-True (-not ($ownerDocSource -match '(?i)-File\s+"?%USERPROFILE%\\Downloads')) 'Owner doc has no frozen -File Downloads command line'
 Assert-True (-not (Test-SourceContains $stageSource 'trustedIssuerManifestFileSha256')) 'Stage avoids circular issuer self pin'
+if ($inlineSource -match "trustedIssuerManifestFileSha256 = '([a-f0-9]{64})'") {
+    Assert-True ($Matches[1] -ceq $issuerFileSha) 'Inline issuer pin equals materialized issuer manifest SHA256'
+} else { throw 'INLINE_PIN_PARSE_FAILED: trustedIssuerManifestFileSha256' }
+if ($inlineSource -match "trustedStageSha256 = '([a-f0-9]{64})'") {
+    Assert-True ($Matches[1] -ceq $stageSha) 'Inline stage pin equals materialized Stage SHA256'
+} else { throw 'INLINE_PIN_PARSE_FAILED: trustedStageSha256' }
+
+$inlineCopyFn = $inlineAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Copy-VerifiedBytesInline' }, $false)
+$inlineNoReparseFn = $inlineAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-NoReparseInline' }, $false)
+if ($null -eq $inlineCopyFn -or $null -eq $inlineNoReparseFn) { throw 'FUNCTION_REQUIRED: inline copy helpers' }
+. ([scriptblock]::Create($inlineNoReparseFn.Extent.Text))
+. ([scriptblock]::Create($inlineCopyFn.Extent.Text))
+$inlineSandbox = Join-Path $env:TEMP ('LDW_V2InlineCopy_' + [guid]::NewGuid().ToString('N'))
+$null = New-Item -ItemType Directory -Path $inlineSandbox -Force
+try {
+    $good = Join-Path $inlineSandbox 'good.bin'
+    $dest = Join-Path $inlineSandbox 'dest.bin'
+    [IO.File]::WriteAllBytes($good, [byte[]](1, 2, 3))
+    $goodSha = (Get-FileHash -LiteralPath $good -Algorithm SHA256).Hash.ToLowerInvariant()
+    Copy-VerifiedBytesInline $good $dest $goodSha | Out-Null
+    Assert-True (Test-Path -LiteralPath $dest) 'inline copy creates protected file'
+    [IO.File]::WriteAllBytes($good, [byte[]](9, 9, 9))
+    $destTamper = Join-Path $inlineSandbox 'dest-tamper.bin'
+    Assert-Refused { Copy-VerifiedBytesInline $good $destTamper $goodSha } 'DOWNLOADS_DATA_HASH_MISMATCH'
+} finally {
+    Remove-Item -LiteralPath $inlineSandbox -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+$launcherSubstitute = Join-Path $env:TEMP ('LDW_V2FakeLauncher_' + [guid]::NewGuid().ToString('N'))
+$null = New-Item -ItemType Directory -Path $launcherSubstitute -Force
+try {
+    $fakeLauncher = Join-Path $launcherSubstitute 'OwnerAdmin-InvokeV2BootstrapProtectedStage.ps1'
+    [IO.File]::WriteAllText($fakeLauncher, 'Write-Host hijacked', [Text.UTF8Encoding]::new($false))
+    $proc = Start-Process -FilePath "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" `
+        -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $fakeLauncher) `
+        -Wait -PassThru -NoNewWindow
+    Assert-True ($proc.ExitCode -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $env:ProgramData 'LDW\PrivilegedControl\bootstrap-staging\v2-publisher-once'))) `
+        'substituted Downloads launcher is not trusted bootstrap authority'
+} finally {
+    Remove-Item -LiteralPath $launcherSubstitute -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+$inlineErrPath = Join-Path $env:TEMP ('ldw-inline-file-test-' + [guid]::NewGuid().ToString('N') + '.txt')
+$inlineFileProc = Start-Process -FilePath "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" `
+    -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $inlinePath) `
+    -Wait -PassThru -NoNewWindow -RedirectStandardError $inlineErrPath
+Assert-True ($inlineFileProc.ExitCode -ne 0) 'inline reference -File exits non-zero'
+$inlineErr = ''
+if (Test-Path -LiteralPath $inlineErrPath) {
+    $inlineErr = Get-Content -LiteralPath $inlineErrPath -Raw -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $inlineErrPath -Force -ErrorAction SilentlyContinue
+}
+Assert-True ($inlineErr.IndexOf('INLINE_REFERENCE_NOT_FILE_INVOKABLE', [StringComparison]::Ordinal) -ge 0) 'inline reference -File refused'
 
 $stageProtectedFn = $stageAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-ProtectedStagePath' }, $false)
 if ($null -eq $stageProtectedFn) { throw 'FUNCTION_REQUIRED: Assert-ProtectedStagePath' }
@@ -346,5 +406,5 @@ Write-Host "REVIEW_MANIFEST_WORKER_SHA256=$manifestWorkerPin"
 Write-Host "REVIEW_MANIFEST_FILE_SHA256=$manifestFileSha"
 Write-Host "ISSUER_MANIFEST_FILE_SHA256=$issuerFileSha"
 Write-Host "STAGE_SHA256=$stageSha"
-Write-Host "OWNER_LAUNCH_SHA256=$ownerSha"
+Write-Host "INLINE_REFERENCE_SHA256=$inlineSha"
 Write-Host "GIT_TREE_INSTALL_SHA256=$installSha"

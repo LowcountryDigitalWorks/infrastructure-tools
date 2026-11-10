@@ -1,5 +1,13 @@
-# Fixed elevated owner-admin entry (Downloads only): verifies the independently reviewed issuer manifest,
-# materializes the full bundle under protected ProgramData staging, then launches Stage only from that protected copy.
+# SOURCE REFERENCE ONLY — paste this entire file into an elevated native 64-bit System32
+# Windows PowerShell 5.1 admin console after normal-user hash verification.
+# Never invoke via -File from Downloads, a checkout, PATH alias, or any script path (TOCTOU).
+# Downloads bytes are DATA read with [IO.File]::ReadAllBytes / Get-FileHash only.
+if ($MyInvocation.InvocationName -ne '.') {
+    if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+        throw 'INLINE_REFERENCE_NOT_FILE_INVOKABLE'
+    }
+}
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -8,16 +16,15 @@ $stageFileName = 'Stage-AdminBrokerV2PublisherBootstrap.ps1'
 $bootstrapFileName = 'Install-AdminBrokerV2PublisherBootstrap.ps1'
 $workerBundleName = 'Invoke-AdminBrokerV2PublisherWorker.ps1'
 $reviewManifestFileName = 'AdminBrokerV2BootstrapReviewManifest.json'
-$ownerLaunchFileName = 'OwnerAdmin-InvokeV2BootstrapProtectedStage.ps1'
 $reviewDownloadRoot = Join-Path $env:USERPROFILE 'Downloads\LDW-V2-Publisher-Bootstrap-Review'
 $stagingLeaf = 'v2-publisher-once'
-# Independently reviewed frozen pins (issuer manifest lists stage/owner; owner self-hash comes from issuer content only).
+$trustedIssuerManifestFileSha256 = 'c973136d1ef4c805d16d2e5c59b5f0790edc1a2e4f9f5e6a2a55c2fd753bb04b'
 $trustedReviewManifestFileSha256 = 'bc774896b562a6574f340dd46560814f5ef1b3a50ead19286688bb732dc552de'
 $trustedBootstrapSha256 = '4e14986198531436672c659b556461b790321a18344981dbfa0c743680790c85'
 $trustedWorkerSha256 = '051124b03f88694f19f557954e844ffe1f71c24187c7998a4cf6e8ce55aaa4f1'
-$trustedStageSha256 = 'bbecf942a3035f981cacbff2bf1128dfe19684bec7d7b7d67c13af8e72edc97d'
+$trustedStageSha256 = '8278e8ac3c70370a8fdf9ea61d09596257195ee6b97fa51233dd4be341334aa2'
 
-function Assert-Elevated {
+function Assert-ElevatedInline {
     if ($env:OS -ne 'Windows_NT') { throw 'WINDOWS_REQUIRED' }
     $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -25,7 +32,7 @@ function Assert-Elevated {
     }
 }
 
-function Get-SystemPowerShellExecutable {
+function Get-SystemPowerShellExecutableInline {
     if (-not [Environment]::Is64BitProcess) { throw 'POWERSHELL_HOST_BITNESS_REFUSED' }
     $windir = [Environment]::GetEnvironmentVariable('WINDIR', 'Machine')
     if ([string]::IsNullOrWhiteSpace($windir)) { throw 'WINDIR_REQUIRED' }
@@ -38,7 +45,7 @@ function Get-SystemPowerShellExecutable {
     $full
 }
 
-function Assert-NoReparse([string]$Path) {
+function Assert-NoReparseInline([string]$Path) {
     $cursor = [IO.Path]::GetFullPath($Path)
     while ($cursor) {
         if (Test-Path -LiteralPath $cursor) {
@@ -51,7 +58,7 @@ function Assert-NoReparse([string]$Path) {
     }
 }
 
-function New-ProtectedDirectoryAcl([string]$Path) {
+function New-ProtectedDirectoryAclInline([string]$Path) {
     $null = New-Item -ItemType Directory -Path $Path -Force
     $acl = [Security.AccessControl.DirectorySecurity]::new()
     $acl.SetAccessRuleProtection($true, $false)
@@ -63,9 +70,9 @@ function New-ProtectedDirectoryAcl([string]$Path) {
     Set-Acl -LiteralPath $Path -AclObject $acl
 }
 
-function Read-IssuerManifest([string]$ManifestPath) {
+function Read-IssuerManifestInline([string]$ManifestPath) {
     if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) { throw 'ISSUER_MANIFEST_MISSING' }
-    Assert-NoReparse $ManifestPath
+    Assert-NoReparseInline $ManifestPath
     $bytes = [IO.File]::ReadAllBytes($ManifestPath)
     if ($bytes.Length -lt 2 -or $bytes.Length -gt 16384) { throw 'ISSUER_MANIFEST_INVALID' }
     $text = [Text.Encoding]::UTF8.GetString($bytes)
@@ -86,8 +93,7 @@ function Read-IssuerManifest([string]$ManifestPath) {
         $reviewManifestFileName,
         $bootstrapFileName,
         $workerBundleName,
-        $stageFileName,
-        $ownerLaunchFileName
+        $stageFileName
     )
     $items = @($doc.artifacts)
     if ($items.Count -ne $expectedNames.Count) { throw 'ISSUER_MANIFEST_INVALID' }
@@ -106,88 +112,105 @@ function Read-IssuerManifest([string]$ManifestPath) {
     return $map
 }
 
-function Assert-FileSha256([string]$Path, [string]$ExpectedSha256, [string]$MismatchCode) {
+function Assert-FileSha256Inline([string]$Path, [string]$ExpectedSha256, [string]$MismatchCode) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw 'ARTIFACT_MISSING' }
-    Assert-NoReparse $Path
+    Assert-NoReparseInline $Path
     $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actual -cne $ExpectedSha256) { throw $MismatchCode }
 }
 
-function Assert-DownloadBundleRoot([string]$Root) {
+function Assert-DownloadBundleRootInline([string]$Root) {
     $full = [IO.Path]::GetFullPath($Root)
     $downloads = [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE 'Downloads'))
     if (-not $full.StartsWith($downloads, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'DOWNLOAD_BUNDLE_ROOT_REFUSED'
     }
-    Assert-NoReparse $full
+    Assert-NoReparseInline $full
 }
 
-Assert-Elevated
-$commandPath = $PSCommandPath
-if ([string]::IsNullOrWhiteSpace($commandPath)) { throw 'OWNER_LAUNCH_PATH_REQUIRED' }
-$commandFull = [IO.Path]::GetFullPath($commandPath)
-$expectedLaunchLeaf = [IO.Path]::GetFullPath((Join-Path $reviewDownloadRoot $ownerLaunchFileName))
-if ($commandFull -cne $expectedLaunchLeaf) { throw 'OWNER_LAUNCH_PATH_REFUSED' }
-Assert-DownloadBundleRoot $reviewDownloadRoot
-
-$ldwRoot = Join-Path $env:ProgramData 'LDW'
-if (-not (Test-Path -LiteralPath $ldwRoot -PathType Container)) { throw 'LDW_ROOT_MISSING' }
-Assert-NoReparse $ldwRoot
-Assert-NoReparse $env:ProgramData
-$stagingRoot = Join-Path $ldwRoot ('PrivilegedControl/bootstrap-staging/' + $stagingLeaf)
-if (Test-Path -LiteralPath $stagingRoot) { throw 'STAGING_ALREADY_EXISTS' }
-New-ProtectedDirectoryAcl $stagingRoot
-
-$downloadIssuer = Join-Path $reviewDownloadRoot $issuerManifestFileName
-$downloadPaths = @($downloadIssuer)
-foreach ($leaf in @($reviewManifestFileName, $bootstrapFileName, $workerBundleName, $stageFileName, $ownerLaunchFileName)) {
-    $downloadPaths += Join-Path $reviewDownloadRoot $leaf
-}
-foreach ($path in $downloadPaths) {
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'REVIEWED_BUNDLE_INCOMPLETE' }
-}
-
-$issuerPins = Read-IssuerManifest $downloadIssuer
-if ($issuerPins[$reviewManifestFileName] -cne $trustedReviewManifestFileSha256 -or
-    $issuerPins[$bootstrapFileName] -cne $trustedBootstrapSha256 -or
-    $issuerPins[$workerBundleName] -cne $trustedWorkerSha256 -or
-    $issuerPins[$stageFileName] -cne $trustedStageSha256) {
-    throw 'ISSUER_REVIEWED_PIN_MISMATCH'
-}
-Assert-FileSha256 $commandFull $issuerPins[$ownerLaunchFileName] 'OWNER_LAUNCH_SHA256_MISMATCH'
-Assert-FileSha256 (Join-Path $reviewDownloadRoot $reviewManifestFileName) $trustedReviewManifestFileSha256 'REVIEWED_MANIFEST_FILE_SHA256_MISMATCH'
-Assert-FileSha256 (Join-Path $reviewDownloadRoot $bootstrapFileName) $trustedBootstrapSha256 'REVIEWED_BOOTSTRAP_SHA256_MISMATCH'
-Assert-FileSha256 (Join-Path $reviewDownloadRoot $workerBundleName) $trustedWorkerSha256 'REVIEWED_WORKER_SHA256_MISMATCH'
-Assert-FileSha256 (Join-Path $reviewDownloadRoot $stageFileName) $trustedStageSha256 'REVIEWED_STAGE_SHA256_MISMATCH'
-
-$protectedPaths = @{}
-$copyMap = @{
-    $issuerManifestFileName = (Get-FileHash -LiteralPath $downloadIssuer -Algorithm SHA256).Hash.ToLowerInvariant()
-    $reviewManifestFileName = $trustedReviewManifestFileSha256
-    $bootstrapFileName = $trustedBootstrapSha256
-    $workerBundleName = $trustedWorkerSha256
-    $stageFileName = $trustedStageSha256
-    $ownerLaunchFileName = $issuerPins[$ownerLaunchFileName]
-}
-foreach ($leaf in $copyMap.Keys) {
-    $src = Join-Path $reviewDownloadRoot $leaf
-    $dest = Join-Path $stagingRoot $leaf
-    Copy-Item -LiteralPath $src -Destination $dest -Force
-    Assert-FileSha256 $dest $copyMap[$leaf] 'PROTECTED_COPY_HASH_MISMATCH'
-    $protectedPaths[$leaf] = $dest
+function Copy-VerifiedBytesInline([string]$SourcePath, [string]$DestPath, [string]$ExpectedSha256) {
+    Assert-NoReparseInline $SourcePath
+    $bytes = [IO.File]::ReadAllBytes($SourcePath)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = $sha.ComputeHash($bytes)
+        $actual = [BitConverter]::ToString($digest).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $sha.Dispose()
+    }
+    if ($actual -cne $ExpectedSha256) { throw 'DOWNLOADS_DATA_HASH_MISMATCH' }
+    $destDir = [IO.Path]::GetDirectoryName($DestPath)
+    if (-not [string]::IsNullOrEmpty($destDir)) {
+        $null = New-Item -ItemType Directory -Path $destDir -Force
+    }
+    $flags = [IO.FileOptions]::None
+    $stream = [IO.File]::Open($DestPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try {
+        $stream.Write($bytes, 0, $bytes.Length)
+    } finally {
+        $stream.Dispose()
+    }
+    Assert-FileSha256Inline $DestPath $ExpectedSha256 'PROTECTED_COPY_HASH_MISMATCH'
 }
 
-$protectedStage = $protectedPaths[$stageFileName]
+function Invoke-LdwV2BootstrapProtectedStagingInlineTransaction {
+    Assert-ElevatedInline
+    Assert-DownloadBundleRootInline $reviewDownloadRoot
 
-$powershellExe = Get-SystemPowerShellExecutable
-$psi = [Diagnostics.ProcessStartInfo]::new()
-$psi.FileName = $powershellExe
-$psi.Arguments = '-NoLogo -NoProfile -NonInteractive -File "' + $protectedStage + '"'
-$psi.UseShellExecute = $false
-$psi.CreateNoWindow = $true
-$psi.WorkingDirectory = $stagingRoot
-$process = [Diagnostics.Process]::Start($psi)
-if ($null -eq $process) { throw 'STAGE_LAUNCH_FAILED' }
-$process.WaitForExit()
-if ($process.ExitCode -ne 0) { throw 'STAGE_EXIT_NONZERO' }
-'OWNER_ADMIN_V2_PROTECTED_STAGE=PASS'
+    $ldwRoot = Join-Path $env:ProgramData 'LDW'
+    if (-not (Test-Path -LiteralPath $ldwRoot -PathType Container)) { throw 'LDW_ROOT_MISSING' }
+    Assert-NoReparseInline $ldwRoot
+    Assert-NoReparseInline $env:ProgramData
+    $stagingRoot = Join-Path $ldwRoot ('PrivilegedControl/bootstrap-staging/' + $stagingLeaf)
+    if (Test-Path -LiteralPath $stagingRoot) { throw 'STAGING_ALREADY_EXISTS' }
+    New-ProtectedDirectoryAclInline $stagingRoot
+
+    $bundleLeaves = @(
+        $issuerManifestFileName,
+        $reviewManifestFileName,
+        $bootstrapFileName,
+        $workerBundleName,
+        $stageFileName
+    )
+    foreach ($leaf in $bundleLeaves) {
+        $path = Join-Path $reviewDownloadRoot $leaf
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'REVIEWED_BUNDLE_INCOMPLETE' }
+    }
+
+    $downloadIssuer = Join-Path $reviewDownloadRoot $issuerManifestFileName
+    Assert-FileSha256Inline $downloadIssuer $trustedIssuerManifestFileSha256 'ISSUER_MANIFEST_FILE_SHA256_MISMATCH'
+    $issuerPins = Read-IssuerManifestInline $downloadIssuer
+    if ($issuerPins[$reviewManifestFileName] -cne $trustedReviewManifestFileSha256 -or
+        $issuerPins[$bootstrapFileName] -cne $trustedBootstrapSha256 -or
+        $issuerPins[$workerBundleName] -cne $trustedWorkerSha256 -or
+        $issuerPins[$stageFileName] -cne $trustedStageSha256) {
+        throw 'ISSUER_REVIEWED_PIN_MISMATCH'
+    }
+
+    $copyMap = @{
+        $issuerManifestFileName = $trustedIssuerManifestFileSha256
+        $reviewManifestFileName = $trustedReviewManifestFileSha256
+        $bootstrapFileName = $trustedBootstrapSha256
+        $workerBundleName = $trustedWorkerSha256
+        $stageFileName = $trustedStageSha256
+    }
+    foreach ($leaf in $copyMap.Keys) {
+        $src = Join-Path $reviewDownloadRoot $leaf
+        $dest = Join-Path $stagingRoot $leaf
+        Copy-VerifiedBytesInline $src $dest $copyMap[$leaf]
+    }
+
+    $protectedStage = Join-Path $stagingRoot $stageFileName
+    $powershellExe = Get-SystemPowerShellExecutableInline
+    $psi = [Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $powershellExe
+    $psi.Arguments = '-NoLogo -NoProfile -NonInteractive -File "' + $protectedStage + '"'
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.WorkingDirectory = $stagingRoot
+    $process = [Diagnostics.Process]::Start($psi)
+    if ($null -eq $process) { throw 'STAGE_LAUNCH_FAILED' }
+    $process.WaitForExit()
+    if ($process.ExitCode -ne 0) { throw 'STAGE_EXIT_NONZERO' }
+    'OWNER_INLINE_V2_PROTECTED_STAGE=PASS'
+}

@@ -84,7 +84,7 @@ function Read-IssuerManifest([string]$ManifestPath) {
     if ($doc.schema -ne 1) { throw 'ISSUER_MANIFEST_INVALID' }
     if ($doc.protocol -cne 'ldw.admin-broker.v2-bootstrap.issuer-manifest.v1') { throw 'ISSUER_MANIFEST_INVALID' }
     $items = @($doc.artifacts)
-    if ($items.Count -ne 5) { throw 'ISSUER_MANIFEST_INVALID' }
+    if ($items.Count -ne 4) { throw 'ISSUER_MANIFEST_INVALID' }
     $map = @{}
     foreach ($item in $items) {
         $itemProps = @($item.PSObject.Properties.Name)
@@ -95,7 +95,7 @@ function Read-IssuerManifest([string]$ManifestPath) {
         if ($map.ContainsKey($name)) { throw 'ISSUER_MANIFEST_INVALID' }
         $map[$name] = $sha.ToLowerInvariant()
     }
-    if ($map.Count -ne 5) { throw 'ISSUER_MANIFEST_INVALID' }
+    if ($map.Count -ne 4) { throw 'ISSUER_MANIFEST_INVALID' }
     return $map
 }
 

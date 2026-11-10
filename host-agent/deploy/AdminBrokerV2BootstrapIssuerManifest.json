@@ -16,11 +16,7 @@
     },
     {
       "name": "Stage-AdminBrokerV2PublisherBootstrap.ps1",
-      "sha256": "bbecf942a3035f981cacbff2bf1128dfe19684bec7d7b7d67c13af8e72edc97d"
-    },
-    {
-      "name": "OwnerAdmin-InvokeV2BootstrapProtectedStage.ps1",
-      "sha256": "cba679db10b2a71edff4bdfba0b9dd48ede7ce230a7dcff99e54918bc4e22125"
+      "sha256": "8278e8ac3c70370a8fdf9ea61d09596257195ee6b97fa51233dd4be341334aa2"
     }
   ]
 }
