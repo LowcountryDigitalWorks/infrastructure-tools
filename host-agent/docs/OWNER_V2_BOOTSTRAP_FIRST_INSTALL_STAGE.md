@@ -49,6 +49,8 @@ Expected sanitized success line (Stage, if Install completed): `STAGE_ADMIN_BROK
 
 ## HOLD criteria
 
+- `LDW_PARENT_ACL_HOLD` or `LDW_PARENT_OWNER_REFUSED`: live `%ProgramData%\LDW` (or ancestors) has untrusted owner or inherited **BUILTIN\Users** / broad write. **Do not** weaken these checks or mutate production ACLs from this bootstrap lane; open a separate reviewed owner/host ACL remediation, then re-run normal-user verification.
+- `PROGRAMDATA_ENV_SPOOFED` / `USERPROFILE_ENV_SPOOFED`: process environment does not match OS known-folder profile paths.
 - Any hash mismatch (Downloads DATA, protected copy, issuer vs embedded review pins).
 - `STAGING_ALREADY_EXISTS`, `REPARSE_PATH_REFUSED`, or ambiguous `LDW_ROOT` owner/DACL.
 - 32-bit host, SysWOW64, or WindowsApps PowerShell.
@@ -59,6 +61,10 @@ Expected sanitized success line (Stage, if Install completed): `STAGE_ADMIN_BROK
 ## Rollback
 
 Before Install mutates tasks: delete only `bootstrap-staging\v2-publisher-once` if Install success is not proven. Otherwise follow Install journal HOLD rules.
+
+## Interrupt / journal caveat (LOW)
+
+If elevation is interrupted after staging copy but before Install journaling completes, follow Install HOLD rules; do not assume partial staging is safe to reuse (`STAGING_ALREADY_EXISTS` applies).
 
 ## Post-merge pin refresh
 

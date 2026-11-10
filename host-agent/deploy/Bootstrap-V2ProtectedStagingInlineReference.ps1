@@ -16,13 +16,13 @@ $stageFileName = 'Stage-AdminBrokerV2PublisherBootstrap.ps1'
 $bootstrapFileName = 'Install-AdminBrokerV2PublisherBootstrap.ps1'
 $workerBundleName = 'Invoke-AdminBrokerV2PublisherWorker.ps1'
 $reviewManifestFileName = 'AdminBrokerV2BootstrapReviewManifest.json'
-$reviewDownloadRoot = Join-Path $env:USERPROFILE 'Downloads\LDW-V2-Publisher-Bootstrap-Review'
 $stagingLeaf = 'v2-publisher-once'
-$trustedIssuerManifestFileSha256 = '26822027245830b74a8b3ad7b5c5552a488304e4931ab14ab3f42a4efdb5457b'
-$trustedReviewManifestFileSha256 = 'bc774896b562a6574f340dd46560814f5ef1b3a50ead19286688bb732dc552de'
-$trustedBootstrapSha256 = '4e14986198531436672c659b556461b790321a18344981dbfa0c743680790c85'
+$fixedReviewDownloadSuffix = 'Downloads\LDW-V2-Publisher-Bootstrap-Review'
+$trustedIssuerManifestFileSha256 = 'cbee01cc9539de647205fdbd63f4b4999cc4e27480a40bfaf1d7aaded88f57d0'
+$trustedReviewManifestFileSha256 = '65ecded7bc8cdb3db43d36c2a2dc5a8576a4f3ef3f1cb1dcd771d95e081e5ba7'
+$trustedBootstrapSha256 = '4ecb1d07bdc267af299dc4ff093d5b962aa72207b90911060848b1026ec181e7'
 $trustedWorkerSha256 = '051124b03f88694f19f557954e844ffe1f71c24187c7998a4cf6e8ce55aaa4f1'
-$trustedStageSha256 = '8278e8ac3c70370a8fdf9ea61d09596257195ee6b97fa51233dd4be341334aa2'
+$trustedStageSha256 = 'fb4e5722f340b24639536b12f5292cf80a8d3ed60199e3461a2bd82d621250b3'
 
 function Assert-ElevatedInline {
     if ($env:OS -ne 'Windows_NT') { throw 'WINDOWS_REQUIRED' }
@@ -30,6 +30,67 @@ function Assert-ElevatedInline {
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         throw 'ELEVATION_REQUIRED'
     }
+}
+
+function Get-TrustedUserProfileRoot {
+    $known = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    if ([string]::IsNullOrWhiteSpace($known)) { throw 'USERPROFILE_REQUIRED' }
+    $full = [IO.Path]::GetFullPath($known)
+    if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+        if ([IO.Path]::GetFullPath($env:USERPROFILE) -cne $full) { throw 'USERPROFILE_ENV_SPOOFED' }
+    }
+    Assert-NoReparseInline $full
+    $full
+}
+
+function Get-ReviewDownloadBundleRootInline {
+    $root = Join-Path (Get-TrustedUserProfileRoot) $fixedReviewDownloadSuffix
+    $full = [IO.Path]::GetFullPath($root)
+    Assert-NoReparseInline $full
+    $full
+}
+
+function Get-MachineProgramDataRootInline {
+    $known = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+    if ([string]::IsNullOrWhiteSpace($known)) { throw 'COMMONAPPLICATIONDATA_REQUIRED' }
+    $full = [IO.Path]::GetFullPath($known)
+    if ([IO.Path]::GetFileName($full.TrimEnd('\')) -cne 'ProgramData') { throw 'COMMONAPPLICATIONDATA_PATH_REFUSED' }
+    $machineVar = [Environment]::GetEnvironmentVariable('ProgramData', 'Machine')
+    if (-not [string]::IsNullOrWhiteSpace($machineVar)) {
+        if ([IO.Path]::GetFullPath($machineVar) -cne $full) { throw 'PROGRAMDATA_MACHINE_MISMATCH' }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) {
+        if ([IO.Path]::GetFullPath($env:ProgramData) -cne $full) { throw 'PROGRAMDATA_ENV_SPOOFED' }
+    }
+    Assert-NoReparseInline $full
+    $full
+}
+
+function Assert-TrustedDirectoryAclInline([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) { throw 'PROTECTED_PATH_MISSING' }
+    Assert-NoReparseInline $Path
+    $resolved = [IO.Path]::GetFullPath($Path)
+    $acl = Get-Acl -LiteralPath $resolved
+    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if ($owner -notin @('S-1-5-18', 'S-1-5-32-544')) { throw 'LDW_PARENT_OWNER_REFUSED' }
+    $forbidden = [Security.AccessControl.FileSystemRights]::Write -bor
+        [Security.AccessControl.FileSystemRights]::CreateFiles -bor
+        [Security.AccessControl.FileSystemRights]::CreateDirectories -bor
+        [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership
+    foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -ne 'Allow') { continue }
+        $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        if ($sid -in @('S-1-5-18', 'S-1-5-32-544')) { continue }
+        if ($rule.FileSystemRights -band $forbidden) { throw 'LDW_PARENT_ACL_HOLD' }
+    }
+}
+
+function Assert-LdwParentPreflightInline([string]$ProgramDataRoot, [string]$LdwRoot) {
+    Assert-TrustedDirectoryAclInline $ProgramDataRoot
+    if (Test-Path -LiteralPath $LdwRoot) { Assert-TrustedDirectoryAclInline $LdwRoot }
 }
 
 function Get-SystemPowerShellExecutableInline {
@@ -121,11 +182,8 @@ function Assert-FileSha256Inline([string]$Path, [string]$ExpectedSha256, [string
 
 function Assert-DownloadBundleRootInline([string]$Root) {
     $full = [IO.Path]::GetFullPath($Root)
-    $downloads = [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE 'Downloads'))
-    if (-not $full.StartsWith($downloads, [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'DOWNLOAD_BUNDLE_ROOT_REFUSED'
-    }
-    Assert-NoReparseInline $full
+    $expected = Get-ReviewDownloadBundleRootInline
+    if ($full -cne $expected) { throw 'DOWNLOAD_BUNDLE_ROOT_REFUSED' }
 }
 
 function Copy-VerifiedBytesInline([string]$SourcePath, [string]$DestPath, [string]$ExpectedSha256) {
@@ -155,12 +213,13 @@ function Copy-VerifiedBytesInline([string]$SourcePath, [string]$DestPath, [strin
 
 function Invoke-LdwV2BootstrapProtectedStagingInlineTransaction {
     Assert-ElevatedInline
+    $reviewDownloadRoot = Get-ReviewDownloadBundleRootInline
     Assert-DownloadBundleRootInline $reviewDownloadRoot
 
-    $ldwRoot = Join-Path $env:ProgramData 'LDW'
+    $programDataRoot = Get-MachineProgramDataRootInline
+    $ldwRoot = Join-Path $programDataRoot 'LDW'
     if (-not (Test-Path -LiteralPath $ldwRoot -PathType Container)) { throw 'LDW_ROOT_MISSING' }
-    Assert-NoReparseInline $ldwRoot
-    Assert-NoReparseInline $env:ProgramData
+    Assert-LdwParentPreflightInline $programDataRoot $ldwRoot
     $stagingRoot = Join-Path $ldwRoot ('PrivilegedControl/bootstrap-staging/' + $stagingLeaf)
     if (Test-Path -LiteralPath $stagingRoot) { throw 'STAGING_ALREADY_EXISTS' }
     New-ProtectedDirectoryAclInline $stagingRoot

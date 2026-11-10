@@ -329,6 +329,18 @@ Assert-True (Test-SourceContains $inlineSource 'DOWNLOADS_DATA_HASH_MISMATCH') '
 Assert-True (Test-SourceContains $inlineSource 'STAGING_ALREADY_EXISTS') 'Inline transaction refuses concurrent staging'
 Assert-True (Test-SourceContains $inlineSource 'DOWNLOAD_BUNDLE_ROOT_REFUSED') 'Inline transaction pins Downloads bundle root'
 Assert-True (Test-SourceContains $inlineSource 'Invoke-LdwV2BootstrapProtectedStagingInlineTransaction') 'Inline transaction entry function published'
+Assert-True (Test-SourceContains $inlineSource 'Get-MachineProgramDataRootInline') 'Inline uses CommonApplicationData root'
+Assert-True (Test-SourceContains $inlineSource 'LDW_PARENT_ACL_HOLD') 'Inline preflight refuses weak parent DACL'
+Assert-True (Test-SourceContains $inlineSource 'USERPROFILE_ENV_SPOOFED') 'Inline refuses profile env spoof'
+Assert-True (Test-SourceContains $stageSource 'Get-MachineProgramDataRoot') 'Stage uses CommonApplicationData root'
+Assert-True (Test-SourceContains $stageSource 'LDW_PARENT_ACL_HOLD') 'Stage preflight refuses weak parent DACL'
+Assert-True (Test-SourceContains $installSource 'Get-MachineProgramDataRoot') 'Install uses CommonApplicationData root'
+Assert-True (Test-SourceContains $installSource 'PROGRAMDATA_ENV_SPOOFED') 'Install refuses ProgramData env spoof'
+Assert-True (Test-SourceContains $installSource 'LDW_PARENT_ACL_HOLD') 'Install preflight refuses weak parent DACL'
+Assert-True (-not (Test-SourceContains $stageSource 'Join-Path $env:ProgramData')) 'Stage does not join paths from process ProgramData env'
+Assert-True (-not (Test-SourceContains $inlineSource 'Join-Path $env:ProgramData')) 'Inline does not join paths from process ProgramData env'
+Assert-True (Test-SourceContains $stageSource 'PROGRAMDATA_ENV_SPOOFED') 'Stage compares process ProgramData to machine known folder'
+Assert-True (Test-SourceContains $inlineSource 'PROGRAMDATA_ENV_SPOOFED') 'Inline compares process ProgramData to machine known folder'
 Assert-True (Test-SourceContains $ownerDocSource 'Invoke-LdwV2BootstrapProtectedStagingInlineTransaction') 'Owner doc names inline transaction entry'
 Assert-True (-not (Test-SourceContains $ownerDocSource 'OwnerAdmin-InvokeV2BootstrapProtectedStage.ps1')) 'Owner doc does not reference Downloads launcher'
 Assert-True (Test-SourceContains $ownerDocSource 'Never `powershell -File` a path under Downloads while elevated') 'Owner doc states elevated -File Downloads prohibition'
@@ -377,13 +389,39 @@ try {
     $proc = Start-Process -FilePath "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" `
         -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $fakeLauncher) `
         -Wait -PassThru -NoNewWindow
-    Assert-True ($proc.ExitCode -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $env:ProgramData 'LDW\PrivilegedControl\bootstrap-staging\v2-publisher-once'))) `
+    Assert-True ($proc.ExitCode -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $programDataKnown 'LDW\PrivilegedControl\bootstrap-staging\v2-publisher-once'))) `
         'substituted Downloads launcher is not trusted bootstrap authority'
 } finally {
     Remove-Item -LiteralPath $launcherSubstitute -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 $inlineErrPath = Join-Path $env:TEMP ('ldw-inline-file-test-' + [guid]::NewGuid().ToString('N') + '.txt')
+$pdRootFn = $stageAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Get-MachineProgramDataRoot' }, $false)
+$aclFn = $stageAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-TrustedDirectoryAcl' }, $false)
+if ($null -eq $pdRootFn -or $null -eq $aclFn) { throw 'FUNCTION_REQUIRED: machine program data helpers' }
+. ([scriptblock]::Create($pdRootFn.Extent.Text))
+. ([scriptblock]::Create($aclFn.Extent.Text))
+$originalPd = $env:ProgramData
+try {
+    $env:ProgramData = 'C:\SpoofedProgramDataForTest'
+    Assert-Refused { Get-MachineProgramDataRoot } 'PROGRAMDATA_ENV_SPOOFED'
+} finally {
+    $env:ProgramData = $originalPd
+}
+$aclSandbox = Join-Path $env:TEMP ('LDW_V2Acl_' + [guid]::NewGuid().ToString('N'))
+$null = New-Item -ItemType Directory -Path $aclSandbox -Force
+try {
+    $acl = Get-Acl -LiteralPath $aclSandbox
+    $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+    $usersSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
+    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        $usersSid, 'Write', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+    Set-Acl -LiteralPath $aclSandbox -AclObject $acl
+    Assert-Refused { Assert-TrustedDirectoryAcl $aclSandbox } 'LDW_PARENT_ACL_HOLD'
+} finally {
+    Remove-Item -LiteralPath $aclSandbox -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 $inlineFileProc = Start-Process -FilePath "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" `
     -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $inlinePath) `
     -Wait -PassThru -NoNewWindow -RedirectStandardError $inlineErrPath
@@ -397,8 +435,10 @@ Assert-True ($inlineErr.IndexOf('INLINE_REFERENCE_NOT_FILE_INVOKABLE', [StringCo
 
 $stageProtectedFn = $stageAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-ProtectedStagePath' }, $false)
 if ($null -eq $stageProtectedFn) { throw 'FUNCTION_REQUIRED: Assert-ProtectedStagePath' }
-$stagingSample = Join-Path $env:ProgramData 'LDW\PrivilegedControl\bootstrap-staging\v2-publisher-once\Stage-AdminBrokerV2PublisherBootstrap.ps1'
-$downloadsSample = Join-Path $env:USERPROFILE 'Downloads\LDW-V2-Publisher-Bootstrap-Review\Stage-AdminBrokerV2PublisherBootstrap.ps1'
+$programDataKnown = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+$profileKnown = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+$stagingSample = Join-Path $programDataKnown 'LDW\PrivilegedControl\bootstrap-staging\v2-publisher-once\Stage-AdminBrokerV2PublisherBootstrap.ps1'
+$downloadsSample = Join-Path $profileKnown 'Downloads\LDW-V2-Publisher-Bootstrap-Review\Stage-AdminBrokerV2PublisherBootstrap.ps1'
 . ([scriptblock]::Create($stageProtectedFn.Extent.Text))
 Assert-Refused { Assert-ProtectedStagePath $downloadsSample $stagingSample } 'STAGE_DOWNLOAD_PATH_REFUSED'
 Assert-Refused { Assert-ProtectedStagePath $installPath $stagingSample } 'STAGE_PROTECTED_PATH_REQUIRED'

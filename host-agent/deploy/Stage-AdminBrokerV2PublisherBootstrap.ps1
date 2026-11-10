@@ -10,8 +10,8 @@ $workerBundleName = 'Invoke-AdminBrokerV2PublisherWorker.ps1'
 $reviewManifestFileName = 'AdminBrokerV2BootstrapReviewManifest.json'
 $stagingLeaf = 'v2-publisher-once'
 # Independently reviewed byte pins for the install bundle (issuer manifest cross-checks these literals; Stage has no self-digest pin).
-$trustedReviewManifestFileSha256 = 'bc774896b562a6574f340dd46560814f5ef1b3a50ead19286688bb732dc552de'
-$trustedBootstrapSha256 = '4e14986198531436672c659b556461b790321a18344981dbfa0c743680790c85'
+$trustedReviewManifestFileSha256 = '65ecded7bc8cdb3db43d36c2a2dc5a8576a4f3ef3f1cb1dcd771d95e081e5ba7'
+$trustedBootstrapSha256 = '4ecb1d07bdc267af299dc4ff093d5b962aa72207b90911060848b1026ec181e7'
 $trustedWorkerSha256 = '051124b03f88694f19f557954e844ffe1f71c24187c7998a4cf6e8ce55aaa4f1'
 
 function Assert-Elevated {
@@ -20,6 +20,49 @@ function Assert-Elevated {
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         throw 'ELEVATION_REQUIRED'
     }
+}
+
+function Get-MachineProgramDataRoot {
+    $known = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+    if ([string]::IsNullOrWhiteSpace($known)) { throw 'COMMONAPPLICATIONDATA_REQUIRED' }
+    $full = [IO.Path]::GetFullPath($known)
+    if ([IO.Path]::GetFileName($full.TrimEnd('\')) -cne 'ProgramData') { throw 'COMMONAPPLICATIONDATA_PATH_REFUSED' }
+    $machineVar = [Environment]::GetEnvironmentVariable('ProgramData', 'Machine')
+    if (-not [string]::IsNullOrWhiteSpace($machineVar)) {
+        if ([IO.Path]::GetFullPath($machineVar) -cne $full) { throw 'PROGRAMDATA_MACHINE_MISMATCH' }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) {
+        if ([IO.Path]::GetFullPath($env:ProgramData) -cne $full) { throw 'PROGRAMDATA_ENV_SPOOFED' }
+    }
+    Assert-NoReparse $full
+    $full
+}
+
+function Assert-TrustedDirectoryAcl([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) { throw 'PROTECTED_PATH_MISSING' }
+    Assert-NoReparse $Path
+    $resolved = [IO.Path]::GetFullPath($Path)
+    $acl = Get-Acl -LiteralPath $resolved
+    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if ($owner -notin @('S-1-5-18', 'S-1-5-32-544')) { throw 'LDW_PARENT_OWNER_REFUSED' }
+    $forbidden = [Security.AccessControl.FileSystemRights]::Write -bor
+        [Security.AccessControl.FileSystemRights]::CreateFiles -bor
+        [Security.AccessControl.FileSystemRights]::CreateDirectories -bor
+        [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership
+    foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -ne 'Allow') { continue }
+        $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        if ($sid -in @('S-1-5-18', 'S-1-5-32-544')) { continue }
+        if ($rule.FileSystemRights -band $forbidden) { throw 'LDW_PARENT_ACL_HOLD' }
+    }
+}
+
+function Assert-LdwParentPreflight([string]$ProgramDataRoot, [string]$LdwRoot) {
+    Assert-TrustedDirectoryAcl $ProgramDataRoot
+    if (Test-Path -LiteralPath $LdwRoot) { Assert-TrustedDirectoryAcl $LdwRoot }
 }
 
 function Get-SystemPowerShellExecutable {
@@ -52,12 +95,14 @@ function Assert-ProtectedStagePath([string]$CommandPath, [string]$ExpectedProtec
     if ([string]::IsNullOrWhiteSpace($CommandPath)) { throw 'STAGE_PROTECTED_PATH_REQUIRED' }
     $actual = [IO.Path]::GetFullPath($CommandPath)
     $expected = [IO.Path]::GetFullPath($ExpectedProtectedStagePath)
-    $downloads = [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE 'Downloads'))
+    $profileRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    if ([string]::IsNullOrWhiteSpace($profileRoot)) { throw 'USERPROFILE_REQUIRED' }
+    $downloads = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetFullPath($profileRoot)) 'Downloads'))
     if ($actual.StartsWith($downloads, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'STAGE_DOWNLOAD_PATH_REFUSED'
     }
     if ($actual -cne $expected) { throw 'STAGE_PROTECTED_PATH_REQUIRED' }
-    $programData = [IO.Path]::GetFullPath($env:ProgramData)
+    $programData = Get-MachineProgramDataRoot
     if (-not $actual.StartsWith($programData, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'STAGE_PROTECTED_PATH_REQUIRED'
     }
@@ -146,10 +191,10 @@ function Assert-FileSha256([string]$Path, [string]$ExpectedSha256, [string]$Mism
 }
 
 Assert-Elevated
-$ldwRoot = Join-Path $env:ProgramData 'LDW'
+$programDataRoot = Get-MachineProgramDataRoot
+$ldwRoot = Join-Path $programDataRoot 'LDW'
 if (-not (Test-Path -LiteralPath $ldwRoot -PathType Container)) { throw 'LDW_ROOT_MISSING' }
-Assert-NoReparse $ldwRoot
-Assert-NoReparse $env:ProgramData
+Assert-LdwParentPreflight $programDataRoot $ldwRoot
 $stagingRoot = Join-Path $ldwRoot ('PrivilegedControl/bootstrap-staging/' + $stagingLeaf)
 if (-not (Test-Path -LiteralPath $stagingRoot -PathType Container)) { throw 'STAGING_NOT_PREPARED' }
 Assert-NoReparse $stagingRoot
