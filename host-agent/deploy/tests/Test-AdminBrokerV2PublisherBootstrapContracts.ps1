@@ -11,8 +11,10 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
 $deployRoot = Split-Path -Parent $PSScriptRoot
 $installPath = Join-Path $deployRoot 'Install-AdminBrokerV2PublisherBootstrap.ps1'
 $stagePath = Join-Path $deployRoot 'Stage-AdminBrokerV2PublisherBootstrap.ps1'
+$ownerPath = Join-Path $deployRoot 'OwnerAdmin-InvokeV2BootstrapProtectedStage.ps1'
 $v2WorkerPath = Join-Path $deployRoot 'Invoke-AdminBrokerV2PublisherWorker.ps1'
 $manifestPath = Join-Path $deployRoot 'AdminBrokerV2BootstrapReviewManifest.json'
+$issuerPath = Join-Path $deployRoot 'AdminBrokerV2BootstrapIssuerManifest.json'
 $repoRoot = (Resolve-Path (Join-Path $deployRoot '../..')).Path
 $script:Assertions = 0
 
@@ -46,7 +48,7 @@ function Get-BytesSha256([byte[]]$Bytes) {
     }
 }
 
-foreach ($scriptPath in @($installPath, $stagePath, $v2WorkerPath)) {
+foreach ($scriptPath in @($installPath, $stagePath, $ownerPath, $v2WorkerPath)) {
     $errors = $null
     [void][Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$errors)
     Assert-True ($errors.Count -eq 0) "Parse OK: $(Split-Path -Leaf $scriptPath)"
@@ -54,18 +56,28 @@ foreach ($scriptPath in @($installPath, $stagePath, $v2WorkerPath)) {
 $manifestParsed = $null
 try { $manifestParsed = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json } catch { $manifestParsed = $null }
 Assert-True ($null -ne $manifestParsed) 'Parse OK: AdminBrokerV2BootstrapReviewManifest.json'
+$issuerParsed = $null
+try { $issuerParsed = Get-Content -LiteralPath $issuerPath -Raw | ConvertFrom-Json } catch { $issuerParsed = $null }
+Assert-True ($null -ne $issuerParsed) 'Parse OK: AdminBrokerV2BootstrapIssuerManifest.json'
 
 $installAst = [Management.Automation.Language.Parser]::ParseFile($installPath, [ref]$null, [ref]$null)
 $stageAst = [Management.Automation.Language.Parser]::ParseFile($stagePath, [ref]$null, [ref]$null)
+$ownerAst = [Management.Automation.Language.Parser]::ParseFile($ownerPath, [ref]$null, [ref]$null)
 Assert-True ($null -eq ($installAst.Find({ param($n) $n -is [Management.Automation.Language.ParamBlockAst] }, $false))) 'Install has no param block'
 Assert-True ($null -eq ($stageAst.Find({ param($n) $n -is [Management.Automation.Language.ParamBlockAst] }, $false))) 'Stage has no param block'
+Assert-True ($null -eq ($ownerAst.Find({ param($n) $n -is [Management.Automation.Language.ParamBlockAst] }, $false))) 'Owner launcher has no param block'
 
 $installSource = Get-Content -LiteralPath $installPath -Raw
 $stageSource = Get-Content -LiteralPath $stagePath -Raw
+$ownerSource = Get-Content -LiteralPath $ownerPath -Raw
 $v2Source = Get-Content -LiteralPath $v2WorkerPath -Raw
 $manifestJson = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+$issuerJson = Get-Content -LiteralPath $issuerPath -Raw | ConvertFrom-Json
 
 $installSha = (Get-FileHash -LiteralPath $installPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$stageSha = (Get-FileHash -LiteralPath $stagePath -Algorithm SHA256).Hash.ToLowerInvariant()
+$ownerSha = (Get-FileHash -LiteralPath $ownerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$issuerFileSha = (Get-FileHash -LiteralPath $issuerPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $v2Sha = (Get-FileHash -LiteralPath $v2WorkerPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $manifestFileSha = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $manifestInstallPin = @($manifestJson.artifacts | Where-Object { $_.name -ceq 'Install-AdminBrokerV2PublisherBootstrap.ps1' }).sha256.ToLowerInvariant()
@@ -75,6 +87,14 @@ Assert-True ($manifestJson.schema -eq 1) 'manifest schema'
 Assert-True ($manifestJson.protocol -ceq 'ldw.admin-broker.v2-bootstrap.review-manifest.v1') 'manifest protocol'
 Assert-True ($manifestInstallPin -ceq $installSha) 'manifest install pin equals materialized file SHA256'
 Assert-True ($manifestWorkerPin -ceq $v2Sha) 'manifest worker pin equals materialized file SHA256'
+Assert-True ($issuerJson.schema -eq 1) 'issuer manifest schema'
+Assert-True ($issuerJson.protocol -ceq 'ldw.admin-broker.v2-bootstrap.issuer-manifest.v1') 'issuer manifest protocol'
+Assert-True (@($issuerJson.artifacts).Count -eq 5) 'issuer manifest lists five artifacts'
+$issuerStagePin = @($issuerJson.artifacts | Where-Object { $_.name -ceq 'Stage-AdminBrokerV2PublisherBootstrap.ps1' }).sha256.ToLowerInvariant()
+$issuerOwnerPin = @($issuerJson.artifacts | Where-Object { $_.name -ceq 'OwnerAdmin-InvokeV2BootstrapProtectedStage.ps1' }).sha256.ToLowerInvariant()
+Assert-True ($issuerStagePin -ceq $stageSha) 'issuer manifest stage pin equals materialized Stage SHA256'
+Assert-True ($issuerOwnerPin -ceq $ownerSha) 'issuer manifest owner pin equals materialized owner launcher SHA256'
+Assert-True (-not (@($issuerJson.artifacts | Where-Object { $_.name -ceq 'AdminBrokerV2BootstrapIssuerManifest.json' }))) 'issuer manifest has no circular self-entry'
 Assert-True (Test-SourceContains $stageSource 'trustedBootstrapSha256') 'Stage embeds reviewed bootstrap pin'
 Assert-True (Test-SourceContains $stageSource 'trustedWorkerSha256') 'Stage embeds reviewed worker pin'
 Assert-True (Test-SourceContains $stageSource 'trustedReviewManifestFileSha256') 'Stage embeds reviewed manifest file pin'
@@ -117,11 +137,18 @@ if (Test-Path -LiteralPath (Join-Path $repoRoot '.git')) {
     $gitInstallBlob = (git -C $repoRoot rev-parse "HEAD:host-agent/deploy/Install-AdminBrokerV2PublisherBootstrap.ps1" 2>$null).Trim()
     $gitWorkerBlob = (git -C $repoRoot rev-parse "HEAD:host-agent/deploy/Invoke-AdminBrokerV2PublisherWorker.ps1" 2>$null).Trim()
     $gitManifestBlob = (git -C $repoRoot rev-parse "HEAD:host-agent/deploy/AdminBrokerV2BootstrapReviewManifest.json" 2>$null).Trim()
+    $gitStageBlob = (git -C $repoRoot rev-parse "HEAD:host-agent/deploy/Stage-AdminBrokerV2PublisherBootstrap.ps1" 2>$null).Trim()
+    $gitOwnerBlob = (git -C $repoRoot rev-parse "HEAD:host-agent/deploy/OwnerAdmin-InvokeV2BootstrapProtectedStage.ps1" 2>$null).Trim()
+    $gitIssuerBlob = (git -C $repoRoot rev-parse "HEAD:host-agent/deploy/AdminBrokerV2BootstrapIssuerManifest.json" 2>$null).Trim()
     Assert-True ($gitInstallBlob -match '^[a-f0-9]{40}$') 'git install blob identity'
     Assert-True ($gitWorkerBlob -match '^[a-f0-9]{40}$') 'git worker blob identity'
     Assert-True ($gitManifestBlob -match '^[a-f0-9]{40}$') 'git manifest blob identity'
+    Assert-True ($gitStageBlob -match '^[a-f0-9]{40}$') 'git stage blob identity'
+    Assert-True ($gitOwnerBlob -match '^[a-f0-9]{40}$') 'git owner launcher blob identity'
+    Assert-True ($gitIssuerBlob -match '^[a-f0-9]{40}$') 'git issuer manifest blob identity'
     $gitInstallSha = (git -C $repoRoot hash-object $installPath).Trim().ToLowerInvariant()
     Assert-True ($gitInstallBlob -ceq $gitInstallSha) 'install git blob matches working tree object'
+    Assert-True ($gitStageBlob -ceq (git -C $repoRoot hash-object $stagePath).Trim().ToLowerInvariant()) 'stage git blob matches working tree object'
 }
 
 $rawBytes = [IO.File]::ReadAllBytes($installPath)
@@ -290,6 +317,24 @@ Assert-True (-not (Test-SourceContains $installSource 'Start-Process')) 'Install
 Assert-True (Test-SourceContains $stageSource 'System32') 'Stage pins native System32 path'
 Assert-True (Test-SourceContains $stageSource 'POWERSHELL_HOST_BITNESS_REFUSED') 'Stage refuses 32-bit host'
 Assert-True (Test-SourceContains $stageSource 'PROTECTED_COPY_HASH_MISMATCH') 'Stage post-copy hash gate'
+Assert-True (Test-SourceContains $stageSource 'STAGE_DOWNLOAD_PATH_REFUSED') 'Stage refuses Downloads execution'
+Assert-True (Test-SourceContains $stageSource 'STAGE_PROTECTED_PATH_REQUIRED') 'Stage requires protected path'
+Assert-True (Test-SourceContains $stageSource 'STAGE_ISSUER_PIN_MISMATCH') 'Stage verifies self via issuer manifest'
+Assert-True (Test-SourceContains $stageSource 'ISSUER_REVIEWED_PIN_MISMATCH') 'Stage cross-checks issuer against embedded review pins'
+Assert-True (-not (Test-SourceContains $stageSource 'LDW-V2-Publisher-Bootstrap-Review')) 'Stage does not read Downloads bundle'
+Assert-True (Test-SourceContains $ownerSource 'OWNER_LAUNCH_PATH_REFUSED') 'Owner launcher pins fixed Downloads path'
+Assert-True (Test-SourceContains $ownerSource 'OWNER_LAUNCH_SHA256_MISMATCH') 'Owner launcher verifies self via issuer content'
+Assert-True (Test-SourceContains $ownerSource 'DOWNLOAD_BUNDLE_ROOT_REFUSED') 'Owner launcher refuses mutable bundle root'
+Assert-True (-not (Test-SourceContains $ownerSource 'trustedOwnerLaunchSha256')) 'Owner launcher has no self-embedded digest pin'
+Assert-True (-not (Test-SourceContains $stageSource 'trustedIssuerManifestFileSha256')) 'Stage avoids circular issuer self pin'
+
+$stageProtectedFn = $stageAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-ProtectedStagePath' }, $false)
+if ($null -eq $stageProtectedFn) { throw 'FUNCTION_REQUIRED: Assert-ProtectedStagePath' }
+$stagingSample = Join-Path $env:ProgramData 'LDW\PrivilegedControl\bootstrap-staging\v2-publisher-once\Stage-AdminBrokerV2PublisherBootstrap.ps1'
+$downloadsSample = Join-Path $env:USERPROFILE 'Downloads\LDW-V2-Publisher-Bootstrap-Review\Stage-AdminBrokerV2PublisherBootstrap.ps1'
+. ([scriptblock]::Create($stageProtectedFn.Extent.Text))
+Assert-Refused { Assert-ProtectedStagePath $downloadsSample $stagingSample } 'STAGE_DOWNLOAD_PATH_REFUSED'
+Assert-Refused { Assert-ProtectedStagePath $installPath $stagingSample } 'STAGE_PROTECTED_PATH_REQUIRED'
 Assert-True (Test-SourceContains $installSource 'Remove-StagedV2Worker') 'Install rollback removes staged V2 only'
 
 Assert-True (Test-SourceContains $v2Source 'DRAGONFLY_V2_PUBLISH_REVIEWED') 'V2 worker registers publish operation'
@@ -299,4 +344,7 @@ Write-Host "Admin Broker V2 publisher bootstrap contract assertions PASS: $scrip
 Write-Host "REVIEW_MANIFEST_INSTALL_SHA256=$manifestInstallPin"
 Write-Host "REVIEW_MANIFEST_WORKER_SHA256=$manifestWorkerPin"
 Write-Host "REVIEW_MANIFEST_FILE_SHA256=$manifestFileSha"
+Write-Host "ISSUER_MANIFEST_FILE_SHA256=$issuerFileSha"
+Write-Host "STAGE_SHA256=$stageSha"
+Write-Host "OWNER_LAUNCH_SHA256=$ownerSha"
 Write-Host "GIT_TREE_INSTALL_SHA256=$installSha"
