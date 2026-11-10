@@ -137,7 +137,7 @@ $afterDrift['stage'] = 'AFTER_APPLY'
 $afterBad = Copy-RedrixMigrationLedger $childMap
 $afterBad['CiJitControl'] = ('0' * 64)
 $afterDrift['childSha256After'] = $afterBad
-Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $afterDrift) -ceq 'HOLD_CHILD_INTEGRITY_AFTER_APPLY') 'CHILD_AFTER_DRIFT'
+Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $afterDrift) -ceq 'HOLD_CHILD_PIN_DRIFT') 'CHILD_AFTER_WRONG_DIGEST'
 
 $noReceipt = Copy-RedrixMigrationLedger $validLedger
 $noReceipt['durableReceiptWritten'] = $false
@@ -146,6 +146,38 @@ Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $noReceipt) -ceq 'H
 $physicalFlag = Copy-RedrixMigrationLedger $validLedger
 $physicalFlag['physicalApplyAttempted'] = $true
 Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $physicalFlag) -ceq 'HOLD_PHYSICAL_FLAG_DRIFT') 'PHYSICAL_FLAG_FORGED'
+
+$committedNoAfter = Copy-RedrixMigrationLedger $validLedger
+$committedNoAfter['stage'] = 'COMMITTED'
+$committedNoAfter['childSha256After'] = $null
+Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $committedNoAfter) -ceq 'HOLD_CHILD_POST_STATE_MISSING') 'COMMITTED_MISSING_AFTER'
+
+$rebootNoAfter = Copy-RedrixMigrationLedger $validLedger
+$rebootNoAfter['stage'] = 'REBOOT'
+$rebootNoAfter.Remove('childSha256After')
+Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $rebootNoAfter) -ceq 'HOLD_CHILD_POST_STATE_MISSING') 'REBOOT_MISSING_AFTER_KEY'
+
+$extraBefore = Copy-RedrixMigrationLedger $validLedger
+$extraChildMap = Copy-RedrixMigrationLedger $childMap
+$extraChildMap['SeventhChild'] = ('0' * 64)
+$extraBefore['childSha256Before'] = $extraChildMap
+Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $extraBefore) -ceq 'HOLD_CHILD_PIN_DRIFT') 'EXTRA_CHILD_BEFORE'
+
+$extraAfter = Copy-RedrixMigrationLedger $validLedger
+$extraAfter['stage'] = 'COMMITTED'
+$extraAfterMap = Copy-RedrixMigrationLedger $childMap
+$extraAfterMap['SeventhChild'] = ('0' * 64)
+$extraAfter['childSha256After'] = $extraAfterMap
+Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $extraAfter) -ceq 'HOLD_CHILD_PIN_DRIFT') 'EXTRA_CHILD_AFTER'
+
+$preparedNoReceipt = Copy-RedrixMigrationLedger $validLedger
+$preparedNoReceipt['stage'] = 'PREPARED'
+$preparedNoReceipt['durableReceiptWritten'] = $false
+Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $preparedNoReceipt) -ceq 'HOLD_RECOVERY_AMBIGUOUS') 'PREPARED_NO_RECEIPT'
+
+$bogusStage = Copy-RedrixMigrationLedger $validLedger
+$bogusStage['stage'] = 'ROLLED_BACK'
+Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $bogusStage) -ceq 'HOLD_LEDGER_STAGE_AMBIGUOUS') 'STAGE_MISMATCH'
 
 Assert ((Test-RedrixLdwParentAclMigrationRollbackPolicy $null) -ceq 'ROLLBACK_REFUSED_NO_JOURNAL') 'ROLLBACK_NO_JOURNAL'
 Assert ((Test-RedrixLdwParentAclMigrationRollbackPolicy @{ journalComplete = $true }) -ceq 'ROLLBACK_REFUSED_NO_JOURNAL') 'ROLLBACK_FORGED_LEDGER'

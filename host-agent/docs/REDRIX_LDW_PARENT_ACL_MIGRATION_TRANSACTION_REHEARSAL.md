@@ -20,7 +20,7 @@ Merged PR301 supplies the **explicit in-memory target** (SHA `d0d4816b…`). Mer
 
 **Forbidden in this packet:** `Set-Acl`, host writes, stock `C:\ProgramData` DACL changes, new privileged launcher, scheduled-task mutation, secrets/network.
 
-ProgramData root trust uses **machine-known** `[Environment]::GetFolderPath(CommonApplicationData)` only; untrusted caller paths are refused. Rehearsal mock snapshots do not assert host LDW ACL state (`hostRootTrustAsserted = false`).
+ProgramData root trust uses **machine-known** `[Environment]::GetFolderPath(CommonApplicationData)` only; untrusted caller paths are refused. That binding is **not** a reparse-point, junction, or live ACL readback proof — physical LDW01 review (#186 / #139) remains required before any future host action. Rehearsal mock snapshots do not assert host LDW ACL or memory truth (`syntheticSnapshotOnly = true`, `hostRootTrustAsserted = false`); green rehearsal or ledger recovery strings are source-model checks only, not physical authorization.
 
 ## Owner-reviewed checklist (rehearsal stages)
 

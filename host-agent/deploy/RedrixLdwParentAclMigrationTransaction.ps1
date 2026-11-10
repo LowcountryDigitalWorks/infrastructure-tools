@@ -157,17 +157,25 @@ function New-RedrixLdwParentAclMigrationLedgerEntry {
     }
 }
 
+function Test-RedrixLdwParentAclMigrationLedgerChildShaMap([hashtable]$Map) {
+    $ref = Get-RedrixLdwParentAclMigrationReference
+    if ($null -eq $Map) { return 'HOLD_RECOVERY_AMBIGUOUS' }
+    $expectedNames = @($ref.protectedChildSddlSha256Utf8.PSObject.Properties | ForEach-Object { $_.Name })
+    if ($Map.Count -ne $expectedNames.Count) { return 'HOLD_CHILD_PIN_DRIFT' }
+    foreach ($key in $Map.Keys) {
+        if ($expectedNames -notcontains [string]$key) { return 'HOLD_CHILD_EXTRA_KEY' }
+    }
+    foreach ($prop in $ref.protectedChildSddlSha256Utf8.PSObject.Properties) {
+        if ($Map[$prop.Name] -cne [string]$prop.Value) { return 'HOLD_CHILD_PIN_DRIFT' }
+    }
+    return 'OK'
+}
+
 function Test-RedrixLdwParentAclMigrationLedgerPins([hashtable]$Ledger) {
     $ref = Get-RedrixLdwParentAclMigrationReference
     if ($Ledger['parentSha256Before'] -cne $ref.liveParentPreimageSha256Utf8SddlProperty) { return 'HOLD_PREIMAGE_PIN_DRIFT' }
     if ($Ledger['targetSha256Utf8'] -cne $ref.canonicalTargetSha256Utf8SddlProperty) { return 'HOLD_TARGET_PIN_DRIFT' }
-    $childBefore = $Ledger['childSha256Before']
-    if ($null -eq $childBefore) { return 'HOLD_RECOVERY_AMBIGUOUS' }
-    foreach ($prop in $ref.protectedChildSddlSha256Utf8.PSObject.Properties) {
-        if (-not $childBefore.ContainsKey($prop.Name)) { return 'HOLD_CHILD_PIN_DRIFT' }
-        if ($childBefore[$prop.Name] -cne [string]$prop.Value) { return 'HOLD_CHILD_PIN_DRIFT' }
-    }
-    return 'OK'
+    return (Test-RedrixLdwParentAclMigrationLedgerChildShaMap $Ledger['childSha256Before'])
 }
 
 function Test-RedrixLdwParentAclMigrationChildHashParity(
@@ -191,19 +199,35 @@ function Test-RedrixLdwParentAclMigrationRecoveryAfterReboot([hashtable]$Ledger)
     }
     if ($Ledger['marker'] -cne $script:RedrixMigrationMarker) { return 'HOLD_LEDGER_FORGED' }
     if (-not $Ledger['journalComplete']) { return 'HOLD_RECOVERY_AMBIGUOUS' }
-    if (-not $Ledger['durableReceiptWritten']) { return 'HOLD_RECOVERY_AMBIGUOUS' }
     if ($Ledger['physicalApplyAttempted']) { return 'HOLD_PHYSICAL_FLAG_DRIFT' }
     $allowedStages = @('PREPARED', 'COMMITTED', 'AFTER_APPLY', 'REBOOT', 'PRE_APPLY_REHEARSAL')
     if ($Ledger['stage'] -notin $allowedStages) { return 'HOLD_LEDGER_STAGE_AMBIGUOUS' }
+    $postStages = @('COMMITTED', 'AFTER_APPLY', 'REBOOT', 'PRE_APPLY_REHEARSAL')
+    $receiptRequiredStages = @('COMMITTED', 'AFTER_APPLY', 'REBOOT', 'PRE_APPLY_REHEARSAL')
+    if ($Ledger['stage'] -in $receiptRequiredStages -and -not $Ledger['durableReceiptWritten']) {
+        return 'HOLD_RECOVERY_AMBIGUOUS'
+    }
+    if ($Ledger['stage'] -eq 'PREPARED' -and -not $Ledger['durableReceiptWritten']) {
+        return 'HOLD_RECOVERY_AMBIGUOUS'
+    }
     $pin = Test-RedrixLdwParentAclMigrationLedgerPins $Ledger
     if ($pin -cne 'OK') { return $pin }
-    if ($Ledger.ContainsKey('childSha256After') -and $null -ne $Ledger['childSha256After']) {
+    if ($Ledger['stage'] -in $postStages) {
+        if (-not $Ledger.ContainsKey('childSha256After') -or $null -eq $Ledger['childSha256After']) {
+            return 'HOLD_CHILD_POST_STATE_MISSING'
+        }
+        $afterPin = Test-RedrixLdwParentAclMigrationLedgerChildShaMap $Ledger['childSha256After']
+        if ($afterPin -cne 'OK') { return $afterPin }
         if (-not (Test-RedrixLdwParentAclMigrationChildHashParity $Ledger['childSha256Before'] $Ledger['childSha256After'])) {
             return 'HOLD_CHILD_INTEGRITY_AFTER_APPLY'
         }
     }
-    if ($Ledger['stage'] -in @('COMMITTED', 'AFTER_APPLY', 'REBOOT') -and -not $Ledger['durableReceiptWritten']) {
-        return 'HOLD_RECOVERY_AMBIGUOUS'
+    elseif ($Ledger.ContainsKey('childSha256After') -and $null -ne $Ledger['childSha256After']) {
+        $afterPin = Test-RedrixLdwParentAclMigrationLedgerChildShaMap $Ledger['childSha256After']
+        if ($afterPin -cne 'OK') { return $afterPin }
+        if (-not (Test-RedrixLdwParentAclMigrationChildHashParity $Ledger['childSha256Before'] $Ledger['childSha256After'])) {
+            return 'HOLD_CHILD_INTEGRITY_AFTER_APPLY'
+        }
     }
     return 'RECOVERY_LEDGER_COMPLETE'
 }
