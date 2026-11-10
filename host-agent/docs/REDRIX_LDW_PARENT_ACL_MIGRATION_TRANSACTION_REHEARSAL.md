@@ -20,6 +20,8 @@ Merged PR301 supplies the **explicit in-memory target** (SHA `d0d4816b…`). Mer
 
 **Forbidden in this packet:** `Set-Acl`, host writes, stock `C:\ProgramData` DACL changes, new privileged launcher, scheduled-task mutation, secrets/network.
 
+ProgramData root trust uses **machine-known** `[Environment]::GetFolderPath(CommonApplicationData)` only; untrusted caller paths are refused. Rehearsal mock snapshots do not assert host LDW ACL state (`hostRootTrustAsserted = false`).
+
 ## Owner-reviewed checklist (rehearsal stages)
 
 1. **Fresh read-only preflight** — run `Test-RedrixLdwParentAclReadiness.ps1` on LDW01; must classify `READ_ONLY_PREIMAGE_MATCH_NOT_AUTHORIZED` or `HOLD_READ_ONLY` (no authorization either way).

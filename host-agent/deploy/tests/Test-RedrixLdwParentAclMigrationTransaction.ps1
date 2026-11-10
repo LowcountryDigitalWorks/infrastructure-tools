@@ -19,15 +19,6 @@ $commands = @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.Co
 foreach ($name in $forbidden) {
     if ($commands -contains $name) { throw ('FORBIDDEN_COMMAND_' + $name) }
 }
-if ($null -ne $ast.ParamBlock) {
-    foreach ($p in $ast.ParamBlock.Parameters) {
-        if ($p.Name -notin @('Variant', 'MachineCommonApplicationData', 'MachineProgramDataRegistry',
-                'ProcessProgramDataEnvironment', 'Snapshot', 'ClaimedAuthorizationBasis', 'Ledger',
-                'Before', 'After', 'Stage', 'ParentShaBefore', 'ChildShaBefore', 'JournalComplete')) {
-            throw ('UNEXPECTED_CALLER_PARAM_' + $p.Name)
-        }
-    }
-}
 
 . $helper
 
@@ -37,18 +28,50 @@ function Assert([bool]$Condition, [string]$Code) {
     $script:checks++
 }
 
+function Get-RedrixMigrationTestChildMap {
+    $ref = Get-RedrixLdwParentAclMigrationReference
+    $map = @{}
+    foreach ($prop in $ref.protectedChildSddlSha256Utf8.PSObject.Properties) {
+        $map[$prop.Name] = [string]$prop.Value
+    }
+    return $map
+}
+
+function Copy-RedrixMigrationLedger([hashtable]$Ledger) {
+    $copy = @{}
+    foreach ($key in $Ledger.Keys) { $copy[$key] = $Ledger[$key] }
+    return $copy
+}
+
 $ref = Get-RedrixLdwParentAclMigrationReference
 Assert ($ref.fixedV1ReviewedOperationTaskName -ceq 'LDW-ADMIN-REVIEWED-OPERATION') 'V1_TASK_NAME_PIN'
 Assert ($ref.canonicalTargetSha256Utf8SddlProperty -ceq 'd0d4816b0b001698a7f49ee24dab0eff49f784bcd9164ad5504b6e45f47f0a41') 'TARGET_SHA_PIN'
 Assert ($ref.syntheticHashIsNotMutationAuthority) 'SYNTHETIC_HASH_NOT_AUTHORITY'
 Assert (@($ref.protectedChildSddlSha256Utf8.PSObject.Properties).Count -eq 6) 'SIX_CHILD_PINS'
 
-$pd = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
-$machinePd = [Environment]::GetEnvironmentVariable('ProgramData', 'Machine')
-Assert ((Test-RedrixLdwParentAclMigrationProgramDataPathPolicy $pd $machinePd $null) -ceq 'OK') 'KNOWN_FOLDER_POLICY'
-$bogus = Join-Path $env:TEMP 'NotProgramData'
-Assert ((Test-RedrixLdwParentAclMigrationProgramDataPathPolicy $bogus $null $null) -ceq 'MACHINE_PROGRAMDATA_INVALID') 'INVALID_FOLDER_REJECT'
-Assert ((Test-RedrixLdwParentAclMigrationProgramDataPathPolicy $pd $machinePd $bogus) -ceq 'PROCESS_PROGRAMDATA_SPOOFED') 'PROCESS_ENV_SPOOF'
+$binding = Get-RedrixLdwParentAclMigrationMachineProgramDataBinding
+Assert ($binding.policy -ceq 'OK') 'MACHINE_BINDING_OK'
+Assert ($binding.hostRootTrustBound) 'HOST_ROOT_TRUST_ON_MACHINE'
+Assert ((Test-RedrixLdwParentAclMigrationProgramDataPathPolicy) -ceq 'OK') 'POLICY_NO_CALLER_OK'
+
+$machinePd = [string]$binding.machineKnownPath
+$fakePd = Join-Path $env:TEMP 'ProgramData'
+Assert ((Test-RedrixLdwParentAclMigrationProgramDataPathPolicy -UntrustedCallerPath $fakePd) -ceq 'CALLER_PATH_NOT_MACHINE_KNOWN') 'FAKE_TEMP_PROGRAMDATA'
+$bogusLeaf = Join-Path $env:TEMP 'NotProgramData'
+Assert ((Test-RedrixLdwParentAclMigrationProgramDataPathPolicy -UntrustedCallerPath $bogusLeaf) -ceq 'CALLER_PATH_NOT_MACHINE_KNOWN') 'FAKE_WRONG_LEAF'
+Assert ((Test-RedrixLdwParentAclMigrationProgramDataPathPolicy -UntrustedCallerPath '') -ceq 'CALLER_PATH_EMPTY_REFUSED') 'CALLER_EMPTY'
+Assert ((Test-RedrixLdwParentAclMigrationProgramDataPathPolicy -UntrustedCallerPath '\\srv\share\ProgramData') -ceq 'UNC_CALLER_REFUSED') 'UNC_REFUSED'
+Assert ((Test-RedrixLdwParentAclMigrationProgramDataPathPolicy -UntrustedCallerPath ($machinePd + '\')) -ceq 'OK') 'NORMALIZED_TRAILING_SLASH'
+
+$oldEnv = $env:ProgramData
+try {
+    $env:ProgramData = Join-Path $env:TEMP 'SpoofProgramData'
+    $spoofBinding = Get-RedrixLdwParentAclMigrationMachineProgramDataBinding
+    Assert ($spoofBinding.policy -ceq 'PROCESS_PROGRAMDATA_SPOOFED') 'PROCESS_ENV_SPOOF_BINDING'
+}
+finally {
+    $env:ProgramData = $oldEnv
+}
 
 Assert ((Test-RedrixLdwParentAclMigrationSyntheticHashIsNotAuthorization $ref.canonicalTargetSha256Utf8SddlProperty) -ceq 'NOT_AUTHORIZED_SYNTHETIC_HASH_ONLY') 'D0D_NOT_AUTHORIZATION'
 Assert ((Test-RedrixLdwParentAclMigrationSyntheticHashIsNotAuthorization 'owner-approved') -ceq 'NOT_AUTHORIZED') 'ARBITRARY_NOT_AUTHORIZED'
@@ -64,6 +87,9 @@ Assert ((Test-RedrixLdwParentAclMigrationPreconditions $busy) -ceq 'TASK_NOT_QUI
 
 $rehearsal = Invoke-RedrixLdwParentAclMigrationRehearsal $snap
 Assert ($rehearsal.outcome -ceq 'REHEARSAL_PASS_NO_APPLY') 'REHEARSAL_PASS'
+Assert ($rehearsal.machineProgramDataPolicy -ceq 'OK') 'REHEARSAL_MACHINE_POLICY'
+Assert ($rehearsal.syntheticSnapshotOnly) 'REHEARSAL_SYNTHETIC_ONLY'
+Assert (-not $rehearsal.hostRootTrustAsserted) 'NO_HOST_ROOT_TRUST_ASSERT'
 Assert ($rehearsal.childHashParityVerified) 'CHILD_HASH_PARITY'
 Assert (-not $rehearsal.physicalAclChangeAuthorized) 'NO_PHYSICAL_AUTH'
 Assert ($rehearsal.targetSha256 -ceq $ref.canonicalTargetSha256Utf8SddlProperty) 'TARGET_SHA_MATCH'
@@ -72,13 +98,58 @@ Assert ($rehearsal.applyBoundary.classification -ceq 'BLOCKED_APPROVAL') 'APPLY_
 $apply = Invoke-RedrixLdwParentAclMigrationApplyBoundary
 Assert ($apply.classification -ceq 'BLOCKED_APPROVAL') 'BOUNDARY_ALWAYS_BLOCKED'
 
-$incompleteLedger = @{ journalComplete = $false }
-Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $incompleteLedger) -ceq 'HOLD_RECOVERY_AMBIGUOUS') 'REBOOT_FAULT_HOLD'
-$completeLedger = @{ journalComplete = $true }
-Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $completeLedger) -ceq 'RECOVERY_LEDGER_COMPLETE') 'LEDGER_COMPLETE'
+$childMap = Get-RedrixMigrationTestChildMap
+$validLedger = New-RedrixLdwParentAclMigrationLedgerEntry -Stage 'PREPARED' `
+    -ParentShaBefore $ref.liveParentPreimageSha256Utf8SddlProperty `
+    -TargetSha256Utf8 $ref.canonicalTargetSha256Utf8SddlProperty `
+    -ChildShaBefore $childMap -ChildShaAfter $childMap `
+    -JournalComplete $true -DurableReceiptWritten $true
+Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $validLedger) -ceq 'RECOVERY_LEDGER_COMPLETE') 'LEDGER_PREPARED'
+
+foreach ($stage in @('COMMITTED', 'AFTER_APPLY', 'REBOOT')) {
+    $lg = New-RedrixLdwParentAclMigrationLedgerEntry -Stage $stage `
+        -ParentShaBefore $ref.liveParentPreimageSha256Utf8SddlProperty `
+        -TargetSha256Utf8 $ref.canonicalTargetSha256Utf8SddlProperty `
+        -ChildShaBefore $childMap -ChildShaAfter $childMap `
+        -JournalComplete $true -DurableReceiptWritten $true
+    Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $lg) -ceq 'RECOVERY_LEDGER_COMPLETE') ('LEDGER_' + $stage)
+}
+
+Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot @{ journalComplete = $true }) -ceq 'HOLD_RECOVERY_AMBIGUOUS') 'FORGED_MINIMAL_LEDGER'
+$forgedMarker = Copy-RedrixMigrationLedger $validLedger
+$forgedMarker['marker'] = 'FORGED'
+Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $forgedMarker) -ceq 'HOLD_LEDGER_FORGED') 'FORGED_MARKER'
+
+$badPreimage = Copy-RedrixMigrationLedger $validLedger
+$badPreimage['parentSha256Before'] = ('0' * 64)
+Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $badPreimage) -ceq 'HOLD_PREIMAGE_PIN_DRIFT') 'BAD_PREIMAGE_PIN'
+
+$badTarget = Copy-RedrixMigrationLedger $validLedger
+$badTarget['targetSha256Utf8'] = 'a11c28fd0fceea6c13d29661318b95bdb55ca0cd4ad3a0d5f5a3ceb42ce2f7c8'
+Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $badTarget) -ceq 'HOLD_TARGET_PIN_DRIFT') 'BAD_TARGET_PIN'
+
+$badChild = Copy-RedrixMigrationLedger $validLedger
+$badChild['childSha256Before'] = @{ CiJitControl = ('0' * 64) }
+Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $badChild) -ceq 'HOLD_CHILD_PIN_DRIFT') 'BAD_CHILD_PIN'
+
+$afterDrift = Copy-RedrixMigrationLedger $validLedger
+$afterDrift['stage'] = 'AFTER_APPLY'
+$afterBad = Copy-RedrixMigrationLedger $childMap
+$afterBad['CiJitControl'] = ('0' * 64)
+$afterDrift['childSha256After'] = $afterBad
+Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $afterDrift) -ceq 'HOLD_CHILD_INTEGRITY_AFTER_APPLY') 'CHILD_AFTER_DRIFT'
+
+$noReceipt = Copy-RedrixMigrationLedger $validLedger
+$noReceipt['durableReceiptWritten'] = $false
+Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $noReceipt) -ceq 'HOLD_RECOVERY_AMBIGUOUS') 'NO_DURABLE_RECEIPT'
+
+$physicalFlag = Copy-RedrixMigrationLedger $validLedger
+$physicalFlag['physicalApplyAttempted'] = $true
+Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $physicalFlag) -ceq 'HOLD_PHYSICAL_FLAG_DRIFT') 'PHYSICAL_FLAG_FORGED'
 
 Assert ((Test-RedrixLdwParentAclMigrationRollbackPolicy $null) -ceq 'ROLLBACK_REFUSED_NO_JOURNAL') 'ROLLBACK_NO_JOURNAL'
-Assert ((Test-RedrixLdwParentAclMigrationRollbackPolicy $incompleteLedger) -ceq 'ROLLBACK_REFUSED_NO_JOURNAL') 'ROLLBACK_INCOMPLETE_JOURNAL'
+Assert ((Test-RedrixLdwParentAclMigrationRollbackPolicy @{ journalComplete = $true }) -ceq 'ROLLBACK_REFUSED_NO_JOURNAL') 'ROLLBACK_FORGED_LEDGER'
+Assert ((Test-RedrixLdwParentAclMigrationRollbackPolicy $validLedger) -ceq 'ROLLBACK_POLICY_REVIEW_ONLY_NOT_EXECUTABLE') 'ROLLBACK_VALID_REVIEW_ONLY'
 
 $before = @{ CiJitControl = '8f40c3b139e861b100c54944e99517c6dad65e9c7ad4831898f97f806af8e626' }
 $after = @{ CiJitControl = '8f40c3b139e861b100c54944e99517c6dad65e9c7ad4831898f97f806af8e626' }

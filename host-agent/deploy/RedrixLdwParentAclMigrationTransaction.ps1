@@ -45,18 +45,61 @@ function New-RedrixLdwParentAclMockHostSnapshot {
     }
 }
 
-function Test-RedrixLdwParentAclMigrationProgramDataPathPolicy {
-    param(
-        [string]$MachineCommonApplicationData,
-        [string]$MachineProgramDataRegistry,
-        [string]$ProcessProgramDataEnvironment)
-    if ([string]::IsNullOrWhiteSpace($MachineCommonApplicationData)) { return 'MACHINE_PROGRAMDATA_MISSING' }
-    $pd = [IO.Path]::GetFullPath($MachineCommonApplicationData)
+function Get-RedrixLdwParentAclMigrationMachineProgramDataBinding {
     $ref = Get-RedrixLdwParentAclMigrationReference
-    if ([IO.Path]::GetFileName($pd.TrimEnd('\')) -cne $ref.fixedProgramDataLeafName) { return 'MACHINE_PROGRAMDATA_INVALID' }
-    if ($MachineProgramDataRegistry -and ([IO.Path]::GetFullPath($MachineProgramDataRegistry) -cne $pd)) { return 'MACHINE_PROGRAMDATA_DRIFT' }
-    if ($ProcessProgramDataEnvironment -and ([IO.Path]::GetFullPath($ProcessProgramDataEnvironment) -cne $pd)) {
-        return 'PROCESS_PROGRAMDATA_SPOOFED'
+    $known = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+    if ([string]::IsNullOrWhiteSpace($known)) {
+        return [ordered]@{
+            policy = 'MACHINE_PROGRAMDATA_MISSING'
+            machineKnownPath = $null
+            hostRootTrustBound = $false
+        }
+    }
+    $pd = [IO.Path]::GetFullPath($known)
+    if ([IO.Path]::GetFileName($pd.TrimEnd('\')) -cne $ref.fixedProgramDataLeafName) {
+        return [ordered]@{
+            policy = 'MACHINE_PROGRAMDATA_INVALID'
+            machineKnownPath = $pd
+            hostRootTrustBound = $false
+        }
+    }
+    $machineReg = [Environment]::GetEnvironmentVariable('ProgramData', 'Machine')
+    if ($machineReg -and ([IO.Path]::GetFullPath($machineReg) -cne $pd)) {
+        return [ordered]@{
+            policy = 'MACHINE_PROGRAMDATA_DRIFT'
+            machineKnownPath = $pd
+            hostRootTrustBound = $false
+        }
+    }
+    $proc = $env:ProgramData
+    if ($proc -and ([IO.Path]::GetFullPath($proc) -cne $pd)) {
+        return [ordered]@{
+            policy = 'PROCESS_PROGRAMDATA_SPOOFED'
+            machineKnownPath = $pd
+            hostRootTrustBound = $false
+        }
+    }
+    return [ordered]@{
+        policy = 'OK'
+        machineKnownPath = $pd
+        hostRootTrustBound = $true
+    }
+}
+
+function Test-RedrixLdwParentAclMigrationProgramDataPathPolicy {
+    param([string]$UntrustedCallerPath)
+    $binding = Get-RedrixLdwParentAclMigrationMachineProgramDataBinding
+    if ($binding.policy -cne 'OK') { return $binding.policy }
+    $machinePd = [string]$binding.machineKnownPath
+    if (-not $PSBoundParameters.ContainsKey('UntrustedCallerPath')) { return 'OK' }
+    if ([string]::IsNullOrWhiteSpace($UntrustedCallerPath)) { return 'CALLER_PATH_EMPTY_REFUSED' }
+    if ($UntrustedCallerPath -match '^\\\\[^\\]+\\') { return 'UNC_CALLER_REFUSED' }
+    $callerFull = [IO.Path]::GetFullPath($UntrustedCallerPath).TrimEnd('\')
+    $machineNorm = $machinePd.TrimEnd('\')
+    if ($callerFull -cne $machineNorm) { return 'CALLER_PATH_NOT_MACHINE_KNOWN' }
+    $ref = Get-RedrixLdwParentAclMigrationReference
+    if ([IO.Path]::GetFileName($callerFull.TrimEnd('\')) -cne $ref.fixedProgramDataLeafName) {
+        return 'MACHINE_PROGRAMDATA_INVALID'
     }
     return 'OK'
 }
@@ -93,18 +136,38 @@ function Test-RedrixLdwParentAclMigrationPreconditions([pscustomobject]$Snapshot
 
 function New-RedrixLdwParentAclMigrationLedgerEntry {
     param(
-        [string]$Stage,
+        [ValidateSet('PREPARED', 'COMMITTED', 'AFTER_APPLY', 'REBOOT', 'PRE_APPLY_REHEARSAL')]
+            [string]$Stage,
         [string]$ParentShaBefore,
+        [string]$TargetSha256Utf8,
         [hashtable]$ChildShaBefore,
-        [bool]$JournalComplete)
+        [hashtable]$ChildShaAfter,
+        [bool]$JournalComplete,
+        [bool]$DurableReceiptWritten)
     [ordered]@{
         marker = $script:RedrixMigrationMarker
         stage = $Stage
         parentSha256Before = $ParentShaBefore
+        targetSha256Utf8 = $TargetSha256Utf8
         childSha256Before = $ChildShaBefore
+        childSha256After = $ChildShaAfter
         journalComplete = $JournalComplete
+        durableReceiptWritten = $DurableReceiptWritten
         physicalApplyAttempted = $false
     }
+}
+
+function Test-RedrixLdwParentAclMigrationLedgerPins([hashtable]$Ledger) {
+    $ref = Get-RedrixLdwParentAclMigrationReference
+    if ($Ledger['parentSha256Before'] -cne $ref.liveParentPreimageSha256Utf8SddlProperty) { return 'HOLD_PREIMAGE_PIN_DRIFT' }
+    if ($Ledger['targetSha256Utf8'] -cne $ref.canonicalTargetSha256Utf8SddlProperty) { return 'HOLD_TARGET_PIN_DRIFT' }
+    $childBefore = $Ledger['childSha256Before']
+    if ($null -eq $childBefore) { return 'HOLD_RECOVERY_AMBIGUOUS' }
+    foreach ($prop in $ref.protectedChildSddlSha256Utf8.PSObject.Properties) {
+        if (-not $childBefore.ContainsKey($prop.Name)) { return 'HOLD_CHILD_PIN_DRIFT' }
+        if ($childBefore[$prop.Name] -cne [string]$prop.Value) { return 'HOLD_CHILD_PIN_DRIFT' }
+    }
+    return 'OK'
 }
 
 function Test-RedrixLdwParentAclMigrationChildHashParity(
@@ -120,13 +183,36 @@ function Test-RedrixLdwParentAclMigrationChildHashParity(
 
 function Test-RedrixLdwParentAclMigrationRecoveryAfterReboot([hashtable]$Ledger) {
     if ($null -eq $Ledger) { return 'HOLD_RECOVERY_AMBIGUOUS' }
-    if (-not $Ledger.ContainsKey('journalComplete')) { return 'HOLD_RECOVERY_AMBIGUOUS' }
+    $required = @(
+        'marker', 'stage', 'parentSha256Before', 'targetSha256Utf8', 'childSha256Before',
+        'journalComplete', 'durableReceiptWritten', 'physicalApplyAttempted')
+    foreach ($key in $required) {
+        if (-not $Ledger.ContainsKey($key)) { return 'HOLD_RECOVERY_AMBIGUOUS' }
+    }
+    if ($Ledger['marker'] -cne $script:RedrixMigrationMarker) { return 'HOLD_LEDGER_FORGED' }
     if (-not $Ledger['journalComplete']) { return 'HOLD_RECOVERY_AMBIGUOUS' }
+    if (-not $Ledger['durableReceiptWritten']) { return 'HOLD_RECOVERY_AMBIGUOUS' }
+    if ($Ledger['physicalApplyAttempted']) { return 'HOLD_PHYSICAL_FLAG_DRIFT' }
+    $allowedStages = @('PREPARED', 'COMMITTED', 'AFTER_APPLY', 'REBOOT', 'PRE_APPLY_REHEARSAL')
+    if ($Ledger['stage'] -notin $allowedStages) { return 'HOLD_LEDGER_STAGE_AMBIGUOUS' }
+    $pin = Test-RedrixLdwParentAclMigrationLedgerPins $Ledger
+    if ($pin -cne 'OK') { return $pin }
+    if ($Ledger.ContainsKey('childSha256After') -and $null -ne $Ledger['childSha256After']) {
+        if (-not (Test-RedrixLdwParentAclMigrationChildHashParity $Ledger['childSha256Before'] $Ledger['childSha256After'])) {
+            return 'HOLD_CHILD_INTEGRITY_AFTER_APPLY'
+        }
+    }
+    if ($Ledger['stage'] -in @('COMMITTED', 'AFTER_APPLY', 'REBOOT') -and -not $Ledger['durableReceiptWritten']) {
+        return 'HOLD_RECOVERY_AMBIGUOUS'
+    }
     return 'RECOVERY_LEDGER_COMPLETE'
 }
 
 function Test-RedrixLdwParentAclMigrationRollbackPolicy([hashtable]$Ledger) {
-    if ($null -eq $Ledger -or -not $Ledger['journalComplete']) { return 'ROLLBACK_REFUSED_NO_JOURNAL' }
+    if ($null -eq $Ledger) { return 'ROLLBACK_REFUSED_NO_JOURNAL' }
+    if ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $Ledger) -ne 'RECOVERY_LEDGER_COMPLETE') {
+        return 'ROLLBACK_REFUSED_NO_JOURNAL'
+    }
     return 'ROLLBACK_POLICY_REVIEW_ONLY_NOT_EXECUTABLE'
 }
 
@@ -144,6 +230,17 @@ function Invoke-RedrixLdwParentAclMigrationApplyBoundary {
 
 function Invoke-RedrixLdwParentAclMigrationRehearsal([pscustomobject]$Snapshot) {
     $ref = Get-RedrixLdwParentAclMigrationReference
+    $binding = Get-RedrixLdwParentAclMigrationMachineProgramDataBinding
+    if ($binding.policy -cne 'OK') {
+        return [ordered]@{
+            marker = $script:RedrixMigrationMarker
+            outcome = 'REHEARSAL_HOLD'
+            reasonCode = $binding.policy
+            physicalAclChangeAuthorized = $false
+            syntheticSnapshotOnly = $true
+            hostRootTrustAsserted = $false
+        }
+    }
     $pre = Test-RedrixLdwParentAclMigrationPreconditions $Snapshot
     if ($pre -cne 'OK') {
         return [ordered]@{
@@ -171,13 +268,22 @@ function Invoke-RedrixLdwParentAclMigrationRehearsal([pscustomobject]$Snapshot) 
         }
     }
     $ledger = New-RedrixLdwParentAclMigrationLedgerEntry -Stage 'PRE_APPLY_REHEARSAL' `
-        -ParentShaBefore $Snapshot.ParentSha256Utf8Sddl -ChildShaBefore $childBefore -JournalComplete $true
+        -ParentShaBefore $Snapshot.ParentSha256Utf8Sddl `
+        -TargetSha256Utf8 $targetPin.candidateSha256 `
+        -ChildShaBefore $childBefore -ChildShaAfter $childAfter `
+        -JournalComplete $true -DurableReceiptWritten $true
+    if ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $ledger) -ne 'RECOVERY_LEDGER_COMPLETE') {
+        throw 'LEDGER_SELF_CHECK_FAILED'
+    }
     $apply = Invoke-RedrixLdwParentAclMigrationApplyBoundary
     [ordered]@{
         marker = $script:RedrixMigrationMarker
         outcome = 'REHEARSAL_PASS_NO_APPLY'
         authorityClassification = $ref.authorityClassification
         verificationStatus = $ref.verificationStatus
+        machineProgramDataPolicy = $binding.policy
+        syntheticSnapshotOnly = $true
+        hostRootTrustAsserted = $false
         parentPreimageSha256 = $Snapshot.ParentSha256Utf8Sddl
         targetSha256 = $targetPin.candidateSha256
         childHashParityVerified = $true
