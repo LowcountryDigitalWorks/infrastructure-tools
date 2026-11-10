@@ -11,22 +11,23 @@ $bootstrapFileName = 'Install-AdminBrokerV2PublisherBootstrap.ps1'
 $workerBundleName = 'Invoke-AdminBrokerV2PublisherWorker.ps1'
 $taskName = '\LDW-ADMIN-REVIEWED-OPERATION'
 
-$controlRoot = Join-Path $env:ProgramData 'LDW/PrivilegedControl'
-$binRoot = Join-Path $controlRoot 'bin'
-$lockRoot = Join-Path $controlRoot 'lock'
-$journalRoot = Join-Path $controlRoot 'journal'
-$v1WorkerInstalled = Join-Path $binRoot 'Invoke-AdminPrivilegedOperation.ps1'
-$v2WorkerInstalled = Join-Path $binRoot ('v2/' + $v2WorkerIdentity + '/' + $workerBundleName)
-$protectedStagingRoot = Join-Path $controlRoot ('bootstrap-staging/' + $bootstrapStagingLeaf)
-$expectedBootstrapPath = Join-Path $protectedStagingRoot $bootstrapFileName
-$requestRoot = Join-Path $controlRoot 'requests'
-$resultRoot = Join-Path $controlRoot 'results'
-$operationLockPath = Join-Path $lockRoot 'operation.lock'
+$controlRoot = $null
+$binRoot = $null
+$lockRoot = $null
+$journalRoot = $null
+$v1WorkerInstalled = $null
+$v2WorkerInstalled = $null
+$protectedStagingRoot = $null
+$expectedBootstrapPath = $null
+$requestRoot = $null
+$resultRoot = $null
+$operationLockPath = $null
+$lockPath = $null
+$journalPath = $null
+$receiptPath = $null
+$script:BootstrapLayoutInitialized = $false
 $v1InFlightMinutes = 15
 $v1ResultsScanMaxFiles = 64
-$lockPath = Join-Path $lockRoot 'v2-publisher-bootstrap.lock'
-$journalPath = Join-Path $journalRoot 'v2-publisher-bootstrap.jsonl'
-$receiptPath = Join-Path $journalRoot 'v2-bootstrap-consumed.receipt'
 
 $script:LockStream = $null
 $script:JournalEnabled = $false
@@ -40,6 +41,132 @@ function Assert-Elevated {
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         throw 'ELEVATION_REQUIRED'
     }
+}
+
+function Get-MachineProgramDataRoot {
+    $known = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+    if ([string]::IsNullOrWhiteSpace($known)) { throw 'COMMONAPPLICATIONDATA_REQUIRED' }
+    $full = [IO.Path]::GetFullPath($known)
+    if ([IO.Path]::GetFileName($full.TrimEnd('\')) -cne 'ProgramData') { throw 'COMMONAPPLICATIONDATA_PATH_REFUSED' }
+    $machineVar = [Environment]::GetEnvironmentVariable('ProgramData', 'Machine')
+    if (-not [string]::IsNullOrWhiteSpace($machineVar)) {
+        if ([IO.Path]::GetFullPath($machineVar) -cne $full) { throw 'PROGRAMDATA_MACHINE_MISMATCH' }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) {
+        if ([IO.Path]::GetFullPath($env:ProgramData) -cne $full) { throw 'PROGRAMDATA_ENV_SPOOFED' }
+    }
+    Assert-NoReparse $full
+    $full
+}
+
+function Assert-WindowsProgramDataRootBaselineAcl([string]$ProgramDataRoot) {
+    $canonical = Get-MachineProgramDataRoot
+    $resolved = [IO.Path]::GetFullPath($ProgramDataRoot)
+    if ($resolved -cne $canonical) { throw 'COMMONAPPLICATIONDATA_PATH_REFUSED' }
+    if (-not (Test-Path -LiteralPath $resolved -PathType Container)) { throw 'PROTECTED_PATH_MISSING' }
+    $acl = Get-Acl -LiteralPath $resolved
+    if (-not $acl.AreAccessRulesProtected) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if ($owner -notin @('S-1-5-18', 'S-1-5-32-544')) { throw 'LDW_PARENT_OWNER_REFUSED' }
+    $win32GenericWrite = 0x40000000
+    $win32GenericAll = 0x10000000
+    $dangerous = [int](
+        [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership)
+    $genericAll = $win32GenericAll
+    $stockUsersWrite = 278
+    $stockUsersRx = 1179817
+    $fullControlMask = [int][Security.AccessControl.FileSystemRights]::FullControl
+    $usersSid = 'S-1-5-32-545'
+    $creatorOwnerSid = 'S-1-3-0'
+    $trustedSids = @('S-1-5-18', 'S-1-5-32-544')
+    $containerInherit = [Security.AccessControl.InheritanceFlags]::ContainerInherit
+    $inheritOnly = [Security.AccessControl.PropagationFlags]::InheritOnly
+    $writeSurface = [int](
+        [Security.AccessControl.FileSystemRights]::Write -bor
+        [Security.AccessControl.FileSystemRights]::CreateFiles -bor
+        [Security.AccessControl.FileSystemRights]::CreateDirectories)
+    foreach ($rule in $acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -ne 'Allow') { continue }
+        $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        $rights = [int][Security.AccessControl.FileSystemRights]$rule.FileSystemRights
+        $inh = $rule.InheritanceFlags
+        $prop = $rule.PropagationFlags
+        if ($sid -in $trustedSids) { continue }
+        if ($sid -ceq $usersSid) {
+            if (($inh -band $containerInherit) -eq 0) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+            if (($prop -band $inheritOnly) -ne 0) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+            if ($rights -eq $stockUsersWrite -or $rights -eq $stockUsersRx) { continue }
+            throw 'PROGRAMDATA_ROOT_BASELINE_HOLD'
+        }
+        if ($sid -ceq $creatorOwnerSid) {
+            if (($prop -band $inheritOnly) -ne 0 -and $rights -eq $genericAll) { continue }
+            throw 'PROGRAMDATA_ROOT_BASELINE_HOLD'
+        }
+        if (($rights -band $win32GenericWrite) -ne 0) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+        if (($rights -band $win32GenericAll) -ne 0) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+        if ($rights -band $dangerous) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+        if ($rights -eq $fullControlMask) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+        if ($rights -band $writeSurface) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+        throw 'PROGRAMDATA_ROOT_BASELINE_HOLD'
+    }
+}
+
+function Assert-TrustedDirectoryAcl([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) { throw 'PROTECTED_PATH_MISSING' }
+    Assert-NoReparse $Path
+    $resolved = [IO.Path]::GetFullPath($Path)
+    $acl = Get-Acl -LiteralPath $resolved
+    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if ($owner -notin @('S-1-5-18', 'S-1-5-32-544')) { throw 'LDW_PARENT_OWNER_REFUSED' }
+    $win32GenericWrite = 0x40000000
+    $win32GenericAll = 0x10000000
+    $forbidden = [int](
+        [Security.AccessControl.FileSystemRights]::Write -bor
+        [Security.AccessControl.FileSystemRights]::CreateFiles -bor
+        [Security.AccessControl.FileSystemRights]::CreateDirectories -bor
+        [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership)
+    foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -ne 'Allow') { continue }
+        $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        if ($sid -in @('S-1-5-18', 'S-1-5-32-544')) { continue }
+        $rights = [int][Security.AccessControl.FileSystemRights]$rule.FileSystemRights
+        if (($rights -band $win32GenericWrite) -ne 0) { throw 'LDW_PARENT_ACL_HOLD' }
+        if (($rights -band $win32GenericAll) -ne 0) { throw 'LDW_PARENT_ACL_HOLD' }
+        if (($rights -band $forbidden) -ne 0) { throw 'LDW_PARENT_ACL_HOLD' }
+    }
+}
+
+function Assert-LdwParentPreflight([string]$ProgramDataRoot, [string]$LdwRoot) {
+    Assert-WindowsProgramDataRootBaselineAcl $ProgramDataRoot
+    if (Test-Path -LiteralPath $LdwRoot) { Assert-TrustedDirectoryAcl $LdwRoot }
+}
+
+function Initialize-BootstrapLayout {
+    if ($script:BootstrapLayoutInitialized) { return }
+    $programDataRoot = Get-MachineProgramDataRoot
+    $ldwRoot = Join-Path $programDataRoot 'LDW'
+    Assert-LdwParentPreflight $programDataRoot $ldwRoot
+    $script:controlRoot = Join-Path $ldwRoot 'PrivilegedControl'
+    $script:binRoot = Join-Path $script:controlRoot 'bin'
+    $script:lockRoot = Join-Path $script:controlRoot 'lock'
+    $script:journalRoot = Join-Path $script:controlRoot 'journal'
+    $script:v1WorkerInstalled = Join-Path $script:binRoot 'Invoke-AdminPrivilegedOperation.ps1'
+    $script:v2WorkerInstalled = Join-Path $script:binRoot ('v2/' + $v2WorkerIdentity + '/' + $workerBundleName)
+    $script:protectedStagingRoot = Join-Path $script:controlRoot ('bootstrap-staging/' + $bootstrapStagingLeaf)
+    $script:expectedBootstrapPath = Join-Path $script:protectedStagingRoot $bootstrapFileName
+    $script:requestRoot = Join-Path $script:controlRoot 'requests'
+    $script:resultRoot = Join-Path $script:controlRoot 'results'
+    $script:operationLockPath = Join-Path $script:lockRoot 'operation.lock'
+    $script:lockPath = Join-Path $script:lockRoot 'v2-publisher-bootstrap.lock'
+    $script:journalPath = Join-Path $script:journalRoot 'v2-publisher-bootstrap.jsonl'
+    $script:receiptPath = Join-Path $script:journalRoot 'v2-bootstrap-consumed.receipt'
+    $script:BootstrapLayoutInitialized = $true
 }
 
 function Assert-NoReparse([string]$Path) {
@@ -103,12 +230,7 @@ function New-ProtectedDirectoryAcl([string]$Path) {
 }
 
 function Assert-ProtectedDirectory([string]$Path) {
-    Assert-NoReparse $Path
-    if (-not (Test-Path -LiteralPath $Path)) { throw 'PROTECTED_PATH_MISSING' }
-    $acl = Get-Acl -LiteralPath $Path
-    if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @('S-1-5-18', 'S-1-5-32-544')) {
-        throw 'CONTROL_ACL_OWNER_REFUSED'
-    }
+    Assert-TrustedDirectoryAcl $Path
 }
 
 function Write-Journal([string]$Phase, [hashtable]$Fields) {
@@ -442,6 +564,7 @@ function Write-ConsumedReceipt([string]$V1Sha, [string]$V2Sha) {
 
 try {
     Assert-Elevated
+    Initialize-BootstrapLayout
     Assert-NoReplay
     Assert-BootstrapProvenance
     $ownerSid = Get-OwnerSid

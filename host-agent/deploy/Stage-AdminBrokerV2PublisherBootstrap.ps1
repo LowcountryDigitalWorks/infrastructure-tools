@@ -1,16 +1,17 @@
-# Fixed owner staging command: copies reviewed bootstrap bytes into protected ProgramData staging,
-# re-hashes against pinned SHA-256, then launches bootstrap only from the protected copy via native system PowerShell.
+# Runs only from protected ProgramData staging: validates issuer + review manifests and pinned artifacts,
+# then launches Install only from the protected copy via native 64-bit System32 Windows PowerShell.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$stageFileName = 'Stage-AdminBrokerV2PublisherBootstrap.ps1'
+$issuerManifestFileName = 'AdminBrokerV2BootstrapIssuerManifest.json'
 $bootstrapFileName = 'Install-AdminBrokerV2PublisherBootstrap.ps1'
 $workerBundleName = 'Invoke-AdminBrokerV2PublisherWorker.ps1'
 $reviewManifestFileName = 'AdminBrokerV2BootstrapReviewManifest.json'
-$reviewDownloadRoot = Join-Path $env:USERPROFILE 'Downloads\LDW-V2-Publisher-Bootstrap-Review'
 $stagingLeaf = 'v2-publisher-once'
-# Independently reviewed byte pins (not supplied by the untrusted Downloads manifest).
-$trustedReviewManifestFileSha256 = 'bc774896b562a6574f340dd46560814f5ef1b3a50ead19286688bb732dc552de'
-$trustedBootstrapSha256 = '4e14986198531436672c659b556461b790321a18344981dbfa0c743680790c85'
+# Independently reviewed byte pins for the install bundle (issuer manifest cross-checks these literals; Stage has no self-digest pin).
+$trustedReviewManifestFileSha256 = '59be27057046f7eefdabed7dda8e236b1d6afd6c8c6d2f91c442f07e6a299df7'
+$trustedBootstrapSha256 = '53ed786c404a39da7ba7d3cbb73e50cb59dcec7545bd389101bf808b3e9f36aa'
 $trustedWorkerSha256 = '051124b03f88694f19f557954e844ffe1f71c24187c7998a4cf6e8ce55aaa4f1'
 
 function Assert-Elevated {
@@ -19,6 +20,110 @@ function Assert-Elevated {
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         throw 'ELEVATION_REQUIRED'
     }
+}
+
+function Get-MachineProgramDataRoot {
+    $known = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+    if ([string]::IsNullOrWhiteSpace($known)) { throw 'COMMONAPPLICATIONDATA_REQUIRED' }
+    $full = [IO.Path]::GetFullPath($known)
+    if ([IO.Path]::GetFileName($full.TrimEnd('\')) -cne 'ProgramData') { throw 'COMMONAPPLICATIONDATA_PATH_REFUSED' }
+    $machineVar = [Environment]::GetEnvironmentVariable('ProgramData', 'Machine')
+    if (-not [string]::IsNullOrWhiteSpace($machineVar)) {
+        if ([IO.Path]::GetFullPath($machineVar) -cne $full) { throw 'PROGRAMDATA_MACHINE_MISMATCH' }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) {
+        if ([IO.Path]::GetFullPath($env:ProgramData) -cne $full) { throw 'PROGRAMDATA_ENV_SPOOFED' }
+    }
+    Assert-NoReparse $full
+    $full
+}
+
+function Assert-WindowsProgramDataRootBaselineAcl([string]$ProgramDataRoot) {
+    $canonical = Get-MachineProgramDataRoot
+    $resolved = [IO.Path]::GetFullPath($ProgramDataRoot)
+    if ($resolved -cne $canonical) { throw 'COMMONAPPLICATIONDATA_PATH_REFUSED' }
+    if (-not (Test-Path -LiteralPath $resolved -PathType Container)) { throw 'PROTECTED_PATH_MISSING' }
+    $acl = Get-Acl -LiteralPath $resolved
+    if (-not $acl.AreAccessRulesProtected) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if ($owner -notin @('S-1-5-18', 'S-1-5-32-544')) { throw 'LDW_PARENT_OWNER_REFUSED' }
+    $win32GenericWrite = 0x40000000
+    $win32GenericAll = 0x10000000
+    $dangerous = [int](
+        [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership)
+    $genericAll = $win32GenericAll
+    $stockUsersWrite = 278
+    $stockUsersRx = 1179817
+    $fullControlMask = [int][Security.AccessControl.FileSystemRights]::FullControl
+    $usersSid = 'S-1-5-32-545'
+    $creatorOwnerSid = 'S-1-3-0'
+    $trustedSids = @('S-1-5-18', 'S-1-5-32-544')
+    $containerInherit = [Security.AccessControl.InheritanceFlags]::ContainerInherit
+    $inheritOnly = [Security.AccessControl.PropagationFlags]::InheritOnly
+    $writeSurface = [int](
+        [Security.AccessControl.FileSystemRights]::Write -bor
+        [Security.AccessControl.FileSystemRights]::CreateFiles -bor
+        [Security.AccessControl.FileSystemRights]::CreateDirectories)
+    foreach ($rule in $acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -ne 'Allow') { continue }
+        $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        $rights = [int][Security.AccessControl.FileSystemRights]$rule.FileSystemRights
+        $inh = $rule.InheritanceFlags
+        $prop = $rule.PropagationFlags
+        if ($sid -in $trustedSids) { continue }
+        if ($sid -ceq $usersSid) {
+            if (($inh -band $containerInherit) -eq 0) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+            if (($prop -band $inheritOnly) -ne 0) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+            if ($rights -eq $stockUsersWrite -or $rights -eq $stockUsersRx) { continue }
+            throw 'PROGRAMDATA_ROOT_BASELINE_HOLD'
+        }
+        if ($sid -ceq $creatorOwnerSid) {
+            if (($prop -band $inheritOnly) -ne 0 -and $rights -eq $genericAll) { continue }
+            throw 'PROGRAMDATA_ROOT_BASELINE_HOLD'
+        }
+        if (($rights -band $win32GenericWrite) -ne 0) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+        if (($rights -band $win32GenericAll) -ne 0) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+        if ($rights -band $dangerous) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+        if ($rights -eq $fullControlMask) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+        if ($rights -band $writeSurface) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+        throw 'PROGRAMDATA_ROOT_BASELINE_HOLD'
+    }
+}
+
+function Assert-TrustedDirectoryAcl([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) { throw 'PROTECTED_PATH_MISSING' }
+    Assert-NoReparse $Path
+    $resolved = [IO.Path]::GetFullPath($Path)
+    $acl = Get-Acl -LiteralPath $resolved
+    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if ($owner -notin @('S-1-5-18', 'S-1-5-32-544')) { throw 'LDW_PARENT_OWNER_REFUSED' }
+    $win32GenericWrite = 0x40000000
+    $win32GenericAll = 0x10000000
+    $forbidden = [int](
+        [Security.AccessControl.FileSystemRights]::Write -bor
+        [Security.AccessControl.FileSystemRights]::CreateFiles -bor
+        [Security.AccessControl.FileSystemRights]::CreateDirectories -bor
+        [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership)
+    foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -ne 'Allow') { continue }
+        $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        if ($sid -in @('S-1-5-18', 'S-1-5-32-544')) { continue }
+        $rights = [int][Security.AccessControl.FileSystemRights]$rule.FileSystemRights
+        if (($rights -band $win32GenericWrite) -ne 0) { throw 'LDW_PARENT_ACL_HOLD' }
+        if (($rights -band $win32GenericAll) -ne 0) { throw 'LDW_PARENT_ACL_HOLD' }
+        if (($rights -band $forbidden) -ne 0) { throw 'LDW_PARENT_ACL_HOLD' }
+    }
+}
+
+function Assert-LdwParentPreflight([string]$ProgramDataRoot, [string]$LdwRoot) {
+    Assert-WindowsProgramDataRootBaselineAcl $ProgramDataRoot
+    if (Test-Path -LiteralPath $LdwRoot) { Assert-TrustedDirectoryAcl $LdwRoot }
 }
 
 function Get-SystemPowerShellExecutable {
@@ -47,16 +152,57 @@ function Assert-NoReparse([string]$Path) {
     }
 }
 
-function New-ProtectedDirectoryAcl([string]$Path) {
-    $null = New-Item -ItemType Directory -Path $Path -Force
-    $acl = [Security.AccessControl.DirectorySecurity]::new()
-    $acl.SetAccessRuleProtection($true, $false)
-    $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
-    foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
-        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
-            [Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+function Assert-ProtectedStagePath([string]$CommandPath, [string]$ExpectedProtectedStagePath) {
+    if ([string]::IsNullOrWhiteSpace($CommandPath)) { throw 'STAGE_PROTECTED_PATH_REQUIRED' }
+    $actual = [IO.Path]::GetFullPath($CommandPath)
+    $expected = [IO.Path]::GetFullPath($ExpectedProtectedStagePath)
+    $profileRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    if ([string]::IsNullOrWhiteSpace($profileRoot)) { throw 'USERPROFILE_REQUIRED' }
+    $downloads = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetFullPath($profileRoot)) 'Downloads'))
+    if ($actual.StartsWith($downloads, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'STAGE_DOWNLOAD_PATH_REFUSED'
     }
-    Set-Acl -LiteralPath $Path -AclObject $acl
+    if ($actual -cne $expected) { throw 'STAGE_PROTECTED_PATH_REQUIRED' }
+    $programData = Get-MachineProgramDataRoot
+    if (-not $actual.StartsWith($programData, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'STAGE_PROTECTED_PATH_REQUIRED'
+    }
+    Assert-NoReparse $actual
+}
+
+function Read-IssuerManifest([string]$ManifestPath) {
+    if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) { throw 'ISSUER_MANIFEST_MISSING' }
+    Assert-NoReparse $ManifestPath
+    $bytes = [IO.File]::ReadAllBytes($ManifestPath)
+    if ($bytes.Length -lt 2 -or $bytes.Length -gt 16384) { throw 'ISSUER_MANIFEST_INVALID' }
+    $text = [Text.Encoding]::UTF8.GetString($bytes)
+    if ($text.IndexOf([char]0) -ge 0) { throw 'ISSUER_MANIFEST_INVALID' }
+    try {
+        $doc = $text | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        throw 'ISSUER_MANIFEST_INVALID'
+    }
+    if ($null -eq $doc) { throw 'ISSUER_MANIFEST_INVALID' }
+    $topProps = @($doc.PSObject.Properties.Name)
+    if (@(Compare-Object @('schema', 'protocol', 'artifacts') $topProps -CaseSensitive).Count) {
+        throw 'ISSUER_MANIFEST_INVALID'
+    }
+    if ($doc.schema -ne 1) { throw 'ISSUER_MANIFEST_INVALID' }
+    if ($doc.protocol -cne 'ldw.admin-broker.v2-bootstrap.issuer-manifest.v1') { throw 'ISSUER_MANIFEST_INVALID' }
+    $items = @($doc.artifacts)
+    if ($items.Count -ne 4) { throw 'ISSUER_MANIFEST_INVALID' }
+    $map = @{}
+    foreach ($item in $items) {
+        $itemProps = @($item.PSObject.Properties.Name)
+        if (@(Compare-Object @('name', 'sha256') $itemProps -CaseSensitive).Count) { throw 'ISSUER_MANIFEST_INVALID' }
+        $name = [string]$item.name
+        $sha = [string]$item.sha256
+        if ($sha -cnotmatch '^[a-f0-9]{64}$') { throw 'ISSUER_MANIFEST_INVALID' }
+        if ($map.ContainsKey($name)) { throw 'ISSUER_MANIFEST_INVALID' }
+        $map[$name] = $sha.ToLowerInvariant()
+    }
+    if ($map.Count -ne 4) { throw 'ISSUER_MANIFEST_INVALID' }
+    return $map
 }
 
 function Read-ReviewManifest([string]$ManifestPath) {
@@ -106,46 +252,40 @@ function Assert-FileSha256([string]$Path, [string]$ExpectedSha256, [string]$Mism
 }
 
 Assert-Elevated
-$ldwRoot = Join-Path $env:ProgramData 'LDW'
+$programDataRoot = Get-MachineProgramDataRoot
+$ldwRoot = Join-Path $programDataRoot 'LDW'
 if (-not (Test-Path -LiteralPath $ldwRoot -PathType Container)) { throw 'LDW_ROOT_MISSING' }
-Assert-NoReparse $ldwRoot
-Assert-NoReparse $env:ProgramData
+Assert-LdwParentPreflight $programDataRoot $ldwRoot
 $stagingRoot = Join-Path $ldwRoot ('PrivilegedControl/bootstrap-staging/' + $stagingLeaf)
-if (Test-Path -LiteralPath $stagingRoot) { throw 'STAGING_ALREADY_EXISTS' }
-New-ProtectedDirectoryAcl $stagingRoot
+if (-not (Test-Path -LiteralPath $stagingRoot -PathType Container)) { throw 'STAGING_NOT_PREPARED' }
+Assert-NoReparse $stagingRoot
 
-$downloadManifest = Join-Path $reviewDownloadRoot $reviewManifestFileName
-$downloadBootstrap = Join-Path $reviewDownloadRoot $bootstrapFileName
-$downloadWorker = Join-Path $reviewDownloadRoot $workerBundleName
-foreach ($path in @($downloadManifest, $downloadBootstrap, $downloadWorker)) {
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'REVIEWED_BUNDLE_INCOMPLETE' }
-}
-Assert-FileSha256 $downloadManifest $trustedReviewManifestFileSha256 'REVIEWED_MANIFEST_FILE_SHA256_MISMATCH'
-Assert-FileSha256 $downloadBootstrap $trustedBootstrapSha256 'REVIEWED_BOOTSTRAP_SHA256_MISMATCH'
-Assert-FileSha256 $downloadWorker $trustedWorkerSha256 'REVIEWED_WORKER_SHA256_MISMATCH'
-$manifest = Read-ReviewManifest $downloadManifest
-if ($manifest.BootstrapSha256 -cne $trustedBootstrapSha256 -or $manifest.WorkerSha256 -cne $trustedWorkerSha256) {
-    throw 'REVIEWED_MANIFEST_PIN_MISMATCH'
-}
+$expectedStagePath = Join-Path $stagingRoot $stageFileName
+Assert-ProtectedStagePath $PSCommandPath $expectedStagePath
 
+$protectedIssuer = Join-Path $stagingRoot $issuerManifestFileName
 $protectedBootstrap = Join-Path $stagingRoot $bootstrapFileName
 $protectedWorker = Join-Path $stagingRoot $workerBundleName
-$protectedManifest = Join-Path $stagingRoot $reviewManifestFileName
-Copy-Item -LiteralPath $downloadBootstrap -Destination $protectedBootstrap -Force
-Copy-Item -LiteralPath $downloadWorker -Destination $protectedWorker -Force
-Copy-Item -LiteralPath $downloadManifest -Destination $protectedManifest -Force
-Assert-FileSha256 $protectedBootstrap $manifest.BootstrapSha256 'PROTECTED_COPY_HASH_MISMATCH'
-Assert-FileSha256 $protectedWorker $manifest.WorkerSha256 'PROTECTED_COPY_HASH_MISMATCH'
-$manifestBytesBefore = [IO.File]::ReadAllBytes($downloadManifest)
-$manifestBytesAfter = [IO.File]::ReadAllBytes($protectedManifest)
-if ($manifestBytesBefore.Length -ne $manifestBytesAfter.Length) { throw 'PROTECTED_MANIFEST_DRIFT' }
-for ($i = 0; $i -lt $manifestBytesBefore.Length; $i++) {
-    if ($manifestBytesBefore[$i] -ne $manifestBytesAfter[$i]) { throw 'PROTECTED_MANIFEST_DRIFT' }
+$protectedReviewManifest = Join-Path $stagingRoot $reviewManifestFileName
+foreach ($path in @($protectedIssuer, $protectedBootstrap, $protectedWorker, $protectedReviewManifest)) {
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'PROTECTED_BUNDLE_INCOMPLETE' }
 }
-$manifestAfterCopy = Read-ReviewManifest $protectedManifest
-if ($manifestAfterCopy.BootstrapSha256 -cne $manifest.BootstrapSha256 -or
-    $manifestAfterCopy.WorkerSha256 -cne $manifest.WorkerSha256) {
-    throw 'PROTECTED_MANIFEST_DRIFT'
+
+$issuerPins = Read-IssuerManifest $protectedIssuer
+if ($issuerPins[$reviewManifestFileName] -cne $trustedReviewManifestFileSha256 -or
+    $issuerPins[$bootstrapFileName] -cne $trustedBootstrapSha256 -or
+    $issuerPins[$workerBundleName] -cne $trustedWorkerSha256) {
+    throw 'ISSUER_REVIEWED_PIN_MISMATCH'
+}
+Assert-FileSha256 $PSCommandPath $issuerPins[$stageFileName] 'STAGE_ISSUER_PIN_MISMATCH'
+Assert-FileSha256 $protectedBootstrap $trustedBootstrapSha256 'PROTECTED_COPY_HASH_MISMATCH'
+Assert-FileSha256 $protectedWorker $trustedWorkerSha256 'PROTECTED_COPY_HASH_MISMATCH'
+Assert-FileSha256 $protectedReviewManifest $trustedReviewManifestFileSha256 'PROTECTED_COPY_HASH_MISMATCH'
+
+$manifest = Read-ReviewManifest $protectedReviewManifest
+if ($manifest.BootstrapSha256 -cne $trustedBootstrapSha256 -or
+    $manifest.WorkerSha256 -cne $trustedWorkerSha256) {
+    throw 'REVIEWED_MANIFEST_PIN_MISMATCH'
 }
 
 $powershellExe = Get-SystemPowerShellExecutable
