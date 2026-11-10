@@ -1,0 +1,64 @@
+{
+  "schema": "ldw.redrix-capacity-guest-executor-admission.v1",
+  "status": "SOURCE_ONLY_RESEARCH_2PLUS6",
+  "research_only_explicit": true,
+  "guest_mib": 2048,
+  "research_reserve_mib": 6144,
+  "research_floor_mib": 8192,
+  "production_reserve_mib": 8192,
+  "production_floor_mib": 10240,
+  "network": "none",
+  "physical_execution_source_flag_default": false,
+  "runtime_enablement": "SEPARATE_REVIEWED_SOURCE_FLAG_FLIP_ONLY",
+  "chromeos_host_corroboration": "UNVERIFIED",
+  "owner_interactivity_corroboration_required": true,
+  "guest_lock_relative": "guest.lock",
+  "guest_lock_state_root_pattern": "~/.local/state/ldw-dragonfly-jit/",
+  "same_uid_race_limitation_disclosed": true,
+  "pinned_controller_blob_sha1": "dd6808cb1eb282c8c859a4cfcc641f4a5c574c2a",
+  "pinned_base_image_filename": "debian-13-genericcloud-amd64.qcow2",
+  "pinned_base_sha512": "3ace18e33bdd036edb49d1f79342bd01d2ab980e35194edb0b410435cd543538d286a0bd13bbb0835f7862306e3d385ce2f6a70d8ecf0bd961111166adbc1b8e",
+  "evidence_phases_required_for_physical_run": [
+    {
+      "phase": "pre",
+      "signals": [
+        "memavailable_mib_samples",
+        "psi_some_full_samples",
+        "balloon_vmstat_inflate_samples",
+        "oom_events_baseline",
+        "load_fraction",
+        "free_disk_gib",
+        "controller_state",
+        "guest_lock_availability",
+        "qemu_process_census",
+        "kvm_rw"
+      ]
+    },
+    {
+      "phase": "during",
+      "signals": [
+        "memavailable_mib_samples",
+        "qemu_peak_rss_kib",
+        "balloon_drift",
+        "oom_events_delta",
+        "owned_child_verification"
+      ]
+    },
+    {
+      "phase": "post",
+      "signals": [
+        "serial_tail_nonce_marker",
+        "cleanup_complete",
+        "oom_events_final",
+        "evidence_retained_if_hold"
+      ]
+    }
+  ],
+  "forbidden_authority_fields": [
+    "jit_admission_authorized",
+    "provider_admission_authorized",
+    "production_policy_changed"
+  ],
+  "canonical_owner_policy_issue": "LowcountryDigitalWorks/infrastructure-tools#96",
+  "physical_gate_issue": "LowcountryDigitalWorks/infrastructure-tools#139"
+}
