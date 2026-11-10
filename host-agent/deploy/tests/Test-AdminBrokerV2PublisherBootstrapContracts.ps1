@@ -484,16 +484,14 @@ try {
     Remove-Item -LiteralPath $aclSandbox -Recurse -Force -ErrorAction SilentlyContinue
 }
 if ($isAdmin) {
-    $genericWriteMask = [Security.AccessControl.FileSystemRights]0x40000000
-    $genericAllMask = [Security.AccessControl.FileSystemRights]0x10000000
-    $combinedGenericMask = [Security.AccessControl.FileSystemRights](0x40000000 -bor 0x10000000)
+    $inherit = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
     $usersSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
     $authUsersSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-11')
     foreach ($probe in @(
-        @{ Name = 'generic-write'; Mask = $genericWriteMask; Sid = $usersSid },
-        @{ Name = 'generic-all'; Mask = $genericAllMask; Sid = $usersSid },
-        @{ Name = 'generic-combined'; Mask = $combinedGenericMask; Sid = $usersSid },
-        @{ Name = 'auth-users-generic-write'; Mask = $genericWriteMask; Sid = $authUsersSid }
+        @{ Name = 'generic-write'; Mask = 0x40000000; Sid = $usersSid },
+        @{ Name = 'generic-all'; Mask = 0x10000000; Sid = $usersSid },
+        @{ Name = 'generic-combined'; Mask = (0x40000000 -bor 0x10000000); Sid = $usersSid },
+        @{ Name = 'auth-users-generic-write'; Mask = 0x40000000; Sid = $authUsersSid }
     )) {
         $dir = Join-Path $env:TEMP ('LDW_V2Generic_' + $probe.Name + '_' + [guid]::NewGuid().ToString('N'))
         $null = New-Item -ItemType Directory -Path $dir -Force
@@ -503,8 +501,10 @@ if ($isAdmin) {
             $ldwAcl.SetAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
                 [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'),
                 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
-            $ldwAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
-                $probe.Sid, $probe.Mask, 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+            $ldwAcl.AddAccessRule(New-Object Security.AccessControl.FileSystemAccessRule(
+                $probe.Sid, $probe.Mask, $inherit,
+                [Security.AccessControl.PropagationFlags]::None,
+                [Security.AccessControl.AccessControlType]::Allow))
             Set-Acl -LiteralPath $dir -AclObject $ldwAcl
             $materialized = [int](Get-Acl -LiteralPath $dir).GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]) |
                 Where-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq $probe.Sid.Value } |
