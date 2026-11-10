@@ -191,6 +191,29 @@ class CalibrationTest(unittest.TestCase):
         self.assertEqual(out["balloon_vmstat"], "MEASURED_INDICATIVE")
         self.assertEqual(out["balloon_inflate_pages_delta"], 23)
         self.assertEqual(out["balloon_deflate_pages_delta"], 62)
+        self.assertEqual(out["balloon_net_inflated_mib_estimate"], 18515)
+        self.assertEqual(out["balloon_net_inflated_mib_status"], "MEASURED_GUEST_ESTIMATE_NOT_HOST_RAM")
+
+    def test_balloon_net_estimate_from_final_complete_counters(self):
+        samples = [_sample(balloon=(6769300, 1872062)) for _ in range(3)]
+        out = module.classify(samples, (2048, 8192))
+        self.assertEqual(out["balloon_net_inflated_mib_estimate"], 19130)
+        self.assertFalse(out["ci_dispatch_authorized"])
+        self.assertFalse(out["jit_admission_authorized"])
+
+    def test_balloon_zero_net_is_measured_and_window_delta_can_be_zero(self):
+        out = module.classify([_sample(balloon=(10, 10)) for _ in range(3)], (2048, 8192))
+        self.assertEqual(out["balloon_net_inflated_mib_estimate"], 0)
+        self.assertEqual(out["balloon_inflate_pages_delta"], 0)
+
+    def test_balloon_invalid_or_missing_net_is_unverified_or_hold(self):
+        for counters, status in [([None] * 3, "UNVERIFIED"), ([(10, 11)] * 3, "HOLD"),
+                                 ([(20, 1), (2, 1), (30, 2)], "HOLD"),
+                                 ([(2**54, 0)] * 3, "HOLD")]:
+            with self.subTest(status=status):
+                out = module.classify([_sample(balloon=x) for x in counters], (2048, 8192))
+                self.assertEqual(out["balloon_net_inflated_mib_status"], status)
+                self.assertIsNone(out["balloon_net_inflated_mib_estimate"])
 
     def test_below_guest_idle_floor_is_not_a_chromeos_ram_shortage(self):
         # Physical REDRIX penguin was ~9,378 MiB available; owner separately
