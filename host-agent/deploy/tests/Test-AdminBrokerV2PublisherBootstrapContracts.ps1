@@ -334,6 +334,9 @@ Assert-True (-not (Test-SourceContains $ownerDocSource 'OwnerAdmin-InvokeV2Boots
 Assert-True (Test-SourceContains $ownerDocSource 'Never `powershell -File` a path under Downloads while elevated') 'Owner doc states elevated -File Downloads prohibition'
 Assert-True (-not ($ownerDocSource -match '(?i)-File\s+"?%USERPROFILE%\\Downloads')) 'Owner doc has no frozen -File Downloads command line'
 Assert-True (-not (Test-SourceContains $stageSource 'trustedIssuerManifestFileSha256')) 'Stage avoids circular issuer self pin'
+if (Test-SourceContains ([IO.File]::ReadAllText($issuerPath)) "`r`n") {
+    $script:Assertions++
+} else { throw 'ASSERTION_FAILED: issuer manifest materializes with CRLF line endings' }
 if ($inlineSource -match "trustedIssuerManifestFileSha256 = '([a-f0-9]{64})'") {
     Assert-True ($Matches[1] -ceq $issuerFileSha) 'Inline issuer pin equals materialized issuer manifest SHA256'
 } else { throw 'INLINE_PIN_PARSE_FAILED: trustedIssuerManifestFileSha256' }
@@ -343,8 +346,12 @@ if ($inlineSource -match "trustedStageSha256 = '([a-f0-9]{64})'") {
 
 $inlineCopyFn = $inlineAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Copy-VerifiedBytesInline' }, $false)
 $inlineNoReparseFn = $inlineAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-NoReparseInline' }, $false)
-if ($null -eq $inlineCopyFn -or $null -eq $inlineNoReparseFn) { throw 'FUNCTION_REQUIRED: inline copy helpers' }
+$inlineAssertHashFn = $inlineAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-FileSha256Inline' }, $false)
+if ($null -eq $inlineCopyFn -or $null -eq $inlineNoReparseFn -or $null -eq $inlineAssertHashFn) {
+    throw 'FUNCTION_REQUIRED: inline copy helpers'
+}
 . ([scriptblock]::Create($inlineNoReparseFn.Extent.Text))
+. ([scriptblock]::Create($inlineAssertHashFn.Extent.Text))
 . ([scriptblock]::Create($inlineCopyFn.Extent.Text))
 $inlineSandbox = Join-Path $env:TEMP ('LDW_V2InlineCopy_' + [guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path $inlineSandbox -Force
