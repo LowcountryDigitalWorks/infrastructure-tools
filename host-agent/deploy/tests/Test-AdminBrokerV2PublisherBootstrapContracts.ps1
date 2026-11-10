@@ -501,10 +501,10 @@ if ($isAdmin) {
             $ldwAcl.SetAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
                 [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'),
                 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
-            $ldwAcl.AddAccessRule(New-Object Security.AccessControl.FileSystemAccessRule(
+            $ldwAcl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
                 $probe.Sid, $probe.Mask, $inherit,
                 [Security.AccessControl.PropagationFlags]::None,
-                [Security.AccessControl.AccessControlType]::Allow))
+                [Security.AccessControl.AccessControlType]::Allow)))
             Set-Acl -LiteralPath $dir -AclObject $ldwAcl
             $materialized = [int](Get-Acl -LiteralPath $dir).GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]) |
                 Where-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq $probe.Sid.Value } |
