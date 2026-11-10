@@ -688,7 +688,7 @@ lock.release()
                 _seed_home(home, receiver_blob=contract["required_installed_receiver_git_blob"])
                 child = f"""
 import os, sys
-sys.path.insert(0, {json.dumps(str(ROOT))}
+sys.path.insert(0, {json.dumps(str(ROOT))})
 import importlib.util
 spec = importlib.util.spec_from_file_location(
     "redrix_normal_user_v2_receiver_install",
@@ -701,7 +701,7 @@ mod.install_fixture(
     home=__import__("pathlib").Path({json.dumps(str(home))}),
     uid=os.getuid(),
     package_root=__import__("pathlib").Path({json.dumps(str(pkg))}),
-    operation_id={"6a" * 16!r},
+    operation_id={json.dumps("6a" * 16)},
     fault_after="abrupt_exit",
 )
 """
