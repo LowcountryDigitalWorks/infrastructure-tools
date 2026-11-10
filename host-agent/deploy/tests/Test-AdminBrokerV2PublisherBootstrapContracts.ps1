@@ -483,39 +483,59 @@ try {
 } finally {
     Remove-Item -LiteralPath $aclSandbox -Recurse -Force -ErrorAction SilentlyContinue
 }
+function Test-StrictParentAceMaskHold([int]$Rights) {
+    $win32GenericWrite = 0x40000000
+    $win32GenericAll = 0x10000000
+    $forbidden = [int](
+        [Security.AccessControl.FileSystemRights]::Write -bor
+        [Security.AccessControl.FileSystemRights]::CreateFiles -bor
+        [Security.AccessControl.FileSystemRights]::CreateDirectories -bor
+        [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership)
+    if (($Rights -band $win32GenericWrite) -ne 0) { return $true }
+    if (($Rights -band $win32GenericAll) -ne 0) { return $true }
+    if (($Rights -band $forbidden) -ne 0) { return $true }
+    return $false
+}
+function Test-BaselineUnexpectedAceHold([int]$Rights) {
+    $win32GenericWrite = 0x40000000
+    $win32GenericAll = 0x10000000
+    $writeSurface = [int](
+        [Security.AccessControl.FileSystemRights]::Write -bor
+        [Security.AccessControl.FileSystemRights]::CreateFiles -bor
+        [Security.AccessControl.FileSystemRights]::CreateDirectories)
+    if (($Rights -band $win32GenericWrite) -ne 0) { return $true }
+    if (($Rights -band $win32GenericAll) -ne 0) { return $true }
+    if (($Rights -band $writeSurface) -ne 0) { return $true }
+    return $false
+}
+foreach ($mask in @(0x40000000, 0x10000000, (0x40000000 -bor 0x10000000))) {
+    Assert-True (Test-StrictParentAceMaskHold $mask) "strict refuses Win32 generic mask $mask"
+    Assert-True (Test-BaselineUnexpectedAceHold $mask) "baseline refuses Win32 generic mask $mask"
+}
+Assert-True (Test-StrictParentAceMaskHold 278) 'strict LDW refuses stock Users write surface 278'
+Assert-True (Test-BaselineUnexpectedAceHold 278) 'baseline fallback holds non-Users write surface 278'
+Assert-True (-not (Test-BaselineUnexpectedAceHold 1179817)) 'baseline fallback allows stock-like RX without generic bits'
+Assert-True (Test-StrictParentAceMaskHold (278 -bor [int][Security.AccessControl.FileSystemRights]::Write)) `
+    'strict refuses concrete write on non-stock mask'
 if ($isAdmin) {
-    $inherit = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
-    $usersSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
-    $authUsersSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-11')
-    foreach ($probe in @(
-        @{ Name = 'generic-write'; Mask = 0x40000000; Sid = $usersSid },
-        @{ Name = 'generic-all'; Mask = 0x10000000; Sid = $usersSid },
-        @{ Name = 'generic-combined'; Mask = (0x40000000 -bor 0x10000000); Sid = $usersSid },
-        @{ Name = 'auth-users-generic-write'; Mask = 0x40000000; Sid = $authUsersSid }
-    )) {
-        $dir = Join-Path $env:TEMP ('LDW_V2Generic_' + $probe.Name + '_' + [guid]::NewGuid().ToString('N'))
-        $null = New-Item -ItemType Directory -Path $dir -Force
-        try {
-            $ldwAcl = Get-Acl -LiteralPath $dir
-            $ldwAcl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
-            $ldwAcl.SetAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
-                [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'),
-                'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
-            $ldwAcl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
-                $probe.Sid, $probe.Mask, $inherit,
-                [Security.AccessControl.PropagationFlags]::None,
-                [Security.AccessControl.AccessControlType]::Allow)))
-            Set-Acl -LiteralPath $dir -AclObject $ldwAcl
-            $materialized = [int](Get-Acl -LiteralPath $dir).GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]) |
-                Where-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq $probe.Sid.Value } |
-                Select-Object -First 1 |
-                ForEach-Object { [int]$_.FileSystemRights }
-            Assert-True (($materialized -band 0x40000000) -ne 0 -or ($materialized -band 0x10000000) -ne 0) (
-                "generic ACE materialized for $($probe.Name)")
-            Assert-Refused { Assert-TrustedDirectoryAcl $dir } 'LDW_PARENT_ACL_HOLD'
-        } finally {
-            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
-        }
+    $dir = Join-Path $env:TEMP ('LDW_V2GenericWriteConcrete_' + [guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory -Path $dir -Force
+    try {
+        $ldwAcl = Get-Acl -LiteralPath $dir
+        $ldwAcl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+        $ldwAcl.SetAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'),
+            'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+        $usersSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
+        $ldwAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $usersSid, 'Write', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+        Set-Acl -LiteralPath $dir -AclObject $ldwAcl
+        Assert-Refused { Assert-TrustedDirectoryAcl $dir } 'LDW_PARENT_ACL_HOLD'
+    } finally {
+        Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
