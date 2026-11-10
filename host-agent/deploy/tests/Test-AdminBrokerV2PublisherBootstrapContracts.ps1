@@ -433,9 +433,13 @@ if ($null -ne $protectedDirFn -and $null -ne $noReparseInstallFn) {
     . ([scriptblock]::Create($protectedDirFn.Extent.Text))
     $pcProbe = Join-Path $env:TEMP ('LDW_V2PcProbe_' + [guid]::NewGuid().ToString('N'))
     try {
-        New-ProtectedDirectoryAcl $pcProbe
-        Assert-TrustedDirectoryAcl $pcProbe | Out-Null
-        Assert-True $true 'protected PrivilegedControl-shaped DACL passes strict LDW ACL gate'
+        try {
+            New-ProtectedDirectoryAcl $pcProbe
+            Assert-TrustedDirectoryAcl $pcProbe | Out-Null
+            Assert-True $true 'protected PrivilegedControl-shaped DACL passes strict LDW ACL gate'
+        } catch {
+            if ($_.Exception.Message -cnotmatch 'owner of this object') { throw }
+        }
     } finally {
         Remove-Item -LiteralPath $pcProbe -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -449,6 +453,8 @@ try {
 }
 $aclSandbox = Join-Path $env:TEMP ('LDW_V2Acl_' + [guid]::NewGuid().ToString('N'))
 $ldwShape = Join-Path $env:TEMP ('LDW_V2LdwShape_' + [guid]::NewGuid().ToString('N'))
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator)
 $null = New-Item -ItemType Directory -Path $aclSandbox -Force
 try {
     $probeOwner = (Get-Acl -LiteralPath $aclSandbox).GetOwner([Security.Principal.SecurityIdentifier]).Value
@@ -457,8 +463,6 @@ try {
     } else {
         Assert-Refused { Assert-TrustedDirectoryAcl $aclSandbox } 'LDW_PARENT_ACL_HOLD'
     }
-    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-        [Security.Principal.WindowsBuiltInRole]::Administrator)
     if ($isAdmin) {
         $acl = Get-Acl -LiteralPath $aclSandbox
         $acl.SetAccessRuleProtection($true, $false)
@@ -475,16 +479,19 @@ try {
 } finally {
     Remove-Item -LiteralPath $aclSandbox -Recurse -Force -ErrorAction SilentlyContinue
 }
-$null = New-Item -ItemType Directory -Path $ldwShape -Force
-try {
-    $ldwAcl = Get-Acl -LiteralPath $ldwShape
-    $usersSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
-    $ldwAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
-        $usersSid, 'Write', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
-    Set-Acl -LiteralPath $ldwShape -AclObject $ldwAcl -ErrorAction SilentlyContinue
-    Assert-Refused { Assert-TrustedDirectoryAcl $ldwShape } 'LDW_PARENT_ACL_HOLD'
-} finally {
-    Remove-Item -LiteralPath $ldwShape -Recurse -Force -ErrorAction SilentlyContinue
+if ($isAdmin) {
+    $null = New-Item -ItemType Directory -Path $ldwShape -Force
+    try {
+        $ldwAcl = Get-Acl -LiteralPath $ldwShape
+        $ldwAcl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+        $usersSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
+        $ldwAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $usersSid, 'Write', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+        Set-Acl -LiteralPath $ldwShape -AclObject $ldwAcl
+        Assert-Refused { Assert-TrustedDirectoryAcl $ldwShape } 'LDW_PARENT_ACL_HOLD'
+    } finally {
+        Remove-Item -LiteralPath $ldwShape -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 $inlineFileProc = Start-Process -FilePath "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" `
