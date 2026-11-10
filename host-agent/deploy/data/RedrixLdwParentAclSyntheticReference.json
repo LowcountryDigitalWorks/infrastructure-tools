@@ -1,0 +1,8 @@
+{
+  "schema": "REDRIX_LDW_PARENT_ACL_SYNTHETIC_V1",
+  "classification": "NON_EXECUTABLE_REFERENCE_ONLY",
+  "preimageSddl": "O:SYG:SYD:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIIOID;GA;;;CO)(A;OICIID;0x1200a9;;;BU)(A;CIID;0x116;;;BU)",
+  "reviewerHypothesisTargetSddl": "O:SYG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)",
+  "reviewerHypothesisTargetSha256Utf8SddlProperty": "a11c28fd0fceea6c13d29661318b95bdb55ca0cd4ad3a0d5f5a3ceb42ce2f7c8",
+  "note": "Hypothesis pin is not trusted until independently verified on WinPS 5.1 via DirectorySecurity.Sddl UTF-8 SHA-256."
+}

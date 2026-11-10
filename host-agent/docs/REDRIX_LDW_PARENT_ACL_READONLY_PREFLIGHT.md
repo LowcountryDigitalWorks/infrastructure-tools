@@ -18,14 +18,18 @@ The owner-approved first-install does not authorize changing unrelated system AC
 
 ## Separate future ACL transaction — NOT implemented or authorized here
 
+Canonical **source-only design** (supersedes preserve-CREATOR_OWNER / copy-inherited-then-remove recipes): `host-agent/docs/REDRIX_LDW_PARENT_ACL_TRANSACTION_DESIGN.md` and issue comment 6757651419.
+
 Any eventual owner-only protected action requires a new exact independent security review and a frozen source/byte identity. It may touch **only** the existing %ProgramData%\LDW parent. Its transaction design must:
 
 1. Reconcile current live #186, #139, protected V1 task and lock state; stop if concurrent/in-flight operations, mismatched root owner, reparse/rename race, unexpected children or differing exact SDDL preimages.
-2. Verify no approved normal-user feature depends on creating new children at the LDW parent. Preserve the fixed existing children and their exact protected DACLs.
+2. Verify no approved normal-user feature depends on creating new children at the LDW parent. Preserve the fixed existing six protected children and their exact protected DACLs.
 3. Capture the original SDDL in a durable, access-controlled owner-only journal under the *existing* verified protected PrivilegedControl directory; fail closed on unavailable or ambiguous journaling.
-4. Compute and independently review an exact target LDW-parent DACL before any write. Remove inherited BUILTIN\Users Write from **LDW only**, retain necessary read/execute and SYSTEM/Administrators rights, and prevent new insecure inheritance. Never edit stock C:\ProgramData or child DACLs.
+4. Compute and independently review an **explicit** target LDW-parent DACL (fresh allowlist; **omit CREATOR OWNER generic-all and Users write**; do not use `SetAccessRuleProtection($true,$true)` copy-remove). Never edit stock C:\ProgramData or child DACLs.
 5. If separately authorized, commit one bounded ACL change and re-read the exact new parent owner/DACL plus all six unchanged child SDDL hashes and existing V1 task identity. On any ambiguous result retain the journal and HOLD—no guessed automatic rollback.
 6. Permit a separately reviewed fixed rollback to the original SDDL only with exact current-state and child identity guards. Never remove the evidence journal merely because a tool reports success.
+
+This read-only observer (PR300) uses the **pre-change** parent SDDL pin and will **HOLD** after any future parent mutation until a separately reviewed ledger is adopted; it does not self-adapt.
 
 After a security-accepted and host-proven ACL transaction, **different** gates still control the immutable V2 publisher first-install, protected receiver transfer, authenticated REDRIX A4 proc/FD evidence, guest-visible 2 GiB + 8 GiB memory policy, exact queued GitHub job admission and destructive cleanup.
 
