@@ -2,7 +2,7 @@
 
 Status: **SOURCE-ONLY** / **SYNTHETIC_NO_EXECUTION** / independent security review required.
 
-Composes existing `canonical_command_batch`, `signed_batch_binding`, `gate_a_admission`, and `session` fixtures behind a **closed immutable registry** of exactly two enrolled host IDs (`host:synthetic-a`, `host:synthetic-b`). Unknown host IDs and revoked enrollments are refused (`ENROLLED_HOST_UNKNOWN`, `ENROLLMENT_REVOKED`) before Gate A or session helpers run. Each record pins `owner_signer_generation`, `session_epoch`, and `revoked` state used by admission and session operations.
+Composes existing `canonical_command_batch`, `signed_batch_binding`, `gate_a_admission`, and `session` fixtures behind a **closed immutable registry** of exactly two enrolled host IDs (`host:synthetic-a`, `host:synthetic-b`). The public `enrollments` view is read-only; unknown or malformed host IDs and revoked enrollments are refused (`ENROLLED_HOST_UNKNOWN`, `ENROLLMENT_REVOKED`) before Gate A or session helpers run. Each record pins distinct synthetic owner-signer and issuer public keys, `owner_signer_generation`, `session_epoch`, and `revoked` state. `gate_for()` returns an enrollment-scoped Gate A wrapper that revalidates the active record on every admission; epoch rotation rebuilds the `SessionIssuer` so only post-rotation grants validate.
 
 Proves host **A** and **B** enrollments are cryptographically distinct:
 

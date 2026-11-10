@@ -10,6 +10,7 @@ import hashlib
 import json
 import uuid
 from dataclasses import dataclass, replace
+from types import MappingProxyType
 from typing import Callable, Mapping
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -59,6 +60,7 @@ class SyntheticHostEnrollment:
 
     host_id: str
     issuer_public_key: Ed25519PublicKey
+    owner_signer_public_key: Ed25519PublicKey
     owner_signer_generation: int = 2
     session_epoch: int = 1
     revoked: bool = False
@@ -72,31 +74,55 @@ class SignedBatchArtifacts:
     nonce: str
 
 
+class EnrollmentScopedGateA:
+    """Gate A admission that revalidates enrollment on every call."""
+
+    def __init__(self, probe: TwoHostEnrollmentDenialProbe, host_id: str, inner: GateAAdmission) -> None:
+        self._probe = probe
+        self._host_id = host_id
+        self._inner = inner
+
+    def admit(self, proposal: dict) -> dict:
+        self._probe.require_enrolled_host(self._host_id)
+        return self._inner.admit(proposal)
+
+
 class TwoHostEnrollmentDenialProbe:
     """Closed registry of exactly two synthetic host enrollments."""
 
     def __init__(
         self,
         *,
-        signer_private: Ed25519PrivateKey,
-        issuer_private: Ed25519PrivateKey,
+        signer_private_a: Ed25519PrivateKey | None = None,
+        signer_private_b: Ed25519PrivateKey | None = None,
+        issuer_private_a: Ed25519PrivateKey | None = None,
+        issuer_private_b: Ed25519PrivateKey | None = None,
         clock: Callable[[], float] | None = None,
     ) -> None:
-        self._signer_private = signer_private
-        self._signer_public = signer_private.public_key()
-        self._issuer_private = issuer_private
-        self._issuer_public = issuer_private.public_key()
         self._clock = clock if clock is not None else (lambda: float(NOW_UNIX))
         self._nonce_ledger = SyntheticNonceLedger()
         self._split_brain = SplitBrainRegistry()
-        self._enrollments: dict[str, SyntheticHostEnrollment] = {
-            HOST_A: SyntheticHostEnrollment(HOST_A, self._issuer_public),
-            HOST_B: SyntheticHostEnrollment(HOST_B, self._issuer_public),
+        self._signer_privates: dict[str, Ed25519PrivateKey] = {
+            HOST_A: signer_private_a or Ed25519PrivateKey.generate(),
+            HOST_B: signer_private_b or Ed25519PrivateKey.generate(),
         }
+        self._issuer_privates: dict[str, Ed25519PrivateKey] = {
+            HOST_A: issuer_private_a or Ed25519PrivateKey.generate(),
+            HOST_B: issuer_private_b or Ed25519PrivateKey.generate(),
+        }
+        self._enrollments: dict[str, SyntheticHostEnrollment] = {}
         self._policies: dict[str, OwnerPolicy] = {}
         self._issuers: dict[str, SessionIssuer] = {}
         self._agents: dict[str, SyntheticAgent] = {}
-        for host_id, record in self._enrollments.items():
+        for host_id in ENROLLED_HOST_IDS:
+            issuer_public = self._issuer_privates[host_id].public_key()
+            signer_public = self._signer_privates[host_id].public_key()
+            record = SyntheticHostEnrollment(
+                host_id,
+                issuer_public,
+                signer_public,
+            )
+            self._enrollments[host_id] = record
             policy = OwnerPolicy(
                 policy_id=f"synthetic-two-host-policy-{host_id[-1]}",
                 operator=OPERATOR,
@@ -106,13 +132,13 @@ class TwoHostEnrollmentDenialProbe:
             )
             self._policies[host_id] = policy
             self._issuers[host_id] = SessionIssuer(
-                self._issuer_private,
+                self._issuer_privates[host_id],
                 policy,
                 clock=self._clock,
                 epoch=record.session_epoch,
             )
             self._agents[host_id] = SyntheticAgent(
-                self._issuer_public,
+                issuer_public,
                 policy,
                 host_id,
                 clock=self._clock,
@@ -121,7 +147,7 @@ class TwoHostEnrollmentDenialProbe:
 
     @property
     def enrollments(self) -> Mapping[str, SyntheticHostEnrollment]:
-        return self._enrollments
+        return MappingProxyType(self._enrollments)
 
     @property
     def host_a(self) -> SyntheticHostEnrollment:
@@ -131,7 +157,13 @@ class TwoHostEnrollmentDenialProbe:
     def host_b(self) -> SyntheticHostEnrollment:
         return self._enrollments[HOST_B]
 
-    def require_enrolled_host(self, host_id: str) -> SyntheticHostEnrollment:
+    def _signer_public(self, host_id: str) -> Ed25519PublicKey:
+        record = self.require_enrolled_host(host_id)
+        return record.owner_signer_public_key
+
+    def require_enrolled_host(self, host_id: object) -> SyntheticHostEnrollment:
+        if not isinstance(host_id, str):
+            raise EnrollmentRefused("ENROLLED_HOST_UNKNOWN")
         if host_id not in ENROLLED_HOST_IDS:
             raise EnrollmentRefused("ENROLLED_HOST_UNKNOWN")
         record = self._enrollments.get(host_id)
@@ -144,6 +176,8 @@ class TwoHostEnrollmentDenialProbe:
         return record
 
     def revoke_enrollment(self, host_id: str) -> SyntheticHostEnrollment:
+        if not isinstance(host_id, str):
+            raise EnrollmentRefused("ENROLLED_HOST_UNKNOWN")
         if host_id not in ENROLLED_HOST_IDS:
             raise EnrollmentRefused("ENROLLED_HOST_UNKNOWN")
         current = self._enrollments[host_id]
@@ -151,21 +185,23 @@ class TwoHostEnrollmentDenialProbe:
         self._enrollments[host_id] = updated
         return updated
 
-    def gate_for(self, host_id: str) -> GateAAdmission:
+    def gate_for(self, host_id: str) -> EnrollmentScopedGateA:
         record = self.require_enrolled_host(host_id)
-        return GateAAdmission(
+        signer_public = record.owner_signer_public_key
+        inner = GateAAdmission(
             TrustedContext(
                 host_id=record.host_id,
                 operator=OPERATOR,
                 signer_key_id=SIGNER_KEY_ID,
                 signer_generation=record.owner_signer_generation,
                 batch_generation=BATCH_GENERATION,
-                signer_public_key=self._signer_public,
+                signer_public_key=signer_public,
                 nonce_ledger=self._nonce_ledger,
             ),
             clock=lambda: NOW_UNIX,
             split_brain=self._split_brain,
         )
+        return EnrollmentScopedGateA(self, record.host_id, inner)
 
     def sign_batch_raw(
         self,
@@ -176,6 +212,7 @@ class TwoHostEnrollmentDenialProbe:
         nonce: str | None = None,
     ) -> SignedBatchArtifacts:
         use_nonce = nonce or str(uuid.uuid4())
+        signer_private = self._signer_privates[record.host_id]
         document = {
             "version": DECISION_VERSION,
             "decision_id": parsed["decision_id"],
@@ -196,7 +233,7 @@ class TwoHostEnrollmentDenialProbe:
             "nonce": use_nonce,
         }
         raw = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-        token = _b64(raw) + "." + _b64(self._signer_private.sign(raw))
+        token = _b64(raw) + "." + _b64(signer_private.sign(raw))
         return SignedBatchArtifacts(
             batch_raw=batch_raw, batch=parsed, decision_token=token, nonce=use_nonce,
         )
@@ -255,7 +292,7 @@ class TwoHostEnrollmentDenialProbe:
             raise EnrollmentRefused("SIGNER_GENERATION_MISMATCH")
         return verify_signed_batch(
             artifacts.decision_token,
-            self._signer_public,
+            record.owner_signer_public_key,
             artifacts.batch_raw,
             host_id=record.host_id,
             operator=OPERATOR,
@@ -280,9 +317,19 @@ class TwoHostEnrollmentDenialProbe:
         record = self.require_enrolled_host(host_id)
         return self._agents[record.host_id].revoke(session_id)
 
+    def _synchronize_session_epoch(self, host_id: str, epoch: int) -> None:
+        policy = self._policies[host_id]
+        self._agents[host_id].set_epoch(epoch)
+        self._issuers[host_id] = SessionIssuer(
+            self._issuer_privates[host_id],
+            policy,
+            clock=self._clock,
+            epoch=epoch,
+        )
+
     def rotate_epoch(self, host_id: str, epoch: int) -> None:
         record = self.require_enrolled_host(host_id)
-        self._agents[record.host_id].set_epoch(epoch)
+        self._synchronize_session_epoch(record.host_id, epoch)
         updated = replace(record, session_epoch=epoch)
         self._enrollments[record.host_id] = updated
 
@@ -297,6 +344,7 @@ class TwoHostEnrollmentDenialProbe:
 __all__ = [
     "ENROLLED_HOST_IDS",
     "EnrollmentRefused",
+    "EnrollmentScopedGateA",
     "HOST_A",
     "HOST_B",
     "NOW_UNIX",
