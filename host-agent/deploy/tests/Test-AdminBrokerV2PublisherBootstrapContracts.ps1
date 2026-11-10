@@ -17,6 +17,8 @@ $v2WorkerPath = Join-Path $deployRoot 'Invoke-AdminBrokerV2PublisherWorker.ps1'
 $manifestPath = Join-Path $deployRoot 'AdminBrokerV2BootstrapReviewManifest.json'
 $issuerPath = Join-Path $deployRoot 'AdminBrokerV2BootstrapIssuerManifest.json'
 $repoRoot = (Resolve-Path (Join-Path $deployRoot '../..')).Path
+$programDataKnown = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+$profileKnown = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
 $script:Assertions = 0
 
 function Assert-True([bool]$Value, [string]$Message) {
@@ -411,13 +413,22 @@ try {
 $aclSandbox = Join-Path $env:TEMP ('LDW_V2Acl_' + [guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path $aclSandbox -Force
 try {
-    $acl = Get-Acl -LiteralPath $aclSandbox
-    $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
-    $usersSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
-    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
-        $usersSid, 'Write', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
-    Set-Acl -LiteralPath $aclSandbox -AclObject $acl
-    Assert-Refused { Assert-TrustedDirectoryAcl $aclSandbox } 'LDW_PARENT_ACL_HOLD'
+    Assert-Refused { Assert-TrustedDirectoryAcl $aclSandbox } 'LDW_PARENT_OWNER_REFUSED'
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+    if ($isAdmin) {
+        $acl = Get-Acl -LiteralPath $aclSandbox
+        $acl.SetAccessRuleProtection($true, $false)
+        $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+        $acl.SetAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'),
+            'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+        $usersSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
+        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $usersSid, 'Write', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+        Set-Acl -LiteralPath $aclSandbox -AclObject $acl
+        Assert-Refused { Assert-TrustedDirectoryAcl $aclSandbox } 'LDW_PARENT_ACL_HOLD'
+    }
 } finally {
     Remove-Item -LiteralPath $aclSandbox -Recurse -Force -ErrorAction SilentlyContinue
 }
@@ -435,8 +446,6 @@ Assert-True ($inlineErr.IndexOf('INLINE_REFERENCE_NOT_FILE_INVOKABLE', [StringCo
 
 $stageProtectedFn = $stageAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-ProtectedStagePath' }, $false)
 if ($null -eq $stageProtectedFn) { throw 'FUNCTION_REQUIRED: Assert-ProtectedStagePath' }
-$programDataKnown = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
-$profileKnown = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
 $stagingSample = Join-Path $programDataKnown 'LDW\PrivilegedControl\bootstrap-staging\v2-publisher-once\Stage-AdminBrokerV2PublisherBootstrap.ps1'
 $downloadsSample = Join-Path $profileKnown 'Downloads\LDW-V2-Publisher-Bootstrap-Review\Stage-AdminBrokerV2PublisherBootstrap.ps1'
 . ([scriptblock]::Create($stageProtectedFn.Extent.Text))
