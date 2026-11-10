@@ -1,6 +1,6 @@
 # message_board_ui_v0 — read-model capability (source-only)
 
-**Authority:** infrastructure-tools #207 (`message_board_ui_v0` gate per owner comment 6730467322).  
+**Authority:** infrastructure-tools #207 (`message_board_ui_v0` gate per owner comment 6730467322).
 **Status:** SOURCE ONLY — no Site plugin deploy, no queue, no database, no ChatGPT wake.
 
 ## Purpose
