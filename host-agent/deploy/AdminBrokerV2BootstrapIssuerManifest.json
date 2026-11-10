@@ -4,11 +4,11 @@
   "artifacts": [
     {
       "name": "AdminBrokerV2BootstrapReviewManifest.json",
-      "sha256": "ea7d2ed037ba0bd4f3418020174b4e3e1f0f2768cec06a7f033b46315ffe6b17"
+      "sha256": "fb2dd7b2f495d67edb7b72da35f14b83f1976d0054fe2d76530dbc3330664feb"
     },
     {
       "name": "Install-AdminBrokerV2PublisherBootstrap.ps1",
-      "sha256": "4ecb1d07bdc267af299dc4ff093d5b962aa72207b90911060848b1026ec181e7"
+      "sha256": "688a795dccfdbb4df7e9fb9fe5ba9cc7834c7144cc6da3a6bd7302346bae335c"
     },
     {
       "name": "Invoke-AdminBrokerV2PublisherWorker.ps1",
@@ -16,7 +16,7 @@
     },
     {
       "name": "Stage-AdminBrokerV2PublisherBootstrap.ps1",
-      "sha256": "6b922f05000ab39fb04521971d06c45b996519fad931d7222d8dad4ac13a7351"
+      "sha256": "12359cf09e404b5eee6d63289b11d435ff671d3e407fbc81160e29f04aec1aa9"
     }
   ]
 }

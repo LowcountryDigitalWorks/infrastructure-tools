@@ -59,6 +59,56 @@ function Get-MachineProgramDataRoot {
     $full
 }
 
+function Assert-WindowsProgramDataRootBaselineAcl([string]$ProgramDataRoot) {
+    $canonical = Get-MachineProgramDataRoot
+    $resolved = [IO.Path]::GetFullPath($ProgramDataRoot)
+    if ($resolved -cne $canonical) { throw 'COMMONAPPLICATIONDATA_PATH_REFUSED' }
+    if (-not (Test-Path -LiteralPath $resolved -PathType Container)) { throw 'PROTECTED_PATH_MISSING' }
+    $acl = Get-Acl -LiteralPath $resolved
+    if (-not $acl.AreAccessRulesProtected) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if ($owner -notin @('S-1-5-18', 'S-1-5-32-544')) { throw 'LDW_PARENT_OWNER_REFUSED' }
+    $dangerous = [int](
+        [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership -bor
+        [Security.AccessControl.FileSystemRights]::FullControl)
+    $genericAll = 268435456
+    $stockUsersWrite = 278
+    $stockUsersRx = 1179817
+    $usersSid = 'S-1-5-32-545'
+    $creatorOwnerSid = 'S-1-3-0'
+    $trustedSids = @('S-1-5-18', 'S-1-5-32-544')
+    $containerInherit = [Security.AccessControl.InheritanceFlags]::ContainerInherit
+    $inheritOnly = [Security.AccessControl.PropagationFlags]::InheritOnly
+    $writeSurface = [int](
+        [Security.AccessControl.FileSystemRights]::Write -bor
+        [Security.AccessControl.FileSystemRights]::CreateFiles -bor
+        [Security.AccessControl.FileSystemRights]::CreateDirectories)
+    foreach ($rule in $acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -ne 'Allow') { continue }
+        $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        $rights = [int][Security.AccessControl.FileSystemRights]$rule.FileSystemRights
+        $inh = $rule.InheritanceFlags
+        $prop = $rule.PropagationFlags
+        if ($sid -in $trustedSids) { continue }
+        if ($rights -band $dangerous) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+        if ($rights -eq $genericAll) {
+            if ($sid -ceq $creatorOwnerSid -and ($prop -band $inheritOnly) -ne 0) { continue }
+            throw 'PROGRAMDATA_ROOT_BASELINE_HOLD'
+        }
+        if ($sid -ceq $creatorOwnerSid) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+        if ($sid -ceq $usersSid) {
+            if (($inh -band $containerInherit) -eq 0) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+            if (($prop -band $inheritOnly) -ne 0) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+            if ($rights -eq $stockUsersWrite -or $rights -eq $stockUsersRx) { continue }
+            throw 'PROGRAMDATA_ROOT_BASELINE_HOLD'
+        }
+        if ($rights -band $writeSurface) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+    }
+}
+
 function Assert-TrustedDirectoryAcl([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { throw 'PROTECTED_PATH_MISSING' }
     Assert-NoReparse $Path
@@ -82,7 +132,7 @@ function Assert-TrustedDirectoryAcl([string]$Path) {
 }
 
 function Assert-LdwParentPreflight([string]$ProgramDataRoot, [string]$LdwRoot) {
-    Assert-TrustedDirectoryAcl $ProgramDataRoot
+    Assert-WindowsProgramDataRootBaselineAcl $ProgramDataRoot
     if (Test-Path -LiteralPath $LdwRoot) { Assert-TrustedDirectoryAcl $LdwRoot }
 }
 

@@ -49,7 +49,8 @@ Expected sanitized success line (Stage, if Install completed): `STAGE_ADMIN_BROK
 
 ## HOLD criteria
 
-- `LDW_PARENT_ACL_HOLD` or `LDW_PARENT_OWNER_REFUSED`: live `%ProgramData%\LDW` (or ancestors) has untrusted owner or inherited **BUILTIN\Users** / broad write. **Do not** weaken these checks or mutate production ACLs from this bootstrap lane; open a separate reviewed owner/host ACL remediation, then re-run normal-user verification.
+- `PROGRAMDATA_ROOT_BASELINE_HOLD`: OS `ProgramData` root DACL diverges from the stock Windows baseline (protected DACL; SYSTEM/Administrators owner; only the documented **BUILTIN\Users** create/write and read/execute inherit rules plus **InheritOnly** CREATOR_OWNER generic-all). **Do not** change the system-wide `C:\ProgramData` ACL to satisfy bootstrap.
+- `LDW_PARENT_ACL_HOLD` or `LDW_PARENT_OWNER_REFUSED`: live `%ProgramData%\LDW` or below (excluding the OS-wide root baseline) has untrusted owner or inherited **BUILTIN\Users** / broad write. **Do not** weaken these checks or mutate production ACLs from this bootstrap lane; open a separate reviewed **LDW-only** ACL remediation, then re-run normal-user verification.
 - `PROGRAMDATA_ENV_SPOOFED` / `USERPROFILE_ENV_SPOOFED`: process environment does not match OS known-folder profile paths.
 - Any hash mismatch (Downloads DATA, protected copy, issuer vs embedded review pins).
 - `STAGING_ALREADY_EXISTS`, `REPARSE_PATH_REFUSED`, or ambiguous `LDW_ROOT` owner/DACL.

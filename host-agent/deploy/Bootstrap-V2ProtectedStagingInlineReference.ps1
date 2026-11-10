@@ -18,11 +18,11 @@ $workerBundleName = 'Invoke-AdminBrokerV2PublisherWorker.ps1'
 $reviewManifestFileName = 'AdminBrokerV2BootstrapReviewManifest.json'
 $stagingLeaf = 'v2-publisher-once'
 $fixedReviewDownloadSuffix = 'Downloads\LDW-V2-Publisher-Bootstrap-Review'
-$trustedIssuerManifestFileSha256 = 'adafa0968d2a6bf4edea63c2aeb032154844a4179bf7cee0452e4076d294ecd0'
-$trustedReviewManifestFileSha256 = 'ea7d2ed037ba0bd4f3418020174b4e3e1f0f2768cec06a7f033b46315ffe6b17'
-$trustedBootstrapSha256 = '4ecb1d07bdc267af299dc4ff093d5b962aa72207b90911060848b1026ec181e7'
+$trustedIssuerManifestFileSha256 = 'd703990730f65af67c0e0b118c09b3297acc1fbda8e5f7b52b5ed288ba58588c'
+$trustedReviewManifestFileSha256 = 'fb2dd7b2f495d67edb7b72da35f14b83f1976d0054fe2d76530dbc3330664feb'
+$trustedBootstrapSha256 = '688a795dccfdbb4df7e9fb9fe5ba9cc7834c7144cc6da3a6bd7302346bae335c'
 $trustedWorkerSha256 = '051124b03f88694f19f557954e844ffe1f71c24187c7998a4cf6e8ce55aaa4f1'
-$trustedStageSha256 = '6b922f05000ab39fb04521971d06c45b996519fad931d7222d8dad4ac13a7351'
+$trustedStageSha256 = '12359cf09e404b5eee6d63289b11d435ff671d3e407fbc81160e29f04aec1aa9'
 
 function Assert-ElevatedInline {
     if ($env:OS -ne 'Windows_NT') { throw 'WINDOWS_REQUIRED' }
@@ -66,6 +66,56 @@ function Get-MachineProgramDataRootInline {
     $full
 }
 
+function Assert-WindowsProgramDataRootBaselineAclInline([string]$ProgramDataRoot) {
+    $canonical = Get-MachineProgramDataRootInline
+    $resolved = [IO.Path]::GetFullPath($ProgramDataRoot)
+    if ($resolved -cne $canonical) { throw 'COMMONAPPLICATIONDATA_PATH_REFUSED' }
+    if (-not (Test-Path -LiteralPath $resolved -PathType Container)) { throw 'PROTECTED_PATH_MISSING' }
+    $acl = Get-Acl -LiteralPath $resolved
+    if (-not $acl.AreAccessRulesProtected) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if ($owner -notin @('S-1-5-18', 'S-1-5-32-544')) { throw 'LDW_PARENT_OWNER_REFUSED' }
+    $dangerous = [int](
+        [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership -bor
+        [Security.AccessControl.FileSystemRights]::FullControl)
+    $genericAll = 268435456
+    $stockUsersWrite = 278
+    $stockUsersRx = 1179817
+    $usersSid = 'S-1-5-32-545'
+    $creatorOwnerSid = 'S-1-3-0'
+    $trustedSids = @('S-1-5-18', 'S-1-5-32-544')
+    $containerInherit = [Security.AccessControl.InheritanceFlags]::ContainerInherit
+    $inheritOnly = [Security.AccessControl.PropagationFlags]::InheritOnly
+    $writeSurface = [int](
+        [Security.AccessControl.FileSystemRights]::Write -bor
+        [Security.AccessControl.FileSystemRights]::CreateFiles -bor
+        [Security.AccessControl.FileSystemRights]::CreateDirectories)
+    foreach ($rule in $acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -ne 'Allow') { continue }
+        $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        $rights = [int][Security.AccessControl.FileSystemRights]$rule.FileSystemRights
+        $inh = $rule.InheritanceFlags
+        $prop = $rule.PropagationFlags
+        if ($sid -in $trustedSids) { continue }
+        if ($rights -band $dangerous) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+        if ($rights -eq $genericAll) {
+            if ($sid -ceq $creatorOwnerSid -and ($prop -band $inheritOnly) -ne 0) { continue }
+            throw 'PROGRAMDATA_ROOT_BASELINE_HOLD'
+        }
+        if ($sid -ceq $creatorOwnerSid) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+        if ($sid -ceq $usersSid) {
+            if (($inh -band $containerInherit) -eq 0) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+            if (($prop -band $inheritOnly) -ne 0) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+            if ($rights -eq $stockUsersWrite -or $rights -eq $stockUsersRx) { continue }
+            throw 'PROGRAMDATA_ROOT_BASELINE_HOLD'
+        }
+        if ($rights -band $writeSurface) { throw 'PROGRAMDATA_ROOT_BASELINE_HOLD' }
+    }
+}
+
 function Assert-TrustedDirectoryAclInline([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { throw 'PROTECTED_PATH_MISSING' }
     Assert-NoReparseInline $Path
@@ -89,7 +139,7 @@ function Assert-TrustedDirectoryAclInline([string]$Path) {
 }
 
 function Assert-LdwParentPreflightInline([string]$ProgramDataRoot, [string]$LdwRoot) {
-    Assert-TrustedDirectoryAclInline $ProgramDataRoot
+    Assert-WindowsProgramDataRootBaselineAclInline $ProgramDataRoot
     if (Test-Path -LiteralPath $LdwRoot) { Assert-TrustedDirectoryAclInline $LdwRoot }
 }
 

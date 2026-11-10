@@ -332,13 +332,16 @@ Assert-True (Test-SourceContains $inlineSource 'STAGING_ALREADY_EXISTS') 'Inline
 Assert-True (Test-SourceContains $inlineSource 'DOWNLOAD_BUNDLE_ROOT_REFUSED') 'Inline transaction pins Downloads bundle root'
 Assert-True (Test-SourceContains $inlineSource 'Invoke-LdwV2BootstrapProtectedStagingInlineTransaction') 'Inline transaction entry function published'
 Assert-True (Test-SourceContains $inlineSource 'Get-MachineProgramDataRootInline') 'Inline uses CommonApplicationData root'
-Assert-True (Test-SourceContains $inlineSource 'LDW_PARENT_ACL_HOLD') 'Inline preflight refuses weak parent DACL'
+Assert-True (Test-SourceContains $inlineSource 'Assert-WindowsProgramDataRootBaselineAclInline') 'Inline uses stock ProgramData root baseline'
+Assert-True (Test-SourceContains $inlineSource 'LDW_PARENT_ACL_HOLD') 'Inline preflight refuses weak LDW parent DACL'
 Assert-True (Test-SourceContains $inlineSource 'USERPROFILE_ENV_SPOOFED') 'Inline refuses profile env spoof'
 Assert-True (Test-SourceContains $stageSource 'Get-MachineProgramDataRoot') 'Stage uses CommonApplicationData root'
-Assert-True (Test-SourceContains $stageSource 'LDW_PARENT_ACL_HOLD') 'Stage preflight refuses weak parent DACL'
+Assert-True (Test-SourceContains $stageSource 'Assert-WindowsProgramDataRootBaselineAcl') 'Stage uses stock ProgramData root baseline'
+Assert-True (Test-SourceContains $stageSource 'LDW_PARENT_ACL_HOLD') 'Stage preflight refuses weak LDW parent DACL'
 Assert-True (Test-SourceContains $installSource 'Get-MachineProgramDataRoot') 'Install uses CommonApplicationData root'
 Assert-True (Test-SourceContains $installSource 'PROGRAMDATA_ENV_SPOOFED') 'Install refuses ProgramData env spoof'
-Assert-True (Test-SourceContains $installSource 'LDW_PARENT_ACL_HOLD') 'Install preflight refuses weak parent DACL'
+Assert-True (Test-SourceContains $installSource 'Assert-WindowsProgramDataRootBaselineAcl') 'Install uses stock ProgramData root baseline'
+Assert-True (Test-SourceContains $installSource 'LDW_PARENT_ACL_HOLD') 'Install preflight refuses weak LDW parent DACL'
 Assert-True (-not (Test-SourceContains $stageSource 'Join-Path $env:ProgramData')) 'Stage does not join paths from process ProgramData env'
 Assert-True (-not (Test-SourceContains $inlineSource 'Join-Path $env:ProgramData')) 'Inline does not join paths from process ProgramData env'
 Assert-True (Test-SourceContains $stageSource 'PROGRAMDATA_ENV_SPOOFED') 'Stage compares process ProgramData to machine known folder'
@@ -399,10 +402,44 @@ try {
 
 $inlineErrPath = Join-Path $env:TEMP ('ldw-inline-file-test-' + [guid]::NewGuid().ToString('N') + '.txt')
 $pdRootFn = $stageAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Get-MachineProgramDataRoot' }, $false)
+$noReparseStageFn = $stageAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-NoReparse' }, $false)
+$baselineFn = $stageAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-WindowsProgramDataRootBaselineAcl' }, $false)
 $aclFn = $stageAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-TrustedDirectoryAcl' }, $false)
-if ($null -eq $pdRootFn -or $null -eq $aclFn) { throw 'FUNCTION_REQUIRED: machine program data helpers' }
+if ($null -eq $pdRootFn -or $null -eq $noReparseStageFn -or $null -eq $baselineFn -or $null -eq $aclFn) {
+    throw 'FUNCTION_REQUIRED: machine program data helpers'
+}
+. ([scriptblock]::Create($noReparseStageFn.Extent.Text))
 . ([scriptblock]::Create($pdRootFn.Extent.Text))
+. ([scriptblock]::Create($baselineFn.Extent.Text))
 . ([scriptblock]::Create($aclFn.Extent.Text))
+$machinePd = Get-MachineProgramDataRoot
+Assert-WindowsProgramDataRootBaselineAcl $machinePd
+Assert-True $true 'stock OS ProgramData root baseline passes read-only probe'
+$baselineRefuseProbe = Join-Path $env:TEMP ('LDW_V2PdBaselineRefuse_' + [guid]::NewGuid().ToString('N'))
+$null = New-Item -ItemType Directory -Path $baselineRefuseProbe -Force
+try {
+    Assert-Refused { Assert-WindowsProgramDataRootBaselineAcl $baselineRefuseProbe } 'COMMONAPPLICATIONDATA_PATH_REFUSED'
+} finally {
+    Remove-Item -LiteralPath $baselineRefuseProbe -Recurse -Force -ErrorAction SilentlyContinue
+}
+$dangerousProbe = [int]([Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles)
+$stockWrite = 278
+Assert-True (($stockWrite -band $dangerousProbe) -eq 0) 'stock Users write mask excludes delete-child'
+Assert-True (($stockWrite -bor $dangerousProbe) -band $dangerousProbe) 'Users write plus delete-child would trip baseline dangerous mask'
+$noReparseInstallFn = $installAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-NoReparse' }, $false)
+$protectedDirFn = $installAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'New-ProtectedDirectoryAcl' }, $false)
+if ($null -ne $protectedDirFn -and $null -ne $noReparseInstallFn) {
+    . ([scriptblock]::Create($noReparseInstallFn.Extent.Text))
+    . ([scriptblock]::Create($protectedDirFn.Extent.Text))
+    $pcProbe = Join-Path $env:TEMP ('LDW_V2PcProbe_' + [guid]::NewGuid().ToString('N'))
+    try {
+        New-ProtectedDirectoryAcl $pcProbe
+        Assert-TrustedDirectoryAcl $pcProbe | Out-Null
+        Assert-True $true 'protected PrivilegedControl-shaped DACL passes strict LDW ACL gate'
+    } finally {
+        Remove-Item -LiteralPath $pcProbe -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
 $originalPd = $env:ProgramData
 try {
     $env:ProgramData = 'C:\SpoofedProgramDataForTest'
@@ -411,6 +448,7 @@ try {
     $env:ProgramData = $originalPd
 }
 $aclSandbox = Join-Path $env:TEMP ('LDW_V2Acl_' + [guid]::NewGuid().ToString('N'))
+$ldwShape = Join-Path $env:TEMP ('LDW_V2LdwShape_' + [guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path $aclSandbox -Force
 try {
     $probeOwner = (Get-Acl -LiteralPath $aclSandbox).GetOwner([Security.Principal.SecurityIdentifier]).Value
@@ -436,6 +474,17 @@ try {
     }
 } finally {
     Remove-Item -LiteralPath $aclSandbox -Recurse -Force -ErrorAction SilentlyContinue
+}
+$null = New-Item -ItemType Directory -Path $ldwShape -Force
+try {
+    $ldwAcl = Get-Acl -LiteralPath $ldwShape
+    $usersSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
+    $ldwAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        $usersSid, 'Write', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+    Set-Acl -LiteralPath $ldwShape -AclObject $ldwAcl -ErrorAction SilentlyContinue
+    Assert-Refused { Assert-TrustedDirectoryAcl $ldwShape } 'LDW_PARENT_ACL_HOLD'
+} finally {
+    Remove-Item -LiteralPath $ldwShape -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 $inlineFileProc = Start-Process -FilePath "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" `
