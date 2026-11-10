@@ -186,18 +186,16 @@ class PlanTests(unittest.TestCase):
 
     def test_working_tree_sourced_package_rejected(self):
         with tempfile.TemporaryDirectory() as td:
+            worktree = (ROOT / "ssh_forced_receiver.py").read_bytes()
+            canonical = _canonical_source_bytes(SOURCE_COMMIT, RECEIVER_SOURCE_PATH)
+            if worktree == canonical:
+                adversarial = canonical + b"\n# adversarial-append"
+            else:
+                adversarial = worktree
             pkg = PackageBuilder().write(
                 Path(td),
-                receiver=(ROOT / "ssh_forced_receiver.py").read_bytes(),
-                inbound=(ROOT / "inbound_transfer_v2.py").read_bytes(),
+                receiver=adversarial,
                 use_canonical=False,
-            )
-            worktree_receiver_blob = _git_blob((ROOT / "ssh_forced_receiver.py").read_bytes())
-            contract_receiver = mod.load_contract()["payload_entries"][0]["git_blob"]
-            self.assertNotEqual(
-                worktree_receiver_blob,
-                contract_receiver,
-                "CRLF adversarial regression requires checkout bytes differ from canonical Git blob",
             )
             home = Path(td) / "home"
             home.mkdir()
