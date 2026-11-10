@@ -291,8 +291,8 @@ class InstallFixtureTests(unittest.TestCase):
                     _git_blob(inbound_path.read_bytes()),
                     contract["payload_entries"][1]["git_blob"],
                 )
-                txn = json.loads((home / mod.TRANSACTION_REL).read_text(encoding="utf-8"))
-                self.assertEqual(txn["phase"], "CLEANUP")
+                self.assertTrue((home / mod.RECEIPT_REL).is_file())
+                self.assertFalse((home / mod.TRANSACTION_REL).exists())
             finally:
                 mod.PHYSICAL_INSTALL_ENABLED = False
 
@@ -395,6 +395,136 @@ class InstallFixtureTests(unittest.TestCase):
                 mod.PHYSICAL_INSTALL_ENABLED = False
                 release.set()
                 thread.join(timeout=5)
+
+    def test_crlf_materialized_payload_refused_deterministically(self):
+        canonical = _canonical_source_bytes(SOURCE_COMMIT, RECEIVER_SOURCE_PATH)
+        crlf = canonical.replace(b"\n", b"\r\n")
+        with tempfile.TemporaryDirectory() as td:
+            pkg = PackageBuilder().write(Path(td), receiver=crlf, use_canonical=False)
+            manifest = json.loads((pkg / "manifest.json").read_text(encoding="utf-8"))
+            manifest["payloadEntries"][0]["gitBlob"] = _git_blob(canonical)
+            manifest["payloadEntries"][0]["sha256"] = _sha256(canonical)
+            manifest["payloadEntries"][0]["size"] = len(canonical)
+            (pkg / "manifest.json").write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+            home = Path(td) / "home"
+            home.mkdir()
+            _seed_home(home, receiver_blob=mod.load_contract()["required_installed_receiver_git_blob"])
+            with self.assertRaisesRegex(mod.InstallError, "PACKAGE_CRLF_MATERIALIZATION_REFUSED"):
+                mod.build_install_plan(home=home, uid=TEST_UID, package_root=pkg)
+
+    def test_republished_preflight_under_lock_holds_after_peer_receipt_without_writes(self):
+        if sys.platform == "win32":
+            raise unittest.SkipTest("POSIX atomic install semantics")
+        contract = mod.load_contract()
+        with tempfile.TemporaryDirectory() as td:
+            pkg = PackageBuilder().write(Path(td))
+            home = Path(td) / "home"
+            home.mkdir()
+            _seed_home(home, receiver_blob=contract["required_installed_receiver_git_blob"])
+            mod.PHYSICAL_INSTALL_ENABLED = True
+            try:
+                mod.install_fixture(
+                    home=home,
+                    uid=TEST_UID,
+                    package_root=pkg,
+                    operation_id="3" * 32,
+                )
+                with self.assertRaisesRegex(mod.InstallError, "RECEIPT_ALREADY_PRESENT"):
+                    mod.install_fixture(
+                        home=home,
+                        uid=TEST_UID,
+                        package_root=pkg,
+                        operation_id="2" * 32,
+                    )
+                self.assertFalse((home / mod.TRANSACTION_REL).exists())
+            finally:
+                mod.PHYSICAL_INSTALL_ENABLED = False
+
+    def test_receipt_fault_preserves_v2_commit_and_refuses_replay(self):
+        if sys.platform == "win32":
+            raise unittest.SkipTest("POSIX atomic install semantics")
+        contract = mod.load_contract()
+        with tempfile.TemporaryDirectory() as td:
+            pkg = PackageBuilder().write(Path(td))
+            home = Path(td) / "home"
+            home.mkdir()
+            _seed_home(home, receiver_blob=contract["required_installed_receiver_git_blob"])
+            mod.PHYSICAL_INSTALL_ENABLED = True
+            try:
+                with self.assertRaisesRegex(mod.InstallError, "INSTALL_POST_RECEIPT_HOLD"):
+                    mod.install_fixture(
+                        home=home,
+                        uid=TEST_UID,
+                        package_root=pkg,
+                        operation_id="4" * 32,
+                        fault_after="receipt",
+                    )
+                receiver = (home / mod.RECEIVER_REL).read_bytes()
+                inbound = (home / mod.INBOUND_REL).read_bytes()
+                self.assertEqual(_git_blob(receiver), contract["payload_entries"][0]["git_blob"])
+                self.assertEqual(_git_blob(inbound), contract["payload_entries"][1]["git_blob"])
+                self.assertTrue((home / mod.RECEIPT_REL).is_file())
+                receipt = json.loads((home / mod.RECEIPT_REL).read_text(encoding="utf-8"))
+                self.assertEqual(receipt["installedReceiverGitBlob"], contract["payload_entries"][0]["git_blob"])
+                with self.assertRaises(mod.InstallError):
+                    mod.install_fixture(
+                        home=home,
+                        uid=TEST_UID,
+                        package_root=pkg,
+                        operation_id="5" * 32,
+                    )
+            finally:
+                mod.PHYSICAL_INSTALL_ENABLED = False
+
+    def test_abrupt_incomplete_transaction_requires_recovery_hold(self):
+        if sys.platform == "win32":
+            raise unittest.SkipTest("POSIX atomic install semantics")
+        contract = mod.load_contract()
+        with tempfile.TemporaryDirectory() as td:
+            pkg = PackageBuilder().write(Path(td))
+            home = Path(td) / "home"
+            home.mkdir()
+            _seed_home(home, receiver_blob=contract["required_installed_receiver_git_blob"])
+            mod.PHYSICAL_INSTALL_ENABLED = True
+            try:
+                with self.assertRaises(mod.InstallError):
+                    mod.install_fixture(
+                        home=home,
+                        uid=TEST_UID,
+                        package_root=pkg,
+                        operation_id="6" * 32,
+                        fault_after=mod.INBOUND_PACKAGE,
+                    )
+                with self.assertRaisesRegex(mod.InstallError, "INSTALL_RECOVERY_REQUIRED"):
+                    mod.build_install_plan(home=home, uid=TEST_UID, package_root=pkg)
+            finally:
+                mod.PHYSICAL_INSTALL_ENABLED = False
+
+    def test_kernel_lock_rejects_swapped_path_while_held(self):
+        if sys.platform == "win32":
+            raise unittest.SkipTest("POSIX flock semantics")
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            home.mkdir()
+            state = home / ".local/state/ldw-dragonfly-jit/v2-receiver-install"
+            state.mkdir(parents=True, mode=0o700)
+            lock_path = state / "invoke.kernel.lock"
+            lock = mod._KernelLock()
+            lock.acquire(home=home, path=lock_path, uid=TEST_UID, operation_id="7" * 32)
+            try:
+                swap = home / "invoke.kernel.lock.swap"
+                swap.write_bytes(b"swap\n")
+                os.chmod(swap, 0o600)
+                os.replace(swap, lock_path)
+                with self.assertRaises(mod.InstallError):
+                    mod._KernelLock().acquire(
+                        home=home,
+                        path=lock_path,
+                        uid=TEST_UID,
+                        operation_id="8" * 32,
+                    )
+            finally:
+                lock.release()
 
     def test_replay_refused(self):
         if sys.platform == "win32":

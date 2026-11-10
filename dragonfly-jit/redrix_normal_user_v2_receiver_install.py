@@ -62,18 +62,38 @@ class _KernelLock:
         _assert_path_chain(home, path, uid)
         if path.is_symlink():
             raise InstallError("LOCK_PATH_INVALID")
-        if path.exists():
-            info = path.lstat()
-            if stat.S_ISLNK(info.st_mode) or not _uid_matches(info, uid):
+        observed = path.lstat() if path.exists() else None
+        if observed is not None:
+            if stat.S_ISLNK(observed.st_mode) or not _uid_matches(observed, uid):
                 raise InstallError("LOCK_PATH_INVALID")
-            if sys.platform != "win32" and stat.S_IMODE(info.st_mode) != 0o600:
+            if sys.platform != "win32" and stat.S_IMODE(observed.st_mode) != 0o600:
                 raise InstallError("LOCK_PATH_INVALID")
-        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+            open_flags = os.O_RDWR
+            if hasattr(os, "O_NOFOLLOW"):
+                open_flags |= os.O_NOFOLLOW
+        else:
+            open_flags = os.O_RDWR | os.O_CREAT
+        fd = os.open(path, open_flags, 0o600)
         try:
+            locked_stat = os.fstat(fd)
+            if observed is not None:
+                if (locked_stat.st_dev, locked_stat.st_ino) != (observed.st_dev, observed.st_ino):
+                    raise InstallError("LOCK_PATH_INVALID")
+                if not _uid_matches(locked_stat, uid) or (
+                    sys.platform != "win32" and stat.S_IMODE(locked_stat.st_mode) != 0o600
+                ):
+                    raise InstallError("LOCK_PATH_INVALID")
+            else:
+                refreshed = path.lstat()
+                if (locked_stat.st_dev, locked_stat.st_ino) != (refreshed.st_dev, refreshed.st_ino):
+                    raise InstallError("LOCK_PATH_INVALID")
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except (BlockingIOError, OSError) as exc:
             os.close(fd)
             raise InstallError("CONCURRENT_INVOKE_REFUSED") from exc
+        except InstallError:
+            os.close(fd)
+            raise
         payload = {
             "marker": MARKER,
             "operationId": operation_id,
@@ -309,6 +329,10 @@ def _verify_package_inventory(
         if data_path.stat().st_size > _MAX_PACKAGE_BYTES:
             raise InstallError("PACKAGE_FILE_TOO_LARGE")
         data = data_path.read_bytes()
+        if b"\r\n" in data:
+            normalized = data.replace(b"\r\n", b"\n")
+            if _git_blob(normalized) == spec["gitBlob"]:
+                raise InstallError("PACKAGE_CRLF_MATERIALIZATION_REFUSED")
         if _git_blob(data) != spec["gitBlob"] or _sha256(data) != spec["sha256"] or len(data) != spec["size"]:
             raise InstallError("PACKAGE_CONTENT_INVALID")
         inventory[package_path] = data
@@ -533,30 +557,30 @@ def install_fixture(
         raise InstallError("OPERATION_ID_INVALID")
 
     contract = load_contract()
-    plan = build_install_plan(home=home, uid=uid, package_root=package_root, contract=contract)
-    if not plan["receiverInboundPinCoherent"]:
-        raise InstallError("RECEIVER_INBOUND_PIN_INCOHERENT")
-
     home = _assert_home(home, uid)
     kernel_lock_path = home / KERNEL_LOCK_REL
     transaction_path = home / TRANSACTION_REL
     receipt_path = home / RECEIPT_REL
     rollback_archive = home / ROLLBACK_ARCHIVE_REL
 
-    manifest = _validate_manifest(
-        json.loads((package_root / "manifest.json").read_text(encoding="utf-8")),
-        contract,
-    )
-    inventory = _verify_package_inventory(package_root, manifest, contract)
-    inbound_entry = _entry_for_package(contract, INBOUND_PACKAGE)
-    receiver_entry = _entry_for_package(contract, RECEIVER_PACKAGE)
-    inbound_bytes = inventory[INBOUND_PACKAGE]
-    receiver_bytes = inventory[RECEIVER_PACKAGE]
-
     lock = _KernelLock()
     stage_root: Path | None = None
+    receipt_written = False
     try:
         lock.acquire(home=home, path=kernel_lock_path, uid=uid, operation_id=operation_id)
+        plan = build_install_plan(home=home, uid=uid, package_root=package_root, contract=contract)
+        if not plan["receiverInboundPinCoherent"]:
+            raise InstallError("RECEIVER_INBOUND_PIN_INCOHERENT")
+
+        manifest = _validate_manifest(
+            json.loads((package_root / "manifest.json").read_text(encoding="utf-8")),
+            contract,
+        )
+        inventory = _verify_package_inventory(package_root, manifest, contract)
+        inbound_entry = _entry_for_package(contract, INBOUND_PACKAGE)
+        receiver_entry = _entry_for_package(contract, RECEIVER_PACKAGE)
+        inbound_bytes = inventory[INBOUND_PACKAGE]
+        receiver_bytes = inventory[RECEIVER_PACKAGE]
         prior_receiver = _assert_owned_regular(home / RECEIVER_REL, uid, 0o700)
 
         transaction = {
@@ -628,6 +652,7 @@ def install_fixture(
             "authorizedKeysSha256": None,
         }
         _atomic_write(receipt_path, _canonical(receipt), 0o600)
+        receipt_written = True
         if fault_after == "receipt":
             raise InstallError("SIMULATED_INTERRUPT")
         transaction["phase"] = "CLEANUP"
@@ -636,8 +661,23 @@ def install_fixture(
             for child in stage_root.iterdir():
                 child.unlink()
             stage_root.rmdir()
+        transaction_path.unlink(missing_ok=True)
+        _fsync_dir(transaction_path.parent)
         return receipt
-    except Exception:
+    except Exception as original:
+        if receipt_written:
+            if transaction_path.exists() or transaction_path.is_symlink():
+                try:
+                    record = _validate_transaction(_read_json_object(transaction_path, uid))
+                    record["phase"] = "FAILED"
+                    _write_transaction(transaction_path, record)
+                except InstallError:
+                    pass
+            if stage_root is not None and stage_root.exists():
+                for child in stage_root.iterdir():
+                    child.unlink()
+                stage_root.rmdir()
+            raise InstallError("INSTALL_POST_RECEIPT_HOLD") from original
         if transaction_path.exists() or transaction_path.is_symlink():
             try:
                 record = _validate_transaction(_read_json_object(transaction_path, uid))
