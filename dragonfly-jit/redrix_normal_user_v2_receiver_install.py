@@ -8,6 +8,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+try:
+    import fcntl
+except ModuleNotFoundError:  # pragma: no cover - non-POSIX dev hosts
+    fcntl = None  # type: ignore[assignment]
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -15,7 +19,6 @@ import re
 import stat
 import sys
 import tempfile
-import time
 from typing import Any
 
 CONTRACT_PATH = Path(__file__).with_name("redrix_normal_user_v2_receiver_install.json")
@@ -27,18 +30,69 @@ INSTALL_LIB_REL = Path(".local/lib/ldw-dragonfly-jit")
 STATE_REL = Path(".local/state/ldw-dragonfly-jit/v2-receiver-install")
 RECEIVER_REL = INSTALL_LIB_REL / "ssh_forced_receiver.py"
 INBOUND_REL = INSTALL_LIB_REL / "inbound_transfer_v2.py"
-LOCK_REL = STATE_REL / "invoke.lock"
+STAGING_REL = INSTALL_LIB_REL / ".v2-receiver-staging"
+KERNEL_LOCK_REL = STATE_REL / "invoke.kernel.lock"
 TRANSACTION_REL = STATE_REL / "install-transaction.json"
 RECEIPT_REL = STATE_REL / "install-receipt.json"
 ROLLBACK_ARCHIVE_REL = STATE_REL / "rollback-receiver-v1.bin"
 FORCED_COMMAND = "/usr/bin/python3 /home/eddie/.local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py"
+INBOUND_PACKAGE = "payload/inbound_transfer_v2.py"
+RECEIVER_PACKAGE = "payload/ssh_forced_receiver.py"
 _MAX_PACKAGE_BYTES = 256 * 1024
 _BLOB_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_TRANSACTION_PHASES = frozenset(
+    {"PREPARED", "INBOUND_STAGED", "INBOUND_COMMITTED", "RECEIVER_COMMITTED", "CLEANUP", "FAILED"}
+)
 
 
 class InstallError(RuntimeError):
     pass
+
+
+class _KernelLock:
+    def __init__(self) -> None:
+        self._fd: int | None = None
+
+    def acquire(self, *, home: Path, path: Path, uid: int, operation_id: str) -> None:
+        if sys.platform == "win32" or fcntl is None:
+            raise InstallError("KERNEL_LOCK_UNAVAILABLE")
+        home = _assert_home(home, uid)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _assert_path_chain(home, path, uid)
+        if path.is_symlink():
+            raise InstallError("LOCK_PATH_INVALID")
+        if path.exists():
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode) or not _uid_matches(info, uid):
+                raise InstallError("LOCK_PATH_INVALID")
+            if sys.platform != "win32" and stat.S_IMODE(info.st_mode) != 0o600:
+                raise InstallError("LOCK_PATH_INVALID")
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError) as exc:
+            os.close(fd)
+            raise InstallError("CONCURRENT_INVOKE_REFUSED") from exc
+        payload = {
+            "marker": MARKER,
+            "operationId": operation_id,
+            "pid": os.getpid(),
+        }
+        record = _canonical(payload)
+        os.ftruncate(fd, 0)
+        os.write(fd, record)
+        os.fsync(fd)
+        self._fd = fd
+
+    def release(self) -> None:
+        if self._fd is None:
+            return
+        try:
+            fcntl.flock(self._fd, fcntl.LOCK_UN)
+        finally:
+            os.close(self._fd)
+            self._fd = None
 
 
 def load_contract() -> dict[str, Any]:
@@ -128,7 +182,20 @@ def _assert_owned_regular(path: Path, uid: int, mode: int | None = None) -> byte
     return path.read_bytes()
 
 
+def _assert_no_symlink_target(path: Path) -> None:
+    if path.is_symlink():
+        raise InstallError("SYMLINK_PATH_REFUSED")
+    cursor = path
+    for parent in path.parents:
+        if parent == parent.anchor:
+            break
+        if parent.is_symlink():
+            raise InstallError("SYMLINK_PATH_REFUSED")
+        cursor = parent
+
+
 def _atomic_write(path: Path, data: bytes, mode: int) -> None:
+    _assert_no_symlink_target(path.parent)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temp = path.parent / ("." + path.name + ".tmp-" + os.urandom(8).hex())
     try:
@@ -264,34 +331,124 @@ def _read_json_object(path: Path, uid: int) -> dict[str, Any]:
     return value
 
 
-def _acquire_lock(home: Path, lock_path: Path, uid: int, *, stale_after_sec: int = 900) -> None:
-    home = _assert_home(home, uid)
-    lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    _assert_path_chain(home, lock_path, uid)
-    now = int(time.time())
-    if lock_path.exists() or lock_path.is_symlink():
-        record = _read_json_object(lock_path, uid)
-        started = record.get("startedUnix")
-        if not isinstance(started, int) or now - started < stale_after_sec:
-            raise InstallError("CONCURRENT_INVOKE_REFUSED")
-        lock_path.unlink()
-    payload = {
-        "marker": MARKER,
-        "startedUnix": now,
-        "pid": os.getpid(),
+def _validate_transaction(record: object) -> dict[str, Any]:
+    if not isinstance(record, dict):
+        raise InstallError("TRANSACTION_INVALID")
+    expected = {
+        "marker",
+        "schema",
+        "operationId",
+        "sourceCommit",
+        "phase",
+        "rollbackReceiverGitBlob",
+        "inboundGitBlob",
+        "receiverGitBlob",
     }
-    _atomic_write(lock_path, _canonical(payload), 0o600)
+    if set(record) != expected or record.get("marker") != MARKER or record.get("schema") != 1:
+        raise InstallError("TRANSACTION_INVALID")
+    phase = record.get("phase")
+    if phase not in _TRANSACTION_PHASES:
+        raise InstallError("TRANSACTION_INVALID")
+    if not re.fullmatch(r"[0-9a-f]{32}", str(record.get("operationId"))):
+        raise InstallError("TRANSACTION_INVALID")
+    return record
 
 
-def _release_lock(lock_path: Path) -> None:
+def _reconcile_durable_state(home: Path, uid: int, contract: dict[str, Any]) -> None:
+    home = _assert_home(home, uid)
+    transaction_path = home / TRANSACTION_REL
+    receipt_path = home / RECEIPT_REL
+    _assert_path_chain(home, transaction_path, uid)
+    _assert_path_chain(home, receipt_path, uid)
+
+    if receipt_path.exists() or receipt_path.is_symlink():
+        raise InstallError("RECEIPT_ALREADY_PRESENT")
+
+    if transaction_path.exists() or transaction_path.is_symlink():
+        record = _validate_transaction(_read_json_object(transaction_path, uid))
+        if record["phase"] != "CLEANUP":
+            raise InstallError("INSTALL_RECOVERY_REQUIRED")
+
+    inbound = home / INBOUND_REL
+    receiver = home / RECEIVER_REL
+    v1_blob = contract["required_installed_receiver_git_blob"]
+    v2_inbound = contract["payload_entries"][1]["git_blob"]
+    v2_receiver = contract["payload_entries"][0]["git_blob"]
+
+    inbound_present = inbound.exists() or inbound.is_symlink()
+    if inbound_present:
+        inbound_data = _assert_owned_regular(inbound, uid)
+        inbound_blob = _git_blob(inbound_data)
+    else:
+        inbound_blob = None
+
+    receiver_data = _assert_owned_regular(receiver, uid, 0o700)
+    receiver_blob = _git_blob(receiver_data)
+
+    if inbound_blob == v2_inbound and receiver_blob == v1_blob:
+        raise InstallError("INSTALL_STATE_AMBIGUOUS")
+    if inbound_blob == v2_inbound and receiver_blob != v2_receiver:
+        raise InstallError("INSTALL_STATE_AMBIGUOUS")
+    if inbound_blob not in (None, v2_inbound) or receiver_blob not in (v1_blob, v2_receiver):
+        raise InstallError("INSTALL_STATE_UNRECOGNIZED")
+
+
+def _prepare_exclusive_staging(home: Path, uid: int) -> Path:
+    stage_root = home / STAGING_REL
+    _assert_path_chain(home, stage_root, uid)
+    _assert_no_symlink_target(stage_root.parent)
+    if stage_root.exists() or stage_root.is_symlink():
+        raise InstallError("STAGING_PATH_PRESENT")
     try:
-        lock_path.unlink()
-    except FileNotFoundError:
-        pass
+        stage_root.mkdir(mode=0o700)
+    except FileExistsError as exc:
+        raise InstallError("STAGING_PATH_PRESENT") from exc
+    info = stage_root.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or not _uid_matches(info, uid)
+        or (sys.platform != "win32" and stat.S_IMODE(info.st_mode) != 0o700)
+    ):
+        raise InstallError("STAGING_PATH_INVALID")
+    return stage_root
+
+
+def _entry_for_package(contract: dict[str, Any], package_path: str) -> dict[str, Any]:
+    for entry in contract["payload_entries"]:
+        if entry["package_path"] == package_path:
+            return entry
+    raise InstallError("PACKAGE_PATH_UNKNOWN")
+
+
+def _write_transaction(path: Path, record: dict[str, Any]) -> None:
+    _atomic_write(path, _canonical(record), 0o600)
+
+
+def _rollback_partial_inbound(home: Path, uid: int, contract: dict[str, Any]) -> None:
+    inbound = home / INBOUND_REL
+    if not inbound.exists() and not inbound.is_symlink():
+        return
+    data = _assert_owned_regular(inbound, uid)
+    if _git_blob(data) == contract["payload_entries"][1]["git_blob"]:
+        inbound.unlink()
+        _fsync_dir(inbound.parent)
+
+
+def _restore_v1_receiver(home: Path, uid: int, contract: dict[str, Any]) -> None:
+    archive = home / ROLLBACK_ARCHIVE_REL
+    target = home / RECEIVER_REL
+    if not archive.exists():
+        return
+    data = _assert_owned_regular(archive, uid, 0o600)
+    if _git_blob(data) != contract["required_installed_receiver_git_blob"]:
+        return
+    _atomic_write(target, data, 0o700)
 
 
 def preflight_installed_state(home: Path, uid: int, contract: dict[str, Any]) -> dict[str, Any]:
     home = _assert_home(home, uid)
+    _reconcile_durable_state(home, uid, contract)
     install_root = home / INSTALL_LIB_REL
     _assert_path_chain(home, install_root, uid)
     if not install_root.exists():
@@ -305,6 +462,10 @@ def preflight_installed_state(home: Path, uid: int, contract: dict[str, Any]) ->
     ):
         raise InstallError("INSTALL_ROOT_INVALID")
 
+    stage = home / STAGING_REL
+    if stage.exists() or stage.is_symlink():
+        raise InstallError("STAGING_PATH_PRESENT")
+
     receiver = home / RECEIVER_REL
     receiver_blob = _assert_owned_regular(receiver, uid, 0o700)
     observed = _git_blob(receiver_blob)
@@ -316,11 +477,6 @@ def preflight_installed_state(home: Path, uid: int, contract: dict[str, Any]) ->
     _assert_path_chain(home, inbound, uid)
     if inbound.exists() or inbound.is_symlink():
         raise InstallError("INBOUND_ALREADY_PRESENT")
-
-    for rel_path in (LOCK_REL, TRANSACTION_REL):
-        path = home / rel_path
-        if path.exists() or path.is_symlink():
-            raise InstallError("PRIOR_INSTALL_ARTIFACT_PRESENT")
 
     return {
         "installedReceiverGitBlob": observed,
@@ -344,7 +500,7 @@ def build_install_plan(
     manifest = _validate_manifest(json.loads(manifest_path.read_text(encoding="utf-8")), contract)
     inventory = _verify_package_inventory(package_root, manifest, contract)
     installed = preflight_installed_state(home, uid, contract)
-    receiver_bytes = inventory["payload/ssh_forced_receiver.py"]
+    receiver_bytes = inventory[RECEIVER_PACKAGE]
     inbound_blob = contract["payload_entries"][1]["git_blob"]
     coherent = _receiver_inbound_coherent(receiver_bytes, inbound_blob)
     return {
@@ -358,9 +514,7 @@ def build_install_plan(
             entry["package_path"]: entry["git_blob"] for entry in contract["payload_entries"]
         },
         "receiverInboundPinCoherent": coherent,
-        "eligibleForPhysicalInstall": bool(
-            PHYSICAL_INSTALL_ENABLED and coherent
-        ),
+        "eligibleForPhysicalInstall": bool(PHYSICAL_INSTALL_ENABLED and coherent),
         "authorizedKeysMutationAuthorized": False,
     }
 
@@ -373,7 +527,6 @@ def install_fixture(
     operation_id: str,
     fault_after: str | None = None,
 ) -> dict[str, Any]:
-    """Test-only install path; still refuses unless PHYSICAL_INSTALL_ENABLED in tests."""
     if not PHYSICAL_INSTALL_ENABLED:
         raise InstallError("PHYSICAL_INSTALL_DISABLED")
     if not re.fullmatch(r"[0-9a-f]{32}", operation_id):
@@ -385,25 +538,25 @@ def install_fixture(
         raise InstallError("RECEIVER_INBOUND_PIN_INCOHERENT")
 
     home = _assert_home(home, uid)
-    lock_path = home / LOCK_REL
+    kernel_lock_path = home / KERNEL_LOCK_REL
     transaction_path = home / TRANSACTION_REL
     receipt_path = home / RECEIPT_REL
     rollback_archive = home / ROLLBACK_ARCHIVE_REL
 
-    if receipt_path.exists() or receipt_path.is_symlink():
-        receipt = _read_json_object(receipt_path, uid)
-        if receipt.get("operationId") == operation_id:
-            raise InstallError("REPLAY_REFUSED")
-        raise InstallError("RECEIPT_ALREADY_PRESENT")
+    manifest = _validate_manifest(
+        json.loads((package_root / "manifest.json").read_text(encoding="utf-8")),
+        contract,
+    )
+    inventory = _verify_package_inventory(package_root, manifest, contract)
+    inbound_entry = _entry_for_package(contract, INBOUND_PACKAGE)
+    receiver_entry = _entry_for_package(contract, RECEIVER_PACKAGE)
+    inbound_bytes = inventory[INBOUND_PACKAGE]
+    receiver_bytes = inventory[RECEIVER_PACKAGE]
 
-    _acquire_lock(home, lock_path, uid)
-    staged_paths: list[Path] = []
+    lock = _KernelLock()
+    stage_root: Path | None = None
     try:
-        manifest = _validate_manifest(
-            json.loads((package_root / "manifest.json").read_text(encoding="utf-8")),
-            contract,
-        )
-        inventory = _verify_package_inventory(package_root, manifest, contract)
+        lock.acquire(home=home, path=kernel_lock_path, uid=uid, operation_id=operation_id)
         prior_receiver = _assert_owned_regular(home / RECEIVER_REL, uid, 0o700)
 
         transaction = {
@@ -411,38 +564,54 @@ def install_fixture(
             "schema": 1,
             "operationId": operation_id,
             "sourceCommit": contract["source_commit"],
-            "phase": "staged",
+            "phase": "PREPARED",
             "rollbackReceiverGitBlob": contract["required_installed_receiver_git_blob"],
+            "inboundGitBlob": inbound_entry["git_blob"],
+            "receiverGitBlob": receiver_entry["git_blob"],
         }
-        _atomic_write(transaction_path, _canonical(transaction), 0o600)
+        _write_transaction(transaction_path, transaction)
         _atomic_write(rollback_archive, prior_receiver, 0o600)
 
-        install_root = home / INSTALL_LIB_REL
-        stage_root = install_root / ".v2-receiver-staging"
-        stage_root.mkdir(mode=0o700, exist_ok=True)
-        for entry in contract["payload_entries"]:
-            source = package_root.joinpath(*PurePosixPath(entry["package_path"]).parts)
-            mode = int(entry["mode"], 8)
-            staged = stage_root / Path(entry["package_path"]).name
-            _atomic_write(staged, inventory[entry["package_path"]], mode)
-            staged_paths.append(staged)
-            if fault_after == entry["package_path"]:
-                raise InstallError("SIMULATED_INTERRUPT")
+        stage_root = _prepare_exclusive_staging(home, uid)
+        staged_inbound = stage_root / "inbound_transfer_v2.py"
+        staged_receiver = stage_root / "ssh_forced_receiver.py"
+        _atomic_write(staged_inbound, inbound_bytes, int(inbound_entry["mode"], 8))
+        transaction["phase"] = "INBOUND_STAGED"
+        _write_transaction(transaction_path, transaction)
+        staged_inbound_read = _assert_owned_regular(staged_inbound, uid)
+        if (
+            staged_inbound_read != inbound_bytes
+            or _git_blob(staged_inbound_read) != inbound_entry["git_blob"]
+        ):
+            raise InstallError("STAGED_INBOUND_INVALID")
+        _atomic_write(staged_receiver, receiver_bytes, int(receiver_entry["mode"], 8))
+        staged_receiver_read = _assert_owned_regular(staged_receiver, uid)
+        if (
+            staged_receiver_read != receiver_bytes
+            or _git_blob(staged_receiver_read) != receiver_entry["git_blob"]
+        ):
+            raise InstallError("STAGED_RECEIVER_INVALID")
 
-        for entry in contract["payload_entries"]:
-            target = home / Path(entry["target_relpath"])
-            staged = stage_root / Path(entry["package_path"]).name
-            mode = int(entry["mode"], 8)
-            _assert_path_chain(home, target, uid)
-            expected = inventory[entry["package_path"]]
-            _atomic_write(target, expected, mode)
-            readback = _assert_owned_regular(target, uid, mode)
-            if readback != expected or _git_blob(readback) != entry["git_blob"]:
-                raise InstallError("INSTALL_READBACK_INVALID")
+        inbound_target = home / Path(inbound_entry["target_relpath"])
+        _assert_path_chain(home, inbound_target, uid)
+        _atomic_write(inbound_target, inbound_bytes, int(inbound_entry["mode"], 8))
+        inbound_readback = _assert_owned_regular(inbound_target, uid, int(inbound_entry["mode"], 8))
+        if inbound_readback != inbound_bytes or _git_blob(inbound_readback) != inbound_entry["git_blob"]:
+            raise InstallError("INSTALL_READBACK_INVALID")
+        transaction["phase"] = "INBOUND_COMMITTED"
+        _write_transaction(transaction_path, transaction)
+        if fault_after == INBOUND_PACKAGE:
+            raise InstallError("SIMULATED_INTERRUPT")
 
-        transaction["phase"] = "committed"
-        _atomic_write(transaction_path, _canonical(transaction), 0o600)
-        if fault_after == "receipt":
+        receiver_target = home / Path(receiver_entry["target_relpath"])
+        _assert_path_chain(home, receiver_target, uid)
+        _atomic_write(receiver_target, receiver_bytes, int(receiver_entry["mode"], 8))
+        receiver_readback = _assert_owned_regular(receiver_target, uid, int(receiver_entry["mode"], 8))
+        if receiver_readback != receiver_bytes or _git_blob(receiver_readback) != receiver_entry["git_blob"]:
+            raise InstallError("INSTALL_READBACK_INVALID")
+        transaction["phase"] = "RECEIVER_COMMITTED"
+        _write_transaction(transaction_path, transaction)
+        if fault_after == RECEIVER_PACKAGE:
             raise InstallError("SIMULATED_INTERRUPT")
 
         receipt = {
@@ -451,35 +620,44 @@ def install_fixture(
             "operationId": operation_id,
             "sourceCommit": contract["source_commit"],
             "packageArtifact": contract["package_identity"],
-            "installedReceiverGitBlob": contract["payload_entries"][0]["git_blob"],
-            "installedInboundGitBlob": contract["payload_entries"][1]["git_blob"],
+            "installedReceiverGitBlob": receiver_entry["git_blob"],
+            "installedInboundGitBlob": inbound_entry["git_blob"],
             "priorReceiverGitBlob": contract["required_installed_receiver_git_blob"],
             "rollbackArchiveRel": ROLLBACK_ARCHIVE_REL.as_posix(),
             "forcedCommand": FORCED_COMMAND,
             "authorizedKeysSha256": None,
         }
         _atomic_write(receipt_path, _canonical(receipt), 0o600)
-        transaction_path.unlink()
+        if fault_after == "receipt":
+            raise InstallError("SIMULATED_INTERRUPT")
+        transaction["phase"] = "CLEANUP"
+        _write_transaction(transaction_path, transaction)
+        if stage_root is not None and stage_root.exists():
+            for child in stage_root.iterdir():
+                child.unlink()
+            stage_root.rmdir()
         return receipt
     except Exception:
-        for staged in staged_paths:
+        if transaction_path.exists() or transaction_path.is_symlink():
             try:
-                staged.unlink()
-            except FileNotFoundError:
+                record = _validate_transaction(_read_json_object(transaction_path, uid))
+                record["phase"] = "FAILED"
+                _write_transaction(transaction_path, record)
+            except InstallError:
                 pass
-        for target_rel, blob, mode in (
-            (RECEIVER_REL, contract["required_installed_receiver_git_blob"], 0o700),
-        ):
-            target = home / target_rel
-            if rollback_archive.exists():
-                data = _assert_owned_regular(rollback_archive, uid, 0o600)
-                if _git_blob(data) == blob:
-                    _atomic_write(target, data, mode)
+        phase = None
         if transaction_path.exists():
-            transaction_path.unlink()
+            try:
+                phase = _validate_transaction(_read_json_object(transaction_path, uid))["phase"]
+            except InstallError:
+                phase = "FAILED"
+        if phase in {"INBOUND_COMMITTED", "FAILED"}:
+            _rollback_partial_inbound(home, uid, contract)
+        if phase in {"INBOUND_COMMITTED", "RECEIVER_COMMITTED", "FAILED"}:
+            _restore_v1_receiver(home, uid, contract)
         raise
     finally:
-        _release_lock(lock_path)
+        lock.release()
 
 
 def evaluate_admission() -> dict[str, Any]:

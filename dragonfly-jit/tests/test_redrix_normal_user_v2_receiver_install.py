@@ -9,6 +9,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -192,11 +194,25 @@ class PlanTests(unittest.TestCase):
             )
             worktree_receiver_blob = _git_blob((ROOT / "ssh_forced_receiver.py").read_bytes())
             contract_receiver = mod.load_contract()["payload_entries"][0]["git_blob"]
-            if worktree_receiver_blob == contract_receiver:
-                raise unittest.SkipTest("checkout matches canonical LF in this environment")
+            self.assertNotEqual(
+                worktree_receiver_blob,
+                contract_receiver,
+                "CRLF adversarial regression requires checkout bytes differ from canonical Git blob",
+            )
             home = Path(td) / "home"
             home.mkdir()
             _seed_home(home, receiver_blob=mod.load_contract()["required_installed_receiver_git_blob"])
+            with self.assertRaises(mod.InstallError):
+                mod.build_install_plan(home=home, uid=TEST_UID, package_root=pkg)
+
+    def test_preflight_refuses_preexisting_staging(self):
+        with tempfile.TemporaryDirectory() as td:
+            pkg = PackageBuilder().write(Path(td))
+            home = Path(td) / "home"
+            home.mkdir()
+            _seed_home(home, receiver_blob=mod.load_contract()["required_installed_receiver_git_blob"])
+            staging = home / ".local/lib/ldw-dragonfly-jit/.v2-receiver-staging"
+            staging.mkdir(parents=True, mode=0o700)
             with self.assertRaises(mod.InstallError):
                 mod.build_install_plan(home=home, uid=TEST_UID, package_root=pkg)
 
@@ -252,7 +268,37 @@ class InstallFixtureTests(unittest.TestCase):
                     operation_id="a" * 32,
                 )
 
-    def test_coherent_install_and_rollback_on_interrupt(self):
+    def test_full_install_commits_inbound_before_receiver(self):
+        if sys.platform == "win32":
+            raise unittest.SkipTest("POSIX atomic install semantics")
+        contract = mod.load_contract()
+        with tempfile.TemporaryDirectory() as td:
+            pkg = PackageBuilder().write(Path(td))
+            home = Path(td) / "home"
+            home.mkdir()
+            _seed_home(home, receiver_blob=contract["required_installed_receiver_git_blob"])
+            mod.PHYSICAL_INSTALL_ENABLED = True
+            try:
+                mod.install_fixture(
+                    home=home,
+                    uid=TEST_UID,
+                    package_root=pkg,
+                    operation_id="c" * 32,
+                )
+                installed = _git_blob((home / ".local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py").read_bytes())
+                self.assertEqual(installed, contract["payload_entries"][0]["git_blob"])
+                inbound_path = home / ".local/lib/ldw-dragonfly-jit/inbound_transfer_v2.py"
+                self.assertTrue(inbound_path.is_file())
+                self.assertEqual(
+                    _git_blob(inbound_path.read_bytes()),
+                    contract["payload_entries"][1]["git_blob"],
+                )
+                txn = json.loads((home / mod.TRANSACTION_REL).read_text(encoding="utf-8"))
+                self.assertEqual(txn["phase"], "CLEANUP")
+            finally:
+                mod.PHYSICAL_INSTALL_ENABLED = False
+
+    def test_interrupt_after_inbound_rolls_back_and_blocks_retry(self):
         if sys.platform == "win32":
             raise unittest.SkipTest("POSIX atomic install semantics")
         contract = mod.load_contract()
@@ -270,26 +316,87 @@ class InstallFixtureTests(unittest.TestCase):
                         uid=TEST_UID,
                         package_root=pkg,
                         operation_id="b" * 32,
-                        fault_after="payload/inbound_transfer_v2.py",
+                        fault_after=mod.INBOUND_PACKAGE,
                     )
                 rolled = _git_blob((home / ".local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py").read_bytes())
                 self.assertEqual(rolled, prior_blob)
-                mod.install_fixture(
-                    home=home,
-                    uid=TEST_UID,
-                    package_root=pkg,
-                    operation_id="c" * 32,
-                )
-                installed = _git_blob((home / ".local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py").read_bytes())
-                self.assertEqual(installed, contract["payload_entries"][0]["git_blob"])
-                inbound_path = home / ".local/lib/ldw-dragonfly-jit/inbound_transfer_v2.py"
-                self.assertTrue(inbound_path.is_file())
-                self.assertEqual(
-                    _git_blob(inbound_path.read_bytes()),
-                    contract["payload_entries"][1]["git_blob"],
-                )
+                inbound = home / ".local/lib/ldw-dragonfly-jit/inbound_transfer_v2.py"
+                self.assertFalse(inbound.exists())
+                txn = json.loads((home / mod.TRANSACTION_REL).read_text(encoding="utf-8"))
+                self.assertEqual(txn["phase"], "FAILED")
+                with self.assertRaises(mod.InstallError):
+                    mod.build_install_plan(home=home, uid=TEST_UID, package_root=pkg)
             finally:
                 mod.PHYSICAL_INSTALL_ENABLED = False
+
+    def test_interrupt_after_receiver_restores_v1_and_journal(self):
+        if sys.platform == "win32":
+            raise unittest.SkipTest("POSIX atomic install semantics")
+        contract = mod.load_contract()
+        with tempfile.TemporaryDirectory() as td:
+            pkg = PackageBuilder().write(Path(td))
+            home = Path(td) / "home"
+            home.mkdir()
+            prior_blob = contract["required_installed_receiver_git_blob"]
+            _seed_home(home, receiver_blob=prior_blob)
+            mod.PHYSICAL_INSTALL_ENABLED = True
+            try:
+                with self.assertRaises(mod.InstallError):
+                    mod.install_fixture(
+                        home=home,
+                        uid=TEST_UID,
+                        package_root=pkg,
+                        operation_id="e" * 32,
+                        fault_after=mod.RECEIVER_PACKAGE,
+                    )
+                self.assertEqual(
+                    _git_blob((home / ".local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py").read_bytes()),
+                    prior_blob,
+                )
+                self.assertFalse((home / ".local/lib/ldw-dragonfly-jit/inbound_transfer_v2.py").exists())
+            finally:
+                mod.PHYSICAL_INSTALL_ENABLED = False
+
+    def test_concurrent_kernel_lock_refused(self):
+        if sys.platform == "win32":
+            raise unittest.SkipTest("POSIX flock semantics")
+        contract = mod.load_contract()
+        with tempfile.TemporaryDirectory() as td:
+            pkg = PackageBuilder().write(Path(td))
+            home = Path(td) / "home"
+            home.mkdir()
+            _seed_home(home, receiver_blob=contract["required_installed_receiver_git_blob"])
+            held = threading.Event()
+            release = threading.Event()
+
+            def holder() -> None:
+                lock = mod._KernelLock()
+                lock.acquire(
+                    home=home,
+                    path=home / mod.KERNEL_LOCK_REL,
+                    uid=TEST_UID,
+                    operation_id="f" * 32,
+                )
+                held.set()
+                release.wait(timeout=5)
+                lock.release()
+
+            thread = threading.Thread(target=holder)
+            thread.start()
+            held.wait(timeout=5)
+            mod.PHYSICAL_INSTALL_ENABLED = True
+            try:
+                with self.assertRaises(mod.InstallError):
+                    mod.install_fixture(
+                        home=home,
+                        uid=TEST_UID,
+                        package_root=pkg,
+                        operation_id="0" * 32,
+                    )
+            finally:
+                mod.PHYSICAL_INSTALL_ENABLED = False
+                release.set()
+                thread.join(timeout=5)
 
     def test_replay_refused(self):
         if sys.platform == "win32":
