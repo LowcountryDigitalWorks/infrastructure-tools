@@ -11,6 +11,8 @@ $script:RedrixLdwParentAclCanonicalTargetSddl = 'O:SYG:SYD:PAI(A;OICI;FA;;;SY)(A
 $script:RedrixLdwParentAclCanonicalTargetSha256 = 'd0d4816b0b001698a7f49ee24dab0eff49f784bcd9164ad5504b6e45f47f0a41'
 $script:RedrixLdwParentAclInvalidLiteratureSha256 = 'a11c28fd0fceea6c13d29661318b95bdb55ca0cd4ad3a0d5f5a3ceb42ce2f7c8'
 $script:RedrixLdwParentAclLivePreimageSha256 = 'd7262f4d667814fce0820acbabe2613e352c22614ae7de2105879459c7fbb2a9'
+$script:RedrixLdwParentAclAuthorityClassification = 'NOT_PHYSICAL_AUTHORITY'
+$script:RedrixLdwParentAclVerificationStatus = 'SOURCE_SYNTHETIC_VERIFIED'
 
 function Get-RedrixLdwParentAclPreimageSecurityDescriptor {
     $acl = New-Object System.Security.AccessControl.DirectorySecurity
@@ -186,6 +188,8 @@ function Test-RedrixLdwParentAclCanonicalPin([Security.AccessControl.FileSystemS
     $shaOk = ($actualSha -ceq $script:RedrixLdwParentAclCanonicalTargetSha256)
     $sddlOk = ($Candidate.Sddl -ceq $script:RedrixLdwParentAclCanonicalTargetSddl)
     return [ordered]@{
+        authorityClassification = $script:RedrixLdwParentAclAuthorityClassification
+        verificationStatus = if ($shaOk -and $sddlOk) { $script:RedrixLdwParentAclVerificationStatus } else { 'SOURCE_SYNTHETIC_UNVERIFIED' }
         candidateSddl = $Candidate.Sddl
         candidateSha256 = $actualSha
         canonicalSddl = $script:RedrixLdwParentAclCanonicalTargetSddl
@@ -194,5 +198,19 @@ function Test-RedrixLdwParentAclCanonicalPin([Security.AccessControl.FileSystemS
         shaMatchesCanonical = $shaOk
         sddlMatchesCanonical = $sddlOk
         invalidLiteratureRejected = ($actualSha -cne $script:RedrixLdwParentAclInvalidLiteratureSha256)
+    }
+}
+
+function Test-RedrixLdwParentAclInvalidLiteratureAdversarialHold {
+    $loaded = New-Object System.Security.AccessControl.DirectorySecurity
+    $loaded.SetSecurityDescriptorSddlForm($script:RedrixLdwParentAclCanonicalTargetSddl)
+    $actualSha = Get-RedrixSddlUtf8Sha256 $loaded
+    $wouldAcceptWrongPin = ($actualSha -ceq $script:RedrixLdwParentAclInvalidLiteratureSha256)
+    return [ordered]@{
+        canonicalSha256FromLoadedSddl = $actualSha
+        invalidLiteratureSha256 = $script:RedrixLdwParentAclInvalidLiteratureSha256
+        acceptedCanonicalPin = ($actualSha -ceq $script:RedrixLdwParentAclCanonicalTargetSha256)
+        adversarialLiteratureWouldHold = (-not $wouldAcceptWrongPin)
+        pinStatusIfLiteraturePinRequired = if ($wouldAcceptWrongPin) { 'VERIFIED_LITERATURE_PIN' } else { 'HOLD_TARGET_MISMATCH' }
     }
 }

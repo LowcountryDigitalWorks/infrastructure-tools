@@ -21,6 +21,9 @@ foreach ($name in $forbidden) {
 
 . $helper
 
+$sidProbe = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+if ($sidProbe.Value -cne 'S-1-5-18') { throw 'SECURITYIDENTIFIER_NEW_PS51_FAILED' }
+
 $checks = 0
 function Assert([bool]$Condition, [string]$Code) {
     if (-not $Condition) { throw ('ASSERTION_FAILED_' + $Code) }
@@ -49,6 +52,13 @@ Assert $pin.shaMatchesCanonical 'CANONICAL_SHA_VERIFIED'
 Assert $pin.invalidLiteratureRejected 'INVALID_LITERATURE_SHA_a11c_REJECTED'
 Assert ($pin.candidateSha256 -ceq 'd0d4816b0b001698a7f49ee24dab0eff49f784bcd9164ad5504b6e45f47f0a41') 'PIN_D0D4816B'
 Assert ($pin.candidateSha256 -cne $pin.invalidLiteratureSha256) 'A11C_NOT_ACCEPTED'
+Assert ($pin.authorityClassification -ceq 'NOT_PHYSICAL_AUTHORITY') 'AUTHORITY_NOT_PHYSICAL'
+Assert ($pin.verificationStatus -ceq 'SOURCE_SYNTHETIC_VERIFIED') 'VERIFICATION_SOURCE_SYNTHETIC'
+
+$adv = Test-RedrixLdwParentAclInvalidLiteratureAdversarialHold
+Assert $adv.acceptedCanonicalPin 'CANONICAL_LOADED_SDDL_PIN_D0D4816B'
+Assert $adv.adversarialLiteratureWouldHold 'A11C_ADVERSARIAL_HOLD'
+Assert ($adv.pinStatusIfLiteraturePinRequired -ceq 'HOLD_TARGET_MISMATCH') 'A11C_HOLD_TARGET_MISMATCH'
 
 if ($candidate.Sddl -cmatch ';;;CO\)') { throw 'ASSERTION_FAILED_TARGET_OMITS_CREATOR_OWNER' }
 Assert ($true) 'TARGET_OMITS_CREATOR_OWNER'
@@ -81,6 +91,9 @@ catch {
 }
 
 Write-Host ('REDRIX_LDW_PARENT_ACL_SYNTHETIC_TESTS=PASS assertions=' + $checks)
+Write-Host ('REDRIX_LDW_PARENT_ACL_AUTHORITY_CLASSIFICATION=' + $pin.authorityClassification)
+Write-Host ('REDRIX_LDW_PARENT_ACL_VERIFICATION_STATUS=' + $pin.verificationStatus)
 Write-Host ('REDRIX_LDW_PARENT_ACL_CANDIDATE_SHA256=' + $pin.candidateSha256)
 Write-Host ('REDRIX_LDW_PARENT_ACL_CANDIDATE_SDDL=' + $pin.candidateSddl)
 Write-Host ('REDRIX_LDW_PARENT_ACL_CANONICAL_PIN_STATUS=VERIFIED')
+Write-Host ('REDRIX_LDW_PARENT_ACL_INVALID_LITERATURE_a11c_STATUS=HOLD_TARGET_MISMATCH')
