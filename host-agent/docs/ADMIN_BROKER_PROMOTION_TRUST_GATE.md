@@ -64,6 +64,10 @@ Adversaries to address before implementation:
 
 Protected SYSTEM/Administrators-only roots, closed current registry, immutable installed worker, existing no-trigger task, fixed request ID and durable results remain the security boundary; never admit a new operation from a normal-user writable source.
 
+V2 task argument hashing and a staged worker file digest alone do **not** prove immutable origin: a party who already controls the protected task definition and ACL could retarget both together. Accepted bootstrap still requires independently reviewed Stage source pins, protected-copy manifest verification, task principal/signer/ACL review (#186), and influence-clean exact-head IR—never GitHub comment text, PR metadata, or model summaries as cryptographic authorization.
+
+**Stage issuer (D1 follow-on):** the merged bootstrap lane must publish a fixed **elevated inline** owner transaction (no `-File` from Downloads), an issuer manifest without circular self-digest, and protected-path-only Stage execution. See `host-agent/docs/OWNER_V2_BOOTSTRAP_FIRST_INSTALL_STAGE.md` and `host-agent/deploy/Bootstrap-V2ProtectedStagingInlineReference.ps1`.
+
 ## Candidate A: pinned GitHub App-authored, fixed-issue generation ledger
 
 **Potential advantage:** the fixed repository is currently PUBLIC. A protected verifier could use an anonymous HTTPS GitHub REST GET to the exact pinned GitHub host, repository and issue/comment endpoint, without a bearer token or new secret, and validate server-returned metadata against an independently accepted issuer policy. TLS authenticates the GitHub server endpoint; it does **not** authenticate the API caller, authorize the comment contents, or prove independent issuer decision-making.

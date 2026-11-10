@@ -19,7 +19,7 @@ sys.modules[spec.name] = evidence
 spec.loader.exec_module(evidence)
 
 UIDS = (1000, 1000, 1000, 1000)
-NAMESPACES = ("user:[1]", "pid:[2]")
+NAMESPACES = ("user:[1]", "pid:[2]", "mnt:[3]")
 
 
 class LiveA4CandidateTests(unittest.TestCase):
@@ -63,11 +63,23 @@ class LiveA4CandidateTests(unittest.TestCase):
         scan.assert_not_called()
 
     def test_target_namespace_mismatch_holds(self):
-        values = ["user:[1]", "pid:[2]", "user:[1]", "pid:[3]"]
+        values = ["user:[1]", "pid:[2]", "mnt:[3]", "user:[1]", "pid:[3]", "mnt:[3]"]
         with mock.patch.object(evidence.os, "readlink", side_effect=values):
             with self.assertRaises(evidence.EvidenceHold) as ctx:
                 evidence._namespaces(evidence.PROC_ROOT)
         self.assertEqual(ctx.exception.code, "A4_LIVE_NAMESPACE_MISMATCH")
+
+    def test_target_mount_namespace_mismatch_holds(self):
+        values = ["user:[1]", "pid:[2]", "mnt:[3]", "user:[1]", "pid:[2]", "mnt:[4]"]
+        with mock.patch.object(evidence.os, "readlink", side_effect=values):
+            with self.assertRaises(evidence.EvidenceHold) as ctx:
+                evidence._namespaces(evidence.PROC_ROOT)
+        self.assertEqual(ctx.exception.code, "A4_LIVE_NAMESPACE_MISMATCH")
+
+    def test_namespace_read_denial_fails_closed(self):
+        with mock.patch.object(evidence.os, "readlink", side_effect=PermissionError("denied")):
+            with self.assertRaises(PermissionError):
+                evidence._namespaces(evidence.PROC_ROOT)
 
     def test_clean_synthetic_two_snapshots_cannot_authorize_jit(self):
         sample = ((1, 101), ((101, 4242, UIDS, ((3, "/dev/null"),)),))
@@ -142,6 +154,8 @@ class LiveA4CandidateTests(unittest.TestCase):
                 return NAMESPACES[0]
             if p.endswith("/ns/pid"):
                 return NAMESPACES[1]
+            if p.endswith("/ns/mnt"):
+                return NAMESPACES[2]
             return "/usr/bin/python3"
         with mock.patch.object(evidence.os, "listdir", side_effect=original_listdir), \
              mock.patch.object(evidence, "_identity", return_value=identity), \
@@ -151,6 +165,29 @@ class LiveA4CandidateTests(unittest.TestCase):
             with ExitStack() as resources:
                 with self.assertRaises(PermissionError):
                     evidence._snapshot(root, NAMESPACES, {}, resources)
+
+    def test_process_mount_namespace_mismatch_holds(self):
+        root = evidence.PROC_ROOT
+        identity = (101, 4242, UIDS, "worker")
+        original_listdir = lambda path: ["101"] if path == root else ["3"]
+        def kernel_link(path):
+            p = str(path)
+            if p.endswith("/ns/user"):
+                return NAMESPACES[0]
+            if p.endswith("/ns/pid"):
+                return NAMESPACES[1]
+            if p.endswith("/ns/mnt"):
+                return "mnt:[999]"
+            return "/usr/bin/python3"
+        with mock.patch.object(evidence.os, "listdir", side_effect=original_listdir), \
+             mock.patch.object(evidence, "_identity", return_value=identity), \
+             mock.patch.object(evidence.os, "pidfd_open", side_effect=lambda pid, flags: os.open("/dev/null", os.O_RDONLY)), \
+             mock.patch.object(evidence, "_alive_pidfd", return_value=True), \
+             mock.patch.object(evidence.os, "readlink", side_effect=kernel_link):
+            with ExitStack() as resources:
+                with self.assertRaises(evidence.EvidenceHold) as ctx:
+                    evidence._snapshot(root, NAMESPACES, {}, resources)
+        self.assertEqual(ctx.exception.code, "A4_LIVE_NAMESPACE_MISMATCH")
 
     def test_source_has_no_privilege_or_transport_entrypoint(self):
         source = TARGET.read_text(encoding="utf-8")

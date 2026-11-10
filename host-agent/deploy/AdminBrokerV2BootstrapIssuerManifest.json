@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "protocol": "ldw.admin-broker.v2-bootstrap.issuer-manifest.v1",
+  "artifacts": [
+    {
+      "name": "AdminBrokerV2BootstrapReviewManifest.json",
+      "sha256": "59be27057046f7eefdabed7dda8e236b1d6afd6c8c6d2f91c442f07e6a299df7"
+    },
+    {
+      "name": "Install-AdminBrokerV2PublisherBootstrap.ps1",
+      "sha256": "53ed786c404a39da7ba7d3cbb73e50cb59dcec7545bd389101bf808b3e9f36aa"
+    },
+    {
+      "name": "Invoke-AdminBrokerV2PublisherWorker.ps1",
+      "sha256": "051124b03f88694f19f557954e844ffe1f71c24187c7998a4cf6e8ce55aaa4f1"
+    },
+    {
+      "name": "Stage-AdminBrokerV2PublisherBootstrap.ps1",
+      "sha256": "ee6ad309abed3b924bdf7a55d6d4f073796b273b4bb42f658140cd21ce473cd7"
+    }
+  ]
+}

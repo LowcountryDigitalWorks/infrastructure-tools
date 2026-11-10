@@ -74,8 +74,16 @@ def _report(**fields: object) -> dict[str, Any]:
         "provider_admission_authorized": False,
         "production_policy_changed": False,
         "production_reserve_mib": PRODUCTION_RESERVE_MIB,
+        "research_reserve_mib": RESEARCH_RESERVE_MIB,
         "research_floor_mib": RESEARCH_FLOOR_MIB,
+        "research_only_explicit": True,
         "guest_mib": GUEST_MIB,
+        "physical_execution_source_enabled": PHYSICAL_EXECUTION_ENABLED,
+        "runtime_enablement_gate": "SEPARATE_REVIEWED_SOURCE_FLAG_FLIP_ONLY",
+        "owner_interactivity_corroboration_required": True,
+        "same_uid_race_limitation_disclosed": True,
+        "pinned_controller_blob_sha1": EXPECTED_CONTROLLER_BLOB,
+        "pinned_base_sha512": EXPECTED_BASE_SHA512,
         "network": "none",
         "public_synthetic_note": PUBLIC_SYNTHETIC_NOTE,
         "chromeos_host_corroboration": "UNVERIFIED",
@@ -89,6 +97,9 @@ def _report(**fields: object) -> dict[str, Any]:
     ):
         body[key] = False
     body["production_reserve_mib"] = PRODUCTION_RESERVE_MIB
+    body["research_reserve_mib"] = RESEARCH_RESERVE_MIB
+    body["research_only_explicit"] = True
+    body["physical_execution_source_enabled"] = PHYSICAL_EXECUTION_ENABLED
     return body
 
 
@@ -1084,6 +1095,12 @@ def passive_state_lock_readback(
             os.close(fd)
 
 
+def _product_admission_snapshot() -> dict[str, Any]:
+    from redrix_capacity_guest_executor_admission import evaluate_product_admission_readiness
+
+    return evaluate_product_admission_readiness(sys.modules[__name__])
+
+
 def run_once_local(ctx: RunContext) -> dict[str, Any]:
     """Public entry; refuses unless PHYSICAL_EXECUTION_ENABLED (no alternate admission)."""
     if not PHYSICAL_EXECUTION_ENABLED:
@@ -1091,6 +1108,7 @@ def run_once_local(ctx: RunContext) -> dict[str, Any]:
             reason="RUNTIME_NO_START",
             runtime_status="DRAFT_HOLD",
             physical_guest_executed=False,
+            product_admission_readiness=_product_admission_snapshot(),
         )
     return _run_once_local_impl(ctx)
 
@@ -1471,6 +1489,7 @@ def main(argv: list[str] | None = None) -> int:
                     reason="RUNTIME_NO_START",
                     runtime_status="DRAFT_HOLD",
                     physical_guest_executed=False,
+                    product_admission_readiness=_product_admission_snapshot(),
                 ),
                 sort_keys=True,
                 separators=(",", ":"),
