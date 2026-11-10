@@ -24,8 +24,8 @@ Installer module: `redrix_normal_user_v2_receiver_install.py` (`PHYSICAL_INSTALL
 
 ## Owner-operated physical gate (NOT authorized by source merge)
 
-1. Confirm independent exact-head IR on the installer branch **and** receiver/inbound pin coherence restored on `main`.
-2. On REDRIX as UID 1000, build the bounded package directory from the reviewed `source_commit` only (payload + rollback + manifest).
+1. Confirm independent exact-head IR on the installer branch (canonical Git blob pins at `source_commit`; not working-tree CRLF bytes).
+2. On REDRIX as UID 1000, build the bounded package directory from immutable `git cat-file` bytes at `source_commit` only (payload + rollback + manifest).
 3. Run `plan` dry-run; verify `receiverInboundPinCoherent` is true and `eligibleForPhysicalInstall` would be true only after a separate reviewed commit flips `PHYSICAL_INSTALL_ENABLED`.
 4. Owner executes one bounded install invocation with a fresh `operation_id`; record sanitized receipt digests only.
 5. Re-read installed receiver and inbound Git blobs and modes (`0700` / `0600`); confirm forced command string unchanged.

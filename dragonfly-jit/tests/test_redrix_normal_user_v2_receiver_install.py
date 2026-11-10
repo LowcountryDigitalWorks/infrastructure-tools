@@ -17,6 +17,9 @@ REPO = ROOT.parent
 INSTALL = ROOT / "redrix_normal_user_v2_receiver_install.py"
 ADMISSION = ROOT / "redrix_normal_user_v2_receiver_install_admission.py"
 CONTRACT_PATH = ROOT / "redrix_normal_user_v2_receiver_install.json"
+SOURCE_COMMIT = "6d5fab22ec3dac1580ec49dea8f0bfab468b358b"
+RECEIVER_SOURCE_PATH = "dragonfly-jit/ssh_forced_receiver.py"
+INBOUND_SOURCE_PATH = "dragonfly-jit/inbound_transfer_v2.py"
 
 
 def _load(name: str, path: Path):
@@ -33,18 +36,6 @@ adm = _load("redrix_normal_user_v2_receiver_install_admission", ADMISSION)
 TEST_UID = os.getuid() if hasattr(os, "getuid") else 0
 
 
-def _with_patched_contract(receiver_bytes: bytes):
-    contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
-    contract["payload_entries"][0]["git_blob"] = _git_blob(receiver_bytes)
-    original = mod.load_contract
-
-    def _patched():
-        return contract
-
-    mod.load_contract = _patched
-    return original
-
-
 def _git_blob(data: bytes) -> str:
     return hashlib.sha1(f"blob {len(data)}\0".encode("ascii") + data).hexdigest()
 
@@ -53,32 +44,44 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _git_cat_blob(sha: str) -> bytes:
-    try:
-        return subprocess.check_output(["git", "cat-file", "-p", sha], cwd=REPO)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        import base64
+def _rev_parse_blob_id(commit: str, repo_path: str) -> str:
+    return subprocess.check_output(
+        ["git", "rev-parse", f"{commit}:{repo_path}"],
+        cwd=REPO,
+        text=True,
+    ).strip()
 
-        raw = subprocess.check_output(
-            [
-                "gh",
-                "api",
-                f"repos/LowcountryDigitalWorks/infrastructure-tools/git/blobs/{sha}",
-                "--jq",
-                ".content",
-            ],
-            text=True,
-        )
-        return base64.b64decode(raw)
+
+def _canonical_source_bytes(commit: str, repo_path: str) -> bytes:
+    blob_id = _rev_parse_blob_id(commit, repo_path)
+    return subprocess.check_output(["git", "cat-file", "-p", blob_id], cwd=REPO)
+
+
+def _git_cat_blob(sha: str) -> bytes:
+    return subprocess.check_output(["git", "cat-file", "-p", sha], cwd=REPO)
 
 
 class PackageBuilder:
     def __init__(self) -> None:
         self.contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
 
-    def write(self, work: Path, *, receiver: bytes | None = None, inbound: bytes | None = None) -> Path:
-        receiver = receiver if receiver is not None else (ROOT / "ssh_forced_receiver.py").read_bytes()
-        inbound = inbound if inbound is not None else (ROOT / "inbound_transfer_v2.py").read_bytes()
+    def write(
+        self,
+        work: Path,
+        *,
+        receiver: bytes | None = None,
+        inbound: bytes | None = None,
+        use_canonical: bool = True,
+    ) -> Path:
+        if use_canonical and receiver is None:
+            receiver = _canonical_source_bytes(SOURCE_COMMIT, RECEIVER_SOURCE_PATH)
+        if use_canonical and inbound is None:
+            inbound = _canonical_source_bytes(SOURCE_COMMIT, INBOUND_SOURCE_PATH)
+        if receiver is None:
+            receiver = (ROOT / "ssh_forced_receiver.py").read_bytes()
+        if inbound is None:
+            inbound = (ROOT / "inbound_transfer_v2.py").read_bytes()
+
         rollback = _git_cat_blob(self.contract["required_installed_receiver_git_blob"])
         pkg = work / "package"
         for entry in self.contract["payload_entries"]:
@@ -118,7 +121,7 @@ class PackageBuilder:
             manifest["rollbackEntries"].append(
                 {
                     "packagePath": spec["package_path"],
-                    "sourcePath": "dragonfly-jit/ssh_forced_receiver.py",
+                    "sourcePath": spec["source_path"],
                     "gitBlob": _git_blob(data),
                     "materialization": "raw",
                     "sha256": _sha256(data),
@@ -147,10 +150,20 @@ def _seed_home(
 
 
 class ContractTests(unittest.TestCase):
-    def test_contract_matches_live_main_receiver_blob(self):
+    def test_contract_matches_immutable_git_tree_blobs(self):
         contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
-        live = _git_blob((ROOT / "ssh_forced_receiver.py").read_bytes())
-        self.assertEqual(contract["payload_entries"][0]["git_blob"], live)
+        receiver_blob = _rev_parse_blob_id(SOURCE_COMMIT, RECEIVER_SOURCE_PATH)
+        inbound_blob = _rev_parse_blob_id(SOURCE_COMMIT, INBOUND_SOURCE_PATH)
+        self.assertEqual(contract["payload_entries"][0]["git_blob"], receiver_blob)
+        self.assertEqual(contract["payload_entries"][1]["git_blob"], inbound_blob)
+
+    def test_working_tree_may_differ_from_canonical_on_materialized_checkout(self):
+        worktree = (ROOT / "ssh_forced_receiver.py").read_bytes()
+        canonical = _canonical_source_bytes(SOURCE_COMMIT, RECEIVER_SOURCE_PATH)
+        if worktree != canonical:
+            self.assertNotEqual(_git_blob(worktree), _git_blob(canonical))
+        else:
+            self.assertEqual(_git_blob(worktree), _rev_parse_blob_id(SOURCE_COMMIT, RECEIVER_SOURCE_PATH))
 
     def test_admission_ready_while_physical_disabled(self):
         out = adm.evaluate_product_admission_readiness()
@@ -159,15 +172,33 @@ class ContractTests(unittest.TestCase):
 
 
 class PlanTests(unittest.TestCase):
-    def test_plan_reports_incoherent_pins_on_main_tree(self):
+    def test_plan_reports_coherent_pins_for_canonical_package(self):
         with tempfile.TemporaryDirectory() as td:
             pkg = PackageBuilder().write(Path(td))
             home = Path(td) / "home"
             home.mkdir()
             _seed_home(home, receiver_blob=mod.load_contract()["required_installed_receiver_git_blob"])
             plan = mod.build_install_plan(home=home, uid=TEST_UID, package_root=pkg)
-            self.assertFalse(plan["receiverInboundPinCoherent"])
+            self.assertTrue(plan["receiverInboundPinCoherent"])
             self.assertFalse(plan["eligibleForPhysicalInstall"])
+
+    def test_working_tree_sourced_package_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            pkg = PackageBuilder().write(
+                Path(td),
+                receiver=(ROOT / "ssh_forced_receiver.py").read_bytes(),
+                inbound=(ROOT / "inbound_transfer_v2.py").read_bytes(),
+                use_canonical=False,
+            )
+            worktree_receiver_blob = _git_blob((ROOT / "ssh_forced_receiver.py").read_bytes())
+            contract_receiver = mod.load_contract()["payload_entries"][0]["git_blob"]
+            if worktree_receiver_blob == contract_receiver:
+                raise unittest.SkipTest("checkout matches canonical LF in this environment")
+            home = Path(td) / "home"
+            home.mkdir()
+            _seed_home(home, receiver_blob=mod.load_contract()["required_installed_receiver_git_blob"])
+            with self.assertRaises(mod.InstallError):
+                mod.build_install_plan(home=home, uid=TEST_UID, package_root=pkg)
 
     def test_mismatched_manifest_blob_refused(self):
         with tempfile.TemporaryDirectory() as td:
@@ -186,7 +217,10 @@ class PlanTests(unittest.TestCase):
             pkg = PackageBuilder().write(Path(td))
             home = Path(td) / "home"
             home.mkdir()
-            _seed_home(home, receiver_bytes=(ROOT / "ssh_forced_receiver.py").read_bytes())
+            _seed_home(
+                home,
+                receiver_bytes=_canonical_source_bytes(SOURCE_COMMIT, RECEIVER_SOURCE_PATH),
+            )
             with self.assertRaises(mod.InstallError):
                 mod.build_install_plan(home=home, uid=TEST_UID, package_root=pkg)
 
@@ -222,20 +256,12 @@ class InstallFixtureTests(unittest.TestCase):
         if sys.platform == "win32":
             raise unittest.SkipTest("POSIX atomic install semantics")
         contract = mod.load_contract()
-        inbound_blob = contract["payload_entries"][1]["git_blob"]
-        receiver = (ROOT / "ssh_forced_receiver.py").read_text(encoding="utf-8")
-        receiver = receiver.replace(
-            'EXPECTED_INBOUND_TRANSFER_GIT_BLOB = "4fb4b1fc5141e0b864a2b29c657932425771c567"',
-            f'EXPECTED_INBOUND_TRANSFER_GIT_BLOB = "{inbound_blob}"',
-        )
-        receiver_bytes = receiver.encode("utf-8")
         with tempfile.TemporaryDirectory() as td:
-            pkg = PackageBuilder().write(Path(td), receiver=receiver_bytes)
+            pkg = PackageBuilder().write(Path(td))
             home = Path(td) / "home"
             home.mkdir()
             prior_blob = contract["required_installed_receiver_git_blob"]
             _seed_home(home, receiver_blob=prior_blob)
-            original_load = _with_patched_contract(receiver_bytes)
             mod.PHYSICAL_INSTALL_ENABLED = True
             try:
                 with self.assertRaises(mod.InstallError):
@@ -255,7 +281,7 @@ class InstallFixtureTests(unittest.TestCase):
                     operation_id="c" * 32,
                 )
                 installed = _git_blob((home / ".local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py").read_bytes())
-                self.assertEqual(installed, _git_blob(receiver_bytes))
+                self.assertEqual(installed, contract["payload_entries"][0]["git_blob"])
                 inbound_path = home / ".local/lib/ldw-dragonfly-jit/inbound_transfer_v2.py"
                 self.assertTrue(inbound_path.is_file())
                 self.assertEqual(
@@ -264,26 +290,17 @@ class InstallFixtureTests(unittest.TestCase):
                 )
             finally:
                 mod.PHYSICAL_INSTALL_ENABLED = False
-                mod.load_contract = original_load
 
     def test_replay_refused(self):
         if sys.platform == "win32":
             raise unittest.SkipTest("POSIX atomic install semantics")
         contract = mod.load_contract()
-        inbound_blob = contract["payload_entries"][1]["git_blob"]
-        receiver = (ROOT / "ssh_forced_receiver.py").read_text(encoding="utf-8")
-        receiver = receiver.replace(
-            'EXPECTED_INBOUND_TRANSFER_GIT_BLOB = "4fb4b1fc5141e0b864a2b29c657932425771c567"',
-            f'EXPECTED_INBOUND_TRANSFER_GIT_BLOB = "{inbound_blob}"',
-        )
         op = "d" * 32
-        receiver_bytes = receiver.encode("utf-8")
         with tempfile.TemporaryDirectory() as td:
-            pkg = PackageBuilder().write(Path(td), receiver=receiver_bytes)
+            pkg = PackageBuilder().write(Path(td))
             home = Path(td) / "home"
             home.mkdir()
             _seed_home(home, receiver_blob=contract["required_installed_receiver_git_blob"])
-            original_load = _with_patched_contract(receiver_bytes)
             mod.PHYSICAL_INSTALL_ENABLED = True
             try:
                 mod.install_fixture(
@@ -301,7 +318,6 @@ class InstallFixtureTests(unittest.TestCase):
                     )
             finally:
                 mod.PHYSICAL_INSTALL_ENABLED = False
-                mod.load_contract = original_load
 
 
 if __name__ == "__main__":

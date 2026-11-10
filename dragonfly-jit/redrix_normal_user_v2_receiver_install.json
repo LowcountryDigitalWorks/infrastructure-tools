@@ -17,7 +17,7 @@
       "role": "receiver",
       "package_path": "payload/ssh_forced_receiver.py",
       "source_path": "dragonfly-jit/ssh_forced_receiver.py",
-      "git_blob": "30d280a650c6918378f16f16502e9e3278e02b33",
+      "git_blob": "c3f0af4e1a79e76f7f9b894bb99498fe02224aeb",
       "target_relpath": ".local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py",
       "mode": "0700"
     },
@@ -25,7 +25,7 @@
       "role": "inbound_transfer",
       "package_path": "payload/inbound_transfer_v2.py",
       "source_path": "dragonfly-jit/inbound_transfer_v2.py",
-      "git_blob": "7380bc070f7a47645159346f26571f236bd57f74",
+      "git_blob": "4fb4b1fc5141e0b864a2b29c657932425771c567",
       "target_relpath": ".local/lib/ldw-dragonfly-jit/inbound_transfer_v2.py",
       "mode": "0600"
     }
@@ -40,14 +40,13 @@
       "mode": "0700"
     }
   ],
-  "live_state_notes": [
-    "Device read #115 comment 6755743409 observed installed receiver 88b527fa; inbound_transfer_v2 absent.",
-    "Handoff cited PR291 receiver blob c3f0af4; live main at source_commit is 30d280a6 (main wins).",
-    "Receiver source still embeds EXPECTED_INBOUND_TRANSFER_GIT_BLOB 4fb4b1fc while main inbound file is 7380bc07 — physical install must remain blocked until that drift is resolved in owning source."
+  "canonical_materialization_notes": [
+    "Package bytes must match immutable Git blob objects at source_commit (LF canonical), not checkout working-tree CRLF materialization on Windows.",
+    "Device read #115 comment 6755743409: installed receiver 88b527fa; inbound_transfer_v2 not yet installed."
   ],
   "evidence_phases_required_for_physical_install": [
     "independent_exact_head_independent_review",
-    "receiver_inbound_pin_coherence_restored_on_main",
+    "separate_reviewed_commit_flips_PHYSICAL_INSTALL_ENABLED",
     "owner_operated_physical_gate_steps_in_REDRIX_NORMAL_USER_V2_RECEIVER_INSTALL.md"
   ]
 }
