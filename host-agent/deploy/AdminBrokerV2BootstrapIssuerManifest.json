@@ -4,7 +4,7 @@
   "artifacts": [
     {
       "name": "AdminBrokerV2BootstrapReviewManifest.json",
-      "sha256": "49571d8ed47764d2b5aa5a82ee2f9f63cd877c44114532289db2adcbad3e47b2"
+      "sha256": "498a5365b54d216d41f52ab0472eeb51446c8f6cceb4891e11088d9a73c75103"
     },
     {
       "name": "Install-AdminBrokerV2PublisherBootstrap.ps1",
@@ -16,7 +16,7 @@
     },
     {
       "name": "Stage-AdminBrokerV2PublisherBootstrap.ps1",
-      "sha256": "3719783efba295de2b9562bc2e7f185e6fd80a51a31b50d32eeb65bda3acfd08"
+      "sha256": "2d3030daeb6bc8a9dff862f9500c7f94cbaedbadf81d4cc8a834dcb3d560c196"
     }
   ]
 }
