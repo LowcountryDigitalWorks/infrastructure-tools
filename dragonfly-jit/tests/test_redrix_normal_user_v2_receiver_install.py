@@ -5,13 +5,17 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import multiprocessing as mp
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -133,6 +137,22 @@ class PackageBuilder:
             )
         (pkg / "manifest.json").write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
         return pkg
+
+
+@contextmanager
+def _trusted_install_home():
+    if sys.platform == "win32":
+        raise unittest.SkipTest("POSIX trusted /home anchor")
+    try:
+        mod._assert_kernel_lock_trust_root(Path.home(), TEST_UID)
+    except mod.InstallError:
+        raise unittest.SkipTest("trusted /home anchor unavailable")
+    home = Path.home() / f".ldw-redrix-test-{uuid.uuid4().hex}"
+    home.mkdir(mode=0o700)
+    try:
+        yield home
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
 
 
 def _seed_home(
@@ -266,9 +286,9 @@ class InstallFixtureTests(unittest.TestCase):
                     operation_id="a" * 32,
                 )
 
-    def test_full_install_commits_inbound_before_receiver(self):
+    def test_install_fixture_requires_trusted_home_anchor(self):
         if sys.platform == "win32":
-            raise unittest.SkipTest("POSIX atomic install semantics")
+            raise unittest.SkipTest("POSIX trusted /home anchor")
         contract = mod.load_contract()
         with tempfile.TemporaryDirectory() as td:
             pkg = PackageBuilder().write(Path(td))
@@ -277,24 +297,44 @@ class InstallFixtureTests(unittest.TestCase):
             _seed_home(home, receiver_blob=contract["required_installed_receiver_git_blob"])
             mod.PHYSICAL_INSTALL_ENABLED = True
             try:
-                mod.install_fixture(
-                    home=home,
-                    uid=TEST_UID,
-                    package_root=pkg,
-                    operation_id="c" * 32,
-                )
-                installed = _git_blob((home / ".local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py").read_bytes())
-                self.assertEqual(installed, contract["payload_entries"][0]["git_blob"])
-                inbound_path = home / ".local/lib/ldw-dragonfly-jit/inbound_transfer_v2.py"
-                self.assertTrue(inbound_path.is_file())
-                self.assertEqual(
-                    _git_blob(inbound_path.read_bytes()),
-                    contract["payload_entries"][1]["git_blob"],
-                )
-                self.assertTrue((home / mod.RECEIPT_REL).is_file())
-                self.assertFalse((home / mod.TRANSACTION_REL).exists())
+                with self.assertRaisesRegex(mod.InstallError, "BLOCKED_LOCK_TRUST_ROOT"):
+                    mod.install_fixture(
+                        home=home,
+                        uid=TEST_UID,
+                        package_root=pkg,
+                        operation_id="b" * 32,
+                    )
             finally:
                 mod.PHYSICAL_INSTALL_ENABLED = False
+
+    def test_full_install_commits_inbound_before_receiver(self):
+        if sys.platform == "win32":
+            raise unittest.SkipTest("POSIX atomic install semantics")
+        contract = mod.load_contract()
+        with tempfile.TemporaryDirectory() as td:
+            pkg = PackageBuilder().write(Path(td))
+            with _trusted_install_home() as home:
+                _seed_home(home, receiver_blob=contract["required_installed_receiver_git_blob"])
+                mod.PHYSICAL_INSTALL_ENABLED = True
+                try:
+                    mod.install_fixture(
+                        home=home,
+                        uid=TEST_UID,
+                        package_root=pkg,
+                        operation_id="c" * 32,
+                    )
+                    installed = _git_blob((home / mod.RECEIVER_REL).read_bytes())
+                    self.assertEqual(installed, contract["payload_entries"][0]["git_blob"])
+                    inbound_path = home / mod.INBOUND_REL
+                    self.assertTrue(inbound_path.is_file())
+                    self.assertEqual(
+                        _git_blob(inbound_path.read_bytes()),
+                        contract["payload_entries"][1]["git_blob"],
+                    )
+                    self.assertTrue((home / mod.RECEIPT_REL).is_file())
+                    self.assertFalse((home / mod.TRANSACTION_REL).exists())
+                finally:
+                    mod.PHYSICAL_INSTALL_ENABLED = False
 
     def test_interrupt_after_inbound_rolls_back_and_blocks_retry(self):
         if sys.platform == "win32":
@@ -302,30 +342,28 @@ class InstallFixtureTests(unittest.TestCase):
         contract = mod.load_contract()
         with tempfile.TemporaryDirectory() as td:
             pkg = PackageBuilder().write(Path(td))
-            home = Path(td) / "home"
-            home.mkdir()
             prior_blob = contract["required_installed_receiver_git_blob"]
-            _seed_home(home, receiver_blob=prior_blob)
-            mod.PHYSICAL_INSTALL_ENABLED = True
-            try:
-                with self.assertRaises(mod.InstallError):
-                    mod.install_fixture(
-                        home=home,
-                        uid=TEST_UID,
-                        package_root=pkg,
-                        operation_id="b" * 32,
-                        fault_after=mod.INBOUND_PACKAGE,
-                    )
-                rolled = _git_blob((home / ".local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py").read_bytes())
-                self.assertEqual(rolled, prior_blob)
-                inbound = home / ".local/lib/ldw-dragonfly-jit/inbound_transfer_v2.py"
-                self.assertFalse(inbound.exists())
-                txn = json.loads((home / mod.TRANSACTION_REL).read_text(encoding="utf-8"))
-                self.assertEqual(txn["phase"], "FAILED")
-                with self.assertRaises(mod.InstallError):
-                    mod.build_install_plan(home=home, uid=TEST_UID, package_root=pkg)
-            finally:
-                mod.PHYSICAL_INSTALL_ENABLED = False
+            with _trusted_install_home() as home:
+                _seed_home(home, receiver_blob=prior_blob)
+                mod.PHYSICAL_INSTALL_ENABLED = True
+                try:
+                    with self.assertRaises(mod.InstallError):
+                        mod.install_fixture(
+                            home=home,
+                            uid=TEST_UID,
+                            package_root=pkg,
+                            operation_id="b1" * 16,
+                            fault_after=mod.INBOUND_PACKAGE,
+                        )
+                    rolled = _git_blob((home / mod.RECEIVER_REL).read_bytes())
+                    self.assertEqual(rolled, prior_blob)
+                    self.assertFalse((home / mod.INBOUND_REL).exists())
+                    txn = json.loads((home / mod.TRANSACTION_REL).read_text(encoding="utf-8"))
+                    self.assertEqual(txn["phase"], "FAILED")
+                    with self.assertRaises(mod.InstallError):
+                        mod.build_install_plan(home=home, uid=TEST_UID, package_root=pkg)
+                finally:
+                    mod.PHYSICAL_INSTALL_ENABLED = False
 
     def test_interrupt_after_receiver_restores_v1_and_journal(self):
         if sys.platform == "win32":
@@ -333,27 +371,23 @@ class InstallFixtureTests(unittest.TestCase):
         contract = mod.load_contract()
         with tempfile.TemporaryDirectory() as td:
             pkg = PackageBuilder().write(Path(td))
-            home = Path(td) / "home"
-            home.mkdir()
             prior_blob = contract["required_installed_receiver_git_blob"]
-            _seed_home(home, receiver_blob=prior_blob)
-            mod.PHYSICAL_INSTALL_ENABLED = True
-            try:
-                with self.assertRaises(mod.InstallError):
-                    mod.install_fixture(
-                        home=home,
-                        uid=TEST_UID,
-                        package_root=pkg,
-                        operation_id="e" * 32,
-                        fault_after=mod.RECEIVER_PACKAGE,
-                    )
-                self.assertEqual(
-                    _git_blob((home / ".local/lib/ldw-dragonfly-jit/ssh_forced_receiver.py").read_bytes()),
-                    prior_blob,
-                )
-                self.assertFalse((home / ".local/lib/ldw-dragonfly-jit/inbound_transfer_v2.py").exists())
-            finally:
-                mod.PHYSICAL_INSTALL_ENABLED = False
+            with _trusted_install_home() as home:
+                _seed_home(home, receiver_blob=prior_blob)
+                mod.PHYSICAL_INSTALL_ENABLED = True
+                try:
+                    with self.assertRaises(mod.InstallError):
+                        mod.install_fixture(
+                            home=home,
+                            uid=TEST_UID,
+                            package_root=pkg,
+                            operation_id="e" * 32,
+                            fault_after=mod.RECEIVER_PACKAGE,
+                        )
+                    self.assertEqual(_git_blob((home / mod.RECEIVER_REL).read_bytes()), prior_blob)
+                    self.assertFalse((home / mod.INBOUND_REL).exists())
+                finally:
+                    mod.PHYSICAL_INSTALL_ENABLED = False
 
     def test_concurrent_kernel_lock_refused(self):
         if sys.platform == "win32":
@@ -361,40 +395,39 @@ class InstallFixtureTests(unittest.TestCase):
         contract = mod.load_contract()
         with tempfile.TemporaryDirectory() as td:
             pkg = PackageBuilder().write(Path(td))
-            home = Path(td) / "home"
-            home.mkdir()
-            _seed_home(home, receiver_blob=contract["required_installed_receiver_git_blob"])
-            held = threading.Event()
-            release = threading.Event()
+            with _trusted_install_home() as home:
+                _seed_home(home, receiver_blob=contract["required_installed_receiver_git_blob"])
+                held = threading.Event()
+                release = threading.Event()
 
-            def holder() -> None:
-                lock = mod._KernelLock()
-                lock.acquire(
-                    home=home,
-                    path=home / mod.KERNEL_LOCK_REL,
-                    uid=TEST_UID,
-                    operation_id="f" * 32,
-                )
-                held.set()
-                release.wait(timeout=5)
-                lock.release()
-
-            thread = threading.Thread(target=holder)
-            thread.start()
-            held.wait(timeout=5)
-            mod.PHYSICAL_INSTALL_ENABLED = True
-            try:
-                with self.assertRaises(mod.InstallError):
-                    mod.install_fixture(
+                def holder() -> None:
+                    lock = mod._KernelLock()
+                    lock.acquire(
                         home=home,
+                        path=home / mod.KERNEL_LOCK_REL,
                         uid=TEST_UID,
-                        package_root=pkg,
-                        operation_id="0" * 32,
+                        operation_id="f" * 32,
                     )
-            finally:
-                mod.PHYSICAL_INSTALL_ENABLED = False
-                release.set()
-                thread.join(timeout=5)
+                    held.set()
+                    release.wait(timeout=5)
+                    lock.release()
+
+                thread = threading.Thread(target=holder)
+                thread.start()
+                held.wait(timeout=5)
+                mod.PHYSICAL_INSTALL_ENABLED = True
+                try:
+                    with self.assertRaises(mod.InstallError):
+                        mod.install_fixture(
+                            home=home,
+                            uid=TEST_UID,
+                            package_root=pkg,
+                            operation_id="0" * 32,
+                        )
+                finally:
+                    mod.PHYSICAL_INSTALL_ENABLED = False
+                    release.set()
+                    thread.join(timeout=5)
 
     def test_crlf_materialized_payload_refused_deterministically(self):
         canonical = _canonical_source_bytes(SOURCE_COMMIT, RECEIVER_SOURCE_PATH)
@@ -418,27 +451,26 @@ class InstallFixtureTests(unittest.TestCase):
         contract = mod.load_contract()
         with tempfile.TemporaryDirectory() as td:
             pkg = PackageBuilder().write(Path(td))
-            home = Path(td) / "home"
-            home.mkdir()
-            _seed_home(home, receiver_blob=contract["required_installed_receiver_git_blob"])
-            mod.PHYSICAL_INSTALL_ENABLED = True
-            try:
-                mod.install_fixture(
-                    home=home,
-                    uid=TEST_UID,
-                    package_root=pkg,
-                    operation_id="3" * 32,
-                )
-                with self.assertRaisesRegex(mod.InstallError, "RECEIPT_ALREADY_PRESENT"):
+            with _trusted_install_home() as home:
+                _seed_home(home, receiver_blob=contract["required_installed_receiver_git_blob"])
+                mod.PHYSICAL_INSTALL_ENABLED = True
+                try:
                     mod.install_fixture(
                         home=home,
                         uid=TEST_UID,
                         package_root=pkg,
-                        operation_id="2" * 32,
+                        operation_id="3" * 32,
                     )
-                self.assertFalse((home / mod.TRANSACTION_REL).exists())
-            finally:
-                mod.PHYSICAL_INSTALL_ENABLED = False
+                    with self.assertRaisesRegex(mod.InstallError, "RECEIPT_ALREADY_PRESENT"):
+                        mod.install_fixture(
+                            home=home,
+                            uid=TEST_UID,
+                            package_root=pkg,
+                            operation_id="2" * 32,
+                        )
+                    self.assertFalse((home / mod.TRANSACTION_REL).exists())
+                finally:
+                    mod.PHYSICAL_INSTALL_ENABLED = False
 
     def test_receipt_fault_preserves_v2_commit_and_refuses_replay(self):
         if sys.platform == "win32":
@@ -446,35 +478,60 @@ class InstallFixtureTests(unittest.TestCase):
         contract = mod.load_contract()
         with tempfile.TemporaryDirectory() as td:
             pkg = PackageBuilder().write(Path(td))
-            home = Path(td) / "home"
-            home.mkdir()
-            _seed_home(home, receiver_blob=contract["required_installed_receiver_git_blob"])
-            mod.PHYSICAL_INSTALL_ENABLED = True
-            try:
-                with self.assertRaisesRegex(mod.InstallError, "INSTALL_POST_RECEIPT_HOLD"):
-                    mod.install_fixture(
-                        home=home,
-                        uid=TEST_UID,
-                        package_root=pkg,
-                        operation_id="4" * 32,
-                        fault_after="receipt",
-                    )
-                receiver = (home / mod.RECEIVER_REL).read_bytes()
-                inbound = (home / mod.INBOUND_REL).read_bytes()
-                self.assertEqual(_git_blob(receiver), contract["payload_entries"][0]["git_blob"])
-                self.assertEqual(_git_blob(inbound), contract["payload_entries"][1]["git_blob"])
-                self.assertTrue((home / mod.RECEIPT_REL).is_file())
-                receipt = json.loads((home / mod.RECEIPT_REL).read_text(encoding="utf-8"))
-                self.assertEqual(receipt["installedReceiverGitBlob"], contract["payload_entries"][0]["git_blob"])
-                with self.assertRaises(mod.InstallError):
-                    mod.install_fixture(
-                        home=home,
-                        uid=TEST_UID,
-                        package_root=pkg,
-                        operation_id="5" * 32,
-                    )
-            finally:
-                mod.PHYSICAL_INSTALL_ENABLED = False
+            with _trusted_install_home() as home:
+                _seed_home(home, receiver_blob=contract["required_installed_receiver_git_blob"])
+                mod.PHYSICAL_INSTALL_ENABLED = True
+                try:
+                    with self.assertRaisesRegex(mod.InstallError, "INSTALL_POST_RECEIPT_HOLD"):
+                        mod.install_fixture(
+                            home=home,
+                            uid=TEST_UID,
+                            package_root=pkg,
+                            operation_id="4" * 32,
+                            fault_after="receipt",
+                        )
+                    receiver = (home / mod.RECEIVER_REL).read_bytes()
+                    inbound = (home / mod.INBOUND_REL).read_bytes()
+                    self.assertEqual(_git_blob(receiver), contract["payload_entries"][0]["git_blob"])
+                    self.assertEqual(_git_blob(inbound), contract["payload_entries"][1]["git_blob"])
+                    self.assertTrue((home / mod.RECEIPT_REL).is_file())
+                    receipt = json.loads((home / mod.RECEIPT_REL).read_text(encoding="utf-8"))
+                    self.assertEqual(receipt["installedReceiverGitBlob"], contract["payload_entries"][0]["git_blob"])
+                    with self.assertRaises(mod.InstallError):
+                        mod.install_fixture(
+                            home=home,
+                            uid=TEST_UID,
+                            package_root=pkg,
+                            operation_id="5" * 32,
+                        )
+                finally:
+                    mod.PHYSICAL_INSTALL_ENABLED = False
+
+    def test_receipt_parent_fsync_fault_preserves_v2_without_v1_rollback(self):
+        if sys.platform == "win32":
+            raise unittest.SkipTest("POSIX atomic install semantics")
+        contract = mod.load_contract()
+        with tempfile.TemporaryDirectory() as td:
+            pkg = PackageBuilder().write(Path(td))
+            prior_blob = contract["required_installed_receiver_git_blob"]
+            with _trusted_install_home() as home:
+                _seed_home(home, receiver_blob=prior_blob)
+                mod.PHYSICAL_INSTALL_ENABLED = True
+                try:
+                    with self.assertRaisesRegex(mod.InstallError, "INSTALL_POST_RECEIPT_HOLD"):
+                        mod.install_fixture(
+                            home=home,
+                            uid=TEST_UID,
+                            package_root=pkg,
+                            operation_id="4f" * 16,
+                            fault_after="receipt_parent_fsync",
+                        )
+                    self.assertEqual(_git_blob((home / mod.RECEIVER_REL).read_bytes()), contract["payload_entries"][0]["git_blob"])
+                    self.assertEqual(_git_blob((home / mod.INBOUND_REL).read_bytes()), contract["payload_entries"][1]["git_blob"])
+                    self.assertNotEqual(_git_blob((home / mod.RECEIVER_REL).read_bytes()), prior_blob)
+                    self.assertTrue((home / mod.RECEIPT_REL).is_file())
+                finally:
+                    mod.PHYSICAL_INSTALL_ENABLED = False
 
     def test_abrupt_incomplete_transaction_requires_recovery_hold(self):
         if sys.platform == "win32":
@@ -482,41 +539,38 @@ class InstallFixtureTests(unittest.TestCase):
         contract = mod.load_contract()
         with tempfile.TemporaryDirectory() as td:
             pkg = PackageBuilder().write(Path(td))
-            home = Path(td) / "home"
-            home.mkdir()
-            _seed_home(home, receiver_blob=contract["required_installed_receiver_git_blob"])
-            mod.PHYSICAL_INSTALL_ENABLED = True
-            try:
-                with self.assertRaises(mod.InstallError):
-                    mod.install_fixture(
-                        home=home,
-                        uid=TEST_UID,
-                        package_root=pkg,
-                        operation_id="6" * 32,
-                        fault_after=mod.INBOUND_PACKAGE,
-                    )
-                with self.assertRaisesRegex(mod.InstallError, "INSTALL_RECOVERY_REQUIRED"):
-                    mod.build_install_plan(home=home, uid=TEST_UID, package_root=pkg)
-            finally:
-                mod.PHYSICAL_INSTALL_ENABLED = False
+            with _trusted_install_home() as home:
+                _seed_home(home, receiver_blob=contract["required_installed_receiver_git_blob"])
+                mod.PHYSICAL_INSTALL_ENABLED = True
+                try:
+                    with self.assertRaises(mod.InstallError):
+                        mod.install_fixture(
+                            home=home,
+                            uid=TEST_UID,
+                            package_root=pkg,
+                            operation_id="6" * 32,
+                            fault_after=mod.INBOUND_PACKAGE,
+                        )
+                    with self.assertRaisesRegex(mod.InstallError, "INSTALL_RECOVERY_REQUIRED"):
+                        mod.build_install_plan(home=home, uid=TEST_UID, package_root=pkg)
+                finally:
+                    mod.PHYSICAL_INSTALL_ENABLED = False
 
-    def test_kernel_lock_rejects_swapped_path_while_held(self):
+    def test_kernel_lock_rejects_second_acquire_with_empty_record_swap(self):
         if sys.platform == "win32":
             raise unittest.SkipTest("POSIX flock semantics")
-        with tempfile.TemporaryDirectory() as td:
-            home = Path(td) / "home"
-            home.mkdir()
-            state = home / ".local/state/ldw-dragonfly-jit/v2-receiver-install"
+        with _trusted_install_home() as home:
+            state = home / mod.STATE_REL
             state.mkdir(parents=True, mode=0o700)
-            lock_path = state / "invoke.kernel.lock"
+            lock_path = home / mod.KERNEL_LOCK_REL
             lock = mod._KernelLock()
             lock.acquire(home=home, path=lock_path, uid=TEST_UID, operation_id="7" * 32)
             try:
-                swap = home / "invoke.kernel.lock.swap"
-                swap.write_bytes(b"swap\n")
+                swap = state / "invoke.kernel.lock.swap"
+                swap.write_bytes(b"")
                 os.chmod(swap, 0o600)
                 os.replace(swap, lock_path)
-                with self.assertRaises(mod.InstallError):
+                with self.assertRaisesRegex(mod.InstallError, "CONCURRENT_INVOKE_REFUSED"):
                     mod._KernelLock().acquire(
                         home=home,
                         path=lock_path,
@@ -529,46 +583,135 @@ class InstallFixtureTests(unittest.TestCase):
     def test_kernel_lock_path_identity_stable_through_acquisition(self):
         if sys.platform == "win32":
             raise unittest.SkipTest("POSIX flock semantics")
-        with tempfile.TemporaryDirectory() as td:
-            home = Path(td) / "home"
-            home.mkdir()
-            state = home / ".local/state/ldw-dragonfly-jit/v2-receiver-install"
-            state.mkdir(parents=True, mode=0o700)
-            lock_path = state / "invoke.kernel.lock"
+        with _trusted_install_home() as home:
+            lock_path = home / mod.KERNEL_LOCK_REL
             lock = mod._KernelLock()
             lock.acquire(home=home, path=lock_path, uid=TEST_UID, operation_id="9" * 32)
             try:
-                path_before = lock_path.lstat()
-                lock.reverify_locked_inode(home=home, path=lock_path, uid=TEST_UID)
-                path_after = lock_path.lstat()
+                anchor = mod._assert_kernel_lock_trust_root(home, TEST_UID)
+                anchor_before = anchor.lstat()
+                lock.reverify_lock_anchor(home=home, uid=TEST_UID)
+                anchor_after = anchor.lstat()
                 self.assertEqual(
-                    (path_before.st_dev, path_before.st_ino),
-                    (path_after.st_dev, path_after.st_ino),
+                    (anchor_before.st_dev, anchor_before.st_ino),
+                    (anchor_after.st_dev, anchor_after.st_ino),
                 )
-                self.assertEqual(lock._identity, (path_after.st_dev, path_after.st_ino))
+                self.assertEqual(lock._identity, (anchor_after.st_dev, anchor_after.st_ino))
             finally:
                 lock.release()
 
-    def test_kernel_lock_reverify_fails_after_path_swap(self):
+    def test_kernel_lock_record_swap_does_not_break_anchor_reverify(self):
         if sys.platform == "win32":
             raise unittest.SkipTest("POSIX flock semantics")
-        with tempfile.TemporaryDirectory() as td:
-            home = Path(td) / "home"
-            home.mkdir()
-            state = home / ".local/state/ldw-dragonfly-jit/v2-receiver-install"
+        with _trusted_install_home() as home:
+            state = home / mod.STATE_REL
             state.mkdir(parents=True, mode=0o700)
-            lock_path = state / "invoke.kernel.lock"
+            lock_path = home / mod.KERNEL_LOCK_REL
             lock = mod._KernelLock()
             lock.acquire(home=home, path=lock_path, uid=TEST_UID, operation_id="a" * 32)
             try:
-                swap = home / "invoke.kernel.lock.swap"
-                swap.write_bytes(b"swap\n")
+                swap = state / "invoke.kernel.lock.swap"
+                swap.write_bytes(b"")
                 os.chmod(swap, 0o600)
                 os.replace(swap, lock_path)
-                with self.assertRaisesRegex(mod.InstallError, "LOCK_PATH_INVALID"):
-                    lock.reverify_locked_inode(home=home, path=lock_path, uid=TEST_UID)
+                lock.reverify_lock_anchor(home=home, uid=TEST_UID)
             finally:
                 lock.release()
+
+    def _subprocess_holder_script(self, home: str, wait_path: str, release_path: str) -> str:
+        return f"""
+import os, sys, time
+sys.path.insert(0, {json.dumps(str(ROOT))})
+import importlib.util
+spec = importlib.util.spec_from_file_location(
+    "redrix_normal_user_v2_receiver_install",
+    {json.dumps(str(INSTALL))},
+)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+lock = mod._KernelLock()
+lock.acquire(
+    home=__import__("pathlib").Path({json.dumps(home)}),
+    path=__import__("pathlib").Path({json.dumps(home)}) / mod.KERNEL_LOCK_REL,
+    uid=os.getuid(),
+    operation_id={json.dumps("f" * 32)},
+)
+open({json.dumps(wait_path)}, "w", encoding="utf-8").write("ready\\n")
+while not __import__("pathlib").Path({json.dumps(release_path)}).exists():
+    time.sleep(0.05)
+lock.release()
+"""
+
+    def test_kernel_lock_subprocess_contention_refuses_install(self):
+        if sys.platform == "win32":
+            raise unittest.SkipTest("POSIX flock semantics")
+        contract = mod.load_contract()
+        with tempfile.TemporaryDirectory() as td:
+            pkg = PackageBuilder().write(Path(td))
+            with _trusted_install_home() as home:
+                _seed_home(home, receiver_blob=contract["required_installed_receiver_git_blob"])
+                signal_dir = Path(td) / "signals"
+                signal_dir.mkdir()
+                wait_path = signal_dir / "ready"
+                release_path = signal_dir / "release"
+                script = self._subprocess_holder_script(str(home), str(wait_path), str(release_path))
+                proc = subprocess.Popen([sys.executable, "-c", script])
+                try:
+                    for _ in range(200):
+                        if wait_path.exists():
+                            break
+                        time.sleep(0.05)
+                    else:
+                        self.fail("lock holder subprocess did not become ready")
+                    mod.PHYSICAL_INSTALL_ENABLED = True
+                    try:
+                        with self.assertRaisesRegex(mod.InstallError, "CONCURRENT_INVOKE_REFUSED"):
+                            mod.install_fixture(
+                                home=home,
+                                uid=TEST_UID,
+                                package_root=pkg,
+                                operation_id="0" * 32,
+                            )
+                    finally:
+                        mod.PHYSICAL_INSTALL_ENABLED = False
+                finally:
+                    release_path.write_text("go\n", encoding="utf-8")
+                    proc.wait(timeout=10)
+
+    def test_subprocess_abrupt_exit_after_staged_journal_requires_recovery_hold(self):
+        if sys.platform == "win32":
+            raise unittest.SkipTest("POSIX abrupt exit semantics")
+        contract = mod.load_contract()
+        with tempfile.TemporaryDirectory() as td:
+            pkg = PackageBuilder().write(Path(td))
+            with _trusted_install_home() as home:
+                _seed_home(home, receiver_blob=contract["required_installed_receiver_git_blob"])
+                child = f"""
+import os, sys
+sys.path.insert(0, {json.dumps(str(ROOT))}
+import importlib.util
+spec = importlib.util.spec_from_file_location(
+    "redrix_normal_user_v2_receiver_install",
+    {json.dumps(str(INSTALL))},
+)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+mod.PHYSICAL_INSTALL_ENABLED = True
+mod.install_fixture(
+    home=__import__("pathlib").Path({json.dumps(str(home))}),
+    uid=os.getuid(),
+    package_root=__import__("pathlib").Path({json.dumps(str(pkg))}),
+    operation_id={"6a" * 16!r},
+    fault_after="abrupt_exit",
+)
+"""
+                proc = subprocess.run([sys.executable, "-c", child], check=False)
+                self.assertEqual(proc.returncode, 133)
+                self.assertTrue((home / mod.TRANSACTION_REL).is_file())
+                txn = json.loads((home / mod.TRANSACTION_REL).read_text(encoding="utf-8"))
+                self.assertEqual(txn["phase"], "INBOUND_STAGED")
+                with self.assertRaisesRegex(mod.InstallError, "INSTALL_RECOVERY_REQUIRED"):
+                    mod.build_install_plan(home=home, uid=TEST_UID, package_root=pkg)
 
     def test_replay_refused(self):
         if sys.platform == "win32":
@@ -577,26 +720,25 @@ class InstallFixtureTests(unittest.TestCase):
         op = "d" * 32
         with tempfile.TemporaryDirectory() as td:
             pkg = PackageBuilder().write(Path(td))
-            home = Path(td) / "home"
-            home.mkdir()
-            _seed_home(home, receiver_blob=contract["required_installed_receiver_git_blob"])
-            mod.PHYSICAL_INSTALL_ENABLED = True
-            try:
-                mod.install_fixture(
-                    home=home,
-                    uid=TEST_UID,
-                    package_root=pkg,
-                    operation_id=op,
-                )
-                with self.assertRaises(mod.InstallError):
+            with _trusted_install_home() as home:
+                _seed_home(home, receiver_blob=contract["required_installed_receiver_git_blob"])
+                mod.PHYSICAL_INSTALL_ENABLED = True
+                try:
                     mod.install_fixture(
                         home=home,
                         uid=TEST_UID,
                         package_root=pkg,
                         operation_id=op,
                     )
-            finally:
-                mod.PHYSICAL_INSTALL_ENABLED = False
+                    with self.assertRaises(mod.InstallError):
+                        mod.install_fixture(
+                            home=home,
+                            uid=TEST_UID,
+                            package_root=pkg,
+                            operation_id=op,
+                        )
+                finally:
+                    mod.PHYSICAL_INSTALL_ENABLED = False
 
 
 if __name__ == "__main__":

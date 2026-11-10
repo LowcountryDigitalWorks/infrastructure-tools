@@ -50,7 +50,7 @@ class InstallError(RuntimeError):
     pass
 
 
-_MAX_LOCK_RECORD_BYTES = 4096
+_HOME_MOUNT = Path("/home")
 
 
 def _assert_lock_inode_identity(path: Path, fd: int) -> tuple[int, int]:
@@ -63,105 +63,79 @@ def _assert_lock_inode_identity(path: Path, fd: int) -> tuple[int, int]:
     return identity
 
 
-def _read_kernel_lock_record(fd: int) -> dict[str, Any] | None:
-    os.lseek(fd, 0, os.SEEK_SET)
-    raw = os.read(fd, _MAX_LOCK_RECORD_BYTES)
-    if not raw.strip():
-        return None
+def _assert_kernel_lock_trust_root(home: Path, uid: int) -> Path:
+    """Require install home under root-owned /home (e.g. /home/eddie). Same-UID tamper of /home
+    itself is out of contract; without this anchor return BLOCKED_LOCK_TRUST_ROOT fail-closed."""
+    resolved = _assert_home(home, uid)
+    if sys.platform == "win32" or fcntl is None:
+        raise InstallError("KERNEL_LOCK_UNAVAILABLE")
     try:
-        value = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise InstallError("LOCK_PATH_INVALID") from exc
-    if not isinstance(value, dict):
-        raise InstallError("LOCK_PATH_INVALID")
-    return value
+        mount_info = _HOME_MOUNT.lstat()
+    except OSError as exc:
+        raise InstallError("BLOCKED_LOCK_TRUST_ROOT") from exc
+    if (
+        not stat.S_ISDIR(mount_info.st_mode)
+        or stat.S_ISLNK(mount_info.st_mode)
+        or mount_info.st_uid != 0
+    ):
+        raise InstallError("BLOCKED_LOCK_TRUST_ROOT")
+    try:
+        resolved.relative_to(_HOME_MOUNT.resolve(strict=True))
+    except ValueError as exc:
+        raise InstallError("BLOCKED_LOCK_TRUST_ROOT") from exc
+    return resolved
 
 
 class _KernelLock:
-    """Advisory flock on a regular file. Same-UID path replace can swap inodes after open;
-    inode/path reconciliation limits cooperating-tamper races but cannot fully exclude them."""
+    """One-controller exclusivity via flock on the resolved trusted home directory inode.
+    invoke.kernel.lock is a durable nonce record only (replaceable without bypassing flock)."""
 
     def __init__(self) -> None:
         self._fd: int | None = None
-        self._path: Path | None = None
+        self._anchor: Path | None = None
         self._identity: tuple[int, int] | None = None
 
-    def reverify_locked_inode(self, *, home: Path, path: Path, uid: int) -> None:
-        if self._fd is None:
+    def reverify_lock_anchor(self, *, home: Path, uid: int) -> None:
+        if self._fd is None or self._anchor is None:
             raise InstallError("KERNEL_LOCK_UNAVAILABLE")
-        if self._path is not None and path != self._path:
+        anchor = _assert_kernel_lock_trust_root(home, uid)
+        if anchor != self._anchor:
             raise InstallError("LOCK_PATH_INVALID")
-        home = _assert_home(home, uid)
-        _assert_path_chain(home, path, uid)
-        if path.is_symlink():
-            raise InstallError("LOCK_PATH_INVALID")
-        identity = _assert_lock_inode_identity(path, self._fd)
+        identity = _assert_lock_inode_identity(anchor, self._fd)
         if self._identity is not None and identity != self._identity:
             raise InstallError("LOCK_PATH_INVALID")
 
     def acquire(self, *, home: Path, path: Path, uid: int, operation_id: str) -> None:
         if sys.platform == "win32" or fcntl is None:
             raise InstallError("KERNEL_LOCK_UNAVAILABLE")
-        home = _assert_home(home, uid)
+        anchor = _assert_kernel_lock_trust_root(home, uid)
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         _assert_path_chain(home, path, uid)
         if path.is_symlink():
             raise InstallError("LOCK_PATH_INVALID")
-        observed = path.lstat() if path.exists() else None
-        if observed is not None:
-            if stat.S_ISLNK(observed.st_mode) or not _uid_matches(observed, uid):
-                raise InstallError("LOCK_PATH_INVALID")
-            if sys.platform != "win32" and stat.S_IMODE(observed.st_mode) != 0o600:
-                raise InstallError("LOCK_PATH_INVALID")
-            open_flags = os.O_RDWR
-            if hasattr(os, "O_NOFOLLOW"):
-                open_flags |= os.O_NOFOLLOW
-        else:
-            open_flags = os.O_RDWR | os.O_CREAT
-        fd = os.open(path, open_flags, 0o600)
+        o_directory = getattr(os, "O_DIRECTORY", 0)
+        fd = os.open(anchor, os.O_RDONLY | o_directory)
         try:
-            locked_stat = os.fstat(fd)
-            if observed is not None:
-                if (locked_stat.st_dev, locked_stat.st_ino) != (observed.st_dev, observed.st_ino):
-                    raise InstallError("LOCK_PATH_INVALID")
-                if not _uid_matches(locked_stat, uid) or (
-                    sys.platform != "win32" and stat.S_IMODE(locked_stat.st_mode) != 0o600
-                ):
-                    raise InstallError("LOCK_PATH_INVALID")
-            else:
-                refreshed = path.lstat()
-                if (locked_stat.st_dev, locked_stat.st_ino) != (refreshed.st_dev, refreshed.st_ino):
-                    raise InstallError("LOCK_PATH_INVALID")
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            identity = _assert_lock_inode_identity(path, fd)
-            existing = _read_kernel_lock_record(fd)
-            if existing is not None:
-                if existing.get("marker") != MARKER:
-                    raise InstallError("LOCK_PATH_INVALID")
-                pid = existing.get("pid")
-                op = existing.get("operationId")
-                if not isinstance(pid, int) or not isinstance(op, str):
-                    raise InstallError("LOCK_PATH_INVALID")
-                if pid != os.getpid():
-                    raise InstallError("CONCURRENT_INVOKE_REFUSED")
+            identity = _assert_lock_inode_identity(anchor, fd)
         except (BlockingIOError, OSError) as exc:
             os.close(fd)
             raise InstallError("CONCURRENT_INVOKE_REFUSED") from exc
         except InstallError:
             os.close(fd)
             raise
-        payload = {
-            "marker": MARKER,
-            "operationId": operation_id,
-            "pid": os.getpid(),
-        }
-        record = _canonical(payload)
-        os.ftruncate(fd, 0)
-        os.write(fd, record)
-        os.fsync(fd)
-        _assert_lock_inode_identity(path, fd)
+        record = _canonical(
+            {
+                "marker": MARKER,
+                "operationId": operation_id,
+                "pid": os.getpid(),
+                "lockAnchor": anchor.as_posix(),
+            }
+        )
+        _atomic_write(path, record, 0o600)
+        _assert_lock_inode_identity(anchor, fd)
         self._fd = fd
-        self._path = path
+        self._anchor = anchor
         self._identity = identity
 
     def release(self) -> None:
@@ -172,7 +146,7 @@ class _KernelLock:
         finally:
             os.close(self._fd)
             self._fd = None
-            self._path = None
+            self._anchor = None
             self._identity = None
 
 
@@ -275,7 +249,13 @@ def _assert_no_symlink_target(path: Path) -> None:
         cursor = parent
 
 
-def _atomic_write(path: Path, data: bytes, mode: int) -> None:
+def _atomic_write(
+    path: Path,
+    data: bytes,
+    mode: int,
+    *,
+    inject_parent_fsync_fault: bool = False,
+) -> None:
     _assert_no_symlink_target(path.parent)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temp = path.parent / ("." + path.name + ".tmp-" + os.urandom(8).hex())
@@ -288,12 +268,25 @@ def _atomic_write(path: Path, data: bytes, mode: int) -> None:
             os.close(fd)
         os.chmod(temp, mode)
         os.replace(temp, path)
+        if inject_parent_fsync_fault:
+            raise InstallError("SIMULATED_RECEIPT_PARENT_FSYNC_FAULT")
         _fsync_dir(path.parent)
     finally:
         try:
             temp.unlink()
         except FileNotFoundError:
             pass
+
+
+def _install_receipt_record_matches(path: Path, uid: int, expected: dict[str, Any]) -> bool:
+    if not path.exists() or path.is_symlink():
+        return False
+    try:
+        raw = _assert_owned_regular(path, uid, 0o600)
+        parsed = json.loads(raw.decode("utf-8"))
+    except (InstallError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return isinstance(parsed, dict) and parsed == expected
 
 
 def _validate_manifest(manifest: object, contract: dict[str, Any]) -> dict[str, Any]:
@@ -627,9 +620,10 @@ def install_fixture(
     lock = _KernelLock()
     stage_root: Path | None = None
     receipt_written = False
+    receipt_payload: dict[str, Any] | None = None
 
     def _reverify_kernel_lock() -> None:
-        lock.reverify_locked_inode(home=home, path=kernel_lock_path, uid=uid)
+        lock.reverify_lock_anchor(home=home, uid=uid)
 
     try:
         lock.acquire(home=home, path=kernel_lock_path, uid=uid, operation_id=operation_id)
@@ -669,6 +663,8 @@ def install_fixture(
         _atomic_write(staged_inbound, inbound_bytes, int(inbound_entry["mode"], 8))
         transaction["phase"] = "INBOUND_STAGED"
         _write_transaction(transaction_path, transaction)
+        if fault_after == "abrupt_exit":
+            os._exit(133)
         staged_inbound_read = _assert_owned_regular(staged_inbound, uid)
         if (
             staged_inbound_read != inbound_bytes
@@ -707,7 +703,7 @@ def install_fixture(
         if fault_after == RECEIVER_PACKAGE:
             raise InstallError("SIMULATED_INTERRUPT")
 
-        receipt = {
+        receipt_payload = {
             "marker": MARKER,
             "schema": 1,
             "operationId": operation_id,
@@ -721,7 +717,18 @@ def install_fixture(
             "authorizedKeysSha256": None,
         }
         _reverify_kernel_lock()
-        _atomic_write(receipt_path, _canonical(receipt), 0o600)
+        receipt_parent_fsync_fault = fault_after == "receipt_parent_fsync"
+        try:
+            _atomic_write(
+                receipt_path,
+                _canonical(receipt_payload),
+                0o600,
+                inject_parent_fsync_fault=receipt_parent_fsync_fault,
+            )
+        except InstallError:
+            if _install_receipt_record_matches(receipt_path, uid, receipt_payload):
+                raise InstallError("INSTALL_POST_RECEIPT_HOLD")
+            raise
         receipt_written = True
         if fault_after == "receipt":
             raise InstallError("SIMULATED_INTERRUPT")
@@ -733,9 +740,13 @@ def install_fixture(
             stage_root.rmdir()
         transaction_path.unlink(missing_ok=True)
         _fsync_dir(transaction_path.parent)
-        return receipt
+        return receipt_payload
     except Exception as original:
-        if receipt_written:
+        receipt_on_disk = (
+            receipt_payload is not None
+            and _install_receipt_record_matches(receipt_path, uid, receipt_payload)
+        )
+        if receipt_written or receipt_on_disk:
             if transaction_path.exists() or transaction_path.is_symlink():
                 try:
                     record = _validate_transaction(_read_json_object(transaction_path, uid))

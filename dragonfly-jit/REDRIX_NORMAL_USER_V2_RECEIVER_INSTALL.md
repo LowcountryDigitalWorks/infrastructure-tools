@@ -15,8 +15,10 @@ This does **not** replace the accepted #115 synthetic handoff proof, does **not*
 Machine contract: `redrix_normal_user_v2_receiver_install.json`
 Installer module: `redrix_normal_user_v2_receiver_install.py` (`PHYSICAL_INSTALL_ENABLED = false`)
 
-Source safety (this PR): nonblocking `flock` kernel lock (no age-based lock unlink); durable transaction journal
-(`PREPARED` → `INBOUND_COMMITTED` → `RECEIVER_COMMITTED` → `CLEANUP`/`FAILED`); inbound committed before receiver;
+Source safety (this PR): nonblocking `flock` on the resolved trusted home directory under root-owned `/home`
+(`BLOCKED_LOCK_TRUST_ROOT` otherwise); `invoke.kernel.lock` is a durable record only (not exclusivity); durable
+transaction journal (`PREPARED` → `INBOUND_COMMITTED` → `RECEIVER_COMMITTED` → `CLEANUP`/`FAILED`); inbound committed
+before receiver; receipt commit fail-closed (`INSTALL_POST_RECEIPT_HOLD` if receipt bytes durable after `os.replace`);
 exclusive staging directory create; fail-closed recovery when journal or mixed blobs remain.
 
 ## Out of scope
