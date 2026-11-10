@@ -111,6 +111,13 @@ jobs:
         shell: powershell
         run: powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./host-agent/deploy/tests/Test-AdminBrokerV2PublisherBootstrapContracts.ps1
 
+      - name: Validate REDRIX LDW parent ACL read-only preflight contract (Windows PowerShell 5.1)
+        shell: powershell
+        run: powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./host-agent/deploy/tests/Test-RedrixLdwParentAclReadinessContracts.ps1
+      - name: REDRIX LDW parent ACL synthetic in-memory target (Windows PowerShell 5.1)
+        shell: powershell
+        run: powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./host-agent/deploy/tests/Test-RedrixLdwParentAclSyntheticTarget.ps1
+
       - name: Run tray autostart contract tests
         shell: pwsh
         run: pwsh ./host-agent/deploy/tests/Test-TrayAutostartContracts.ps1

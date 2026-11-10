@@ -18,6 +18,7 @@ VIRTIO_BALLOON_DRIVER = Path("/sys/bus/virtio/drivers/virtio_balloon")
 _VIRTIO_DEVICE_RE = re.compile(r"^virtio\d+$")
 _MAX_DRIVER_ENTRIES = 32
 _MAX_VMSTAT_PAGE_COUNT = 2**53
+BALLOON_PAGE_BYTES = 4096
 
 
 def controller_memory_contract(path: Path) -> tuple[int, int] | None:
@@ -190,25 +191,31 @@ def read_balloon_vmstat_pages(vmstat_path: Path = Path("/proc/vmstat")) -> tuple
 
 
 def _balloon_deltas(samples: list[tuple[int, int] | None]) -> dict[str, object]:
-    """Indicative guest VM activity only; not current balloon size or ChromeOS headroom."""
+    """Report cumulative activity and a guest-only final net page estimate."""
     present = [s for s in samples if s is not None]
     if not present:
-        return {"balloon_vmstat": "UNVERIFIED", "balloon_indicative_note": "counters absent"}
+        return {"balloon_vmstat": "UNVERIFIED", "balloon_net_inflated_mib_status": "UNVERIFIED", "balloon_net_inflated_mib_estimate": None, "balloon_indicative_note": "counters absent"}
     if len(present) != len(samples):
-        return {"balloon_vmstat": "UNVERIFIED", "balloon_indicative_note": "partial samples"}
+        return {"balloon_vmstat": "UNVERIFIED", "balloon_net_inflated_mib_status": "UNVERIFIED", "balloon_net_inflated_mib_estimate": None, "balloon_indicative_note": "partial samples"}
     for pair in present:
         if pair[0] > _MAX_VMSTAT_PAGE_COUNT or pair[1] > _MAX_VMSTAT_PAGE_COUNT:
-            return {"balloon_vmstat": "HOLD", "balloon_indicative_note": "counter overflow"}
+            return {"balloon_vmstat": "HOLD", "balloon_net_inflated_mib_status": "HOLD", "balloon_net_inflated_mib_estimate": None, "balloon_indicative_note": "counter overflow"}
+        if pair[1] > pair[0]:
+            return {"balloon_vmstat": "HOLD", "balloon_net_inflated_mib_status": "HOLD", "balloon_net_inflated_mib_estimate": None, "balloon_indicative_note": "deflate exceeds inflate"}
     for idx in range(1, len(present)):
         prev, cur = present[idx - 1], present[idx]
         if cur[0] < prev[0] or cur[1] < prev[1]:
-            return {"balloon_vmstat": "HOLD", "balloon_indicative_note": "nonmonotonic cumulative counters"}
+            return {"balloon_vmstat": "HOLD", "balloon_net_inflated_mib_status": "HOLD", "balloon_net_inflated_mib_estimate": None, "balloon_indicative_note": "nonmonotonic cumulative counters"}
     first, last = present[0], present[-1]
+    net_pages = last[0] - last[1]
+    estimate_mib = (net_pages * BALLOON_PAGE_BYTES + 512 * 1024) // (1024 * 1024)
     return {
         "balloon_vmstat": "MEASURED_INDICATIVE",
+        "balloon_net_inflated_mib_status": "MEASURED_GUEST_ESTIMATE_NOT_HOST_RAM",
+        "balloon_net_inflated_mib_estimate": estimate_mib,
         "balloon_inflate_pages_delta": max(0, last[0] - first[0]),
         "balloon_deflate_pages_delta": max(0, last[1] - first[1]),
-        "balloon_indicative_note": "cumulative vmstat only; not current balloon or host spare",
+        "balloon_indicative_note": "4 KiB pages; final inflate minus deflate is a guest estimate, not host RAM; deltas describe the sample window",
     }
 
 
