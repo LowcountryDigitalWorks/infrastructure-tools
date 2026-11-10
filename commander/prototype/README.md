@@ -18,6 +18,8 @@ The finished owner product remains a first-party Desktop Commander replacement w
 - The ONLY operation is an in-memory bounded uppercase CANARY_ECHO. It does not start a process, read/write a file, elevate privileges or contact a host.
 - Command IDs are idempotent only for identical inputs; changes conflict. Three distinct synthetic commands per grant; expiry and revoke fail closed.
 
+Two-host enrollment / revocation denial matrix (synthetic compose-only): see `TWO_HOST_ENROLLMENT_DENIAL.md` and `test_two_host_enrollment_denial.py`.
+
 ## Test
 
 From repo root, Python 3.11+ and pinned cryptography==50.0.2 dependency (for Ed25519 signatures):
