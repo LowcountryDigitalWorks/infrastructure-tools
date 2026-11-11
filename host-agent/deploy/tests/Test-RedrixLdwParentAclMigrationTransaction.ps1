@@ -389,6 +389,55 @@ foreach ($stage in @('PREPARED', 'COMMITTED', 'AFTER_APPLY', 'REBOOT', 'PRE_APPL
     Assert-NeverRecoveryOrRollbackReview $badStage ('LEDGER_STAGE_EMPTY_' + $stage)
 }
 
+$mixedReboot = Copy-RedrixMigrationLedger $validLedger
+$mixedReboot['stage'] = 'reboot'
+$mixedReboot['childSha256After'] = Get-RedrixMigrationTestChildMap
+Assert-NeverRecoveryOrRollbackReview $mixedReboot 'STAGE_CASE_REBOOT_LOWER'
+
+$mixedPrepared = Copy-RedrixMigrationLedger $validLedger
+$mixedPrepared['stage'] = 'prepared'
+Assert-NeverRecoveryOrRollbackReview $mixedPrepared 'STAGE_CASE_PREPARED_LOWER'
+
+$goodCommitted = Copy-RedrixMigrationLedger $validLedger
+$goodCommitted['stage'] = 'COMMITTED'
+$goodCommitted['childSha256After'] = Get-RedrixMigrationTestChildMap
+Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $goodCommitted) -ceq 'RECOVERY_LEDGER_COMPLETE') 'STAGE_CASE_COMMITTED_UPPER_GOOD'
+
+$mixedAfterApply = Copy-RedrixMigrationLedger $validLedger
+$mixedAfterApply['stage'] = 'after_apply'
+$mixedAfterApply['childSha256After'] = Get-RedrixMigrationTestChildMap
+Assert-NeverRecoveryOrRollbackReview $mixedAfterApply 'STAGE_CASE_AFTER_APPLY_LOWER'
+
+$mixedStageArray = Copy-RedrixMigrationLedger $validLedger
+$mixedStageArray['stage'] = 'Reboot'
+$mixedStageArray['childSha256After'] = Get-RedrixMigrationTestChildMap
+Assert-NeverRecoveryOrRollbackReview $mixedStageArray 'STAGE_CASE_REBOOT_MIXED'
+
+$lowerChildSnap = New-RedrixLdwParentAclMockHostSnapshot -Variant ValidPreMigration
+$lowerChildren = [ordered]@{}
+foreach ($entry in $lowerChildSnap.ChildrenSha256Utf8Sddl.GetEnumerator()) {
+    $lowerChildren[$entry.Key.ToLowerInvariant()] = $entry.Value
+}
+$lowerChildSnap.ChildrenSha256Utf8Sddl = $lowerChildren
+Assert-PreconditionNeverOk $lowerChildSnap 'SNAP_CHILD_KEY_LOWER_CASE'
+
+$lowerChildLedger = Copy-RedrixMigrationLedger $validLedger
+$lowerChildMap = [ordered]@{}
+foreach ($entry in (Get-RedrixMigrationTestChildMap).GetEnumerator()) {
+    $lowerChildMap[$entry.Key.ToLowerInvariant()] = $entry.Value
+}
+$lowerChildLedger['childSha256Before'] = $lowerChildMap
+Assert-NeverRecoveryOrRollbackReview $lowerChildLedger 'LEDGER_CHILD_KEY_LOWER_BEFORE'
+
+$lowerChildAfter = Copy-RedrixMigrationLedger $validLedger
+$lowerChildAfter['stage'] = 'COMMITTED'
+$lowerAfterMap = [ordered]@{}
+foreach ($entry in (Get-RedrixMigrationTestChildMap).GetEnumerator()) {
+    $lowerAfterMap[$entry.Key.ToLowerInvariant()] = $entry.Value
+}
+$lowerChildAfter['childSha256After'] = $lowerAfterMap
+Assert-NeverRecoveryOrRollbackReview $lowerChildAfter 'LEDGER_CHILD_KEY_LOWER_AFTER'
+
 Write-Host ('REDRIX_LDW_PARENT_ACL_MIGRATION_REHEARSAL_TESTS=PASS assertions=' + $checks)
 Write-Host ('REDRIX_LDW_PARENT_ACL_MIGRATION_PHYSICAL_APPLY=BLOCKED_APPROVAL')
 Write-Host ('REDRIX_LDW_PARENT_ACL_MIGRATION_AUTHORITY=NOT_PHYSICAL_AUTHORITY')

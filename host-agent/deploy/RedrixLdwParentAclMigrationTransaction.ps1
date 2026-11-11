@@ -147,7 +147,7 @@ function Test-RedrixLdwParentAclMigrationRequiredScalarStringOneOf {
         return $ShapeHoldCode
     }
     if ($Candidate -isnot [string]) { return $ShapeHoldCode }
-    if ($Allowed -notcontains $Candidate) { return $NotAllowedHoldCode }
+    if ($Allowed -cnotcontains $Candidate) { return $NotAllowedHoldCode }
     return 'OK'
 }
 
@@ -176,7 +176,7 @@ function Test-RedrixLdwParentAclMigrationTrustedChildShaIdictionary([object]$Map
     $expectedNames = @($ref.protectedChildSddlSha256Utf8.PSObject.Properties | ForEach-Object { $_.Name })
     if ($Map.Count -ne $expectedNames.Count) { return 'TOP_LEVEL_INVENTORY_DRIFT' }
     foreach ($key in $Map.Keys) {
-        if ($expectedNames -notcontains [string]$key) { return 'TOP_LEVEL_INVENTORY_DRIFT' }
+        if ($expectedNames -cnotcontains [string]$key) { return 'TOP_LEVEL_INVENTORY_DRIFT' }
     }
     foreach ($prop in $ref.protectedChildSddlSha256Utf8.PSObject.Properties) {
         $trustedPin = [string]$prop.Value
@@ -271,7 +271,7 @@ function Test-RedrixLdwParentAclMigrationLedgerChildShaMap([hashtable]$Map) {
     $expectedNames = @($ref.protectedChildSddlSha256Utf8.PSObject.Properties | ForEach-Object { $_.Name })
     if ($Map.Count -ne $expectedNames.Count) { return 'HOLD_CHILD_PIN_DRIFT' }
     foreach ($key in $Map.Keys) {
-        if ($expectedNames -notcontains [string]$key) { return 'HOLD_CHILD_EXTRA_KEY' }
+        if ($expectedNames -cnotcontains [string]$key) { return 'HOLD_CHILD_EXTRA_KEY' }
     }
     foreach ($prop in $ref.protectedChildSddlSha256Utf8.PSObject.Properties) {
         $trustedPin = [string]$prop.Value
@@ -348,13 +348,13 @@ function Test-RedrixLdwParentAclMigrationRecoveryAfterReboot([hashtable]$Ledger)
     $ledgerStage = [string]$Ledger['stage']
     $postStages = @('COMMITTED', 'AFTER_APPLY', 'REBOOT', 'PRE_APPLY_REHEARSAL')
     $receiptRequiredStages = @('COMMITTED', 'AFTER_APPLY', 'REBOOT', 'PRE_APPLY_REHEARSAL')
-    if ($ledgerStage -in $receiptRequiredStages -or $ledgerStage -ceq 'PREPARED') {
+    if ($ledgerStage -cin $receiptRequiredStages -or $ledgerStage -ceq 'PREPARED') {
         $receiptCheck = Test-RedrixLdwParentAclMigrationLedgerBooleanRequiredTrue $Ledger['durableReceiptWritten']
         if ($receiptCheck -cne 'OK') { return $receiptCheck }
     }
     $pin = Test-RedrixLdwParentAclMigrationLedgerPins $Ledger
     if ($pin -cne 'OK') { return $pin }
-    if ($ledgerStage -in $postStages) {
+    if ($ledgerStage -cin $postStages) {
         if (-not $Ledger.ContainsKey('childSha256After') -or $null -eq $Ledger['childSha256After']) {
             return 'HOLD_CHILD_POST_STATE_MISSING'
         }
