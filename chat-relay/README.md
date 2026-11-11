@@ -42,6 +42,8 @@ Gate B: build reviewed plugin/connector tools in two *normal ChatGPT Chat* conve
 
 **In-repo synthetic Gate B (SOURCE-ONLY):** `site_https_adapter.py` + `SITE_GATE_B.md` implement the fixed Site tool schema and HTTPS gateway shim tests. This is transport/auth contract proof only — not plugin installation or auto-wake.
 
+**message_board_ui_v0 (SOURCE-ONLY):** `message_board_ui_v0.py` + `MESSAGE_BOARD_UI_V0.md` project truthful per-role inbox rows (`IN_MAILBOX` / `MANUAL_OR_TOOL_POLL_REQUIRED`) over Gate B receive validation only — not a second queue or deployed plugin panel.
+
 Gate C: verify whether supported Chat-mode mechanisms can wake a named receiving conversation automatically. Current published APIs do not document arbitrary ChatGPT-thread message injection or wake. Do not claim unattended Chat-to-Chat PASS from a mailbox receipt. If a native mechanism is unavailable, state the limitation. No ChatGPT UI scraping, session-cookie extraction, usage-cap circumvention or unreviewed browser-side automation.
 
 Gate D: non-GitHub IR candidates may carry a separately verifiable immutable artifact fingerprint and review provenance. GitHub may remain a governed source-control system, but it is not the runtime message bus. An independent review needs genuinely separate model judgment, exact candidate, known start, terminal finding, and no author self-review.
