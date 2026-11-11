@@ -111,11 +111,40 @@ function Test-RedrixLdwParentAclMigrationSyntheticHashIsNotAuthorization {
     return 'NOT_AUTHORIZED'
 }
 
+function Test-RedrixLdwParentAclMigrationScalarSha256PinShape([object]$Candidate) {
+    if ($null -eq $Candidate) { return 'HOLD_SCALAR_SHA256_INVALID' }
+    if ($Candidate -is [System.Collections.IEnumerable] -and $Candidate -isnot [string]) {
+        return 'HOLD_SCALAR_SHA256_INVALID'
+    }
+    if ($Candidate -isnot [string]) { return 'HOLD_SCALAR_SHA256_INVALID' }
+    if ($Candidate.Length -ne 64) { return 'HOLD_SCALAR_SHA256_INVALID' }
+    if ($Candidate -cmatch '[^0-9a-f]') { return 'HOLD_SCALAR_SHA256_INVALID' }
+    return 'OK'
+}
+
+function Test-RedrixLdwParentAclMigrationScalarSha256PinMatch {
+    param(
+        [object]$Candidate,
+        [string]$ExpectedPin,
+        [string]$MismatchHoldCode = 'HOLD_CHILD_PIN_DRIFT')
+    $shape = Test-RedrixLdwParentAclMigrationScalarSha256PinShape $Candidate
+    if ($shape -cne 'OK') { return $shape }
+    $trustedShape = Test-RedrixLdwParentAclMigrationScalarSha256PinShape $ExpectedPin
+    if ($trustedShape -cne 'OK') { return 'REFERENCE_PIN_SHAPE_INVALID' }
+    if ($Candidate -cne $ExpectedPin) { return $MismatchHoldCode }
+    return 'OK'
+}
+
 function Test-RedrixLdwParentAclMigrationPreconditions([pscustomobject]$Snapshot) {
     $ref = Get-RedrixLdwParentAclMigrationReference
     $errors = [System.Collections.Generic.List[string]]::new()
     if ($Snapshot.Marker -cne $script:RedrixMigrationMarker) { $errors.Add('MARKER_DRIFT') }
-    if ($Snapshot.ParentSha256Utf8Sddl -cne $ref.liveParentPreimageSha256Utf8SddlProperty) { $errors.Add('PARENT_PREIMAGE_DRIFT') }
+    $parentPin = Test-RedrixLdwParentAclMigrationScalarSha256PinMatch `
+        $Snapshot.ParentSha256Utf8Sddl `
+        $ref.liveParentPreimageSha256Utf8SddlProperty `
+        'PARENT_PREIMAGE_DRIFT'
+    if ($parentPin -ceq 'HOLD_SCALAR_SHA256_INVALID') { $errors.Add('PARENT_PREIMAGE_DRIFT') }
+    elseif ($parentPin -cne 'OK') { $errors.Add($parentPin) }
     if ($Snapshot.ParentAccessRulesProtected) { $errors.Add('ROOT_PREIMAGE_DRIFT') }
     if ($Snapshot.V1TaskName -cne $ref.fixedV1ReviewedOperationTaskName) { $errors.Add('TASK_IDENTITY_DRIFT') }
     if ($Snapshot.V1TaskState -cne 'Ready') { $errors.Add('TASK_NOT_QUIESCENT') }
@@ -126,9 +155,14 @@ function Test-RedrixLdwParentAclMigrationPreconditions([pscustomobject]$Snapshot
     if ($Snapshot.ChildrenSha256Utf8Sddl.Count -ne $expectedChildCount) { $errors.Add('TOP_LEVEL_INVENTORY_DRIFT') }
     foreach ($prop in $ref.protectedChildSddlSha256Utf8.PSObject.Properties) {
         $name = $prop.Name
-        $pin = [string]$prop.Value
         if (-not $Snapshot.ChildrenSha256Utf8Sddl.Contains($name)) { $errors.Add('TOP_LEVEL_INVENTORY_DRIFT'); break }
-        if ($Snapshot.ChildrenSha256Utf8Sddl[$name] -cne $pin) { $errors.Add('CHILD_SDDL_DRIFT') }
+        $trustedChildPin = [string]$prop.Value
+        $childPin = Test-RedrixLdwParentAclMigrationScalarSha256PinMatch `
+            $Snapshot.ChildrenSha256Utf8Sddl[$name] `
+            $trustedChildPin `
+            'CHILD_SDDL_DRIFT'
+        if ($childPin -ceq 'HOLD_SCALAR_SHA256_INVALID') { $errors.Add('CHILD_SDDL_DRIFT'); break }
+        elseif ($childPin -cne 'OK') { $errors.Add($childPin); break }
     }
     if ($errors.Count -gt 0) { return ($errors | Select-Object -First 1) }
     return 'OK'
@@ -166,24 +200,37 @@ function Test-RedrixLdwParentAclMigrationLedgerChildShaMap([hashtable]$Map) {
         if ($expectedNames -notcontains [string]$key) { return 'HOLD_CHILD_EXTRA_KEY' }
     }
     foreach ($prop in $ref.protectedChildSddlSha256Utf8.PSObject.Properties) {
-        if ($Map[$prop.Name] -cne [string]$prop.Value) { return 'HOLD_CHILD_PIN_DRIFT' }
+        $trustedPin = [string]$prop.Value
+        $match = Test-RedrixLdwParentAclMigrationScalarSha256PinMatch $Map[$prop.Name] $trustedPin 'HOLD_CHILD_PIN_DRIFT'
+        if ($match -cne 'OK') { return $match }
     }
     return 'OK'
 }
 
 function Test-RedrixLdwParentAclMigrationLedgerPins([hashtable]$Ledger) {
     $ref = Get-RedrixLdwParentAclMigrationReference
-    if ($Ledger['parentSha256Before'] -cne $ref.liveParentPreimageSha256Utf8SddlProperty) { return 'HOLD_PREIMAGE_PIN_DRIFT' }
-    if ($Ledger['targetSha256Utf8'] -cne $ref.canonicalTargetSha256Utf8SddlProperty) { return 'HOLD_TARGET_PIN_DRIFT' }
+    $parent = Test-RedrixLdwParentAclMigrationScalarSha256PinMatch `
+        $Ledger['parentSha256Before'] `
+        $ref.liveParentPreimageSha256Utf8SddlProperty `
+        'HOLD_PREIMAGE_PIN_DRIFT'
+    if ($parent -cne 'OK') { return $parent }
+    $target = Test-RedrixLdwParentAclMigrationScalarSha256PinMatch `
+        $Ledger['targetSha256Utf8'] `
+        $ref.canonicalTargetSha256Utf8SddlProperty `
+        'HOLD_TARGET_PIN_DRIFT'
+    if ($target -cne 'OK') { return $target }
     return (Test-RedrixLdwParentAclMigrationLedgerChildShaMap $Ledger['childSha256Before'])
 }
 
 function Test-RedrixLdwParentAclMigrationChildHashParity(
     [hashtable]$Before,
     [hashtable]$After) {
+    if ($null -eq $Before -or $null -eq $After) { return $false }
     if ($Before.Count -ne $After.Count) { return $false }
     foreach ($key in $Before.Keys) {
         if (-not $After.ContainsKey($key)) { return $false }
+        if ((Test-RedrixLdwParentAclMigrationScalarSha256PinShape $Before[$key]) -cne 'OK') { return $false }
+        if ((Test-RedrixLdwParentAclMigrationScalarSha256PinShape $After[$key]) -cne 'OK') { return $false }
         if ($Before[$key] -cne $After[$key]) { return $false }
     }
     return $true

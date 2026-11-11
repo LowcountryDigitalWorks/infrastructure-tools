@@ -229,6 +229,71 @@ $forgedRecovery = Copy-RedrixMigrationLedger $validLedger
 $forgedRecovery['journalComplete'] = 'false'
 Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $forgedRecovery) -ceq 'HOLD_LEDGER_BOOLEAN_INVALID') 'FORGED_JOURNAL_TRUTHY_STRING_NOT_COMPLETE'
 
+function Assert-NeverRecoveryOrRollbackReview([hashtable]$Ledger, [string]$CaseId) {
+    $recovery = Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $Ledger
+    Assert ($recovery -cne 'RECOVERY_LEDGER_COMPLETE') ($CaseId + '_NO_RECOVERY')
+    $rollback = Test-RedrixLdwParentAclMigrationRollbackPolicy $Ledger
+    Assert ($rollback -cne 'ROLLBACK_POLICY_REVIEW_ONLY_NOT_EXECUTABLE') ($CaseId + '_NO_ROLLBACK_REVIEW')
+}
+
+$reproEmptyPins = Copy-RedrixMigrationLedger $validLedger
+$reproEmptyPins['parentSha256Before'] = @()
+$reproEmptyPins['targetSha256Utf8'] = @()
+$emptyChildMap = @{}
+foreach ($name in (Get-RedrixMigrationTestChildMap).Keys) { $emptyChildMap[$name] = @() }
+$reproEmptyPins['childSha256Before'] = $emptyChildMap
+$reproEmptyPins['childSha256After'] = $emptyChildMap
+$reproEmptyPins['stage'] = 'COMMITTED'
+Assert-NeverRecoveryOrRollbackReview $reproEmptyPins 'REPRO_ALL_EMPTY_ARRAY_DIGESTS'
+
+foreach ($stage in @('PREPARED', 'COMMITTED', 'AFTER_APPLY', 'REBOOT', 'PRE_APPLY_REHEARSAL')) {
+    $stageLedger = Copy-RedrixMigrationLedger $validLedger
+    $stageLedger['stage'] = $stage
+  if ($stage -in @('COMMITTED', 'AFTER_APPLY', 'REBOOT', 'PRE_APPLY_REHEARSAL')) {
+        $stageLedger['childSha256After'] = Get-RedrixMigrationTestChildMap
+    }
+
+    $emptyParent = Copy-RedrixMigrationLedger $stageLedger
+    $emptyParent['parentSha256Before'] = @()
+    Assert-NeverRecoveryOrRollbackReview $emptyParent ('SCALAR_EMPTY_PARENT_' + $stage)
+
+    $emptyTarget = Copy-RedrixMigrationLedger $stageLedger
+    $emptyTarget['targetSha256Utf8'] = @()
+    Assert-NeverRecoveryOrRollbackReview $emptyTarget ('SCALAR_EMPTY_TARGET_' + $stage)
+
+    foreach ($childName in (Get-RedrixMigrationTestChildMap).Keys) {
+        $beforeEmpty = Copy-RedrixMigrationLedger $stageLedger
+        $beforeEmpty['childSha256Before'] = Copy-RedrixMigrationLedger $childMap
+        $beforeEmpty['childSha256Before'][$childName] = @()
+        Assert-NeverRecoveryOrRollbackReview $beforeEmpty ('SCALAR_EMPTY_BEFORE_' + $childName + '_' + $stage)
+
+        $singleArrayPin = Copy-RedrixMigrationLedger $childMap
+        $singleArrayPin[$childName] = @([string]$ref.protectedChildSddlSha256Utf8.$childName)
+        $singleArrayLedger = Copy-RedrixMigrationLedger $stageLedger
+        $singleArrayLedger['childSha256Before'] = $singleArrayPin
+        Assert-NeverRecoveryOrRollbackReview $singleArrayLedger ('SCALAR_ONE_ELEM_ARRAY_BEFORE_' + $childName + '_' + $stage)
+
+        if ($stage -in @('COMMITTED', 'AFTER_APPLY', 'REBOOT', 'PRE_APPLY_REHEARSAL')) {
+            $afterEmpty = Copy-RedrixMigrationLedger $stageLedger
+            $afterMap = Get-RedrixMigrationTestChildMap
+            $afterMap[$childName] = @()
+            $afterEmpty['childSha256After'] = $afterMap
+            Assert-NeverRecoveryOrRollbackReview $afterEmpty ('SCALAR_EMPTY_AFTER_' + $childName + '_' + $stage)
+        }
+    }
+}
+
+$snapshotEmptyChild = New-RedrixLdwParentAclMockHostSnapshot -Variant ValidPreMigration
+$snapshotEmptyChild.ChildrenSha256Utf8Sddl['CiJitControl'] = @()
+Assert ((Test-RedrixLdwParentAclMigrationPreconditions $snapshotEmptyChild) -ceq 'CHILD_SDDL_DRIFT') 'SNAPSHOT_EMPTY_ARRAY_CHILD'
+
+$upperPin = Copy-RedrixMigrationLedger $validLedger
+$upperPin['parentSha256Before'] = $ref.liveParentPreimageSha256Utf8SddlProperty.ToUpperInvariant()
+Assert-NeverRecoveryOrRollbackReview $upperPin 'SCALAR_UPPERCASE_PARENT_REJECTED'
+
+Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $validLedger) -ceq 'RECOVERY_LEDGER_COMPLETE') 'SCALAR_GOOD_LEDGER_STILL_COMPLETE'
+Assert ((Test-RedrixLdwParentAclMigrationRollbackPolicy $validLedger) -ceq 'ROLLBACK_POLICY_REVIEW_ONLY_NOT_EXECUTABLE') 'SCALAR_GOOD_ROLLBACK_REVIEW_ONLY'
+
 Write-Host ('REDRIX_LDW_PARENT_ACL_MIGRATION_REHEARSAL_TESTS=PASS assertions=' + $checks)
 Write-Host ('REDRIX_LDW_PARENT_ACL_MIGRATION_PHYSICAL_APPLY=BLOCKED_APPROVAL')
 Write-Host ('REDRIX_LDW_PARENT_ACL_MIGRATION_AUTHORITY=NOT_PHYSICAL_AUTHORITY')
