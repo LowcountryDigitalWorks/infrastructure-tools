@@ -193,6 +193,42 @@ $stockTouch = New-RedrixLdwParentAclMockHostSnapshot -Variant ValidPreMigration
 $stockTouch.StockProgramDataAclMutationAttempted = $true
 Assert ((Test-RedrixLdwParentAclMigrationPreconditions $stockTouch) -ceq 'STOCK_PROGRAMDATA_TOUCH_REFUSED') 'STOCK_PROGRAMDATA_REFUSE'
 
+function Test-RedrixLedgerBooleanAdversarial([hashtable]$Base, [string]$Field, [object]$Value, [string]$Expected, [string]$CaseId) {
+    $lg = Copy-RedrixMigrationLedger $Base
+    $lg[$Field] = $Value
+    $result = Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $lg
+    Assert ($result -ceq $Expected) $CaseId
+}
+
+$ledgerBase = Copy-RedrixMigrationLedger $validLedger
+$ledgerBase['stage'] = 'PREPARED'
+foreach ($stage in @('PREPARED', 'COMMITTED', 'AFTER_APPLY', 'REBOOT', 'PRE_APPLY_REHEARSAL')) {
+    $stageLedger = Copy-RedrixMigrationLedger $validLedger
+    $stageLedger['stage'] = $stage
+    Test-RedrixLedgerBooleanAdversarial $stageLedger 'journalComplete' 'false' 'HOLD_LEDGER_BOOLEAN_INVALID' ('JOURNAL_STRING_FALSE_' + $stage)
+    Test-RedrixLedgerBooleanAdversarial $stageLedger 'journalComplete' 'true' 'HOLD_LEDGER_BOOLEAN_INVALID' ('JOURNAL_STRING_TRUE_' + $stage)
+    Test-RedrixLedgerBooleanAdversarial $stageLedger 'journalComplete' 'True' 'HOLD_LEDGER_BOOLEAN_INVALID' ('JOURNAL_STRING_MIXED_' + $stage)
+    Test-RedrixLedgerBooleanAdversarial $stageLedger 'journalComplete' 0 'HOLD_LEDGER_BOOLEAN_INVALID' ('JOURNAL_INT_ZERO_' + $stage)
+    Test-RedrixLedgerBooleanAdversarial $stageLedger 'journalComplete' 1 'HOLD_LEDGER_BOOLEAN_INVALID' ('JOURNAL_INT_ONE_' + $stage)
+    Test-RedrixLedgerBooleanAdversarial $stageLedger 'journalComplete' @('true') 'HOLD_LEDGER_BOOLEAN_INVALID' ('JOURNAL_ARRAY_' + $stage)
+    Test-RedrixLedgerBooleanAdversarial $stageLedger 'journalComplete' @{ ok = $true } 'HOLD_LEDGER_BOOLEAN_INVALID' ('JOURNAL_OBJECT_' + $stage)
+    $missingJournal = Copy-RedrixMigrationLedger $stageLedger
+    $missingJournal.Remove('journalComplete')
+    Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $missingJournal) -ceq 'HOLD_RECOVERY_AMBIGUOUS') ('JOURNAL_ABSENT_' + $stage)
+
+    Test-RedrixLedgerBooleanAdversarial $stageLedger 'durableReceiptWritten' 'false' 'HOLD_LEDGER_BOOLEAN_INVALID' ('RECEIPT_STRING_FALSE_' + $stage)
+    Test-RedrixLedgerBooleanAdversarial $stageLedger 'durableReceiptWritten' 'true' 'HOLD_LEDGER_BOOLEAN_INVALID' ('RECEIPT_STRING_TRUE_' + $stage)
+    Test-RedrixLedgerBooleanAdversarial $stageLedger 'durableReceiptWritten' 1 'HOLD_LEDGER_BOOLEAN_INVALID' ('RECEIPT_INT_ONE_' + $stage)
+    Test-RedrixLedgerBooleanAdversarial $stageLedger 'physicalApplyAttempted' 'false' 'HOLD_LEDGER_BOOLEAN_INVALID' ('PHYSICAL_STRING_FALSE_' + $stage)
+    Test-RedrixLedgerBooleanAdversarial $stageLedger 'physicalApplyAttempted' 'true' 'HOLD_LEDGER_BOOLEAN_INVALID' ('PHYSICAL_STRING_TRUE_' + $stage)
+    Test-RedrixLedgerBooleanAdversarial $stageLedger 'physicalApplyAttempted' 1 'HOLD_LEDGER_BOOLEAN_INVALID' ('PHYSICAL_INT_ONE_' + $stage)
+    Test-RedrixLedgerBooleanAdversarial $stageLedger 'physicalApplyAttempted' $true 'HOLD_PHYSICAL_FLAG_DRIFT' ('PHYSICAL_BOOL_TRUE_' + $stage)
+}
+
+$forgedRecovery = Copy-RedrixMigrationLedger $validLedger
+$forgedRecovery['journalComplete'] = 'false'
+Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $forgedRecovery) -ceq 'HOLD_LEDGER_BOOLEAN_INVALID') 'FORGED_JOURNAL_TRUTHY_STRING_NOT_COMPLETE'
+
 Write-Host ('REDRIX_LDW_PARENT_ACL_MIGRATION_REHEARSAL_TESTS=PASS assertions=' + $checks)
 Write-Host ('REDRIX_LDW_PARENT_ACL_MIGRATION_PHYSICAL_APPLY=BLOCKED_APPROVAL')
 Write-Host ('REDRIX_LDW_PARENT_ACL_MIGRATION_AUTHORITY=NOT_PHYSICAL_AUTHORITY')

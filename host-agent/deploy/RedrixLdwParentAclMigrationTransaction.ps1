@@ -189,6 +189,21 @@ function Test-RedrixLdwParentAclMigrationChildHashParity(
     return $true
 }
 
+function Test-RedrixLdwParentAclMigrationLedgerBooleanRequiredTrue([object]$Value) {
+    if ($null -eq $Value) { return 'HOLD_LEDGER_BOOLEAN_INVALID' }
+    if ($Value -isnot [bool]) { return 'HOLD_LEDGER_BOOLEAN_INVALID' }
+    if ($Value -ceq $true) { return 'OK' }
+    return 'HOLD_RECOVERY_AMBIGUOUS'
+}
+
+function Test-RedrixLdwParentAclMigrationLedgerPhysicalApplyFlag([object]$Value) {
+    if ($null -eq $Value) { return 'HOLD_LEDGER_BOOLEAN_INVALID' }
+    if ($Value -isnot [bool]) { return 'HOLD_LEDGER_BOOLEAN_INVALID' }
+    if ($Value -ceq $true) { return 'HOLD_PHYSICAL_FLAG_DRIFT' }
+    if ($Value -ceq $false) { return 'OK' }
+    return 'HOLD_LEDGER_BOOLEAN_INVALID'
+}
+
 function Test-RedrixLdwParentAclMigrationRecoveryAfterReboot([hashtable]$Ledger) {
     if ($null -eq $Ledger) { return 'HOLD_RECOVERY_AMBIGUOUS' }
     $required = @(
@@ -198,17 +213,17 @@ function Test-RedrixLdwParentAclMigrationRecoveryAfterReboot([hashtable]$Ledger)
         if (-not $Ledger.ContainsKey($key)) { return 'HOLD_RECOVERY_AMBIGUOUS' }
     }
     if ($Ledger['marker'] -cne $script:RedrixMigrationMarker) { return 'HOLD_LEDGER_FORGED' }
-    if (-not $Ledger['journalComplete']) { return 'HOLD_RECOVERY_AMBIGUOUS' }
-    if ($Ledger['physicalApplyAttempted']) { return 'HOLD_PHYSICAL_FLAG_DRIFT' }
+    $journalCheck = Test-RedrixLdwParentAclMigrationLedgerBooleanRequiredTrue $Ledger['journalComplete']
+    if ($journalCheck -cne 'OK') { return $journalCheck }
+    $physicalCheck = Test-RedrixLdwParentAclMigrationLedgerPhysicalApplyFlag $Ledger['physicalApplyAttempted']
+    if ($physicalCheck -cne 'OK') { return $physicalCheck }
     $allowedStages = @('PREPARED', 'COMMITTED', 'AFTER_APPLY', 'REBOOT', 'PRE_APPLY_REHEARSAL')
     if ($Ledger['stage'] -notin $allowedStages) { return 'HOLD_LEDGER_STAGE_AMBIGUOUS' }
     $postStages = @('COMMITTED', 'AFTER_APPLY', 'REBOOT', 'PRE_APPLY_REHEARSAL')
     $receiptRequiredStages = @('COMMITTED', 'AFTER_APPLY', 'REBOOT', 'PRE_APPLY_REHEARSAL')
-    if ($Ledger['stage'] -in $receiptRequiredStages -and -not $Ledger['durableReceiptWritten']) {
-        return 'HOLD_RECOVERY_AMBIGUOUS'
-    }
-    if ($Ledger['stage'] -eq 'PREPARED' -and -not $Ledger['durableReceiptWritten']) {
-        return 'HOLD_RECOVERY_AMBIGUOUS'
+    if ($Ledger['stage'] -in $receiptRequiredStages -or $Ledger['stage'] -ceq 'PREPARED') {
+        $receiptCheck = Test-RedrixLdwParentAclMigrationLedgerBooleanRequiredTrue $Ledger['durableReceiptWritten']
+        if ($receiptCheck -cne 'OK') { return $receiptCheck }
     }
     $pin = Test-RedrixLdwParentAclMigrationLedgerPins $Ledger
     if ($pin -cne 'OK') { return $pin }
