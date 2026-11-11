@@ -1,0 +1,22 @@
+{
+  "schema": "REDRIX_LDW_PARENT_ACL_MIGRATION_TRANSACTION_V1",
+  "classification": "NON_EXECUTABLE_REHEARSAL_ONLY",
+  "authorityClassification": "NOT_PHYSICAL_AUTHORITY",
+  "verificationStatus": "SOURCE_REHEARSAL_SYNTHETIC",
+  "physicalApplyDefault": "BLOCKED_APPROVAL",
+  "fixedProgramDataLeafName": "ProgramData",
+  "fixedLdwParentDirectoryName": "LDW",
+  "fixedV1ReviewedOperationTaskName": "LDW-ADMIN-REVIEWED-OPERATION",
+  "liveParentPreimageSha256Utf8SddlProperty": "d7262f4d667814fce0820acbabe2613e352c22614ae7de2105879459c7fbb2a9",
+  "canonicalTargetSddl": "O:SYG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)",
+  "canonicalTargetSha256Utf8SddlProperty": "d0d4816b0b001698a7f49ee24dab0eff49f784bcd9164ad5504b6e45f47f0a41",
+  "syntheticHashIsNotMutationAuthority": true,
+  "protectedChildSddlSha256Utf8": {
+    "CiJitControl": "8f40c3b139e861b100c54944e99517c6dad65e9c7ad4831898f97f806af8e626",
+    "CiJitStatus": "8f40c3b139e861b100c54944e99517c6dad65e9c7ad4831898f97f806af8e626",
+    "CiRunnerDispatch": "7ad481f8a327149b1b0848cb05cd48e089f50bb0aba8acc247aa771e66445142",
+    "CiRunnerEphemeral": "7ad481f8a327149b1b0848cb05cd48e089f50bb0aba8acc247aa771e66445142",
+    "DragonflyCanaryAdjunct": "7ad481f8a327149b1b0848cb05cd48e089f50bb0aba8acc247aa771e66445142",
+    "PrivilegedControl": "8f40c3b139e861b100c54944e99517c6dad65e9c7ad4831898f97f806af8e626"
+  }
+}
