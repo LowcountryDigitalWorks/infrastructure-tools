@@ -51,7 +51,7 @@ Assert (@($ref.protectedChildSddlSha256Utf8.PSObject.Properties).Count -eq 6) 'S
 
 $binding = Get-RedrixLdwParentAclMigrationMachineProgramDataBinding
 Assert ($binding.policy -ceq 'OK') 'MACHINE_BINDING_OK'
-Assert ($binding.hostRootTrustBound) 'HOST_ROOT_TRUST_ON_MACHINE'
+Assert ($binding.machineProgramDataPathBound) 'MACHINE_PROGRAMDATA_PATH_BOUND'
 Assert ((Test-RedrixLdwParentAclMigrationProgramDataPathPolicy) -ceq 'OK') 'POLICY_NO_CALLER_OK'
 
 $machinePd = [string]$binding.machineKnownPath
@@ -293,6 +293,101 @@ Assert-NeverRecoveryOrRollbackReview $upperPin 'SCALAR_UPPERCASE_PARENT_REJECTED
 
 Assert ((Test-RedrixLdwParentAclMigrationRecoveryAfterReboot $validLedger) -ceq 'RECOVERY_LEDGER_COMPLETE') 'SCALAR_GOOD_LEDGER_STILL_COMPLETE'
 Assert ((Test-RedrixLdwParentAclMigrationRollbackPolicy $validLedger) -ceq 'ROLLBACK_POLICY_REVIEW_ONLY_NOT_EXECUTABLE') 'SCALAR_GOOD_ROLLBACK_REVIEW_ONLY'
+
+function Assert-PreconditionNeverOk([pscustomobject]$Snapshot, [string]$CaseId) {
+    $pre = Test-RedrixLdwParentAclMigrationPreconditions $Snapshot
+    Assert ($pre -cne 'OK') ($CaseId + '_PRE_NOT_OK')
+    $rehearsal = Invoke-RedrixLdwParentAclMigrationRehearsal $Snapshot
+    Assert ($rehearsal.outcome -cne 'REHEARSAL_PASS_NO_APPLY') ($CaseId + '_NO_REHEARSAL_PASS')
+}
+
+$identityBase = New-RedrixLdwParentAclMockHostSnapshot -Variant ValidPreMigration
+$emptyMarkerSnap = New-RedrixLdwParentAclMockHostSnapshot -Variant ValidPreMigration
+$emptyMarkerSnap.Marker = @()
+Assert-PreconditionNeverOk $emptyMarkerSnap 'SNAP_MARKER_EMPTY_ARRAY'
+
+$emptyTaskSnap = New-RedrixLdwParentAclMockHostSnapshot -Variant ValidPreMigration
+$emptyTaskSnap.V1TaskName = @()
+Assert-PreconditionNeverOk $emptyTaskSnap 'SNAP_V1_NAME_EMPTY_ARRAY'
+
+$emptyStateSnap = New-RedrixLdwParentAclMockHostSnapshot -Variant ValidPreMigration
+$emptyStateSnap.V1TaskState = @()
+Assert-PreconditionNeverOk $emptyStateSnap 'SNAP_V1_STATE_EMPTY_ARRAY'
+
+$emptyTriggerSnap = New-RedrixLdwParentAclMockHostSnapshot -Variant ValidPreMigration
+$emptyTriggerSnap.V1TaskTriggerCount = @()
+Assert-PreconditionNeverOk $emptyTriggerSnap 'SNAP_V1_TRIGGER_EMPTY_ARRAY'
+
+$stringZeroTrigger = New-RedrixLdwParentAclMockHostSnapshot -Variant ValidPreMigration
+$stringZeroTrigger.V1TaskTriggerCount = '0'
+Assert-PreconditionNeverOk $stringZeroTrigger 'SNAP_V1_TRIGGER_STRING_ZERO'
+
+$int64Trigger = New-RedrixLdwParentAclMockHostSnapshot -Variant ValidPreMigration
+$int64Trigger.V1TaskTriggerCount = [int64]0
+Assert-PreconditionNeverOk $int64Trigger 'SNAP_V1_TRIGGER_INT64'
+
+$doubleTrigger = New-RedrixLdwParentAclMockHostSnapshot -Variant ValidPreMigration
+$doubleTrigger.V1TaskTriggerCount = [double]0
+Assert-PreconditionNeverOk $doubleTrigger 'SNAP_V1_TRIGGER_DOUBLE'
+
+$falseParentProt = New-RedrixLdwParentAclMockHostSnapshot -Variant ValidPreMigration
+$falseParentProt.ParentAccessRulesProtected = @()
+Assert-PreconditionNeverOk $falseParentProt 'SNAP_PARENT_PROTECTED_EMPTY_ARRAY'
+
+$stringFalseStock = New-RedrixLdwParentAclMockHostSnapshot -Variant ValidPreMigration
+$stringFalseStock.StockProgramDataAclMutationAttempted = 'false'
+Assert-PreconditionNeverOk $stringFalseStock 'SNAP_STOCK_STRING_FALSE'
+
+$spoofEmpty = New-RedrixLdwParentAclMockHostSnapshot -Variant ValidPreMigration
+$spoofEmpty.ProcessProgramDataSpoofed = @()
+Assert-PreconditionNeverOk $spoofEmpty 'SNAP_SPOOF_EMPTY_ARRAY'
+
+$childArraySpoof = New-RedrixLdwParentAclMockHostSnapshot -Variant ValidPreMigration
+$childArraySpoof.ChildrenSha256Utf8Sddl = @(Get-RedrixMigrationTestChildMap).Values
+Assert-PreconditionNeverOk $childArraySpoof 'SNAP_CHILDREN_AS_ARRAY'
+
+$hashtableSnap = @{
+    Marker = $script:RedrixMigrationMarker
+    ParentSha256Utf8Sddl = $ref.liveParentPreimageSha256Utf8SddlProperty
+    ParentAccessRulesProtected = $false
+    ChildrenSha256Utf8Sddl = Get-RedrixMigrationTestChildMap
+    V1TaskName = $ref.fixedV1ReviewedOperationTaskName
+    V1TaskState = 'Ready'
+    V1TaskTriggerCount = 0
+    StockProgramDataAclMutationAttempted = $false
+    ProcessProgramDataSpoofed = $false
+}
+Assert ((Test-RedrixLdwParentAclMigrationPreconditions $hashtableSnap) -cne 'OK') 'SNAP_HASHTABLE_NOT_PSCUSTOMOBJECT'
+$arraySnap = @($identityBase)
+Assert ((Test-RedrixLdwParentAclMigrationPreconditions $arraySnap) -cne 'OK') 'SNAP_ARRAY_NOT_PSCUSTOMOBJECT'
+
+Assert ((Test-RedrixLdwParentAclMigrationPreconditions $identityBase) -ceq 'OK') 'SNAP_IDENTITY_GOOD_CASE'
+
+$ledgerMarkerEmpty = Copy-RedrixMigrationLedger $validLedger
+$ledgerMarkerEmpty['marker'] = @()
+Assert-NeverRecoveryOrRollbackReview $ledgerMarkerEmpty 'LEDGER_MARKER_EMPTY_ARRAY'
+
+$ledgerStageEmpty = Copy-RedrixMigrationLedger $validLedger
+$ledgerStageEmpty['stage'] = @()
+Assert-NeverRecoveryOrRollbackReview $ledgerStageEmpty 'LEDGER_STAGE_EMPTY_ARRAY'
+
+$ledgerStageArray = Copy-RedrixMigrationLedger $validLedger
+$ledgerStageArray['stage'] = @('COMMITTED')
+Assert-NeverRecoveryOrRollbackReview $ledgerStageArray 'LEDGER_STAGE_ONE_ELEM_ARRAY'
+
+foreach ($stage in @('PREPARED', 'COMMITTED', 'AFTER_APPLY', 'REBOOT', 'PRE_APPLY_REHEARSAL')) {
+    $stageLedger = Copy-RedrixMigrationLedger $validLedger
+    $stageLedger['stage'] = $stage
+    if ($stage -in @('COMMITTED', 'AFTER_APPLY', 'REBOOT', 'PRE_APPLY_REHEARSAL')) {
+        $stageLedger['childSha256After'] = Get-RedrixMigrationTestChildMap
+    }
+    $stageLedger['marker'] = @()
+    Assert-NeverRecoveryOrRollbackReview $stageLedger ('LEDGER_MARKER_EMPTY_' + $stage)
+    $badStage = Copy-RedrixMigrationLedger $stageLedger
+    $badStage['marker'] = $script:RedrixMigrationMarker
+    $badStage['stage'] = @()
+    Assert-NeverRecoveryOrRollbackReview $badStage ('LEDGER_STAGE_EMPTY_' + $stage)
+}
 
 Write-Host ('REDRIX_LDW_PARENT_ACL_MIGRATION_REHEARSAL_TESTS=PASS assertions=' + $checks)
 Write-Host ('REDRIX_LDW_PARENT_ACL_MIGRATION_PHYSICAL_APPLY=BLOCKED_APPROVAL')

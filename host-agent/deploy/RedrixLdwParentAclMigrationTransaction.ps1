@@ -52,7 +52,7 @@ function Get-RedrixLdwParentAclMigrationMachineProgramDataBinding {
         return [ordered]@{
             policy = 'MACHINE_PROGRAMDATA_MISSING'
             machineKnownPath = $null
-            hostRootTrustBound = $false
+            machineProgramDataPathBound = $false
         }
     }
     $pd = [IO.Path]::GetFullPath($known)
@@ -60,7 +60,7 @@ function Get-RedrixLdwParentAclMigrationMachineProgramDataBinding {
         return [ordered]@{
             policy = 'MACHINE_PROGRAMDATA_INVALID'
             machineKnownPath = $pd
-            hostRootTrustBound = $false
+            machineProgramDataPathBound = $false
         }
     }
     $machineReg = [Environment]::GetEnvironmentVariable('ProgramData', 'Machine')
@@ -68,7 +68,7 @@ function Get-RedrixLdwParentAclMigrationMachineProgramDataBinding {
         return [ordered]@{
             policy = 'MACHINE_PROGRAMDATA_DRIFT'
             machineKnownPath = $pd
-            hostRootTrustBound = $false
+            machineProgramDataPathBound = $false
         }
     }
     $proc = $env:ProgramData
@@ -76,13 +76,13 @@ function Get-RedrixLdwParentAclMigrationMachineProgramDataBinding {
         return [ordered]@{
             policy = 'PROCESS_PROGRAMDATA_SPOOFED'
             machineKnownPath = $pd
-            hostRootTrustBound = $false
+            machineProgramDataPathBound = $false
         }
     }
     return [ordered]@{
         policy = 'OK'
         machineKnownPath = $pd
-        hostRootTrustBound = $true
+        machineProgramDataPathBound = $true
     }
 }
 
@@ -122,6 +122,71 @@ function Test-RedrixLdwParentAclMigrationScalarSha256PinShape([object]$Candidate
     return 'OK'
 }
 
+function Test-RedrixLdwParentAclMigrationRequiredScalarStringEqual {
+    param(
+        [object]$Candidate,
+        [string]$Expected,
+        [string]$MismatchHoldCode = 'HOLD_SCALAR_STRING_INVALID')
+    if ($null -eq $Candidate) { return 'HOLD_SCALAR_STRING_INVALID' }
+    if ($Candidate -is [System.Collections.IEnumerable] -and $Candidate -isnot [string]) {
+        return 'HOLD_SCALAR_STRING_INVALID'
+    }
+    if ($Candidate -isnot [string]) { return 'HOLD_SCALAR_STRING_INVALID' }
+    if ($Candidate -cne $Expected) { return $MismatchHoldCode }
+    return 'OK'
+}
+
+function Test-RedrixLdwParentAclMigrationRequiredScalarStringOneOf {
+    param(
+        [object]$Candidate,
+        [string[]]$Allowed,
+        [string]$ShapeHoldCode = 'HOLD_SCALAR_STRING_INVALID',
+        [string]$NotAllowedHoldCode = 'HOLD_LEDGER_STAGE_AMBIGUOUS')
+    if ($null -eq $Candidate) { return $ShapeHoldCode }
+    if ($Candidate -is [System.Collections.IEnumerable] -and $Candidate -isnot [string]) {
+        return $ShapeHoldCode
+    }
+    if ($Candidate -isnot [string]) { return $ShapeHoldCode }
+    if ($Allowed -notcontains $Candidate) { return $NotAllowedHoldCode }
+    return 'OK'
+}
+
+function Test-RedrixLdwParentAclMigrationRequiredBooleanFalse {
+    param(
+        [object]$Value,
+        [string]$TruthyHoldCode = 'HOLD_BOOLEAN_SHAPE_INVALID')
+    if ($null -eq $Value) { return 'HOLD_BOOLEAN_SHAPE_INVALID' }
+    if ($Value -isnot [bool]) { return 'HOLD_BOOLEAN_SHAPE_INVALID' }
+    if ($Value -ceq $true) { return $TruthyHoldCode }
+    if ($Value -ceq $false) { return 'OK' }
+    return 'HOLD_BOOLEAN_SHAPE_INVALID'
+}
+
+function Test-RedrixLdwParentAclMigrationRequiredInt32Zero([object]$Value) {
+    if ($null -eq $Value) { return 'HOLD_INT32_SHAPE_INVALID' }
+    if ($Value -isnot [int]) { return 'HOLD_INT32_SHAPE_INVALID' }
+    if ($Value -ceq 0) { return 'OK' }
+    return 'TASK_TRIGGER_DRIFT'
+}
+
+function Test-RedrixLdwParentAclMigrationTrustedChildShaIdictionary([object]$Map) {
+    $ref = Get-RedrixLdwParentAclMigrationReference
+    if ($null -eq $Map) { return 'TOP_LEVEL_INVENTORY_DRIFT' }
+    if ($Map -isnot [System.Collections.IDictionary]) { return 'TOP_LEVEL_INVENTORY_DRIFT' }
+    $expectedNames = @($ref.protectedChildSddlSha256Utf8.PSObject.Properties | ForEach-Object { $_.Name })
+    if ($Map.Count -ne $expectedNames.Count) { return 'TOP_LEVEL_INVENTORY_DRIFT' }
+    foreach ($key in $Map.Keys) {
+        if ($expectedNames -notcontains [string]$key) { return 'TOP_LEVEL_INVENTORY_DRIFT' }
+    }
+    foreach ($prop in $ref.protectedChildSddlSha256Utf8.PSObject.Properties) {
+        $trustedPin = [string]$prop.Value
+        $match = Test-RedrixLdwParentAclMigrationScalarSha256PinMatch $Map[$prop.Name] $trustedPin 'CHILD_SDDL_DRIFT'
+        if ($match -ceq 'HOLD_SCALAR_SHA256_INVALID') { return 'CHILD_SDDL_DRIFT' }
+        if ($match -cne 'OK') { return $match }
+    }
+    return 'OK'
+}
+
 function Test-RedrixLdwParentAclMigrationScalarSha256PinMatch {
     param(
         [object]$Candidate,
@@ -135,35 +200,44 @@ function Test-RedrixLdwParentAclMigrationScalarSha256PinMatch {
     return 'OK'
 }
 
-function Test-RedrixLdwParentAclMigrationPreconditions([pscustomobject]$Snapshot) {
+function Test-RedrixLdwParentAclMigrationPreconditions([object]$Snapshot) {
     $ref = Get-RedrixLdwParentAclMigrationReference
     $errors = [System.Collections.Generic.List[string]]::new()
-    if ($Snapshot.Marker -cne $script:RedrixMigrationMarker) { $errors.Add('MARKER_DRIFT') }
+    if ($null -eq $Snapshot) { return 'MARKER_DRIFT' }
+    if ($Snapshot -isnot [pscustomobject]) { return 'MARKER_DRIFT' }
+    $marker = Test-RedrixLdwParentAclMigrationRequiredScalarStringEqual `
+        $Snapshot.Marker $script:RedrixMigrationMarker 'MARKER_DRIFT'
+    if ($marker -cne 'OK') { $errors.Add($marker) }
     $parentPin = Test-RedrixLdwParentAclMigrationScalarSha256PinMatch `
         $Snapshot.ParentSha256Utf8Sddl `
         $ref.liveParentPreimageSha256Utf8SddlProperty `
         'PARENT_PREIMAGE_DRIFT'
     if ($parentPin -ceq 'HOLD_SCALAR_SHA256_INVALID') { $errors.Add('PARENT_PREIMAGE_DRIFT') }
     elseif ($parentPin -cne 'OK') { $errors.Add($parentPin) }
-    if ($Snapshot.ParentAccessRulesProtected) { $errors.Add('ROOT_PREIMAGE_DRIFT') }
-    if ($Snapshot.V1TaskName -cne $ref.fixedV1ReviewedOperationTaskName) { $errors.Add('TASK_IDENTITY_DRIFT') }
-    if ($Snapshot.V1TaskState -cne 'Ready') { $errors.Add('TASK_NOT_QUIESCENT') }
-    if ($Snapshot.V1TaskTriggerCount -ne 0) { $errors.Add('TASK_TRIGGER_DRIFT') }
-    if ($Snapshot.StockProgramDataAclMutationAttempted) { $errors.Add('STOCK_PROGRAMDATA_TOUCH_REFUSED') }
-    if ($Snapshot.ProcessProgramDataSpoofed) { return 'PROCESS_PROGRAMDATA_SPOOFED' }
-    $expectedChildCount = @($ref.protectedChildSddlSha256Utf8.PSObject.Properties).Count
-    if ($Snapshot.ChildrenSha256Utf8Sddl.Count -ne $expectedChildCount) { $errors.Add('TOP_LEVEL_INVENTORY_DRIFT') }
-    foreach ($prop in $ref.protectedChildSddlSha256Utf8.PSObject.Properties) {
-        $name = $prop.Name
-        if (-not $Snapshot.ChildrenSha256Utf8Sddl.Contains($name)) { $errors.Add('TOP_LEVEL_INVENTORY_DRIFT'); break }
-        $trustedChildPin = [string]$prop.Value
-        $childPin = Test-RedrixLdwParentAclMigrationScalarSha256PinMatch `
-            $Snapshot.ChildrenSha256Utf8Sddl[$name] `
-            $trustedChildPin `
-            'CHILD_SDDL_DRIFT'
-        if ($childPin -ceq 'HOLD_SCALAR_SHA256_INVALID') { $errors.Add('CHILD_SDDL_DRIFT'); break }
-        elseif ($childPin -cne 'OK') { $errors.Add($childPin); break }
-    }
+    $parentProtected = Test-RedrixLdwParentAclMigrationRequiredBooleanFalse `
+        $Snapshot.ParentAccessRulesProtected 'ROOT_PREIMAGE_DRIFT'
+    if ($parentProtected -ceq 'HOLD_BOOLEAN_SHAPE_INVALID') { $errors.Add('ROOT_PREIMAGE_DRIFT') }
+    elseif ($parentProtected -cne 'OK') { $errors.Add($parentProtected) }
+    $taskName = Test-RedrixLdwParentAclMigrationRequiredScalarStringEqual `
+        $Snapshot.V1TaskName $ref.fixedV1ReviewedOperationTaskName 'TASK_IDENTITY_DRIFT'
+    if ($taskName -cne 'OK') { $errors.Add($taskName) }
+    $taskState = Test-RedrixLdwParentAclMigrationRequiredScalarStringEqual `
+        $Snapshot.V1TaskState 'Ready' 'TASK_NOT_QUIESCENT'
+    if ($taskState -cne 'OK') { $errors.Add($taskState) }
+    $triggerCount = Test-RedrixLdwParentAclMigrationRequiredInt32Zero $Snapshot.V1TaskTriggerCount
+    if ($triggerCount -ceq 'HOLD_INT32_SHAPE_INVALID') { $errors.Add('TASK_TRIGGER_DRIFT') }
+    elseif ($triggerCount -cne 'OK') { $errors.Add($triggerCount) }
+    $stockTouch = Test-RedrixLdwParentAclMigrationRequiredBooleanFalse `
+        $Snapshot.StockProgramDataAclMutationAttempted 'STOCK_PROGRAMDATA_TOUCH_REFUSED'
+    if ($stockTouch -ceq 'HOLD_BOOLEAN_SHAPE_INVALID') { $errors.Add('STOCK_PROGRAMDATA_TOUCH_REFUSED') }
+    elseif ($stockTouch -cne 'OK') { $errors.Add($stockTouch) }
+    $procSpoof = Test-RedrixLdwParentAclMigrationRequiredBooleanFalse `
+        $Snapshot.ProcessProgramDataSpoofed 'PROCESS_PROGRAMDATA_SPOOFED'
+    if ($procSpoof -ceq 'PROCESS_PROGRAMDATA_SPOOFED') { return 'PROCESS_PROGRAMDATA_SPOOFED' }
+    if ($procSpoof -ceq 'HOLD_BOOLEAN_SHAPE_INVALID') { $errors.Add('PROCESS_PROGRAMDATA_SPOOFED') }
+    elseif ($procSpoof -cne 'OK') { $errors.Add($procSpoof) }
+    $childMap = Test-RedrixLdwParentAclMigrationTrustedChildShaIdictionary $Snapshot.ChildrenSha256Utf8Sddl
+    if ($childMap -cne 'OK') { $errors.Add($childMap) }
     if ($errors.Count -gt 0) { return ($errors | Select-Object -First 1) }
     return 'OK'
 }
@@ -259,22 +333,28 @@ function Test-RedrixLdwParentAclMigrationRecoveryAfterReboot([hashtable]$Ledger)
     foreach ($key in $required) {
         if (-not $Ledger.ContainsKey($key)) { return 'HOLD_RECOVERY_AMBIGUOUS' }
     }
-    if ($Ledger['marker'] -cne $script:RedrixMigrationMarker) { return 'HOLD_LEDGER_FORGED' }
+    $markerCheck = Test-RedrixLdwParentAclMigrationRequiredScalarStringEqual `
+        $Ledger['marker'] $script:RedrixMigrationMarker 'HOLD_LEDGER_FORGED'
+    if ($markerCheck -ceq 'HOLD_SCALAR_STRING_INVALID') { return 'HOLD_LEDGER_FORGED' }
+    if ($markerCheck -cne 'OK') { return $markerCheck }
     $journalCheck = Test-RedrixLdwParentAclMigrationLedgerBooleanRequiredTrue $Ledger['journalComplete']
     if ($journalCheck -cne 'OK') { return $journalCheck }
     $physicalCheck = Test-RedrixLdwParentAclMigrationLedgerPhysicalApplyFlag $Ledger['physicalApplyAttempted']
     if ($physicalCheck -cne 'OK') { return $physicalCheck }
     $allowedStages = @('PREPARED', 'COMMITTED', 'AFTER_APPLY', 'REBOOT', 'PRE_APPLY_REHEARSAL')
-    if ($Ledger['stage'] -notin $allowedStages) { return 'HOLD_LEDGER_STAGE_AMBIGUOUS' }
+    $stageCheck = Test-RedrixLdwParentAclMigrationRequiredScalarStringOneOf `
+        $Ledger['stage'] $allowedStages 'HOLD_SCALAR_STRING_INVALID' 'HOLD_LEDGER_STAGE_AMBIGUOUS'
+    if ($stageCheck -cne 'OK') { return $stageCheck }
+    $ledgerStage = [string]$Ledger['stage']
     $postStages = @('COMMITTED', 'AFTER_APPLY', 'REBOOT', 'PRE_APPLY_REHEARSAL')
     $receiptRequiredStages = @('COMMITTED', 'AFTER_APPLY', 'REBOOT', 'PRE_APPLY_REHEARSAL')
-    if ($Ledger['stage'] -in $receiptRequiredStages -or $Ledger['stage'] -ceq 'PREPARED') {
+    if ($ledgerStage -in $receiptRequiredStages -or $ledgerStage -ceq 'PREPARED') {
         $receiptCheck = Test-RedrixLdwParentAclMigrationLedgerBooleanRequiredTrue $Ledger['durableReceiptWritten']
         if ($receiptCheck -cne 'OK') { return $receiptCheck }
     }
     $pin = Test-RedrixLdwParentAclMigrationLedgerPins $Ledger
     if ($pin -cne 'OK') { return $pin }
-    if ($Ledger['stage'] -in $postStages) {
+    if ($ledgerStage -in $postStages) {
         if (-not $Ledger.ContainsKey('childSha256After') -or $null -eq $Ledger['childSha256After']) {
             return 'HOLD_CHILD_POST_STATE_MISSING'
         }
@@ -314,7 +394,7 @@ function Invoke-RedrixLdwParentAclMigrationApplyBoundary {
     }
 }
 
-function Invoke-RedrixLdwParentAclMigrationRehearsal([pscustomobject]$Snapshot) {
+function Invoke-RedrixLdwParentAclMigrationRehearsal([object]$Snapshot) {
     $ref = Get-RedrixLdwParentAclMigrationReference
     $binding = Get-RedrixLdwParentAclMigrationMachineProgramDataBinding
     if ($binding.policy -cne 'OK') {
