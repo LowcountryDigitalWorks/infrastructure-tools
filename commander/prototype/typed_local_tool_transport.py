@@ -44,6 +44,18 @@ FORBIDDEN_ARG_KEYS = frozenset({
 MAX_TOOL_JSON_BYTES = 4096
 MAX_PROCESS_OUTPUT = 256
 IDENTITY_INJECTION = "IDENTITY_INJECTION_REFUSED"
+SESSION_ID_MISMATCH = "SESSION_ID_MISMATCH"
+UNKNOWN_ARGUMENT_FIELD = "UNKNOWN_ARGUMENT_FIELD"
+
+TOOL_ARG_ALLOWLIST: dict[str, frozenset[str]] = {
+    "hosts_list": frozenset(),
+    "session_open": frozenset(),
+    "session_close": frozenset({"session_id"}),
+    "fs_read": frozenset({"command_id", "name"}),
+    "fs_write": frozenset({"command_id", "name", "value"}),
+    "run_fixed_canary": frozenset({"command_id"}),
+    "process_read": frozenset(),
+}
 
 
 class TypedLocalToolRefused(ValueError):
@@ -113,6 +125,14 @@ def _reject_identity_injection(arguments: dict[str, Any] | None) -> dict[str, An
     return arguments
 
 
+def _enforce_allowlisted_args(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    allowed = TOOL_ARG_ALLOWLIST[tool]
+    unknown = set(arguments) - allowed
+    if unknown:
+        raise TypedLocalToolRefused(UNKNOWN_ARGUMENT_FIELD)
+    return arguments
+
+
 def sanitize_tool_payload(payload: object) -> dict[str, object]:
     """Bound JSON size for model-visible transport summaries."""
     try:
@@ -153,10 +173,26 @@ class TypedLocalToolDispatcher:
             raise TypedLocalToolRefused("GRANT_UNAVAILABLE")
         self._grant = grant
 
+    def _verify_bound_session_live(self) -> None:
+        """Read-only grant/session check; does not consume command budget."""
+        if self._session_id is None or self._grant is None:
+            raise TypedLocalToolRefused("SESSION_NOT_OPEN")
+        probe = self._probe
+        with probe._lock:
+            grant = probe._decode(self._grant)
+            sid = probe._check(grant, self._binding.operator)
+            if sid != self._session_id:
+                raise TypedLocalToolRefused(SESSION_ID_MISMATCH)
+            if sid in probe._revoked:
+                raise SessionRefused("REVOKED_SESSION")
+            state = probe._active.get(sid)
+            if state is None or state["grant"] != grant:
+                raise SessionRefused("SESSION_NOT_OPEN")
+
     def dispatch(self, tool: str, arguments: dict[str, Any] | None = None) -> dict[str, object]:
         if tool not in ALLOWED_TOOLS:
             raise TypedLocalToolRefused("UNKNOWN_TOOL")
-        args = _reject_identity_injection(arguments)
+        args = _enforce_allowlisted_args(tool, _reject_identity_injection(arguments))
         if tool == "hosts_list":
             result = {
                 "state": "HOSTS_ENUMERATED",
@@ -181,17 +217,19 @@ class TypedLocalToolDispatcher:
             return sanitize_tool_payload(result)
 
         if tool == "session_close":
-            sid = args.get("session_id")
-            if sid is None:
-                if self._session_id is None:
-                    raise TypedLocalToolRefused("SESSION_NOT_OPEN")
-                sid = self._session_id
-            if not isinstance(sid, str):
-                raise TypedLocalToolRefused("MALFORMED_ARGUMENTS")
+            if self._session_id is None:
+                raise TypedLocalToolRefused("SESSION_NOT_OPEN")
+            requested = args.get("session_id")
+            if requested is not None:
+                if not isinstance(requested, str):
+                    raise TypedLocalToolRefused("MALFORMED_ARGUMENTS")
+                if requested != self._session_id:
+                    raise TypedLocalToolRefused(SESSION_ID_MISMATCH)
+            sid = self._session_id
+            self._verify_bound_session_live()
             closed = self._probe.revoke(sid)
-            if self._session_id == sid:
-                self._session_id = None
-                self._last_process = None
+            self._session_id = None
+            self._last_process = None
             result = {"state": "SESSION_CLOSED", **closed}
             return sanitize_tool_payload(result)
 
@@ -238,10 +276,9 @@ class TypedLocalToolDispatcher:
             return sanitize_tool_payload(result)
 
         if tool == "process_read":
-            if args:
-                raise TypedLocalToolRefused("MALFORMED_ARGUMENTS")
             if self._last_process is None:
                 raise TypedLocalToolRefused("PROCESS_NOT_RUN")
+            self._verify_bound_session_live()
             result = {
                 "state": "PROCESS_READ",
                 "session_id": self._session_id,

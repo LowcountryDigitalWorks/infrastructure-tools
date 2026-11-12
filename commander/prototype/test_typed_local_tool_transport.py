@@ -209,6 +209,45 @@ class TypedLocalToolTransportTests(unittest.TestCase):
         out = self.harness.invoke("process_read", {})
         self.assertEqual(out["reason"], "PROCESS_NOT_RUN")
 
+    def test_neg_process_read_denied_after_grant_ttl_and_repeat(self):
+        self.harness.invoke("session_open", {})
+        self.harness.invoke("run_fixed_canary", {"command_id": cid()})
+        preview_live = self.harness.invoke("process_read", {})
+        self.assertEqual(preview_live["state"], "PROCESS_READ")
+        self.now[0] = 2_040.0
+        denied = self.harness.invoke("process_read", {})
+        self.assertEqual(denied, {"state": "TOOL_REFUSED", "reason": "EXPIRED_OR_NOT_YET_VALID"})
+        denied_again = self.harness.invoke("process_read", {})
+        self.assertEqual(denied_again["reason"], "EXPIRED_OR_NOT_YET_VALID")
+
+    def test_neg_session_close_foreign_session_id_leaves_bound_session(self):
+        opened = self.harness.invoke("session_open", {})
+        sid = opened["session_id"]
+        foreign = str(uuid.uuid4())
+        self.assertNotEqual(foreign, sid)
+        blocked = self.harness.invoke("session_close", {"session_id": foreign})
+        self.assertEqual(blocked, {"state": "TOOL_REFUSED", "reason": "SESSION_ID_MISMATCH"})
+        still_open = self.harness.invoke("fs_write", {
+            "command_id": cid(), "name": "open.txt", "value": "still",
+        })
+        self.assertEqual(still_open["state"], "LOCAL_USER_MODE_PROOF")
+        closed = self.harness.invoke("session_close", {})
+        self.assertEqual(closed["state"], "REVOKED")
+
+    def test_neg_unknown_argument_field_on_fs_write(self):
+        self.harness.invoke("session_open", {})
+        out = self.harness.invoke("fs_write", {
+            "command_id": cid(), "name": "extra.txt", "value": "x", "safe": True,
+        })
+        self.assertEqual(out, {"state": "TOOL_REFUSED", "reason": "UNKNOWN_ARGUMENT_FIELD"})
+
+    def test_pos_session_close_without_session_id_uses_bound_session(self):
+        opened = self.harness.invoke("session_open", {})
+        self.harness.invoke("run_fixed_canary", {"command_id": cid()})
+        closed = self.harness.invoke("session_close", {})
+        self.assertEqual(closed["state"], "REVOKED")
+        self.assertEqual(closed["session_id"], opened["session_id"])
+
 
 if __name__ == "__main__":
     unittest.main()

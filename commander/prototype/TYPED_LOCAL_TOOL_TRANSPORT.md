@@ -12,7 +12,14 @@ Move beyond `model_tool_transport_proof.py` fixed `MODEL_OUTPUT_BLOCKED` project
 2. Harness issues grant via `SessionIssuer` (never from tool arguments).
 3. `TypedLocalToolDispatcher` maps tools: `hosts_list`, `session_open`, `session_close`, `fs_read`, `fs_write`, `run_fixed_canary`, `process_read`.
 4. Identity fields (`operator`, `host`, `grant`, shell/path) in tool arguments → `IDENTITY_INJECTION_REFUSED`.
-5. File/process operations delegate to existing `LocalUserModeProbe` (+ optional `HostSessionJournal` binding).
+5. Each tool has an exact argument allowlist; unknown fields → `UNKNOWN_ARGUMENT_FIELD`.
+6. `session_close` only revokes the dispatcher-bound `session_id`; foreign IDs → `SESSION_ID_MISMATCH` with no probe side effect.
+7. `process_read` re-runs the existing signed grant + open-session validators read-only before returning cached preview (TTL/expiry/revoke fail closed).
+8. File/process operations delegate to existing `LocalUserModeProbe` (+ optional `HostSessionJournal` binding).
+
+### `hosts_list` disclosure (in-process only)
+
+`hosts_list` may be called before `session_open` and returns the bound host id and policy id from trusted harness construction. This is acceptable **only** for the current in-process loopback harness where the caller already constructed the binding locally. A future **network-facing ChatGPT/MCP connector must not expose this tool without separate authenticated enrollment** and must not publish an unauthenticated endpoint that enumerates enrolled hosts.
 
 ## Untrusted path
 
@@ -22,7 +29,7 @@ Move beyond `model_tool_transport_proof.py` fixed `MODEL_OUTPUT_BLOCKED` project
 ## Not implemented (honest blockers)
 
 - Gate C–F protected owner enrollment, FULL_ADMIN reach, public network transport, ChatGPT plugin install, UAC/root/Hyper-V, Admin Broker (#52) changes.
-- `process_read` returns bounded preview of last fixed canary only (not arbitrary process tree).
+- `process_read` returns bounded preview of last fixed canary only (not arbitrary process tree); stale cache after grant expiry is refused.
 
 ## Proof
 
