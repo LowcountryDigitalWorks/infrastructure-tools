@@ -201,6 +201,8 @@ class DurableMailboxTests(unittest.TestCase):
         )
         occupied = self.directory("occupied")
         occupied.mkdir()
+        if os.name == "posix":
+            os.chmod(occupied, 0o700)
         (occupied / "journal.sqlite-wal").write_bytes(b"")
         self.assert_code(
             DurableRefused, "DURABLE_SIDECAR",
