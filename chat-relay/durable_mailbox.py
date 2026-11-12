@@ -243,9 +243,10 @@ class DurableMailbox:
             self._refuse_link(directory)
             if not directory.is_dir():
                 raise DurableRefused("DURABLE_PATH_REFUSED")
+            self._refuse_widened(directory, 0o700)
         else:
             os.mkdir(directory, 0o700)
-        os.chmod(directory, 0o700)
+            os.chmod(directory, 0o700)
         self._require_private(directory, 0o700)
         return directory
 
@@ -255,10 +256,11 @@ class DurableMailbox:
             self._refuse_link(self._db_path)
             if not stat.S_ISREG(os.lstat(self._db_path).st_mode):
                 raise DurableRefused("DURABLE_PATH_REFUSED")
+            self._refuse_widened(self._db_path, 0o600)
         else:
             fd = os.open(self._db_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
             os.close(fd)
-        os.chmod(self._db_path, 0o600)
+            os.chmod(self._db_path, 0o600)
         self._require_private(self._db_path, 0o600)
         header = self._db_path.read_bytes()[:16]
         if header and not header.startswith(b"SQLite format 3\x00"):
@@ -338,6 +340,12 @@ class DurableMailbox:
             raise DurableRefused("DURABLE_PATH_REFUSED") from None
         if stat.S_ISLNK(info.st_mode):
             raise DurableRefused("DURABLE_PATH_REFUSED")
+
+    def _refuse_widened(self, path: Path, expected: int) -> None:
+        if os.name != "posix":
+            return
+        if stat.S_IMODE(os.lstat(path).st_mode) != expected:
+            raise DurableRefused("DURABLE_PERMISSIONS")
 
     def _require_private(self, path: Path, expected: int) -> None:
         if os.name != "posix":
