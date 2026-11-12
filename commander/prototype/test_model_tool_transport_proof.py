@@ -6,7 +6,7 @@ import unittest
 
 import model_tool_transport_proof as transport
 from model_output_boundary import BLOCKED_STATUS
-from model_tool_transport_proof import model_tool_result
+from model_tool_transport_proof import model_tool_result, model_typed_tool_call
 
 SECRET = "SYNTHETIC_TEST_SECRET_NOT_REAL"
 BLOCKED = {"status": BLOCKED_STATUS}
@@ -66,6 +66,9 @@ class ModelToolTransportProofTests(unittest.TestCase):
             text = _text(model_tool_result(name))
             self.assertEqual(text, '{"status":"MODEL_OUTPUT_BLOCKED"}')
             self.assertNotIn(name, text)
+
+    def test_typed_tool_call_boundary_stays_blocked(self):
+        self.assertEqual(model_typed_tool_call("session_open", {"host": "evil"}), BLOCKED)
 
     def test_module_does_not_execute_or_iterate_untrusted_values(self):
         source = inspect.getsource(transport)

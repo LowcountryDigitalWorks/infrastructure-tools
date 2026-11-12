@@ -20,6 +20,11 @@ The finished owner product remains a first-party Desktop Commander replacement w
 
 Two-host enrollment / revocation denial matrix (synthetic compose-only): see `TWO_HOST_ENROLLMENT_DENIAL.md` and `test_two_host_enrollment_denial.py`.
 
+## Typed local tool transport (draft #209 slice)
+
+- `typed_local_tool_transport.py` + `local_tool_loopback_harness.py`: closed-catalog in-process tools bound to trusted owner/host binding and existing signed session grants; model/plugin calls remain default-deny via `model_tool_transport_proof.py`.
+- See `TYPED_LOCAL_TOOL_TRANSPORT.md`. Not a network listener or ChatGPT connector.
+
 ## Test
 
 From repo root, Python 3.11+ and pinned cryptography==50.0.2 dependency (for Ed25519 signatures):
