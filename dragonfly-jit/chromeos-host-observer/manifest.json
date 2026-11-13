@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "LDW REDRIX Host Memory Observer (Proof)",
+  "version": "0.1.0",
+  "description": "Manual, local-only, read-only ChromeOS host memory observation. Never authorizes CI/JIT.",
+  "minimum_chrome_version": "91",
+  "permissions": ["system.memory"],
+  "action": {
+    "default_title": "REDRIX host memory (research only)",
+    "default_popup": "popup.html"
+  }
+}
