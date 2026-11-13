@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -57,18 +58,18 @@ def _elapsed_ms(start: datetime, end: datetime) -> int:
     return (span.days * 86400000000 + span.seconds * 1000000 + span.microseconds) // 1000
 
 
-def _window(record: dict, *, maximum_ms: int, minimum_ms: int) -> tuple[datetime, datetime]:
+def _window(record: dict, *, maximum_ms: int, minimum_ms: int, elapsed_tolerance_ms: int = 0) -> tuple[datetime, datetime]:
     start = _utc(record.get("capture_started_utc"))
     end = _utc(record.get("capture_finished_utc"))
     elapsed = _int(record.get("capture_elapsed_ms"), 0, maximum_ms, "ELAPSED_INVALID")
     _require(minimum_ms <= _elapsed_ms(start, end) <= maximum_ms, "CAPTURE_WINDOW_INVALID")
-    _require(_elapsed_ms(start, end) == elapsed, "CAPTURE_ELAPSED_MISMATCH")
+    _require(abs(_elapsed_ms(start, end) - elapsed) <= elapsed_tolerance_ms, "CAPTURE_ELAPSED_MISMATCH")
     return start, end
 
 
 def inspect_host(record: object) -> dict:
     _require(type(record) is dict, "HOST_SCHEMA_INVALID")
-    _require(record.get("marker") == HOST_MARKER and record.get("schema") == 1
+    _require(record.get("marker") == HOST_MARKER and type(record.get("schema")) is int and record.get("schema") == 1
              and record.get("source") == "CHROME_SYSTEM_MEMORY_API"
              and record.get("mode") == "OBSERVE_ONLY"
              and record.get("classification") == "HOST_REPORTED_NOT_ATTESTED"
@@ -96,14 +97,15 @@ def inspect_host(record: object) -> dict:
             _require(250 <= _elapsed_ms(previous, when) <= 6000, "HOST_SAMPLE_GAP_INVALID")
         total, previous = capacity, when
         available.append(free)
-    _require(previous == end and min(available) == record.get("host_min_available_mib"),
+    _require(previous == end and
+             _int(record.get("host_min_available_mib"), 0, total, "HOST_SUMMARY_MISMATCH") == min(available),
              "HOST_SUMMARY_MISMATCH")
     return {"started": start, "finished": end, "minimum_available_mib": min(available), "capacity_mib": total}
 
 
 def inspect_guest(record: object) -> dict:
     _require(type(record) is dict, "GUEST_SCHEMA_INVALID")
-    _require(record.get("marker") == GUEST_MARKER and record.get("schema") == 1
+    _require(record.get("marker") == GUEST_MARKER and type(record.get("schema")) is int and record.get("schema") == 1
              and record.get("mode") == "OBSERVE_ONLY"
              and record.get("classification") == "MEASURED_NOT_AUTHORIZED"
              and record.get("capture_clock_source") == "PENGUIN_UTC_WALLCLOCK_UNATTESTED"
@@ -112,7 +114,10 @@ def inspect_guest(record: object) -> dict:
              "GUEST_SCHEMA_INVALID")
     _false_flags(record, ("ci_dispatch_authorized", "jit_admission_authorized", "candidate_is_policy"))
     _int(record.get("sample_count"), 3, 6, "GUEST_SAMPLES_INVALID")
-    start, end = _window(record, maximum_ms=60000, minimum_ms=1)
+    # Guest producer truncates both UTC endpoints to milliseconds after computing
+    # elapsed_ms from microsecond timestamps; the serialization can differ by 1ms.
+    # This is a precision allowance ONLY, never device/clock attestation.
+    start, end = _window(record, maximum_ms=60000, minimum_ms=1, elapsed_tolerance_ms=1)
     p = record.get("accepted_profile")
     _require(type(p) is dict and p.get("guest_mib") == 2048 and p.get("reserve_mib") == 8192
              and p.get("floor_mib") == 10240, "PRODUCTION_PROFILE_MISMATCH")
@@ -204,6 +209,13 @@ def _bounded_json_int(text: str) -> int:
     return int(text)
 
 
+def _bounded_json_float(text: str) -> float:
+    _require(len(text) <= 40, "INPUT_FLOAT_TOKEN_TOO_LONG")
+    value = float(text)
+    _require(math.isfinite(value), "INPUT_NONFINITE_NUMBER")
+    return value
+
+
 def _read_json(path: Path) -> object:
     # No symlinks, devices, pipes, giant input, content reflection or arbitrary writes.
     fd = None
@@ -215,7 +227,7 @@ def _read_json(path: Path) -> object:
         _require(len(data) <= MAX_BYTES, "INPUT_SIZE_INVALID")
         _reject_unbounded_json_tokens(data)
         return json.loads(data.decode("utf-8"), object_pairs_hook=_no_duplicate_keys,
-                          parse_int=_bounded_json_int,
+                          parse_int=_bounded_json_int, parse_float=_bounded_json_float,
                           parse_constant=lambda _: (_ for _ in ()).throw(EvidenceError("INPUT_NONFINITE_NUMBER")))
     except EvidenceError:
         raise
