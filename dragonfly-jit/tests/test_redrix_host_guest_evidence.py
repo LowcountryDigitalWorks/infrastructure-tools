@@ -1,6 +1,5 @@
 """Fail-closed offline tests; synthetic-only inputs; never read physical device state."""
 from __future__ import annotations
-import copy
 import importlib.util
 import json
 from pathlib import Path
@@ -113,6 +112,10 @@ class Correlation(unittest.TestCase):
                 path.write_text(text)
                 if text == '{}': self.assertEqual(m._read_json(path),{})
                 else:self.assertRaises(m.EvidenceError,m._read_json,path)
+            for hostile_json in ('['*13000 + '0' + ']'*13000,
+                                 '{"k":' + '9'*5000 + '}'):
+                path.write_text(hostile_json)
+                self.assertRaises(m.EvidenceError, m._read_json, path)
             path.write_text(json.dumps(host()))
             self.assertEqual(m._read_json(path)["marker"],m.HOST_MARKER)
             link=Path(tmp)/"symlink.json"
