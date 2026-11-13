@@ -35,7 +35,7 @@ def sample():
 
 def full_hypothesis():
     v=sample()
-    v["runner"].update(inventory_scope="REPOSITORY",pagination_complete=True,org_scope_excluded=True)
+    v["runner"].update(inventory_scope="REPOSITORY_EXACT_NAME_FILTER",pagination_complete=True,original_registration_repository_scoped=True)
     v["locks"]["exclusive_current_lock_owner_proven"]=True
     v["release"].update(active_generation_attested=True, protected_root_acl_trusted=True)
     v["approval"].update(exact_local_operation_security_reviewed=True,
