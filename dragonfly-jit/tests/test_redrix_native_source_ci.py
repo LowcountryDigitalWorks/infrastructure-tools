@@ -149,6 +149,79 @@ class PrivateSourceCiTests(unittest.TestCase):
             self.assertEqual(result["reason"], "SOURCE_TESTS_FAILED")
             self.assertNotIn("SENSITIVE_DETAILS", str(result))
 
+    def test_exact_head_fetch_keeps_ancestry_without_other_refs(self):
+        """The accepted one-shot proof fetches the exact current SHA + reachable ancestry."""
+        seen = []
+        def record_git(args, **kwargs):
+            seen.append(tuple(args))
+            return self.git_ok(args, **kwargs)
+
+        with mock.patch.object(ci, "remote_main", side_effect=[HEAD, HEAD]), \
+             mock.patch.object(ci, "git", side_effect=record_git), \
+             mock.patch.object(ci, "private_sources", return_value=True), \
+             mock.patch.object(ci, "run", return_value=PASSED):
+            result = ci.proof(HEAD)
+        self.assertEqual(result["result"], "PASS_SOURCE_ONLY")
+        fetches = [args for args in seen if args[0] == "fetch"]
+        self.assertEqual(fetches, [("fetch", "--quiet", "--no-tags", "origin", HEAD)])
+        self.assertEqual(
+            [args for args in seen if args[0] == "checkout"],
+            [("checkout", "--quiet", "--detach", "FETCH_HEAD")],
+        )
+        self.assertNotIn("--depth=1", " ".join(map(str, seen)))
+        self.assertNotIn("refs/heads/", " ".join(map(str, seen)))
+
+    def test_exact_commit_fetch_retains_prior_immutable_blob_in_private_fixture(self):
+        """Local file-remote integration: history is data, never executable source."""
+        with tempfile.TemporaryDirectory(prefix="ldw-native-ci-history-") as td:
+            root = Path(td)
+            origin = root / "origin"
+            dest = root / "private-checkout"
+            origin.mkdir()
+            dest.mkdir()
+            env = ci.environment(root)
+            # Only this synthetic test uses a local file Git transport; production
+            # environment() remains HTTPS-only and cannot fetch caller-selected URLs.
+            env["GIT_ALLOW_PROTOCOL"] = "file"
+
+            def git(cwd, *args):
+                completed = subprocess.run(
+                    ["git", "-C", str(cwd), *args],
+                    cwd=root, env=env, capture_output=True, text=True,
+                    timeout=20, check=False,
+                )
+                self.assertEqual(completed.returncode, 0, msg="SYNTHETIC_GIT_FAILED")
+                return completed.stdout.strip()
+
+            git(origin, "init", "-q")
+            original = origin / "historical-source.txt"
+            original.write_text("immutable accepted historic source\n", encoding="utf-8")
+            git(origin, "add", "historical-source.txt")
+            git(origin, "-c", "user.name=Fixture", "-c",
+                "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+                "commit", "-q", "-m", "historical")
+            prior_blob = git(origin, "rev-parse", "HEAD:historical-source.txt")
+            original.write_text("new current source\n", encoding="utf-8")
+            git(origin, "add", "historical-source.txt")
+            git(origin, "-c", "user.name=Fixture", "-c",
+                "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+                "commit", "-q", "-m", "current")
+            head = git(origin, "rev-parse", "HEAD")
+            self.assertRegex(head, r"^[a-f0-9]{40}$")
+
+            git(dest, "init", "-q")
+            git(dest, "remote", "add", "origin", str(origin))
+            git(dest, "fetch", "--quiet", "--no-tags", "origin", head)
+            git(dest, "checkout", "--quiet", "--detach", "FETCH_HEAD")
+            self.assertEqual(git(dest, "rev-parse", "HEAD"), head)
+            historical_bytes = subprocess.run(
+                ["git", "-C", str(dest), "cat-file", "-p", prior_blob],
+                cwd=root, env=env, capture_output=True, timeout=20, check=False,
+            )
+            self.assertEqual(historical_bytes.returncode, 0)
+            self.assertEqual(historical_bytes.stdout,
+                             b"immutable accepted historic source\n")
+
     def test_git_arguments_are_fixed_without_shell(self):
         with mock.patch.object(ci, "run", return_value=GOOD) as run:
             ci.git(("status",), cwd=Path("/tmp"), env={})
