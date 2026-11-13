@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>REDRIX host memory</title>
+    <link rel="stylesheet" href="popup.css">
+    <script type="module" src="popup.mjs"></script>
+  </head>
+  <body>
+    <main>
+      <div class="topline"><span class="dot" aria-hidden="true"></span><span>LDW / Hardware research</span><button type="button" id="theme">Light mode</button></div>
+      <h1>Host memory snapshot</h1>
+      <p>Five local-only ChromeOS browser readings, one second apart. Research evidence only, never runner permission.</p>
+      <button type="button" id="run">Measure host memory</button>
+      <p id="status" role="status" aria-live="polite">No reading captured.</p>
+      <label for="output">Sanitized JSON · select to copy</label>
+      <textarea id="output" readonly spellcheck="false" aria-label="Memory evidence JSON"></textarea>
+      <p class="footnote">No uploads, storage, credentials, persistent service, or system modifications. Close the popup to discard the result.</p>
+    </main>
+  </body>
+</html>
