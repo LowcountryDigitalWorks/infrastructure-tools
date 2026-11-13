@@ -27,9 +27,9 @@ Only after a real ChromeOS Chrome user-level observer installation and independe
 
        python3 -B dragonfly-jit/redrix_host_guest_evidence.py --host /private/host.json --guest /private/guest.json
 
-The helper accepts two regular non-symlink files of at most 32 KiB each, rejects duplicate JSON keys and nonfinite values, validates source markers, observed scopes, false authority flags, production memory profile, summary integrity and bounded timestamp sequence. It never prints raw input, file content, paths, addresses or credentials. On errors it prints only an enumerated sanitized HOLD reason. It writes no artifacts.
+The helper accepts two regular non-symlink files of at most 32 KiB each, rejects duplicate JSON keys and nonfinite numeric tokens (including finite-size exponent overflow to infinity), JSON nesting greater than 64 levels and integer/float numeric tokens longer than 40 characters, validates source markers, observed scopes, false authority flags, production memory profile, summary integrity and bounded timestamp sequence. It never prints raw input, file content, paths, addresses or credentials. On errors it prints only an enumerated sanitized HOLD reason. It writes no artifacts.
 
-The minimum timestamp overlap is 1,000 ms on the two UNATTESTED wall clocks. A positive result is explicitly WALLCLOCK_OVERLAP_OBSERVED_NOT_ATTESTED; it is not GATE_B_PASS, CHROMEOS_HOST_ATTESTED or READY. A no-overlap or implausible capture is HOLD. This helper rejects a frozen browser wall clock (capture less than 3,000 ms), unlike PR308's intentionally permissive source-only popup. Production memory thresholds do not change.
+The minimum timestamp overlap is 1,000 ms on the two UNATTESTED wall clocks. The host browser's millisecond ISO timestamps and elapsed field must match exactly. The accepted guest producer calculates elapsed from microsecond clock values but serializes timestamps to milliseconds, so the offline validator permits at most 1 ms quantization difference for the guest capture only. This tolerance does not attest synchronized clocks or authorize a policy change. A positive result is explicitly WALLCLOCK_OVERLAP_OBSERVED_NOT_ATTESTED; it is not GATE_B_PASS, CHROMEOS_HOST_ATTESTED or READY. A no-overlap or implausible capture is HOLD. This helper rejects a frozen browser wall clock (capture less than 3,000 ms), unlike PR308's intentionally permissive source-only popup. Production memory thresholds do not change.
 
 Even exact UTC overlap cannot prove that the two clocks are synchronized, that readings came from the same physical Chromebook, or that the two different memory ledgers share a memory model. A security-approved host/device/time attestation and real workload proof would be independent future work.
 
@@ -43,6 +43,6 @@ Owner approved normal ChromeOS browser-extension installation, NOT ChromeOS OS D
 
        python3 -m unittest discover -s dragonfly-jit/tests -p test_redrix_host_guest_evidence.py -v
 
-Ten synthetic/adversarial tests cover bounded overlap, nonoverlap, above/below memory threshold with false admission flags, forged scope/status/permission, replayed or frozen timestamps, invalid profile, impossible memory totals, duplicate/nonfinite JSON, oversized/symlinked files and secret-containing input without output reflection.
+Twelve synthetic/adversarial tests cover bounded overlap, nonoverlap, above/below memory threshold with false admission flags, forged scope/status/permission, replayed or frozen timestamps, invalid profile, impossible memory totals, duplicate/nonfinite JSON, oversized/symlinked files, genuine guest microsecond-to-millisecond quantization, boolean schema/summary spoofing and secret-containing input without output reflection.
 
 Exact-head GitHub CI/security and author-excluded independent H0/M0 review are required before merge; source approval does not authorize physical deployment or JIT.
