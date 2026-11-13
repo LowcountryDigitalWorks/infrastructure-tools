@@ -182,7 +182,9 @@ def _read_json(path: Path) -> object:
         _require(len(data) <= MAX_BYTES, "INPUT_SIZE_INVALID")
         return json.loads(data.decode("utf-8"), object_pairs_hook=_no_duplicate_keys,
                           parse_constant=lambda _: (_ for _ in ()).throw(EvidenceError("INPUT_NONFINITE_NUMBER")))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except EvidenceError:
+        raise
+    except (OSError, UnicodeError, ValueError, RecursionError, OverflowError) as exc:
         raise EvidenceError("INPUT_FILE_INVALID") from exc
     finally:
         if fd is not None:
