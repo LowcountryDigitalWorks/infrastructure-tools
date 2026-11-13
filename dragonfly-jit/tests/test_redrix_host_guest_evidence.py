@@ -112,10 +112,12 @@ class Correlation(unittest.TestCase):
                 path.write_text(text)
                 if text == '{}': self.assertEqual(m._read_json(path),{})
                 else:self.assertRaises(m.EvidenceError,m._read_json,path)
-            for hostile_json in ('['*13000 + '0' + ']'*13000,
+            for hostile_json in ('['*128 + '0' + ']'*128,
                                  '{"k":' + '9'*5000 + '}'):
                 path.write_text(hostile_json)
                 self.assertRaises(m.EvidenceError, m._read_json, path)
+            path.write_text('{"brackets_inside_string":"' + '['*200 + '"}')
+            self.assertEqual(m._read_json(path)["brackets_inside_string"], '['*200)
             path.write_text(json.dumps(host()))
             self.assertEqual(m._read_json(path)["marker"],m.HOST_MARKER)
             link=Path(tmp)/"symlink.json"
