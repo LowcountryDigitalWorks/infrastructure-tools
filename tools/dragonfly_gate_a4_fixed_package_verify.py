@@ -107,7 +107,7 @@ def _observe_tree(root: Path, owner_uid: int, owner_gid: int) -> dict[str, objec
     fixture tests; it can never attest real privilege or authorize anything.
     The production entrypoint below fixes root to / and UID/GID to 0.
     """
-    if sys.platform != "linux" or type(root) is not Path or type(owner_uid) is not int or type(owner_gid) is not int:
+    if sys.platform != "linux" or not isinstance(root, Path) or type(owner_uid) is not int or type(owner_gid) is not int:
         return _report("PLATFORM_OR_SOURCE_SHAPE_REFUSED")
     try:
         with ExitStack() as stack:
