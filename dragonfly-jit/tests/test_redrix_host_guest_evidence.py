@@ -98,6 +98,32 @@ class Correlation(unittest.TestCase):
         h["capture_finished_utc"]=h["capture_started_utc"]
         for s in h["samples"]:s["observed_at_utc"]=h["capture_started_utc"]
         self.assertEqual(m.correlate(h,guest())["classification"],"HOLD")
+    def test_guest_microsecond_timestamp_roundtrip_tolerates_at_most_one_ms(self):
+        # Accepted guest producer truncates both ISO UTC endpoints to milliseconds,
+        # then emits int(elapsed_total_microseconds / 1000). Quantization may cause
+        # a one-millisecond difference even when both underlying clocks are valid.
+        g=guest()
+        g["capture_elapsed_ms"]=1999
+        out=m.correlate(host(),g)
+        self.assertEqual(out["classification"],"WALLCLOCK_OVERLAP_OBSERVED_NOT_ATTESTED")
+        self.assertFalse(out["jit_admission_authorized"])
+        g["capture_elapsed_ms"]=1998
+        self.assertEqual(m.correlate(host(),g)["reason"],"CAPTURE_ELAPSED_MISMATCH")
+        h=host()
+        h["capture_elapsed_ms"]=3999
+        self.assertEqual(m.correlate(h,guest())["reason"],"CAPTURE_ELAPSED_MISMATCH")
+
+    def test_boolean_schema_and_summary_forgery_are_rejected(self):
+        for who in ("host","guest"):
+            a,b=host(),guest()
+            if who=="host":a["schema"]=True
+            else:b["schema"]=True
+            self.assertEqual(m.correlate(a,b)["classification"],"HOLD")
+        h=host()
+        for row in h["samples"]:row["host_available_mib"]=1
+        h["host_min_available_mib"]=True
+        self.assertEqual(m.correlate(h,guest())["reason"],"HOST_SUMMARY_MISMATCH")
+
     def test_inputs_never_echo_arbitrary_payload_or_secrets(self):
         h=host();h["password"]="SHOULD_NOT_LEAK_FROM_HOST"
         g=guest();g["private_address"]="SHOULD_NOT_LEAK_FROM_GUEST"
@@ -108,7 +134,8 @@ class Correlation(unittest.TestCase):
     def test_bounded_json_reader_duplicate_fields_and_nonfinite_refusal(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/"sample.json"
-            for text in ['{"a":1,"a":2}', '{"value":NaN}', '{"value":Infinity}', 'x'*40000, '{}']:
+            for text in ['{"a":1,"a":2}', '{"value":NaN}', '{"value":Infinity}',
+                         '{"value":1e4000}', '{"value":1e999999}', 'x'*40000, '{}']:
                 path.write_text(text)
                 if text == '{}': self.assertEqual(m._read_json(path),{})
                 else:self.assertRaises(m.EvidenceError,m._read_json,path)
@@ -118,6 +145,8 @@ class Correlation(unittest.TestCase):
                 self.assertRaises(m.EvidenceError, m._read_json, path)
             path.write_text('{"brackets_inside_string":"' + '['*200 + '"}')
             self.assertEqual(m._read_json(path)["brackets_inside_string"], '['*200)
+            path.write_text('{"value":0.125}')
+            self.assertEqual(m._read_json(path)["value"],0.125)
             path.write_text(json.dumps(host()))
             self.assertEqual(m._read_json(path)["marker"],m.HOST_MARKER)
             link=Path(tmp)/"symlink.json"
