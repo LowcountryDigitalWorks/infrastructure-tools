@@ -171,6 +171,39 @@ def _no_duplicate_keys(items: list[tuple[str, object]]) -> dict:
     return result
 
 
+def _reject_unbounded_json_tokens(data: bytes) -> None:
+    """Reject excessive nesting and integer tokens before Python's version-dependent decoder.
+
+    A byte-level scan ignores quoted braces/brackets (including escaped quotes).
+    The standard JSON decoder still checks full syntax, characters and numbers.
+    """
+    depth = 0
+    quoted = False
+    escaped = False
+    for byte in data:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif byte == 92:  # Backslash
+                escaped = True
+            elif byte == 34:  # Double quote
+                quoted = False
+        elif byte == 34:
+            quoted = True
+        elif byte in (91, 123):  # [ or {
+            depth += 1
+            _require(depth <= 64, "INPUT_JSON_DEPTH_EXCEEDED")
+        elif byte in (93, 125):  # ] or }
+            depth -= 1
+            _require(depth >= 0, "INPUT_JSON_STRUCTURE_INVALID")
+    _require(not quoted and depth == 0, "INPUT_JSON_STRUCTURE_INVALID")
+
+
+def _bounded_json_int(text: str) -> int:
+    _require(len(text) <= 40, "INPUT_INT_TOKEN_TOO_LONG")
+    return int(text)
+
+
 def _read_json(path: Path) -> object:
     # No symlinks, devices, pipes, giant input, content reflection or arbitrary writes.
     fd = None
@@ -180,7 +213,9 @@ def _read_json(path: Path) -> object:
         _require(stat.S_ISREG(info.st_mode) and 0 < info.st_size <= MAX_BYTES, "INPUT_FILE_INVALID")
         data = os.read(fd, MAX_BYTES + 1)
         _require(len(data) <= MAX_BYTES, "INPUT_SIZE_INVALID")
+        _reject_unbounded_json_tokens(data)
         return json.loads(data.decode("utf-8"), object_pairs_hook=_no_duplicate_keys,
+                          parse_int=_bounded_json_int,
                           parse_constant=lambda _: (_ for _ in ()).throw(EvidenceError("INPUT_NONFINITE_NUMBER")))
     except EvidenceError:
         raise
