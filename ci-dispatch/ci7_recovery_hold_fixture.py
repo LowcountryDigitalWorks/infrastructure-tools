@@ -62,7 +62,7 @@ def assess(snapshot: object) -> dict[str, object]:
     top = frozenset({"marker", "schema", "mode", "local", "provider", "runner", "locks", "release", "approval"})
     local_keys = frozenset({"unique_ci7_vm", "vm_off", "owned_tuple_exact", "state_phase_running", "last_evidence_cleanup_failed"})
     provider_keys = frozenset({"run_id", "job_id", "attempt", "original_head", "run_status", "run_conclusion", "job_status", "job_conclusion"})
-    runner_keys = frozenset({"recorded_positive_id", "matching_repository_runners", "inventory_scope", "pagination_complete", "org_scope_excluded"})
+    runner_keys = frozenset({"recorded_positive_id", "matching_repository_runners", "inventory_scope", "pagination_complete", "original_registration_repository_scoped"})
     locks_keys = frozenset({"global_lock_artifact_regular", "run_lock_artifact_regular", "exclusive_current_lock_owner_proven"})
     release_keys = frozenset({"accepted_manifest_hash_exact", "active_generation_attested", "protected_root_acl_trusted"})
     approval_keys = frozenset({"exact_local_operation_security_reviewed", "owner_approved_this_exact_transaction"})
@@ -80,10 +80,10 @@ def assess(snapshot: object) -> dict[str, object]:
         return _report("HOLD_INPUT_UNTRUSTED")
     if not all(_strict_bool(v) for sub in (l, k, s, a) for v in sub.values()):
         return _report("HOLD_INPUT_UNTRUSTED")
-    if not all(_strict_bool(r[key]) for key in ("recorded_positive_id", "pagination_complete", "org_scope_excluded")):
+    if not all(_strict_bool(r[key]) for key in ("recorded_positive_id", "pagination_complete", "original_registration_repository_scoped")):
         return _report("HOLD_INPUT_UNTRUSTED")
     if (type(r["matching_repository_runners"]) is not int or r["matching_repository_runners"] not in (0, 1)
-            or type(r["inventory_scope"]) is not str or r["inventory_scope"] not in ("REPOSITORY", "PARTIAL_REPOSITORY")):
+            or type(r["inventory_scope"]) is not str or r["inventory_scope"] not in ("REPOSITORY", "PARTIAL_REPOSITORY", "REPOSITORY_EXACT_NAME_FILTER")):
         return _report("HOLD_INPUT_UNTRUSTED")
     if (type(p["run_id"]) is not int or type(p["job_id"]) is not int
             or type(p["attempt"]) is not int or type(p["original_head"]) is not str
@@ -101,10 +101,12 @@ def assess(snapshot: object) -> dict[str, object]:
         return _report("HOLD_PROVIDER_TERMINAL_NOT_PROVEN")
     if not all(l.values()):
         return _report("HOLD_LOCAL_TUPLE_NOT_PROVEN")
-    # The existing first-page-only provider reading is insufficient to claim
-    # full runner-registration absence. Absence on a page is NOT absence.
+    # A first-page-only listing is NOT proof of absent runner registration.
+    # A provider exact-name-filtered query with total_count=0 is complete for
+    # that name, but the input itself is still UNTRUSTED and not authority.
+    # Original CI7 registration is repository-scoped via generate-jitconfig.
     if (not r["recorded_positive_id"] or not r["pagination_complete"] or
-            r["inventory_scope"] != "REPOSITORY" or not r["org_scope_excluded"]):
+            r["inventory_scope"] not in ("REPOSITORY", "REPOSITORY_EXACT_NAME_FILTER") or not r["original_registration_repository_scoped"]):
         return _report("HOLD_RUNNER_REGISTRATION_NOT_EXHAUSTIVE")
     if r["matching_repository_runners"] != 0:
         return _report("HOLD_RUNNER_REGISTRATION_PRESENT")
