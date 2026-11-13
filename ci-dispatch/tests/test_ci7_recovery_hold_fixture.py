@@ -22,8 +22,8 @@ def sample():
                      "original_head": f.ORIGINAL_PR_HEAD, "run_status": "completed",
                      "run_conclusion": "cancelled", "job_status": "completed", "job_conclusion": "cancelled"},
         "runner": {"recorded_positive_id": True, "matching_repository_runners": 0,
-                   "inventory_scope": "PARTIAL_REPOSITORY", "pagination_complete": False,
-                   "org_scope_excluded": False},
+                   "inventory_scope": "REPOSITORY_EXACT_NAME_FILTER", "pagination_complete": True,
+                   "original_registration_repository_scoped": True},
         "locks": {"global_lock_artifact_regular": True, "run_lock_artifact_regular": True,
                   "exclusive_current_lock_owner_proven": False},
         "release": {"accepted_manifest_hash_exact": True, "active_generation_attested": False,
@@ -59,8 +59,15 @@ class RefusalTests(unittest.TestCase):
                                     "local_guest_remove_authorized","jit_dispatch_authorized","mutations_performed"})
         return out
 
-    def test_observed_incident_is_hold_for_incomplete_runner_coverage(self):
-        self.check(sample(),"HOLD_RUNNER_REGISTRATION_NOT_EXHAUSTIVE")
+    def test_observed_incident_is_hold_for_unproven_exclusive_locks(self):
+        # Live exact-name repository query returned total_count 0, but existence
+        # of two normal lock files does not prove exclusive current handles.
+        self.check(sample(),"HOLD_CONTROLLER_LOCK_AUTHORITY_UNVERIFIED")
+
+    def test_historical_first_page_scan_not_full_registration_proof(self):
+        s=sample()
+        s["runner"].update(inventory_scope="PARTIAL_REPOSITORY",pagination_complete=False)
+        self.check(s,"HOLD_RUNNER_REGISTRATION_NOT_EXHAUSTIVE")
 
     def test_exact_original_queued_job_preserved(self):
         for state in ("queued","in_progress","waiting","requested","pending"):
@@ -108,7 +115,7 @@ class RefusalTests(unittest.TestCase):
 
     def test_missing_or_nonexhaustive_runner_inventory_cannot_prove_absence(self):
         for key,bad in (("recorded_positive_id",False),("pagination_complete",False),
-                        ("inventory_scope","PARTIAL_REPOSITORY"),("org_scope_excluded",False)):
+                        ("inventory_scope","PARTIAL_REPOSITORY"),("original_registration_repository_scoped",False)):
             s=full_hypothesis();s["runner"][key]=bad
             self.check(s,"HOLD_RUNNER_REGISTRATION_NOT_EXHAUSTIVE")
 
