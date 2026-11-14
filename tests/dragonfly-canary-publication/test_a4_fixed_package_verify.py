@@ -168,7 +168,12 @@ class PackageTests(unittest.TestCase):
             replacement.chmod(0o644)
             os.replace(replacement, self.file)
         with mock.patch.object(probe, "_read_pinned", side_effect=replace):
-            self.hold("INSPECTOR_PATH_REPLACED")
+            observed = self.result()
+        self.assertEqual(observed["classification"], "HOLD")
+        # On some filesystems unlink/replacement changes the pinned FD ctime
+        # before the by-name check; both are correct fail-closed detections.
+        self.assertIn(observed["reasonCode"],
+                      {"INSPECTOR_PATH_REPLACED", "INSPECTOR_DESCRIPTOR_CHANGED"})
 
     def test_ancestor_replaced_while_pinned_refuses(self):
         original = probe._read_pinned
