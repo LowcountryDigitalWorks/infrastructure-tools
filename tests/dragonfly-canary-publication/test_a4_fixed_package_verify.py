@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import signal
 from pathlib import Path
 import shutil
 import socket
@@ -106,6 +107,25 @@ class PackageTests(unittest.TestCase):
         data[-1] ^= 0x01
         self.file.write_bytes(data)
         self.hold("INSPECTOR_BLOB_DRIFT")
+
+    def test_fifo_inspector_leaf_refuses_without_blocking(self):
+        # Untrusted files can be FIFOs. Blocking open would hang before fstat
+        # gets the chance to reject the non-regular leaf.
+        if not hasattr(os, "mkfifo") or not hasattr(signal, "setitimer"):
+            self.skipTest("requires POSIX FIFO and bounded SIGALRM")
+        self.file.unlink()
+        os.mkfifo(self.file, 0o600)
+        self.assertTrue(probe._FILE_FLAGS & os.O_NONBLOCK)
+        prior = signal.getsignal(signal.SIGALRM)
+        def deadline(_signum, _frame):
+            raise TimeoutError("FIFO_OPEN_BLOCKED")
+        signal.signal(signal.SIGALRM, deadline)
+        try:
+            signal.setitimer(signal.ITIMER_REAL, 2.0)
+            self.hold("INSPECTOR_NOT_REGULAR")
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, prior)
 
     def test_symlink_inspector_refuses(self):
         self.file.unlink()
