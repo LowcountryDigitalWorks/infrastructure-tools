@@ -64,4 +64,76 @@ try {
     Remove-Variable -Name DragonflySyntheticGhCalls -Scope Global -ErrorAction SilentlyContinue
 }
 
+# REDRIX pre-JIT fail-before-POST source proof, not protected-runtime evidence.
+# Both the CLI and direct POST writer must refuse until an independently
+# accepted issuer binds the exact workflow ref/commit/blob/release generation.
+$holdMarker = "throw 'DRAGONFLY_CANARY_WORKFLOW_SOURCE_UNBOUND'"
+if ($entry.Split(@($holdMarker), [StringSplitOptions]::None).Count -ne 3) {
+    throw 'DRAGONFLY_PREMINT_DUAL_GUARD_COUNT_INVALID'
+}
+$postFunctionStart = $entry.IndexOf('function Invoke-LdwDragonflyCanaryGhWrite', [StringComparison]::Ordinal)
+$postGuard = $entry.IndexOf($holdMarker, $postFunctionStart, [StringComparison]::Ordinal)
+$ghSpawn = $entry.IndexOf('Get-Command gh.exe', $postFunctionStart, [StringComparison]::Ordinal)
+$entryGuard = $entry.LastIndexOf($holdMarker, [StringComparison]::Ordinal)
+if ($postFunctionStart -lt 0 -or $postGuard -le $postFunctionStart -or
+    $ghSpawn -le $postGuard -or $entryGuard -le $postGuard -or
+    $entryGuard -ge $firstProviderReadIndex) {
+    throw 'DRAGONFLY_PREMINT_GUARDS_MISSING_OR_TOO_LATE'
+}
+
+$tokens = $null
+$parseErrors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile(
+    $entryPath, [ref]$tokens, [ref]$parseErrors
+)
+if (@($parseErrors).Count) { throw 'DRAGONFLY_PREMINT_PARSE_INVALID' }
+$functions = @($ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -ceq 'Invoke-LdwDragonflyCanaryGhWrite'
+}, $true))
+if ($functions.Count -ne 1) { throw 'DRAGONFLY_PREMINT_POST_FUNCTION_AMBIGUOUS' }
+# Import ONLY the contained function definition from syntax tree; do not
+# run the production entrypoint or any provider/host invocation here.
+. ([ScriptBlock]::Create($functions[0].Extent.Text))
+$script:Repository = 'LowcountryDigitalWorks/infrastructure-tools'
+$postBody = [ordered]@{
+    name = 'redrix-123-1-456'
+    runner_group_id = 1
+    labels = @('self-hosted','Linux','X64','dragonfly','jit','ldw-ephemeral','synthetic-only','dragonfly-run-123','dragonfly-attempt-1')
+    work_folder = '_work'
+}
+$postRefused = $false
+try {
+    $null = Invoke-LdwDragonflyCanaryGhWrite -Path 'repos/LowcountryDigitalWorks/infrastructure-tools/actions/runners/generate-jitconfig' -Method POST -Body $postBody
+} catch {
+    $postRefused = $_.Exception.Message -ceq 'DRAGONFLY_CANARY_WORKFLOW_SOURCE_UNBOUND'
+}
+if (-not $postRefused) { throw 'DRAGONFLY_PREMINT_DIRECT_POST_NOT_REFUSED' }
+
+# Execute the REAL source entry using deliberately synthetic identities.
+# An early HOLD must occur even when caller forges a matching-looking SHA;
+# it may not import the transport, read GitHub, request JIT or launch a guest.
+$originalProgramData = $env:ProgramData
+try {
+    $env:ProgramData = [IO.Path]::GetTempPath()
+    $pwshPath = (Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+    foreach ($syntheticHead in @(('a' * 40), ('b' * 40), ('f' * 40))) {
+        $output = @(& $pwshPath -NoLogo -NoProfile -File $entryPath -RunId 123 -RunAttempt 1 -JobId 456 -HeadSha $syntheticHead 2>&1)
+        $exitCode = $LASTEXITCODE
+        $rendered = ($output | Out-String).Trim()
+        $expected = @('DRAGONFLY_CANARY_PRODUCTION=HOLD', 'CLASSIFICATION=DRAGONFLY_CANARY_WORKFLOW_SOURCE_UNBOUND') -join [Environment]::NewLine
+        if ($exitCode -ne 1 -or $rendered -cne $expected) {
+            throw 'DRAGONFLY_PREMINT_ENTRY_NOT_CLOSED'
+        }
+    }
+} finally {
+    $env:ProgramData = $originalProgramData
+}
+
+# The verified child HOLD exits with code 1 by design. Reset only the test
+# harness exit state so the successful negative assertion is not a CI failure.
+$global:LASTEXITCODE = 0
+Write-Output 'DRAGONFLY_CANARY_WORKFLOW_SOURCE_PREMINT=HOLD_PASS'
+
 Write-Output 'DRAGONFLY_CANARY_PRODUCTION_IMPORT_SCOPE=PASS'
