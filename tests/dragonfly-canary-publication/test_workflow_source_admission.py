@@ -113,7 +113,11 @@ class WorkflowSourceHoldTests(unittest.TestCase):
         self.assert_hold(lambda e: e["run_before"].update(event="pull_request"), "RUN_WORKFLOW_MISMATCH")
 
     def test_run_changes_after_preflight(self):
-        self.assert_hold(lambda e: e["run_fresh"].update(id=123457), "RUN_CHANGED_BETWEEN_READS")
+        def move_run(e):
+            e["run_fresh"].update(id=123457)
+            e["job_fresh"].update(run_id=123457)
+            e["job_fresh"]["labels"][-2] = "dragonfly-run-123457"
+        self.assert_hold(move_run, "RUN_CHANGED_BETWEEN_READS")
 
     def test_run_no_longer_queued(self):
         self.assert_hold(lambda e: e["run_fresh"].update(status="in_progress"), "RUN_NOT_QUEUED")
