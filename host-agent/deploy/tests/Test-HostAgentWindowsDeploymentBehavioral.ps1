@@ -135,6 +135,60 @@ function Set-ProtectedDirectoryAcl {
     Set-Acl -LiteralPath $Path -AclObject (New-ProtectedDirectoryAcl -OwnerSid $OwnerSid)
 }
 
+# Read-only synthetic ACL classification; never print path or caller identity.
+function Write-SyntheticInstallAclEvidence {
+    param(
+        [Parameter(Mandatory)]$Constants,
+        [Parameter(Mandatory)][string]$SyntheticProgramFiles,
+        [Parameter(Mandatory)][string]$PackageRoot,
+        [Parameter(Mandatory)][string]$Phase
+    )
+    $mask = [Security.AccessControl.FileSystemRights]::WriteData -bor
+        [Security.AccessControl.FileSystemRights]::AppendData -bor
+        [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
+        [Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+        [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership
+    $broad = @('S-1-1-0', 'S-1-5-11', 'S-1-5-32-545')
+    $paths = @(
+        [pscustomobject]@{ Label='synthetic-program-files'; Path=$SyntheticProgramFiles },
+        [pscustomobject]@{ Label='product-root'; Path=$Constants.ProductRoot },
+        [pscustomobject]@{ Label='install-root'; Path=$Constants.InstallRoot },
+        [pscustomobject]@{ Label='package-root'; Path=$PackageRoot },
+        [pscustomobject]@{ Label='package-a-exe'; Path=(Join-Path $PackageRoot 'A/LDW.HostAgent.Windows.exe') },
+        [pscustomobject]@{ Label='installed-exe'; Path=$Constants.ExecutablePath },
+        [pscustomobject]@{ Label='installed-manifest'; Path=$Constants.InstalledManifestPath }
+    )
+    Write-Host "BEHAVIOR_ACL_DIAG phase=$Phase"
+    foreach ($entry in $paths) {
+        if (-not (Test-Path -LiteralPath $entry.Path)) {
+            Write-Host "BEHAVIOR_ACL_DIAG label=$($entry.Label) state=absent"
+            continue
+        }
+        try {
+            $acl = Get-Acl -LiteralPath $entry.Path -ErrorAction Stop
+            $broadWrite = 0
+            $inheritedBroadWrite = 0
+            foreach ($rule in $acl.Access) {
+                if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
+                $sid = try { $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } catch { $null }
+                if ($sid -in $broad -and ($rule.FileSystemRights -band $mask) -ne 0) {
+                    $broadWrite++
+                    if ($rule.IsInherited) { $inheritedBroadWrite++ }
+                }
+            }
+            Write-Host "BEHAVIOR_ACL_DIAG label=$($entry.Label) state=present protected=$($acl.AreAccessRulesProtected) broadAllowWrite=$broadWrite inheritedBroadWrite=$inheritedBroadWrite"
+        } catch {
+            Write-Host "BEHAVIOR_ACL_DIAG label=$($entry.Label) state=unreadable"
+        }
+    }
+    $stages = @(Get-ChildItem -LiteralPath $Constants.InstallRoot -Directory -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name.StartsWith('.stage-', [StringComparison]::Ordinal) })
+    Write-Host "BEHAVIOR_ACL_DIAG activeStageCount=$($stages.Count)"
+}
+
 function New-SyntheticPackage {
     param(
         [Parameter(Mandatory)][string]$Root,
@@ -302,7 +356,13 @@ try {
     Assert-AbsentStatus -Status $status -Label 'pre-install'
 
     Write-Host 'BEHAVIOR_PHASE=install-a'
-    $null = Invoke-ManagedInstall -Package $packageA
+    Write-SyntheticInstallAclEvidence -Constants $constants -SyntheticProgramFiles $syntheticProgramFiles -PackageRoot $packageRoot -Phase 'before-install-a'
+    try {
+        $null = Invoke-ManagedInstall -Package $packageA
+    } catch {
+        Write-SyntheticInstallAclEvidence -Constants $constants -SyntheticProgramFiles $syntheticProgramFiles -PackageRoot $packageRoot -Phase 'install-a-refused'
+        throw
+    }
     $status = Get-ManagedStatus
     Assert-ManagedStatus -Status $status -Installed $packageA -Rollback $null -Label 'after install A'
 
