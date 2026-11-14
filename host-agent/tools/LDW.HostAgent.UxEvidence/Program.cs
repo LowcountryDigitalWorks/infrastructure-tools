@@ -114,7 +114,19 @@ foreach (var (file, overallColor, health, summary, exceptionColor) in snapshots)
     {
         if (string.IsNullOrWhiteSpace(button.AccessibleName))
             throw new InvalidOperationException($"Action button is missing an accessible name: {button.Text}");
+        if (button.MinimumSize.Height < 44 || button.Height < 44)
+            throw new InvalidOperationException($"Owner action is smaller than the 44px native target: {button.Text}");
     }
+
+    // The approved Manrope family is optional on the owner's machine; the
+    // native Windows fallback is mandatory when neither Manrope family exists.
+    var installedFontFamilies = FontFamily.Families
+        .Select(x => x.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+    var expectedOwnerFont = installedFontFamilies.Contains("Manrope Variable")
+        ? "Manrope Variable"
+        : installedFontFamilies.Contains("Manrope") ? "Manrope" : "Segoe UI";
+    if (!string.Equals(form.Font.FontFamily.Name, expectedOwnerFont, StringComparison.OrdinalIgnoreCase))
+        throw new InvalidOperationException("Host Agent owner typography does not match installed Manrope / Segoe UI fallback.");
 
     AssertObservationLabelsPresent(form);
 
