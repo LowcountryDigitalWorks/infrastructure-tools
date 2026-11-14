@@ -131,6 +131,9 @@ try {
     $env:ProgramData = $originalProgramData
 }
 
+# The verified child HOLD exits with code 1 by design. Reset only the test
+# harness exit state so the successful negative assertion is not a CI failure.
+$global:LASTEXITCODE = 0
 Write-Output 'DRAGONFLY_CANARY_WORKFLOW_SOURCE_PREMINT=HOLD_PASS'
 
 Write-Output 'DRAGONFLY_CANARY_PRODUCTION_IMPORT_SCOPE=PASS'
