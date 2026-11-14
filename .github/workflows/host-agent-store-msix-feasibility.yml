@@ -1,0 +1,123 @@
+name: Host Agent Store MSIX feasibility (source-only)
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/host-agent-store-msix-feasibility.yml'
+      - 'host-agent/docs/HOST_AGENT_STORE_MSIX_FEASIBILITY.md'
+permissions:
+  contents: read
+jobs:
+  synthetic-msix-pack:
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact head, without token persistence
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build and inspect synthetic unsigned MSIX only (NO INSTALL)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          $root = Join-Path $env:RUNNER_TEMP ('ldw-msix-structural-proof-' + [guid]::NewGuid().ToString('N'))
+          $sourcePackage = Join-Path $root 'source-package'
+          $payload = Join-Path $root 'payload'
+          $msix = Join-Path $root 'LDW-HostAgent-SYNTHETIC-NOT-FOR-DISTRIBUTION.msix'
+          try {
+            New-Item -Path $root -ItemType Directory -ErrorAction Stop | Out-Null
+            New-Item -Path $payload -ItemType Directory -ErrorAction Stop | Out-Null
+            pwsh -NoProfile -File ./host-agent/deploy/Publish-HostAgentWindowsPackage.ps1 -OutputDirectory $sourcePackage
+            if ($LASTEXITCODE -ne 0) { throw 'MSIX_PROOF_HOST_AGENT_SOURCE_PUBLISH_FAILED' }
+            $exe = Join-Path $sourcePackage 'LDW.HostAgent.Windows.exe'
+            if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'MSIX_PROOF_EXE_MISSING' }
+            Copy-Item -LiteralPath $exe -Destination (Join-Path $payload 'LDW.HostAgent.Windows.exe') -ErrorAction Stop
+
+            # Synthetic flat-color graphics only. Never use an unaccepted real Store identity/logo.
+            Add-Type -AssemblyName System.Drawing
+            $assetRoot = Join-Path $payload 'Assets'
+            New-Item -Path $assetRoot -ItemType Directory | Out-Null
+            foreach ($size in @(44, 50, 150)) {
+              $bitmap = [System.Drawing.Bitmap]::new($size, $size)
+              $graphics = $null
+              try {
+                $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+                $graphics.Clear([System.Drawing.Color]::FromArgb(16, 42, 58))
+                $bitmap.Save((Join-Path $assetRoot ("Square$size.png")), [System.Drawing.Imaging.ImageFormat]::Png)
+              } finally {
+                if ($null -ne $graphics) { $graphics.Dispose() }
+                $bitmap.Dispose()
+              }
+            }
+            @'
+          <?xml version="1.0" encoding="utf-8"?>
+          <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+                   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+                   xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+                   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+                   IgnorableNamespaces="uap uap10 rescap">
+            <Identity Name="LDW.HostAgent.SYNTHETIC.Feasibility" Publisher="CN=NOT-FOR-PRODUCTION" Version="1.0.0.0" ProcessorArchitecture="x64" />
+            <Properties>
+              <DisplayName>LDW Host Agent - synthetic structural proof</DisplayName>
+              <PublisherDisplayName>NOT-FOR-PRODUCTION</PublisherDisplayName>
+              <Logo>Assets\Square50.png</Logo>
+            </Properties>
+            <Dependencies>
+              <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+            </Dependencies>
+            <Resources><Resource Language="en-us" /></Resources>
+            <Applications>
+              <Application Id="HostAgent" Executable="LDW.HostAgent.Windows.exe"
+                           uap10:RuntimeBehavior="packagedClassicApp" uap10:TrustLevel="mediumIL">
+                <uap:VisualElements DisplayName="LDW Host Agent - synthetic"
+                      Description="Unsigned packaging feasibility only"
+                      Square150x150Logo="Assets\Square150.png"
+                      Square44x44Logo="Assets\Square44.png"
+                      BackgroundColor="transparent" />
+              </Application>
+            </Applications>
+            <Capabilities><rescap:Capability Name="runFullTrust" /></Capabilities>
+          </Package>
+          '@ | Set-Content -LiteralPath (Join-Path $payload 'AppxManifest.xml') -Encoding utf8NoBOM
+            [xml]$manifest = Get-Content -LiteralPath (Join-Path $payload 'AppxManifest.xml') -Raw
+            if ($manifest.Package.Identity.Publisher -cne 'CN=NOT-FOR-PRODUCTION') { throw 'MSIX_PROOF_SYNTHETIC_PUBLISHER_REQUIRED' }
+
+            $sdkBin = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Windows Kits\10\bin'
+            $makeAppx = @(Get-ChildItem -LiteralPath $sdkBin -Filter makeappx.exe -Recurse -File -ErrorAction Stop |
+              Where-Object { $_.Directory.Name -eq 'x64' } | Sort-Object FullName -Descending | Select-Object -First 1)
+            if ($makeAppx.Count -ne 1) { throw 'MSIX_PROOF_SDK_MAKEAPPX_NOT_FOUND' }
+            & $makeAppx[0].FullName pack /d $payload /p $msix /o
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $msix -PathType Leaf)) { throw 'MSIX_PROOF_PACK_FAILED' }
+
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $zip = [IO.Compression.ZipFile]::OpenRead($msix)
+            try {
+              $names = @($zip.Entries | ForEach-Object FullName)
+              foreach ($required in @('AppxManifest.xml', 'LDW.HostAgent.Windows.exe', 'Assets/Square44.png', 'Assets/Square150.png')) {
+                if ($names -notcontains $required) { throw "MSIX_PROOF_CONTENT_MISSING: $required" }
+              }
+            } finally { $zip.Dispose() }
+            Write-Host 'MSIX_SOURCE_ONLY_STRUCTURAL_PROOF=PASS'
+            Write-Host 'MSIX_SIGNED=false; MSIX_INSTALLED=false; MSIX_STORE_SUBMITTED=false'
+            Write-Host 'MSIX_PRODUCT_IDENTITY=synthetic-not-reserved; MSIX_STORE_ACCEPTED=false'
+          } finally {
+            if (Test-Path -LiteralPath $root -PathType Container) {
+              Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop
+            }
+          }
+
+      - name: Verify diff whitespace
+        shell: pwsh
+        run: |
+          $base = (git merge-base origin/main HEAD).Trim()
+          git diff --check "$base...HEAD"
+          if ($LASTEXITCODE -ne 0) { throw 'git diff --check failed.' }
