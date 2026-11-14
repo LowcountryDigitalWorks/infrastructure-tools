@@ -103,13 +103,61 @@ $postBody = [ordered]@{
     labels = @('self-hosted','Linux','X64','dragonfly','jit','ldw-ephemeral','synthetic-only','dragonfly-run-123','dragonfly-attempt-1')
     work_folder = '_work'
 }
-$postRefused = $false
-try {
-    $null = Invoke-LdwDragonflyCanaryGhWrite -Path 'repos/LowcountryDigitalWorks/infrastructure-tools/actions/runners/generate-jitconfig' -Method POST -Body $postBody
-} catch {
-    $postRefused = $_.Exception.Message -ceq 'DRAGONFLY_CANARY_WORKFLOW_SOURCE_UNBOUND'
+# The independent security review found that testing the real writer under
+# ambient gh.exe credentials would be unsafe if the guard regressed. Use TWO
+# nested process boundaries: the Gh discovery command is replaced by a
+# deliberate fail-closed sentinel, and the process has no PATH or GH/GITHUB
+# credential/config environment for the duration of this test. Restore both.
+# Never call the real writer before installing the sentinel.
+$global:DragonflyBlockedGhResolutions = 0
+$sensitiveEnvironment = @('PATH','GH_TOKEN','GITHUB_TOKEN','GH_ENTERPRISE_TOKEN',
+    'GITHUB_ENTERPRISE_TOKEN','GH_HOST','GH_CONFIG_DIR','HOME')
+$savedEnvironment = @{}
+foreach ($name in $sensitiveEnvironment) {
+    $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+    [Environment]::SetEnvironmentVariable($name, $null, 'Process')
 }
-if (-not $postRefused) { throw 'DRAGONFLY_PREMINT_DIRECT_POST_NOT_REFUSED' }
+function global:Get-Command {
+    [CmdletBinding()]
+    param([Parameter(Position=0)][string]$Name)
+    if ($Name -ceq 'gh.exe') {
+        $global:DragonflyBlockedGhResolutions++
+        throw 'DRAGONFLY_TEST_MOCK_GH_RESOLUTION_BLOCKED'
+    }
+    throw 'DRAGONFLY_TEST_UNEXPECTED_COMMAND_RESOLUTION'
+}
+try {
+    $jitPath = 'repos/LowcountryDigitalWorks/infrastructure-tools/actions/runners/generate-jitconfig'
+    $runnerPath = 'repos/LowcountryDigitalWorks/infrastructure-tools/actions/runners/123'
+    foreach ($case in @(
+        @{ Method = 'POST'; Path = $jitPath; Body = $postBody; Expected = 'DRAGONFLY_CANARY_WORKFLOW_SOURCE_UNBOUND' },
+        @{ Method = 'post'; Path = $jitPath; Body = $postBody; Expected = 'DRAGONFLY_CANARY_API_METHOD_NONCANONICAL' },
+        @{ Method = 'pOsT'; Path = $jitPath; Body = $postBody; Expected = 'DRAGONFLY_CANARY_API_METHOD_NONCANONICAL' },
+        @{ Method = 'delete'; Path = $runnerPath; Body = $null; Expected = 'DRAGONFLY_CANARY_API_METHOD_NONCANONICAL' },
+        @{ Method = 'DeLeTe'; Path = $runnerPath; Body = $null; Expected = 'DRAGONFLY_CANARY_API_METHOD_NONCANONICAL' },
+        @{ Method = 'DELETE'; Path = $jitPath; Body = $null; Expected = 'DRAGONFLY_CANARY_API_WRITE_SCOPE_REFUSED' }
+    )) {
+        $actualCode = ''
+        try {
+            $null = Invoke-LdwDragonflyCanaryGhWrite -Path $case.Path -Method $case.Method -Body $case.Body
+        } catch {
+            $actualCode = [string]$_.Exception.Message
+        }
+        if ($actualCode -cne $case.Expected) {
+            throw 'DRAGONFLY_PREMINT_WRITER_REFUSAL_INVALID'
+        }
+    }
+    if ($global:DragonflyBlockedGhResolutions -ne 0) {
+        throw 'DRAGONFLY_PREMINT_WRITER_REACHED_GH_PROCESS'
+    }
+} finally {
+    Remove-Item -LiteralPath 'Function:\global:Get-Command' -Force -ErrorAction SilentlyContinue
+    foreach ($name in $sensitiveEnvironment) {
+        [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process')
+    }
+    Remove-Variable -Name DragonflyBlockedGhResolutions -Scope Global -ErrorAction SilentlyContinue
+}
+
 
 # Execute the REAL source entry using deliberately synthetic identities.
 # An early HOLD must occur even when caller forges a matching-looking SHA;
