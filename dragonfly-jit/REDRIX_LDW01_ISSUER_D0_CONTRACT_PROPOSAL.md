@@ -18,6 +18,14 @@ The accepted threat model must separately state that local Administrator/SYSTEM 
 
 **Fast safe fallback:** If a separate signer/trust key is not already available on an approved $0/included basis, keep future promotions owner-attended per exact approved release. Do not invent a signing credential, weaken verifier requirements, create a broad SYSTEM updater or claim unattended upgrades.
 
+## 2a. Reconcile the existing #52 / #186 GitHub App authority candidate
+
+Parent [#52](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/52) already records an **unaccepted** Gate A candidate: a protected promoter would validate a fixed-schema GitHub authorization record using the provider's `performed_via_github_app` metadata from the existing ChatGPT GitHub App durable-action channel, plus predecessor/next generation, source commit/tree/blob/hash, catalog digest and expiry. **This proposal is a companion threat/first-install contract, NOT a replacement issuer or a second promotion writer.** Any accepted path must route to the *single* #186 policy and #269 protected release controller.
+
+The field `performed_via_github_app` establishes reported GitHub App action provenance in a GitHub REST object. It does **not by itself** attest distinct human security acceptance, the source author's independence, key custody, protected Windows installation, or authority to run the package. Exact app ID and installation identity, how the action is triggered and by whom, reviewer separation, authenticated fresh GitHub GET origin, anti-replay, revocation, accepted signer/authorization policy, and the first protected verifier must all be explicitly security-reviewed before this becomes D0/D1 trust. If the owner or source author can cause the accepted App to issue a privileged approval without a distinct policy/actor gate, a forged-seeming but genuinely App-authored record remains a self-approval risk. Never infer independent approval from `performed_via_github_app` alone.
+
+**Preferred no-new-spend research gate:** evaluate the already available GitHub App channel *first*, in read-only/provider-metadata mode, against an exact non-executing release descriptor and the #186 trust model. If it can satisfy the independent approval and protected first-install conditions, use that existing channel; otherwise retain `D0_TRUST_ROOT_ABSENT` and the owner-attended exact-action alternative. Do not create a new GitHub App, signer private key, token, approval bot, service, or schedule for this proof. D0's pre-existing protected verifier/bootstrap problem remains even if the App metadata is authentic.
+
 ## 3. Exact release record proposed (no current approved values)
 
 A strict v1 release descriptor would bind **all** of:
