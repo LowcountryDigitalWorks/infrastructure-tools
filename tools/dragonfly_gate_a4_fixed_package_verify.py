@@ -25,7 +25,9 @@ PINNED_INSPECTOR_SHA256 = "da0f4ea038cc623424bdff16b0971b15ddbc0babc541b7094c0c1
 PINNED_INSPECTOR_SIZE = 8107
 MAX_INSPECTOR_BYTES = 32768
 _DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-_FILE_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+# O_NONBLOCK makes FIFO/special leaf candidates fail the regular-file check
+# without hanging at open() before fstat(). It has no effect on regular files.
+_FILE_FLAGS = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 
 
 class _Hold(Exception):
