@@ -229,6 +229,19 @@ jobs:
           }
           if (-not (Test-Path -LiteralPath (Join-Path $out 'dpi-layout-evidence.txt') -PathType Leaf)) { throw 'UX DPI evidence missing' }
 
+      - name: Retain synthetic Host Agent UX screenshots for read-only review
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: host-agent-synthetic-ux-${{ github.event.pull_request.head.sha }}
+          path: |
+            ${{ runner.temp }}/host-agent-independent-ux-evidence/healthy.png
+            ${{ runner.temp }}/host-agent-independent-ux-evidence/attention-unknown.png
+            ${{ runner.temp }}/host-agent-independent-ux-evidence/failed.png
+            ${{ runner.temp }}/host-agent-independent-ux-evidence/tray-icon-sizes.png
+            ${{ runner.temp }}/host-agent-independent-ux-evidence/dpi-layout-evidence.txt
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
       - name: Diff whitespace validation
         shell: pwsh
         run: |
