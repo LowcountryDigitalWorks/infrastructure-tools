@@ -187,3 +187,51 @@ jobs:
           $base = (git merge-base origin/main HEAD).Trim()
           git diff --check "$base...HEAD"
           if ($LASTEXITCODE -ne 0) { throw 'git diff --check failed.' }
+
+  # Independent presentation proof: preserves the fail-closed deployment
+  # behavioral job above, while making WinForms build/UX regressions visible
+  # even when a runner ACL mismatch stops that job before compilation.
+  ux-source-smoke:
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact UX candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore and build Host Agent Release
+        shell: pwsh
+        run: |
+          dotnet restore ./host-agent/LDW.HostAgent.sln
+          if ($LASTEXITCODE -ne 0) { throw 'HOST_AGENT_UX_RESTORE_FAILED' }
+          dotnet build ./host-agent/LDW.HostAgent.sln -c Release --no-restore
+          if ($LASTEXITCODE -ne 0) { throw 'HOST_AGENT_UX_BUILD_FAILED' }
+
+      - name: Render synthetic Host Agent UX evidence
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'host-agent-independent-ux-evidence'
+          dotnet run --project ./host-agent/tools/LDW.HostAgent.UxEvidence/LDW.HostAgent.UxEvidence.csproj -c Release --no-restore -- $out
+          if ($LASTEXITCODE -ne 0) { throw 'HOST_AGENT_UX_HARNESS_FAILED' }
+          foreach ($name in @('healthy.png','attention-unknown.png','failed.png','tray-icon-sizes.png')) {
+            $candidate = Join-Path $out $name
+            if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { throw "UX evidence missing: $name" }
+            if ((Get-Item -LiteralPath $candidate).Length -lt 1024) { throw "UX evidence unexpectedly small: $name" }
+          }
+          if (-not (Test-Path -LiteralPath (Join-Path $out 'dpi-layout-evidence.txt') -PathType Leaf)) { throw 'UX DPI evidence missing' }
+
+      - name: Diff whitespace validation
+        shell: pwsh
+        run: |
+          $base = (git merge-base origin/main HEAD).Trim()
+          git diff --check "$base...HEAD"
+          if ($LASTEXITCODE -ne 0) { throw 'git diff --check failed.' }
