@@ -220,7 +220,7 @@ jobs:
         shell: pwsh
         run: |
           $out = Join-Path $env:RUNNER_TEMP 'host-agent-independent-ux-evidence'
-          dotnet run --project ./host-agent/tools/LDW.HostAgent.UxEvidence/LDW.HostAgent.UxEvidence.csproj -c Release --no-restore -- $out
+          dotnet run --project ./host-agent/tools/LDW.HostAgent.UxEvidence/LDW.HostAgent.UxEvidence.csproj -c Release -- $out
           if ($LASTEXITCODE -ne 0) { throw 'HOST_AGENT_UX_HARNESS_FAILED' }
           foreach ($name in @('healthy.png','attention-unknown.png','failed.png','tray-icon-sizes.png')) {
             $candidate = Join-Path $out $name
