@@ -18,6 +18,9 @@ function Invoke-LdwDragonflyCanaryGhWrite {
         [Parameter(Mandatory)][ValidateSet('POST','DELETE')][string]$Method,
         [object]$Body
     )
+    # ValidateSet is case-insensitive; refuse aliases before ANY gh.exe resolution.
+    # The exact transport verbs, not caller casing, define the closed operation.
+    if ($Method -cnotin @('POST','DELETE')) { throw 'DRAGONFLY_CANARY_API_METHOD_NONCANONICAL' }
     if ($Method -ceq 'POST') {
         # No independently accepted protected LDW01 issuer/source generation exists.
         # This concrete POST entry must not mint JIT material from caller HeadSha.
