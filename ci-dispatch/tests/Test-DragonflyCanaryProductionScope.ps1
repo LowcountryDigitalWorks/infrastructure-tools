@@ -117,7 +117,7 @@ if (-not $postRefused) { throw 'DRAGONFLY_PREMINT_DIRECT_POST_NOT_REFUSED' }
 $originalProgramData = $env:ProgramData
 try {
     $env:ProgramData = [IO.Path]::GetTempPath()
-    $pwshPath = (Get-Command pwsh -CommandType Application -ErrorAction Stop).Source
+    $pwshPath = (Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
     foreach ($syntheticHead in @(('a' * 40), ('b' * 40), ('f' * 40))) {
         $output = @(& $pwshPath -NoLogo -NoProfile -File $entryPath -RunId 123 -RunAttempt 1 -JobId 456 -HeadSha $syntheticHead 2>&1)
         $exitCode = $LASTEXITCODE
