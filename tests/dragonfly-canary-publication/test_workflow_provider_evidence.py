@@ -106,7 +106,14 @@ class ProviderReadOnlyTests(unittest.TestCase):
         def change(reader, path):
             if len(reader.calls) == 5:
                 reader.values[path]["object"]["sha"] = "c" * 40
-        self.assert_hold(Reader(provider_values(), change))
+        result = collect(reader=Reader(provider_values(), change))
+        # All eight GETs completed, but the independent tuple correlator
+        # correctly rejects the moved branch target as untrusted.
+        self.assertEqual(result["classification"], "HOLD_WORKFLOW_SOURCE_UNBOUND")
+        self.assertTrue(result["provider_reads_complete"])
+        self.assertFalse(result["tuple_consistent"])
+        self.assertFalse(result["jit_authorized"])
+        self.assertFalse(result["provider_write_authorized"])
 
     def test_blob_changes_after_preflight(self):
         def change(reader, path):
