@@ -48,6 +48,40 @@ namespace LdwJournalResearch {
             out IoStatusBlock ioStatus, IntPtr allocationSize, uint fileAttributes,
             uint shareAccess, uint createDisposition, uint createOptions,
             IntPtr eaBuffer, uint eaLength);
+
+        [DllImport("advapi32.dll", ExactSpelling=true)]
+        private static extern uint GetSecurityInfo(
+            SafeFileHandle handle, int objectType, uint requestedInfo,
+            IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl,
+            out IntPtr securityDescriptor);
+        [DllImport("advapi32.dll", ExactSpelling=true)]
+        private static extern uint GetSecurityDescriptorLength(IntPtr securityDescriptor);
+        [DllImport("kernel32.dll", ExactSpelling=true)]
+        private static extern IntPtr LocalFree(IntPtr memory);
+
+        public static byte[] ReadFixtureSecurityByHandle(SafeFileHandle journal) {
+            if (journal == null || journal.IsInvalid || journal.IsClosed)
+                throw new InvalidOperationException("FIXTURE_JOURNAL_HANDLE_INVALID");
+            IntPtr sd = IntPtr.Zero;
+            // SE_FILE_OBJECT = 1. OWNER | GROUP | DACL = 1 | 2 | 4.
+            uint code = GetSecurityInfo(
+                journal, 1, 7, IntPtr.Zero, IntPtr.Zero,
+                IntPtr.Zero, IntPtr.Zero, out sd);
+            try {
+                if (code != 0 || sd == IntPtr.Zero)
+                    throw new InvalidOperationException("FIXTURE_GET_SECURITY_INFO_FAILED_" + code);
+                uint length = GetSecurityDescriptorLength(sd);
+                if (length < 20 || length > 4096)
+                    throw new InvalidOperationException("FIXTURE_SECURITY_LENGTH_INVALID");
+                var data = new byte[checked((int)length)];
+                Marshal.Copy(sd, data, 0, data.Length);
+                return data;
+            }
+            finally {
+                if (sd != IntPtr.Zero && LocalFree(sd) != IntPtr.Zero)
+                    throw new InvalidOperationException("FIXTURE_LOCALFREE_FAILED");
+            }
+        }
     }
 }
 '@ -ErrorAction Stop
@@ -142,14 +176,24 @@ try {
         $size = $stream.Read($buf, 0, $buf.Length)
         Assert ($size -eq $record.Length) 'READBACK_LENGTH'
         Assert ([Text.Encoding]::ASCII.GetString($buf) -ceq 'PREPARED') 'READBACK_BYTES'
+
+        # Verify the ACTUAL created object on its STILL-OPEN exclusive handle.
+        # Never reopen by pathname: the fixture must not prove a different file.
+        $liveDescriptorBytes = [LdwJournalResearch.Native]::ReadFixtureSecurityByHandle($journal)
+        $liveDescriptor = [Security.AccessControl.RawSecurityDescriptor]::new(
+            $liveDescriptorBytes, 0)
+        Assert ($liveDescriptor.Owner.Value -ceq $sid) 'SAME_HANDLE_OWNER'
+        Assert ($liveDescriptor.Group.Value -ceq $sid) 'SAME_HANDLE_GROUP'
+        Assert ((($liveDescriptor.ControlFlags -band
+            [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected) -ne 0)) 'SAME_HANDLE_PROTECTED_DACL'
+        Assert ($null -ne $liveDescriptor.DiscretionaryAcl) 'SAME_HANDLE_PRESENT_DACL'
+        Assert ($liveDescriptor.DiscretionaryAcl.Count -eq 1) 'SAME_HANDLE_EXACT_ACE_COUNT'
+        $ace = $liveDescriptor.DiscretionaryAcl[0]
+        Assert ($ace.AceType -eq [Security.AccessControl.AceType]::AccessAllowed) 'SAME_HANDLE_ALLOW_ACE'
+        Assert ($ace.AceFlags -eq [Security.AccessControl.AceFlags]::None) 'SAME_HANDLE_NO_INHERITED_ACE'
+        Assert ($ace.SecurityIdentifier.Value -ceq $sid) 'SAME_HANDLE_ACE_IDENTITY'
+        Assert ($ace.AccessMask -eq 2032127) 'SAME_HANDLE_EXACT_FULL_CONTROL_MASK'
     } finally { $stream.Dispose(); $journal = $null }
-    # Creation used exclusive ShareAccess=0; reopen for ACL inspection only
-    # after the journal handle has been disposed. No production paths involved.
-    $acl = Get-Acl -LiteralPath (Join-Path $root 'proof-once.journal')
-    Assert $acl.AreAccessRulesProtected 'CREATE_TIME_PROTECTED_DACL'
-    Assert ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ceq $sid) 'CREATE_TIME_OWNER'
-    $rules = @($acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]))
-    Assert ($rules.Count -eq 1 -and $rules[0].IdentityReference.Value -ceq $sid) 'EXPLICIT_ACE_COUNT'
     $again = Invoke-FixtureCreate $directory 'proof-once.journal' $bytes
     $noUsableHandle = ($null -eq $again.File -or $again.File.IsInvalid)
     if ($null -ne $again.File) { $again.File.Dispose() }
