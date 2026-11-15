@@ -119,7 +119,7 @@ try {
     Assert ([LdwJournalResearch.Native]::UnicodeStringBytes() -eq 16) 'UNICODE_ABI'
     Assert ([LdwJournalResearch.Native]::IoStatusBlockBytes() -eq 16) 'STATUS_ABI'
     $directory = [LdwJournalResearch.Native]::OpenDirectory(
-        $root, [uint32]0xC0000000, [uint32]3, [IntPtr]::Zero,
+        $root, [uint32]3221225472, [uint32]3, [IntPtr]::Zero,
         [uint32]3, [uint32]0x02200000, [IntPtr]::Zero)
     Assert (-not $directory.IsInvalid) 'DIRECTORY_HANDLE'
     $negative = $false
