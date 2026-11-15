@@ -138,12 +138,14 @@ try {
         $size = $stream.Read($buf, 0, $buf.Length)
         Assert ($size -eq $record.Length) 'READBACK_LENGTH'
         Assert ([Text.Encoding]::ASCII.GetString($buf) -ceq 'PREPARED') 'READBACK_BYTES'
-        $acl = Get-Acl -LiteralPath (Join-Path $root 'proof-once.journal')
-        Assert $acl.AreAccessRulesProtected 'CREATE_TIME_PROTECTED_DACL'
-        Assert ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ceq $sid) 'CREATE_TIME_OWNER'
-        $rules = @($acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]))
-        Assert ($rules.Count -eq 1 -and $rules[0].IdentityReference.Value -ceq $sid) 'EXPLICIT_ACE_COUNT'
     } finally { $stream.Dispose(); $journal = $null }
+    # Creation used exclusive ShareAccess=0; reopen for ACL inspection only
+    # after the journal handle has been disposed. No production paths involved.
+    $acl = Get-Acl -LiteralPath (Join-Path $root 'proof-once.journal')
+    Assert $acl.AreAccessRulesProtected 'CREATE_TIME_PROTECTED_DACL'
+    Assert ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ceq $sid) 'CREATE_TIME_OWNER'
+    $rules = @($acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]))
+    Assert ($rules.Count -eq 1 -and $rules[0].IdentityReference.Value -ceq $sid) 'EXPLICIT_ACE_COUNT'
     $again = Invoke-FixtureCreate $directory 'proof-once.journal' $bytes
     if ($null -ne $again.File) { $again.File.Dispose() }
     Assert ($again.Status -ne 0) 'CREATE_NEW_COLLISION_REFUSED'
