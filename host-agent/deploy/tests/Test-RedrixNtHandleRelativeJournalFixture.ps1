@@ -109,7 +109,7 @@ try {
     [void][IO.Directory]::CreateDirectory($root)
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $sddl = 'O:' + $sid + 'G:' + $sid + 'D:P(A;;FA;;;' + $sid + ')'
-    $descriptor = New-Object Security.AccessControl.RawSecurityDescriptor($sddl)
+    $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new($sddl)
     $bytes = New-Object byte[] ($descriptor.BinaryLength)
     $descriptor.GetBinaryForm($bytes, 0)
     Assert ([Runtime.InteropServices.Marshal]::SizeOf([LdwJournalResearch.ObjectAttributes]) -eq 48) 'OBJECT_ATTR_ABI'
@@ -128,7 +128,7 @@ try {
     Assert ($result.Status -eq 0) 'NT_CREATE_STATUS'
     Assert ($result.Information -eq 2) 'FILE_CREATED'
     Assert (-not $journal.IsInvalid) 'VALID_JOURNAL_HANDLE'
-    $stream = New-Object IO.FileStream($journal, [IO.FileAccess]::ReadWrite)
+    $stream = [IO.FileStream]::new($journal, [IO.FileAccess]::ReadWrite)
     try {
         $record = [Text.Encoding]::ASCII.GetBytes('PREPARED')
         $stream.Write($record, 0, $record.Length)
