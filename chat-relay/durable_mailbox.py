@@ -60,6 +60,10 @@ class DurableMailbox:
         self._db_path = self._directory / _DB_NAME
         self._auth = Mailbox(master_secret, clock=clock, allowed_roles=allowed_roles)
         self._roles = self._auth._roles
+        self._role_token_markers = tuple(
+            self._auth.token_for_role(role).casefold()
+            for role in sorted(self._roles)
+        )
         self._roster = hashlib.sha256(
             ("\n".join(sorted(self._roles))).encode("ascii")
         ).hexdigest()
@@ -105,7 +109,7 @@ class DurableMailbox:
     def receive(self, actor: str, limit: int = 20) -> dict:
         if actor not in self._roles:
             raise RelayError(403, "ROLE_NOT_REGISTERED")
-        if not isinstance(limit, int) or not 1 <= limit <= 20:
+        if type(limit) is not int or not 1 <= limit <= 20:
             raise RelayError(400, "INVALID_LIMIT")
         return self._transaction(lambda: self._receive_rows(actor, limit))
 
@@ -322,7 +326,13 @@ class DurableMailbox:
             raise DurableRefused("DURABLE_TAMPER")
 
     def _public_body(self, body: object) -> str:
-        if not isinstance(body, str) or not body or len(body.encode("utf-8")) > MAX_BODY:
+        if not isinstance(body, str) or not body:
+            raise RelayError(400, "INVALID_BODY")
+        try:
+            encoded_body = body.encode("utf-8")
+        except UnicodeError:
+            raise RelayError(400, "INVALID_BODY") from None
+        if len(encoded_body) > MAX_BODY:
             raise RelayError(400, "INVALID_BODY")
         folded = body.casefold()
         if any(marker in folded for marker in _FORBIDDEN):
@@ -331,7 +341,9 @@ class DurableMailbox:
             secret_text = self._secret.decode("utf-8")
         except UnicodeDecodeError:
             secret_text = ""
-        if secret_text and secret_text in body:
+        if secret_text and secret_text.casefold() in folded:
+            raise RelayError(400, "INVALID_BODY")
+        if any(token and token in folded for token in self._role_token_markers):
             raise RelayError(400, "INVALID_BODY")
         return body
 

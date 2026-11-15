@@ -373,6 +373,30 @@ class DurableMailboxTests(unittest.TestCase):
         self.assertEqual(reopened.receive("ir02")["messages"], [])
         self.assertTrue(self.send(reopened, message_id=mid)[1]["duplicate"])
 
+    def test_m4_surrogate_and_casefold_sensitive_content_refused(self):
+        box = self.open(directory=self.directory("m4_inputs"))
+        self.assert_code(
+            RelayError, "INVALID_BODY",
+            lambda: self.send(box, body="bad\ud800surrogate"),
+        )
+        self.assert_code(
+            RelayError, "INVALID_BODY",
+            lambda: self.send(
+                box, body="synthetic " + SECRET.decode("ascii").swapcase()
+            ),
+        )
+        self.assert_code(
+            RelayError, "INVALID_BODY",
+            lambda: self.send(
+                box, body="synthetic " + box.token_for_role("ir02").upper()
+            ),
+        )
+        self.assert_code(
+            RelayError, "INVALID_LIMIT",
+            lambda: box.receive("ir02", limit=True),
+        )
+        self.assertEqual(self.send(box)[1]["state"], "IN_MAILBOX")
+
     def test_schema_version_mismatch_fails_closed(self):
         box = self.open(directory=self.directory("schema"))
         box.close()
