@@ -8,7 +8,7 @@ Accepted transport status remains `IN_MAILBOX` and `MANUAL_OR_TOOL_POLL_REQUIRED
 
 The journal may store synthetic public message text and the trusted role names needed to enforce that text. It does not store the master secret, HMAC tokens, or bearers. The role roster comes only from the trusted constructor argument. Message content cannot add a role.
 
-Restart durability uses a persisted wall-clock high-water mark. A clock that moves backward cannot extend a TTL or restore an expired UUID. SQLite uses a delete journal rather than WAL so `-wal` and `-shm` sidecars are not left beside the database. Any extra file, symlink, non-regular file, schema mismatch, or failed integrity check refuses the journal.
+Restart durability uses a persisted wall-clock high-water mark. A clock that moves backward cannot extend a TTL or restore an expired UUID. SQLite uses a delete journal rather than WAL. On reopen it permits *only* a single correctly owned/typed SQLite rollback `-journal` file for SQLite crash recovery, then requires its removal after recovery and verifies the keyed complete-state commitment. WAL/SHM, unexpected sidecars, symlinks, non-regular files, schema mismatch or failed integrity checks remain refusals. This rollback allowance does not authorize a caller-selected sidecar or relax the separate ancestor/reparse-point requirements.
 
 On POSIX the directory must be mode `0700` and the database mode `0600`, both owned by the current user. This proof does not create an account, a scheduled task, or a privileged helper.
 

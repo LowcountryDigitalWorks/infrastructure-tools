@@ -211,21 +211,33 @@ class DurableMailbox:
         )
         return effective
 
+    @staticmethod
+    def _sqlite_refusal(error: sqlite3.Error) -> DurableRefused:
+        detail = str(error).casefold()
+        if "locked" in detail or "busy" in detail:
+            return DurableRefused("DURABLE_BUSY")
+        return DurableRefused("DURABLE_CORRUPT")
+
     def _transaction(self, fn):
         with self._lock:
             if self._conn is None:
                 raise DurableRefused("DURABLE_CLOSED")
-            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+            except sqlite3.Error as error:
+                raise self._sqlite_refusal(error) from None
             try:
                 self._verify_mac(self._conn)
                 result = fn()
                 self._store_mac(self._conn)
                 self._conn.execute("COMMIT")
-            except Exception:
+            except Exception as error:
                 try:
                     self._conn.execute("ROLLBACK")
                 except sqlite3.Error:
                     pass
+                if isinstance(error, sqlite3.Error):
+                    raise self._sqlite_refusal(error) from None
                 raise
             self._refuse_sidecars()
             return result
@@ -366,7 +378,7 @@ class DurableMailbox:
         return directory
 
     def _open_db(self) -> sqlite3.Connection:
-        self._refuse_sidecars()
+        self._refuse_sidecars(allow_rollback_journal=True)
         if self._db_path.exists() or self._db_path.is_symlink():
             self._refuse_link(self._db_path)
             if not stat.S_ISREG(os.lstat(self._db_path).st_mode):
@@ -382,10 +394,11 @@ class DurableMailbox:
             raise DurableRefused("DURABLE_CORRUPT")
         try:
             conn = sqlite3.connect(
-                self._db_path, isolation_level=None, check_same_thread=False
+                self._db_path, isolation_level=None,
+                check_same_thread=False, timeout=0.5,
             )
-        except sqlite3.Error:
-            raise DurableRefused("DURABLE_CORRUPT") from None
+        except sqlite3.Error as error:
+            raise self._sqlite_refusal(error) from None
         try:
             mode = conn.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
             if str(mode).lower() != "delete":
@@ -439,19 +452,33 @@ class DurableMailbox:
         except DurableRefused:
             conn.close()
             raise
-        except sqlite3.Error:
+        except sqlite3.Error as error:
             conn.close()
-            raise DurableRefused("DURABLE_CORRUPT") from None
+            raise self._sqlite_refusal(error) from None
         except Exception:
             conn.close()
             raise
 
-    def _refuse_sidecars(self) -> None:
+    def _refuse_sidecars(self, *, allow_rollback_journal: bool = False) -> None:
         if not self._directory.exists():
             return
         for child in self._directory.iterdir():
-            if child.name != _DB_NAME or child.is_symlink():
-                raise DurableRefused("DURABLE_SIDECAR")
+            if child.name == _DB_NAME and not child.is_symlink():
+                continue
+            if (allow_rollback_journal
+                and child.name == _DB_NAME + "-journal"
+                and not child.is_symlink()):
+                try:
+                    info = os.lstat(child)
+                except OSError:
+                    raise DurableRefused("DURABLE_SIDECAR") from None
+                if not stat.S_ISREG(info.st_mode):
+                    raise DurableRefused("DURABLE_SIDECAR")
+                if os.name == "posix":
+                    if stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != os.getuid():
+                        raise DurableRefused("DURABLE_SIDECAR")
+                continue
+            raise DurableRefused("DURABLE_SIDECAR")
 
     def _refuse_link(self, path: Path) -> None:
         try:

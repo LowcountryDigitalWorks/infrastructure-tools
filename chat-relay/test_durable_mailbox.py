@@ -1,5 +1,7 @@
 import os
 import sqlite3
+import subprocess
+import sys
 import stat
 import tempfile
 import threading
@@ -396,6 +398,74 @@ class DurableMailboxTests(unittest.TestCase):
             lambda: box.receive("ir02", limit=True),
         )
         self.assertEqual(self.send(box)[1]["state"], "IN_MAILBOX")
+
+    def test_m1_hot_rollback_journal_recovery_keeps_sealed_state(self):
+        directory = self.directory("m1_hot")
+        box = self.open(directory=directory)
+        mid, _ = self.send(box)
+        box.close()
+        path = directory / "journal.sqlite"
+        script = (
+            "import sqlite3,os,sys\n"
+            "c=sqlite3.connect(sys.argv[1],isolation_level=None)\n"
+            "c.execute('BEGIN IMMEDIATE')\n"
+            "c.execute(\"UPDATE messages SET body='interrupted synthetic text'\")\n"
+            "os._exit(9)\n"
+        )
+        child = subprocess.run([sys.executable, "-c", script, str(path)],
+                               check=False, capture_output=True, timeout=10)
+        self.assertEqual(child.returncode, 9, child.stderr.decode(errors="replace"))
+        journal = directory / "journal.sqlite-journal"
+        self.assertTrue(journal.is_file(), "no hot SQLite rollback journal reproduced")
+        recovered = self.open(directory=directory)
+        self.assertEqual(
+            recovered.receive("ir02")["messages"][0]["message_id"], mid
+        )
+        self.assertFalse(journal.exists())
+
+    def test_m1_concurrent_sqlite_lock_returns_closed_busy_code(self):
+        directory = self.directory("m1_busy")
+        box = self.open(directory=directory)
+        path = directory / "journal.sqlite"
+        locker = sqlite3.connect(path, isolation_level=None)
+        try:
+            locker.execute("BEGIN EXCLUSIVE")
+            self.assert_code(
+                DurableRefused, "DURABLE_BUSY",
+                lambda: box.receive("ir02"),
+            )
+        finally:
+            locker.execute("ROLLBACK")
+            locker.close()
+        self.assertEqual(box.receive("ir02")["messages"], [])
+
+    def test_m2_dropped_schema_or_malformed_values_refuse(self):
+        for attack in ("drop_table", "bad_high", "bad_timestamp"):
+            with self.subTest(attack=attack):
+                directory = self.directory("m2_" + attack)
+                box = self.open(directory=directory)
+                self.send(box)
+                box.close()
+                conn = sqlite3.connect(directory / "journal.sqlite")
+                try:
+                    if attack == "drop_table":
+                        conn.execute("DROP TABLE messages")
+                    elif attack == "bad_high":
+                        conn.execute(
+                            "UPDATE meta SET value='not-an-integer' "
+                            "WHERE key='wall_high_ms'"
+                        )
+                    else:
+                        conn.execute(
+                            "UPDATE messages SET created_ms='invalid'"
+                        )
+                    conn.commit()
+                finally:
+                    conn.close()
+                self.assert_code(
+                    DurableRefused, "DURABLE_TAMPER",
+                    lambda: self.open(directory=directory),
+                )
 
     def test_schema_version_mismatch_fails_closed(self):
         box = self.open(directory=self.directory("schema"))
