@@ -52,17 +52,29 @@ namespace LdwA0AncestorIdentityFixture {
         private static extern uint FinalNameByHandle(
             SafeFileHandle handle, StringBuilder buffer, uint capacity, uint flags);
 
-        public static SafeFileHandle OpenNoDeleteShare(string path) {
-            // FILE_READ_ATTRIBUTES only; share READ|WRITE, explicitly NOT SHARE_DELETE.
-            // OPEN_EXISTING, BACKUP_SEMANTICS for directory, OPEN_REPARSE_POINT.
-            SafeFileHandle h = CreateDirectoryHandle(path, 0x80u, 0x3u, IntPtr.Zero,
-                                                    3u, 0x02200000u, IntPtr.Zero);
+        private static SafeFileHandle OpenWithAccess(string path, uint desiredAccess) {
+            // OPEN_EXISTING; BACKUP_SEMANTICS|OPEN_REPARSE_POINT;
+            // share READ|WRITE (never FILE_SHARE_DELETE).
+            SafeFileHandle h = CreateDirectoryHandle(path, desiredAccess, 0x3u,
+                IntPtr.Zero, 3u, 0x02200000u, IntPtr.Zero);
             if (h == null || h.IsInvalid) {
                 int error = Marshal.GetLastWin32Error();
                 if (h != null) h.Dispose();
                 throw new Win32Exception(error, "TEMP_DIRECTORY_OPEN_FAILED");
             }
             return h;
+        }
+
+        public static SafeFileHandle OpenNoDeleteShare(string path) {
+            // GENERIC_READ requests data/traverse + READ_CONTROL, not
+            // FILE_READ_ATTRIBUTES-only. Attribute-only requests are excluded
+            // from ordinary CreateFile share restrictions (Microsoft docs).
+            return OpenWithAccess(path, 0x80000000u);
+        }
+
+        public static SafeFileHandle OpenAttributeOnlyControl(string path) {
+            // Deliberately weak control used ONLY on a disposable TEMP sibling.
+            return OpenWithAccess(path, 0x80u);
         }
 
         public static string Identity(SafeFileHandle h) {
@@ -119,28 +131,57 @@ $controlMoved = Join-Path $root 'unlocked-control-moved'
 $ancestorMoved = Join-Path $root 'ancestor-moved'
 $childMoved = Join-Path $ancestorPath 'exact-child-moved'
 $otherPath = Join-Path $root 'unrelated'
+$attributeControlPath = Join-Path $root 'attribute-only-control'
+$attributeMovedPath = Join-Path $root 'attribute-only-control-moved'
+$ancestorProbePath = Join-Path $root 'isolated-ancestor'
+$ancestorProbeMovedPath = Join-Path $root 'isolated-ancestor-moved'
 
 $rootHandle = $null
 $ancestorHandle = $null
 $childHandle = $null
 $secondChildHandle = $null
 $otherHandle = $null
+$attributeControlHandle = $null
+$ancestorProbeHandle = $null
 try {
     [void][IO.Directory]::CreateDirectory($childPath)
     [void][IO.Directory]::CreateDirectory($controlPath)
     [void][IO.Directory]::CreateDirectory($otherPath)
+    [void][IO.Directory]::CreateDirectory($attributeControlPath)
+    [void][IO.Directory]::CreateDirectory($ancestorProbePath)
     # An unlocked control must be renameable, making denial below meaningful.
     [IO.Directory]::Move($controlPath, $controlMoved)
     Assert-Fixture (Test-Path -LiteralPath $controlMoved -PathType Container) 'CONTROL_RENAME_ALLOWED'
+
+    # Separate attribute-only control. The result is OBSERVED, not assumed:
+    # Microsoft documents that attribute-only requests bypass share restrictions.
+    $attributeControlHandle = [LdwA0AncestorIdentityFixture.Native]::OpenAttributeOnlyControl($attributeControlPath)
+    $attributeControlId = [LdwA0AncestorIdentityFixture.Native]::Identity($attributeControlHandle)
+    $attributeRenameSucceeded = $false
+    try {
+        [IO.Directory]::Move($attributeControlPath, $attributeMovedPath)
+        $attributeRenameSucceeded = $true
+    } catch [IO.IOException] { $attributeRenameSucceeded = $false }
+    Assert-Fixture ($attributeControlId -ceq [LdwA0AncestorIdentityFixture.Native]::Identity($attributeControlHandle)) 'ATTR_ONLY_HANDLE_OBJECT_STILL_SAME'
+    if ($attributeRenameSucceeded) {
+        Assert-Fixture (Test-Path -LiteralPath $attributeMovedPath -PathType Container) 'ATTR_MOVED_EXISTS'
+        Assert-Fixture (-not (Test-Path -LiteralPath $attributeControlPath)) 'ATTR_OLD_NAME_GONE'
+    } else {
+        Assert-Fixture (Test-Path -LiteralPath $attributeControlPath -PathType Container) 'ATTR_DENIED_NAME_PRESERVED'
+    }
+    Write-Output ('A0_TEMP_ATTRIBUTE_ONLY_RENAME=' + $(if ($attributeRenameSucceeded) { 'ALLOWED' } else { 'DENIED' }))
+    $attributeControlHandle.Dispose()
+    $attributeControlHandle = $null
 
     $rootHandle = [LdwA0AncestorIdentityFixture.Native]::OpenNoDeleteShare($root)
     $ancestorHandle = [LdwA0AncestorIdentityFixture.Native]::OpenNoDeleteShare($ancestorPath)
     $childHandle = [LdwA0AncestorIdentityFixture.Native]::OpenNoDeleteShare($childPath)
     $secondChildHandle = [LdwA0AncestorIdentityFixture.Native]::OpenNoDeleteShare($childPath)
     $otherHandle = [LdwA0AncestorIdentityFixture.Native]::OpenNoDeleteShare($otherPath)
+    $ancestorProbeHandle = [LdwA0AncestorIdentityFixture.Native]::OpenNoDeleteShare($ancestorProbePath)
 
     foreach ($h in @($rootHandle, $ancestorHandle, $childHandle,
-                     $secondChildHandle, $otherHandle)) {
+                     $secondChildHandle, $otherHandle, $ancestorProbeHandle)) {
         Assert-Fixture (-not [LdwA0AncestorIdentityFixture.Native]::IsReparsePoint($h)) 'NO_REPARSE_HANDLE'
     }
 
@@ -158,14 +199,26 @@ try {
     $expected = '\\?\' + [IO.Path]::GetFullPath($childPath)
     Assert-Fixture ($final -ieq $expected) 'SAME_HANDLE_FINAL_PATH'
 
+    # Use independent child and ancestor probes, so one result cannot hide
+    # the other; NEVER treat a successful rename as a security PASS.
     $childRenameDenied = $false
     try { [IO.Directory]::Move($childPath, $childMoved) }
     catch [IO.IOException] { $childRenameDenied = $true }
-    Assert-Fixture $childRenameDenied 'CHILD_RENAME_REFUSED_HELD_HANDLE'
     $ancestorRenameDenied = $false
-    try { [IO.Directory]::Move($ancestorPath, $ancestorMoved) }
+    try { [IO.Directory]::Move($ancestorProbePath, $ancestorProbeMovedPath) }
     catch [IO.IOException] { $ancestorRenameDenied = $true }
-    Assert-Fixture $ancestorRenameDenied 'ANCESTOR_RENAME_REFUSED_HELD_HANDLE'
+    $oldChildExists = Test-Path -LiteralPath $childPath -PathType Container
+    $movedChildExists = Test-Path -LiteralPath $childMoved -PathType Container
+    $oldAncestorExists = Test-Path -LiteralPath $ancestorProbePath -PathType Container
+    $movedAncestorExists = Test-Path -LiteralPath $ancestorProbeMovedPath -PathType Container
+    Assert-Fixture ($childId -ceq [LdwA0AncestorIdentityFixture.Native]::Identity($childHandle)) 'CHILD_HANDLE_SAME_OBJECT_AFTER_ATTEMPT'
+    Assert-Fixture ($ancestorId -ceq [LdwA0AncestorIdentityFixture.Native]::Identity($ancestorHandle)) 'CHAIN_ANCESTOR_HANDLE_SAME_AFTER_ATTEMPT'
+    Write-Output ('A0_TEMP_GENERIC_READ_CHILD_RENAME=' + $(if ($childRenameDenied) { 'DENIED' } else { 'ALLOWED' }))
+    Write-Output ('A0_TEMP_GENERIC_READ_ANCESTOR_RENAME=' + $(if ($ancestorRenameDenied) { 'DENIED' } else { 'ALLOWED' }))
+    Assert-Fixture $childRenameDenied 'CHILD_RENAME_REFUSED_HELD_GENERIC_READ_HANDLE'
+    Assert-Fixture $ancestorRenameDenied 'ISOLATED_ANCESTOR_RENAME_REFUSED_HELD_GENERIC_READ_HANDLE'
+    Assert-Fixture ($oldChildExists -and -not $movedChildExists) 'CHILD_NAME_STABLE'
+    Assert-Fixture ($oldAncestorExists -and -not $movedAncestorExists) 'ISOLATED_ANCESTOR_NAME_STABLE'
 
     Assert-Fixture (Test-Path -LiteralPath $childPath -PathType Container) 'PATH_STILL_EXISTS'
     Assert-Fixture (-not (Test-Path -LiteralPath $ancestorMoved)) 'ANCESTOR_NOT_REPLACED'
@@ -179,6 +232,7 @@ try {
 }
 finally {
     foreach ($h in @($otherHandle, $secondChildHandle, $childHandle,
+                     $ancestorProbeHandle, $attributeControlHandle,
                      $ancestorHandle, $rootHandle)) {
         if ($null -ne $h) { $h.Dispose() }
     }
