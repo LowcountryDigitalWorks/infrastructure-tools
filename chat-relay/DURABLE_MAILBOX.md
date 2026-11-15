@@ -13,3 +13,20 @@ Restart durability uses a persisted wall-clock high-water mark. A clock that mov
 On POSIX the directory must be mode `0700` and the database mode `0600`, both owned by the current user. This proof does not create an account, a scheduled task, or a privileged helper.
 
 Rollback is to stop passing the opt-in and delete the disposable directory. The in-memory relay does not read that directory.
+
+## H1 draft integrity boundary (source-only candidate)
+
+The proposed draft change commits to the *entire* SQLite message row set,
+roster, wall-clock high-water value, schema and metadata with a domain-separated
+master-secret-derived HMAC-SHA256. It verifies that commitment on reopen and
+inside each write transaction before any read/mutation, then commits the new
+digest in the same transaction. Unknown or unkeyed legacy journal files fail
+closed rather than silently migrating. No bearer or key is stored.
+
+This excludes casual offline SQLite row insertion, change, deletion, clock
+metadata rollback and reopen with a different master secret. It cannot detect
+rollback of an **entire previously valid database snapshot** without a separate
+trusted monotonic source, nor protect against an attacker who also has the
+in-process master secret. H1 evidence cannot waive the separate M1-M4/L1-L2
+security-review findings or authorize deployment. The persistent adapter
+remains opt-in, synthetic/public and UNMERGED until independent acceptance.

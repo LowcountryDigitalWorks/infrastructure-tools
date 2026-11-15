@@ -300,6 +300,79 @@ class DurableMailboxTests(unittest.TestCase):
         self.assertEqual(row["sender"], "ir02")
         self.assertEqual(final.receive("ir02")["messages"], [])
 
+    def test_h1_complete_state_mac_refuses_offline_forgery(self):
+        # These five probes were independently reproduced as accepted
+        # against the unkeyed PR307 baseline. No real credentials/data.
+        for attack in ("body", "insert", "delete", "secret", "high_water"):
+            with self.subTest(attack=attack):
+                directory = self.directory("h1_" + attack)
+                box = self.open(directory=directory)
+                mid, _ = self.send(box)
+                box.close()
+                path = directory / "journal.sqlite"
+                if attack != "secret":
+                    conn = sqlite3.connect(path)
+                    try:
+                        if attack == "body":
+                            conn.execute(
+                                "UPDATE messages SET body=? WHERE message_id=?",
+                                ("forged public message", mid),
+                            )
+                        elif attack == "insert":
+                            conn.execute(
+                                "INSERT INTO messages VALUES(?,?,?,?,?,?,?,?)",
+                                (str(uuid.uuid4()), "gm17", "ir02",
+                                 "forged public message", None,
+                                 1000000, 1900000, 0),
+                            )
+                        elif attack == "delete":
+                            conn.execute(
+                                "DELETE FROM messages WHERE message_id=?", (mid,)
+                            )
+                        elif attack == "high_water":
+                            conn.execute(
+                                "UPDATE meta SET value='0' WHERE key='wall_high_ms'"
+                            )
+                        conn.commit()
+                    finally:
+                        conn.close()
+                def reopen():
+                    return DurableMailbox(
+                        b"synthetic-alternate-master-key-NEVER-REAL-000000"
+                        if attack == "secret" else SECRET,
+                        directory, opt_in=OPT_IN, allowed_roles=ROLES,
+                        clock=lambda: self.now[0],
+                    )
+                self.assert_code(DurableRefused, "DURABLE_TAMPER", reopen)
+
+    def test_h1_live_sqlite_mutation_detected_before_receive(self):
+        box = self.open(directory=self.directory("h1_live"))
+        mid, _ = self.send(box)
+        path = self.directory("h1_live") / "journal.sqlite"
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute(
+                "UPDATE messages SET body='forged public message' WHERE message_id=?",
+                (mid,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self.assert_code(
+            DurableRefused, "DURABLE_TAMPER",
+            lambda: box.receive("ir02"),
+        )
+
+    def test_h1_integrity_commits_valid_ack_and_reopen(self):
+        box = self.open(directory=self.directory("h1_roundtrip"))
+        mid, _ = self.send(box)
+        self.assertEqual(len(box.receive("ir02")["messages"]), 1)
+        self.assertEqual(box.acknowledge("ir02", mid)["state"], "ACKNOWLEDGED")
+        box.close()
+        reopened = self.open(directory=self.directory("h1_roundtrip"))
+        self.assertEqual(reopened.receive("ir02")["messages"], [])
+        self.assertTrue(self.send(reopened, message_id=mid)[1]["duplicate"])
+
     def test_schema_version_mismatch_fails_closed(self):
         box = self.open(directory=self.directory("schema"))
         box.close()

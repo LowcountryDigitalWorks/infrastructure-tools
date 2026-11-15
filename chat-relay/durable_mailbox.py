@@ -11,6 +11,8 @@ trusted roster. It does not store the master secret, role tokens, or bearers.
 from __future__ import annotations
 
 import hashlib
+import hmac
+import json
 import os
 import sqlite3
 import stat
@@ -24,6 +26,9 @@ STATUS_NOTICE = "IN_MAILBOX / MANUAL_OR_TOOL_POLL_REQUIRED"
 _SCHEMA = 1
 _APP_ID = 0x4C445744
 _DB_NAME = "journal.sqlite"
+_MAC_KEY_DOMAIN = b"LDW/chat-relay/durable/v1/state-key"
+_MAC_STATE_DOMAIN = "LDW/chat-relay/durable/v1/state"
+_MAC_FIELD = "state_mac"
 _FORBIDDEN = (
     "bearer ",
     "private key",
@@ -59,6 +64,7 @@ class DurableMailbox:
             ("\n".join(sorted(self._roles))).encode("ascii")
         ).hexdigest()
         self._secret = master_secret
+        self._mac_key = hmac.new(master_secret, _MAC_KEY_DOMAIN, hashlib.sha256).digest()
         self._lock = RLock()
         self._conn = self._open_db()
 
@@ -207,7 +213,9 @@ class DurableMailbox:
                 raise DurableRefused("DURABLE_CLOSED")
             self._conn.execute("BEGIN IMMEDIATE")
             try:
+                self._verify_mac(self._conn)
                 result = fn()
+                self._store_mac(self._conn)
                 self._conn.execute("COMMIT")
             except Exception:
                 try:
@@ -217,6 +225,101 @@ class DurableMailbox:
                 raise
             self._refuse_sidecars()
             return result
+
+    def _state_mac(self, conn: sqlite3.Connection) -> str:
+        """Authenticate the *complete* local SQLite snapshot, not individual rows.
+
+        A row-only MAC cannot detect message deletion, replay or meta rollback.
+        This does not detect replay of an entire previously valid DB snapshot:
+        that would require an independent, durable monotonic trust anchor.
+        """
+        try:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            app_id = conn.execute("PRAGMA application_id").fetchone()[0]
+            if type(version) is not int or version != _SCHEMA or app_id != _APP_ID:
+                raise DurableRefused("DURABLE_TAMPER")
+            schema = conn.execute(
+                "SELECT type,name,tbl_name,sql FROM sqlite_schema "
+                "ORDER BY type,name"
+            ).fetchall()
+            if {(row[0], row[1]) for row in schema if row[0] == "table"} != {
+                ("table", "meta"), ("table", "messages")
+            } or any(row[0] not in ("table", "index") for row in schema):
+                raise DurableRefused("DURABLE_TAMPER")
+            meta_rows = conn.execute(
+                "SELECT key,value FROM meta ORDER BY key"
+            ).fetchall()
+            meta = dict(meta_rows)
+            if len(meta_rows) != 3 or set(meta) != {
+                "roster", "wall_high_ms", _MAC_FIELD
+            } or any(type(k) is not str or type(v) is not str
+                     for k, v in meta_rows):
+                raise DurableRefused("DURABLE_TAMPER")
+            if meta["roster"] != self._roster:
+                raise DurableRefused("DURABLE_ROSTER_MISMATCH")
+            high = meta["wall_high_ms"]
+            if not high or not high.isascii() or not high.isdecimal() or (
+                len(high) > 1 and high.startswith("0")
+            ) or len(high) > 20:
+                raise DurableRefused("DURABLE_TAMPER")
+            rows = conn.execute(
+                "SELECT message_id,sender,recipient,body,reply_to,"
+                "created_ms,expires_ms,acknowledged FROM messages "
+                "ORDER BY message_id"
+            ).fetchall()
+            if len(rows) > MAX_MESSAGES:
+                raise DurableRefused("DURABLE_TAMPER")
+            for row in rows:
+                mid, sender, recipient, body, reply_to, created, expires, ack = row
+                if (type(mid) is not str or canonical_id(mid) != mid
+                    or type(sender) is not str or sender not in self._roles
+                    or type(recipient) is not str or recipient not in self._roles
+                    or sender == recipient or type(body) is not str
+                    or type(created) is not int or type(expires) is not int
+                    or created < 0 or expires != created + TTL_SECONDS * 1000
+                    or type(ack) is not int or ack not in (0, 1)):
+                    raise DurableRefused("DURABLE_TAMPER")
+                if reply_to is not None and (
+                    type(reply_to) is not str or canonical_id(reply_to) != reply_to
+                ):
+                    raise DurableRefused("DURABLE_TAMPER")
+                self._public_body(body)
+            payload = json.dumps({
+                "domain": _MAC_STATE_DOMAIN,
+                "application_id": app_id,
+                "user_version": version,
+                "schema": schema,
+                "meta": [(key, value) for key, value in meta_rows
+                         if key != _MAC_FIELD],
+                "messages": rows,
+            }, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+            return hmac.new(
+                self._mac_key, payload.encode("ascii"), hashlib.sha256
+            ).hexdigest()
+        except DurableRefused:
+            raise
+        except (sqlite3.Error, RelayError, TypeError, ValueError,
+                OverflowError, UnicodeError):
+            raise DurableRefused("DURABLE_TAMPER") from None
+
+    def _verify_mac(self, conn: sqlite3.Connection) -> None:
+        try:
+            stored = conn.execute(
+                "SELECT value FROM meta WHERE key=?", (_MAC_FIELD,)
+            ).fetchone()
+            if (stored is None or type(stored[0]) is not str
+                or not hmac.compare_digest(stored[0], self._state_mac(conn))):
+                raise DurableRefused("DURABLE_TAMPER")
+        except sqlite3.Error:
+            raise DurableRefused("DURABLE_TAMPER") from None
+
+    def _store_mac(self, conn: sqlite3.Connection) -> None:
+        mac = self._state_mac(conn)
+        result = conn.execute(
+            "UPDATE meta SET value=? WHERE key=?", (mac, _MAC_FIELD)
+        )
+        if result.rowcount != 1:
+            raise DurableRefused("DURABLE_TAMPER")
 
     def _public_body(self, body: object) -> str:
         if not isinstance(body, str) or not body or len(body.encode("utf-8")) > MAX_BODY:
@@ -299,6 +402,10 @@ class DurableMailbox:
                 conn.execute(
                     "INSERT INTO meta(key,value) VALUES('wall_high_ms','0')"
                 )
+                conn.execute(
+                    "INSERT INTO meta(key,value) VALUES(?, '')", (_MAC_FIELD,)
+                )
+                self._store_mac(conn)
                 created = conn.execute("PRAGMA integrity_check").fetchone()
                 if created is None or created[0] != "ok":
                     raise DurableRefused("DURABLE_CORRUPT")
@@ -314,6 +421,7 @@ class DurableMailbox:
                 ).fetchone()
                 if roster is None or roster[0] != self._roster:
                     raise DurableRefused("DURABLE_ROSTER_MISMATCH")
+                self._verify_mac(conn)
             self._refuse_sidecars()
             return conn
         except DurableRefused:
