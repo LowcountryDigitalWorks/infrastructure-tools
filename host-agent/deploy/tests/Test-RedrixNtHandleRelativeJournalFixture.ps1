@@ -66,8 +66,8 @@ function Invoke-FixtureCreate(
     try {
         $namePtr = [Runtime.InteropServices.Marshal]::StringToHGlobalUni($Leaf)
         $u = New-Object LdwJournalResearch.UnicodeString
-        $u.Length = [ushort]($Leaf.Length * 2)
-        $u.MaximumLength = [ushort](($Leaf.Length + 1) * 2)
+        $u.Length = [uint16]($Leaf.Length * 2)
+        $u.MaximumLength = [uint16](($Leaf.Length + 1) * 2)
         $u.Buffer = $namePtr
         $unicodePtr = [Runtime.InteropServices.Marshal]::AllocHGlobal(
             [LdwJournalResearch.Native]::UnicodeStringBytes())
