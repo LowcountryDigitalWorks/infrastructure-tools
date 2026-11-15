@@ -34,6 +34,9 @@ namespace LdwJournalResearch {
         public IntPtr Information;
     }
     public static class Native {
+        public static int ObjectAttributesBytes() { return Marshal.SizeOf(typeof(ObjectAttributes)); }
+        public static int UnicodeStringBytes() { return Marshal.SizeOf(typeof(UnicodeString)); }
+        public static int IoStatusBlockBytes() { return Marshal.SizeOf(typeof(IoStatusBlock)); }
         [DllImport("kernel32.dll", EntryPoint="CreateFileW", CharSet=CharSet.Unicode, SetLastError=true)]
         public static extern SafeFileHandle OpenDirectory(
             string path, uint access, uint shareMode, IntPtr securityAttributes,
@@ -67,12 +70,12 @@ function Invoke-FixtureCreate(
         $u.MaximumLength = [ushort](($Leaf.Length + 1) * 2)
         $u.Buffer = $namePtr
         $unicodePtr = [Runtime.InteropServices.Marshal]::AllocHGlobal(
-            [Runtime.InteropServices.Marshal]::SizeOf([LdwJournalResearch.UnicodeString]))
+            [LdwJournalResearch.Native]::UnicodeStringBytes())
         [Runtime.InteropServices.Marshal]::StructureToPtr($u, $unicodePtr, $false)
         $sdPtr = [Runtime.InteropServices.Marshal]::AllocHGlobal($SecurityBytes.Length)
         [Runtime.InteropServices.Marshal]::Copy($SecurityBytes, 0, $sdPtr, $SecurityBytes.Length)
         $a = New-Object LdwJournalResearch.ObjectAttributes
-        $a.Length = [uint32][Runtime.InteropServices.Marshal]::SizeOf([LdwJournalResearch.ObjectAttributes])
+        $a.Length = [uint32][LdwJournalResearch.Native]::ObjectAttributesBytes()
         $a.RootDirectory = $Root.DangerousGetHandle()
         $a.ObjectName = $unicodePtr
         $a.Attributes = [uint32]0x1040 # OBJ_DONT_REPARSE | OBJ_CASE_INSENSITIVE
@@ -112,9 +115,9 @@ try {
     $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new($sddl)
     $bytes = New-Object byte[] ($descriptor.BinaryLength)
     $descriptor.GetBinaryForm($bytes, 0)
-    Assert ([Runtime.InteropServices.Marshal]::SizeOf([LdwJournalResearch.ObjectAttributes]) -eq 48) 'OBJECT_ATTR_ABI'
-    Assert ([Runtime.InteropServices.Marshal]::SizeOf([LdwJournalResearch.UnicodeString]) -eq 16) 'UNICODE_ABI'
-    Assert ([Runtime.InteropServices.Marshal]::SizeOf([LdwJournalResearch.IoStatusBlock]) -eq 16) 'STATUS_ABI'
+    Assert ([LdwJournalResearch.Native]::ObjectAttributesBytes() -eq 48) 'OBJECT_ATTR_ABI'
+    Assert ([LdwJournalResearch.Native]::UnicodeStringBytes() -eq 16) 'UNICODE_ABI'
+    Assert ([LdwJournalResearch.Native]::IoStatusBlockBytes() -eq 16) 'STATUS_ABI'
     $directory = [LdwJournalResearch.Native]::OpenDirectory(
         $root, [uint32]0xC0000000, [uint32]3, [IntPtr]::Zero,
         [uint32]3, [uint32]0x02200000, [IntPtr]::Zero)
