@@ -35,6 +35,7 @@ namespace LdwJournalResearch {
     }
     public static class Native {
         public static int ObjectAttributesBytes() { return Marshal.SizeOf(typeof(ObjectAttributes)); }
+        public static int ObjectNameCollisionStatus() { return unchecked((int)0xC0000035); }
         public static int UnicodeStringBytes() { return Marshal.SizeOf(typeof(UnicodeString)); }
         public static int IoStatusBlockBytes() { return Marshal.SizeOf(typeof(IoStatusBlock)); }
         [DllImport("kernel32.dll", EntryPoint="CreateFileW", CharSet=CharSet.Unicode, SetLastError=true)]
@@ -150,8 +151,10 @@ try {
     $rules = @($acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]))
     Assert ($rules.Count -eq 1 -and $rules[0].IdentityReference.Value -ceq $sid) 'EXPLICIT_ACE_COUNT'
     $again = Invoke-FixtureCreate $directory 'proof-once.journal' $bytes
+    $noUsableHandle = ($null -eq $again.File -or $again.File.IsInvalid)
     if ($null -ne $again.File) { $again.File.Dispose() }
-    Assert ($again.Status -ne 0) 'CREATE_NEW_COLLISION_REFUSED'
+    Assert ($again.Status -eq [LdwJournalResearch.Native]::ObjectNameCollisionStatus()) 'EXACT_OBJECT_NAME_COLLISION'
+    Assert $noUsableHandle 'COLLISION_HAS_NO_USABLE_HANDLE'
     Write-Output ('REDRIX_NT_HANDLE_JOURNAL_TEMP_ONLY=PASS assertions=' + $script:assertions)
 } finally {
     if ($null -ne $journal) { $journal.Dispose() }
