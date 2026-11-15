@@ -10,7 +10,7 @@ Only host-agent/deploy/tests/Test-RedrixNtHandleRelativeJournalFixture.ps1 execu
 
 The test opens its TEMP directory handle with CreateFileW using backup-semantics and open-reparse-point flags, and retains that handle during NtCreateFile. The NtCreateFile call binds OBJECT_ATTRIBUTES.RootDirectory to that directory HANDLE and ObjectName to an exact fixed one-component journal filename, with a self-relative SecurityDescriptor at creation, FILE_CREATE (not OPEN_IF), no sharing, synchronous write-through and reparse-refusal flags.
 
-The test checks managed x64 structure layout sizes; requires STATUS_SUCCESS and FILE_CREATED; verifies the newly created file has a protected DACL with only one current-fixture-user explicit ACE and that the owner equals the fixture user; writes PREPARED and flushes/read-backs bytes on the same file handle; and refuses a second creation. A traversal path is rejected before native invocation. The fixture uses the ephemeral runner user's SID, not SYSTEM or Administrators, and requires no elevation.
+The test checks managed x64 structure layout sizes; requires STATUS_SUCCESS and FILE_CREATED; writes PREPARED and flushes/read-backs bytes on the same file handle; then invokes Win32 GetSecurityInfo on **that exact still-open journal handle** with OWNER | GROUP | DACL to read a bounded, LocalFree-managed security descriptor. It verifies fixture-user owner and group, a protected DACL with exactly one noninherited allow ACE for the fixture user, and the exact FullControl access mask. It does not reopen the journal by pathname for ACL evidence. A second FILE_CREATE must return exactly STATUS_OBJECT_NAME_COLLISION with no usable handle; a traversal path is rejected before native invocation. The fixture uses the ephemeral runner user's SID, not SYSTEM or Administrators, and requires no elevation.
 
 **Passing proves only these exact Windows TEMP behaviors.** It is not a production security review, physical LDW01 result, first-install trust root or proof of race-free journal creation under the currently writable LDW ancestor. The test does NOT invoke Set-Acl, SetSecurityInfo, Windows Scheduled Tasks, installer, JIT generation, GitHub runners, REDRIX guests, CI7 cleanup, or any privileged operation.
 
@@ -25,6 +25,7 @@ Before any physical action: independently accepted exact-head H0/M0 transaction 
 - [Microsoft NtCreateFile](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile)
 - [Microsoft OBJECT_ATTRIBUTES](https://learn.microsoft.com/en-us/windows/win32/api/ntdef/ns-ntdef-_object_attributes)
 - [Microsoft CreateFileW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)
-- [Microsoft SetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setsecurityinfo)
+- [Microsoft GetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo) and [GetSecurityDescriptorLength](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-getsecuritydescriptorlength) for the still-open fixture handle
+- [Microsoft SetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setsecurityinfo) (not used in this research fixture)
 
 No new credential, paid tool, source-promotion authority, ACL, task, JIT, runner, VM or customer data. $0/included only.
