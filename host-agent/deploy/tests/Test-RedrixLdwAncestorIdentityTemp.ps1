@@ -116,6 +116,22 @@ function Assert-Fixture([bool]$condition, [string]$id) {
     if (-not $condition) { throw ('A0_TEMP_IDENTITY_ASSERT_' + $id) }
 }
 
+function Invoke-TempRenameProbe([string]$source, [string]$destination) {
+    # Exercise only fixture-owned, fixed TEMP paths. A successful move must
+    # NEVER become an accepted security result.
+    try {
+        [IO.Directory]::Move($source, $destination)
+        return [pscustomobject]@{ Denied = $false; HResult = 'NONE'; Win32 = 0 }
+    } catch [IO.IOException] {
+        $number = ([long]$_.Exception.HResult -band 4294967295L)
+        return [pscustomobject]@{
+            Denied = $true
+            HResult = ('0x{0:X8}' -f $number)
+            Win32 = [int]($number -band 65535)
+        }
+    }
+}
+
 $root = Join-Path ([IO.Path]::GetTempPath()) ('ldw-a0-ancestor-id-' + [Guid]::NewGuid().ToString('N'))
 $root = [IO.Path]::GetFullPath($root)
 $systemRoot = [IO.Path]::GetFullPath(
@@ -129,6 +145,7 @@ $childPath = Join-Path $ancestorPath 'exact-child'
 $controlPath = Join-Path $root 'unlocked-control'
 $controlMoved = Join-Path $root 'unlocked-control-moved'
 $childMoved = Join-Path $ancestorPath 'exact-child-moved'
+$nestedAncestorMoved = Join-Path $root 'ancestor-with-child-moved'
 $otherPath = Join-Path $root 'unrelated'
 $attributeControlPath = Join-Path $root 'attribute-only-control'
 $attributeMovedPath = Join-Path $root 'attribute-only-control-moved'
@@ -201,25 +218,33 @@ try {
 
     # Use independent child and ancestor probes, so one result cannot hide
     # the other; NEVER treat a successful rename as a security PASS.
-    $childRenameDenied = $false
-    try { [IO.Directory]::Move($childPath, $childMoved) }
-    catch [IO.IOException] { $childRenameDenied = $true }
-    $ancestorRenameDenied = $false
-    try { [IO.Directory]::Move($ancestorProbePath, $ancestorProbeMovedPath) }
-    catch [IO.IOException] { $ancestorRenameDenied = $true }
+    $childProbe = Invoke-TempRenameProbe $childPath $childMoved
+    $ancestorProbe = Invoke-TempRenameProbe $ancestorProbePath $ancestorProbeMovedPath
+    # Real nested ancestor topology: parent with an OPEN descendant, both
+    # held with substantive access. The isolated probe alone isn't this case.
+    $nestedProbe = Invoke-TempRenameProbe $ancestorPath $nestedAncestorMoved
     $oldChildExists = Test-Path -LiteralPath $childPath -PathType Container
     $movedChildExists = Test-Path -LiteralPath $childMoved -PathType Container
     $oldAncestorExists = Test-Path -LiteralPath $ancestorProbePath -PathType Container
     $movedAncestorExists = Test-Path -LiteralPath $ancestorProbeMovedPath -PathType Container
+    $nestedMovedExists = Test-Path -LiteralPath $nestedAncestorMoved -PathType Container
     Assert-Fixture ($childId -ceq [LdwA0AncestorIdentityFixture.Native]::Identity($childHandle)) 'CHILD_HANDLE_SAME_OBJECT_AFTER_ATTEMPT'
     Assert-Fixture ($ancestorId -ceq [LdwA0AncestorIdentityFixture.Native]::Identity($ancestorHandle)) 'CHAIN_ANCESTOR_HANDLE_SAME_AFTER_ATTEMPT'
     Assert-Fixture ($isolatedAncestorId -ceq [LdwA0AncestorIdentityFixture.Native]::Identity($ancestorProbeHandle)) 'ISOLATED_ANCESTOR_HANDLE_SAME_AFTER_ATTEMPT'
-    Write-Output ('A0_TEMP_GENERIC_READ_CHILD_RENAME=' + $(if ($childRenameDenied) { 'DENIED' } else { 'ALLOWED' }))
-    Write-Output ('A0_TEMP_GENERIC_READ_ANCESTOR_RENAME=' + $(if ($ancestorRenameDenied) { 'DENIED' } else { 'ALLOWED' }))
-    Assert-Fixture $childRenameDenied 'CHILD_RENAME_REFUSED_HELD_GENERIC_READ_HANDLE'
-    Assert-Fixture $ancestorRenameDenied 'ISOLATED_ANCESTOR_RENAME_REFUSED_HELD_GENERIC_READ_HANDLE'
+    Write-Output ('A0_TEMP_GENERIC_READ_CHILD_RENAME=' + $(if ($childProbe.Denied) { 'DENIED' } else { 'ALLOWED' }) + ' HRESULT=' + $childProbe.HResult)
+    Write-Output ('A0_TEMP_GENERIC_READ_ANCESTOR_RENAME=' + $(if ($ancestorProbe.Denied) { 'DENIED' } else { 'ALLOWED' }) + ' HRESULT=' + $ancestorProbe.HResult)
+    Write-Output ('A0_TEMP_GENERIC_READ_NESTED_ANCESTOR_RENAME=' + $(if ($nestedProbe.Denied) { 'DENIED' } else { 'ALLOWED' }) + ' HRESULT=' + $nestedProbe.HResult)
+    # Strict refusal: only Windows ERROR_ACCESS_DENIED (5) or
+    # ERROR_SHARING_VIOLATION (32) count as a matching negative result.
+    # Other I/O faults cannot fake rename protection.
+    foreach ($probe in @($childProbe, $ancestorProbe, $nestedProbe)) {
+        Assert-Fixture $probe.Denied 'PROBE_DENIED_NOT_SILENT_FAILURE'
+        Assert-Fixture ($probe.Win32 -in @(5,32)) 'EXPECTED_WINDOWS_RENAME_DENIAL_CODE'
+    }
     Assert-Fixture ($oldChildExists -and -not $movedChildExists) 'CHILD_NAME_STABLE'
     Assert-Fixture ($oldAncestorExists -and -not $movedAncestorExists) 'ISOLATED_ANCESTOR_NAME_STABLE'
+    Assert-Fixture (-not $nestedMovedExists) 'NESTED_ANCESTOR_NAME_STABLE'
+    Assert-Fixture (([LdwA0AncestorIdentityFixture.Native]::FinalName($childHandle)) -ieq $expected) 'CHILD_FINAL_NAME_STABLE_AFTER_NESTED_PROBE'
 
     Assert-Fixture (Test-Path -LiteralPath $childPath -PathType Container) 'PATH_STILL_EXISTS'
     Assert-Fixture (Test-Path -LiteralPath $ancestorPath -PathType Container) 'ORIGINAL_CHAIN_ANCESTOR_PRESERVED'
