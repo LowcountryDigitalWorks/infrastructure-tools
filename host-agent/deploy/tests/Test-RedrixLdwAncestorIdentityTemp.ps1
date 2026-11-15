@@ -129,6 +129,16 @@ function Invoke-TempRenameProbe([string]$source, [string]$destination) {
             HResult = ('0x{0:X8}' -f $number)
             Win32 = [int]($number -band 65535)
         }
+    } catch [UnauthorizedAccessException] {
+        # Directory.Move may surface ERROR_ACCESS_DENIED as this exception
+        # rather than IOException. The downstream assertion still requires
+        # Win32 5 or 32, and refuses every other exception or success.
+        $number = ([long]$_.Exception.HResult -band 4294967295L)
+        return [pscustomobject]@{
+            Denied = $true
+            HResult = ('0x{0:X8}' -f $number)
+            Win32 = [int]($number -band 65535)
+        }
     }
 }
 
