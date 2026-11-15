@@ -128,7 +128,6 @@ $ancestorPath = Join-Path $root 'ancestor'
 $childPath = Join-Path $ancestorPath 'exact-child'
 $controlPath = Join-Path $root 'unlocked-control'
 $controlMoved = Join-Path $root 'unlocked-control-moved'
-$ancestorMoved = Join-Path $root 'ancestor-moved'
 $childMoved = Join-Path $ancestorPath 'exact-child-moved'
 $otherPath = Join-Path $root 'unrelated'
 $attributeControlPath = Join-Path $root 'attribute-only-control'
@@ -188,6 +187,7 @@ try {
     $rootId = [LdwA0AncestorIdentityFixture.Native]::Identity($rootHandle)
     $ancestorId = [LdwA0AncestorIdentityFixture.Native]::Identity($ancestorHandle)
     $childId = [LdwA0AncestorIdentityFixture.Native]::Identity($childHandle)
+    $isolatedAncestorId = [LdwA0AncestorIdentityFixture.Native]::Identity($ancestorProbeHandle)
     Assert-Fixture ($childId -ceq
         [LdwA0AncestorIdentityFixture.Native]::Identity($secondChildHandle)) 'REOPEN_SAME_ID'
     Assert-Fixture ($childId -cne
@@ -213,6 +213,7 @@ try {
     $movedAncestorExists = Test-Path -LiteralPath $ancestorProbeMovedPath -PathType Container
     Assert-Fixture ($childId -ceq [LdwA0AncestorIdentityFixture.Native]::Identity($childHandle)) 'CHILD_HANDLE_SAME_OBJECT_AFTER_ATTEMPT'
     Assert-Fixture ($ancestorId -ceq [LdwA0AncestorIdentityFixture.Native]::Identity($ancestorHandle)) 'CHAIN_ANCESTOR_HANDLE_SAME_AFTER_ATTEMPT'
+    Assert-Fixture ($isolatedAncestorId -ceq [LdwA0AncestorIdentityFixture.Native]::Identity($ancestorProbeHandle)) 'ISOLATED_ANCESTOR_HANDLE_SAME_AFTER_ATTEMPT'
     Write-Output ('A0_TEMP_GENERIC_READ_CHILD_RENAME=' + $(if ($childRenameDenied) { 'DENIED' } else { 'ALLOWED' }))
     Write-Output ('A0_TEMP_GENERIC_READ_ANCESTOR_RENAME=' + $(if ($ancestorRenameDenied) { 'DENIED' } else { 'ALLOWED' }))
     Assert-Fixture $childRenameDenied 'CHILD_RENAME_REFUSED_HELD_GENERIC_READ_HANDLE'
@@ -221,7 +222,7 @@ try {
     Assert-Fixture ($oldAncestorExists -and -not $movedAncestorExists) 'ISOLATED_ANCESTOR_NAME_STABLE'
 
     Assert-Fixture (Test-Path -LiteralPath $childPath -PathType Container) 'PATH_STILL_EXISTS'
-    Assert-Fixture (-not (Test-Path -LiteralPath $ancestorMoved)) 'ANCESTOR_NOT_REPLACED'
+    Assert-Fixture (Test-Path -LiteralPath $ancestorPath -PathType Container) 'ORIGINAL_CHAIN_ANCESTOR_PRESERVED'
     Assert-Fixture ($childId -ceq
         [LdwA0AncestorIdentityFixture.Native]::Identity($childHandle)) 'CHILD_ID_STABLE'
     Assert-Fixture ($ancestorId -ceq
