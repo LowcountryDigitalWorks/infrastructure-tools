@@ -153,7 +153,13 @@ def proof(head: str, suite: str = "dragonfly") -> dict[str, object]:
             for args in (
                 ("init", "-q", str(root)),
                 ("remote", "add", "origin", REPO),
-                ("fetch", "--quiet", "--depth=1", "origin", head),
+                # Some deterministic source-only tests verify pinned historical
+                # Git blobs (accepted V1 rollback and V2 issuer source). A
+                # depth-one fetch omits those immutable ancestor objects and
+                # creates false failures on REDRIX even when hosted tests pass.
+                # Fetch ONLY the verified exact head and reachable ancestry,
+                # with no tags or other refs; checkout stays detached at head.
+                ("fetch", "--quiet", "--no-tags", "origin", head),
                 ("checkout", "--quiet", "--detach", "FETCH_HEAD"),
             ):
                 if git(args, cwd=root, env=env).returncode != 0:

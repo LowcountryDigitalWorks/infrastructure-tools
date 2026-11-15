@@ -189,6 +189,12 @@ class InboundTransferV2Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             state_root = Path(temp) / "state"
             state_root.mkdir(mode=0o755)
+            # mkdir(mode=...) is still masked by the caller's umask. The
+            # accepted REDRIX native source CI runs with a private 0o077
+            # umask, so explicitly make this hostile fixture world-readable.
+            # Never relax the source runner's private checkout/umask policy.
+            state_root.chmod(0o755)
+            self.assertEqual(state_root.stat().st_mode & 0o777, 0o755)
             with self.assertRaisesRegex(transfer.TransferError, "TRANSFER_STAGING_INVALID"):
                 transfer.install_transfer_bundle(
                     envelope,

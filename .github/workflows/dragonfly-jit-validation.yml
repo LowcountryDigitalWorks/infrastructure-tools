@@ -182,6 +182,8 @@ jobs:
         run: ./tests/dragonfly-canary-publication/Test-DragonflyGateA1Operator.ps1
       - name: Run lifecycle, transport, and canary contract tests
         run: python3 -m unittest discover -s dragonfly-jit/tests -p 'test_*.py' -v
+      - name: Validate ChromeOS host-memory observer (source only)
+        run: node --test dragonfly-jit/chromeos-host-observer/tests/observer.test.mjs
       - name: Run publication and install contract tests
         run: python3 -m unittest discover -s tests/dragonfly-canary-publication -p 'test_*.py' -v
       - name: Validate protected LDW01 adjunct publisher contract
