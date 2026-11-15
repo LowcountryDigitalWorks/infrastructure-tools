@@ -423,6 +423,17 @@ class DurableMailboxTests(unittest.TestCase):
         )
         self.assertFalse(journal.exists())
 
+    def test_m1_rejects_forged_short_rollback_sidecar(self):
+        directory = self.directory("m1_fake")
+        box = self.open(directory=directory)
+        self.send(box)
+        box.close()
+        (directory / "journal.sqlite-journal").write_bytes(b"not-sqlite")
+        self.assert_code(
+            DurableRefused, "DURABLE_SIDECAR",
+            lambda: self.open(directory=directory),
+        )
+
     def test_m1_concurrent_sqlite_lock_returns_closed_busy_code(self):
         directory = self.directory("m1_busy")
         box = self.open(directory=directory)

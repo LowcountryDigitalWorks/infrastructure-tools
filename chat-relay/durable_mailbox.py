@@ -447,6 +447,28 @@ class DurableMailbox:
                 if roster is None or roster[0] != self._roster:
                     raise DurableRefused("DURABLE_ROSTER_MISMATCH")
                 self._verify_mac(conn)
+                # A crash may leave an inactive DELETE-mode rollback journal with
+                # a zeroed header. SQLite read-only open does not erase it; after
+                # verifying the sealed state, complete a bounded, same-value
+                # SQLite write so its own pager retires the cold journal.
+                cold_journal = self._directory / (_DB_NAME + "-journal")
+                if cold_journal.exists():
+                    self._refuse_sidecars(allow_rollback_journal=True)
+                    conn.execute("BEGIN IMMEDIATE")
+                    try:
+                        self._verify_mac(conn)
+                        conn.execute(
+                            "UPDATE meta SET value=value WHERE key=?",
+                            (_MAC_FIELD,),
+                        )
+                        conn.execute("COMMIT")
+                    except Exception:
+                        try:
+                            conn.execute("ROLLBACK")
+                        except sqlite3.Error:
+                            pass
+                        raise
+                    self._verify_mac(conn)
             self._refuse_sidecars()
             return conn
         except DurableRefused:
@@ -472,7 +494,17 @@ class DurableMailbox:
                     info = os.lstat(child)
                 except OSError:
                     raise DurableRefused("DURABLE_SIDECAR") from None
-                if not stat.S_ISREG(info.st_mode):
+                if not stat.S_ISREG(info.st_mode) or info.st_size < 512:
+                    raise DurableRefused("DURABLE_SIDECAR")
+                try:
+                    with child.open("rb") as rollback:
+                        prefix = rollback.read(8)
+                except OSError:
+                    raise DurableRefused("DURABLE_SIDECAR") from None
+                if prefix not in (
+                    b"\x00" * 8,
+                    b"\xd9\xd5\x05\xf9\x20\xa1\x63\xd7",
+                ):
                     raise DurableRefused("DURABLE_SIDECAR")
                 if os.name == "posix":
                     if stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != os.getuid():
