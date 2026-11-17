@@ -77,6 +77,20 @@ namespace LdwA0AncestorIdentityFixture {
             return OpenWithAccess(path, 0x80u);
         }
 
+        public static SafeFileHandle OpenDeleteCapableControl(string path) {
+            // Fixture's PRE-EXISTING hostile handle requests DELETE access
+            // while it allows all shares; later no-delete-share opens must
+            // reject rather than silently treating this chain as protected.
+            SafeFileHandle h = CreateDirectoryHandle(path, 0x80010000u, 0x7u,
+                IntPtr.Zero, 3u, 0x02200000u, IntPtr.Zero);
+            if (h == null || h.IsInvalid) {
+                int error = Marshal.GetLastWin32Error();
+                if (h != null) h.Dispose();
+                throw new Win32Exception(error, "TEMP_DELETE_CAPABLE_OPEN_FAILED");
+            }
+            return h;
+        }
+
         public static string Identity(SafeFileHandle h) {
             if (h == null || h.IsInvalid || h.IsClosed)
                 throw new InvalidOperationException("TEMP_HANDLE_INVALID");
@@ -161,6 +175,7 @@ $attributeControlPath = Join-Path $root 'attribute-only-control'
 $attributeMovedPath = Join-Path $root 'attribute-only-control-moved'
 $ancestorProbePath = Join-Path $root 'isolated-ancestor'
 $ancestorProbeMovedPath = Join-Path $root 'isolated-ancestor-moved'
+$deleteControlPath = Join-Path $root 'preexisting-delete-handle'
 
 $rootHandle = $null
 $ancestorHandle = $null
@@ -169,12 +184,14 @@ $secondChildHandle = $null
 $otherHandle = $null
 $attributeControlHandle = $null
 $ancestorProbeHandle = $null
+$deleteCapableHandle = $null
 try {
     [void][IO.Directory]::CreateDirectory($childPath)
     [void][IO.Directory]::CreateDirectory($controlPath)
     [void][IO.Directory]::CreateDirectory($otherPath)
     [void][IO.Directory]::CreateDirectory($attributeControlPath)
     [void][IO.Directory]::CreateDirectory($ancestorProbePath)
+    [void][IO.Directory]::CreateDirectory($deleteControlPath)
     # An unlocked control must be renameable, making denial below meaningful.
     [IO.Directory]::Move($controlPath, $controlMoved)
     Assert-Fixture (Test-Path -LiteralPath $controlMoved -PathType Container) 'CONTROL_RENAME_ALLOWED'
@@ -192,12 +209,46 @@ try {
     if ($attributeRenameSucceeded) {
         Assert-Fixture (Test-Path -LiteralPath $attributeMovedPath -PathType Container) 'ATTR_MOVED_EXISTS'
         Assert-Fixture (-not (Test-Path -LiteralPath $attributeControlPath)) 'ATTR_OLD_NAME_GONE'
+        # Object identity persists, but its canonical name changed. A new
+        # directory at the former path must have a DIFFERENT FileIdInfo.
+        $movedExpected = '\\?\' + [IO.Path]::GetFullPath($attributeMovedPath)
+        Assert-Fixture (([LdwA0AncestorIdentityFixture.Native]::FinalName($attributeControlHandle)) -ieq $movedExpected) 'ATTR_WEAK_HANDLE_FINAL_NAME_CHANGED'
+        [void][IO.Directory]::CreateDirectory($attributeControlPath)
+        $replacementHandle = $null
+        try {
+            $replacementHandle = [LdwA0AncestorIdentityFixture.Native]::OpenAttributeOnlyControl($attributeControlPath)
+            Assert-Fixture ([LdwA0AncestorIdentityFixture.Native]::Identity($replacementHandle) -cne $attributeControlId) 'ATTR_ORIGINAL_PATH_REPLACED_NEW_OBJECT'
+            $oldExpected = '\\?\' + [IO.Path]::GetFullPath($attributeControlPath)
+            Assert-Fixture (([LdwA0AncestorIdentityFixture.Native]::FinalName($replacementHandle)) -ieq $oldExpected) 'ATTR_REPLACEMENT_CANONICAL_PATH'
+        }
+        finally {
+            if ($null -ne $replacementHandle) { $replacementHandle.Dispose() }
+        }
     } else {
         Assert-Fixture (Test-Path -LiteralPath $attributeControlPath -PathType Container) 'ATTR_DENIED_NAME_PRESERVED'
     }
     Write-Output ('A0_TEMP_ATTRIBUTE_ONLY_RENAME=' + $(if ($attributeRenameSucceeded) { 'ALLOWED' } else { 'DENIED' }))
     $attributeControlHandle.Dispose()
     $attributeControlHandle = $null
+
+    # Adversarial negative: an existing DELETE-capable open predates our
+    # proposed no-delete-sharing hold. The new protected open MUST refuse.
+    # This is an isolated TEMP sibling, never the actual LDW parent.
+    $deleteCapableHandle = [LdwA0AncestorIdentityFixture.Native]::OpenDeleteCapableControl($deleteControlPath)
+    $denyCode = -1
+    try {
+        $unexpected = [LdwA0AncestorIdentityFixture.Native]::OpenNoDeleteShare($deleteControlPath)
+        if ($null -ne $unexpected) { $unexpected.Dispose() }
+        throw 'A0_TEMP_DELETE_CAPABLE_UNEXPECTED_SECOND_HANDLE'
+    }
+    catch [ComponentModel.Win32Exception] {
+        $denyCode = [int]$_.Exception.NativeErrorCode
+    }
+    Assert-Fixture ($denyCode -eq 32) 'PREEXISTING_DELETE_CAPABLE_HANDLE_MUST_REFUSE'
+    Assert-Fixture (Test-Path -LiteralPath $deleteControlPath -PathType Container) 'DELETE_CAPABLE_CONTROL_PATH_UNCHANGED'
+    Write-Output ('A0_TEMP_PREEXISTING_DELETE_HANDLE_REOPEN=DENIED Win32=' + $denyCode)
+    $deleteCapableHandle.Dispose()
+    $deleteCapableHandle = $null
 
     $rootHandle = [LdwA0AncestorIdentityFixture.Native]::OpenNoDeleteShare($root)
     $ancestorHandle = [LdwA0AncestorIdentityFixture.Native]::OpenNoDeleteShare($ancestorPath)
@@ -268,7 +319,7 @@ try {
 }
 finally {
     foreach ($h in @($otherHandle, $secondChildHandle, $childHandle,
-                     $ancestorProbeHandle, $attributeControlHandle,
+                     $ancestorProbeHandle, $attributeControlHandle, $deleteCapableHandle,
                      $ancestorHandle, $rootHandle)) {
         if ($null -ne $h) { $h.Dispose() }
     }
