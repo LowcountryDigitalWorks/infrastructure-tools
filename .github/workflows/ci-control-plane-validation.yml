@@ -43,6 +43,10 @@ jobs:
             throw "PowerShell parser reported $($allErrors.Count) error(s)."
           }
 
+      - name: Test non-authorizing CI7 incident hold fixture
+        shell: pwsh
+        run: python -m unittest discover -s ci-dispatch/tests -p test_ci7_recovery_hold_fixture.py -v
+
       - name: Run dispatcher contract tests
         shell: pwsh
         run: pwsh ./ci-dispatch/tests/Test-Dispatch.ps1
