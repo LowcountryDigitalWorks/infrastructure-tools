@@ -457,10 +457,21 @@ class DurableMailbox:
                     conn.execute("BEGIN IMMEDIATE")
                     try:
                         self._verify_mac(conn)
+                        # A no-op UPDATE is optimized away by SQLite's
+                        # pager and leaves a cold journal behind. Force one
+                        # real reversible SQLite write instead; the keyed
+                        # state and schema must be identical at COMMIT.
+                        cleanup_key = "__ldw_cold_journal_cleanup__"
                         conn.execute(
-                            "UPDATE meta SET value=value WHERE key=?",
-                            (_MAC_FIELD,),
+                            "INSERT INTO meta(key,value) VALUES (?,?)",
+                            (cleanup_key, "1"),
                         )
+                        deleted = conn.execute(
+                            "DELETE FROM meta WHERE key=?", (cleanup_key,)
+                        )
+                        if deleted.rowcount != 1:
+                            raise DurableRefused("DURABLE_TAMPER")
+                        self._verify_mac(conn)
                         conn.execute("COMMIT")
                     except Exception:
                         try:
