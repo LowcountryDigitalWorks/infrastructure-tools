@@ -29,10 +29,10 @@ namespace LdwA0TokenReadOnlyFixture {
     }
 
     public static class Probe {
-        private const uint TokenQuery = 0x000[uint32]8;
+        private const uint TokenQuery = 0x0008u;
         private const int TokenPrivileges = 3;
-        private const uint Enabled = 0x0000000[uint32]2;
-        private const uint Removed = 0x0000000[uint32]4;
+        private const uint Enabled = 0x00000002u;
+        private const uint Removed = 0x00000004u;
         private const uint KnownPrivilegeFlags = 0x80000007u;
 
         [DllImport("kernel32.dll")]
@@ -61,10 +61,10 @@ namespace LdwA0TokenReadOnlyFixture {
 
         public static string Classify(bool present, uint attributes, bool duplicate) {
             if (duplicate) return "HOLD_AMBIGUOUS";
-            if (!present) return attributes == [uint32]0 ? "ABSENT" : "HOLD_AMBIGUOUS";
-            if ((attributes & ~KnownPrivilegeFlags) != [uint32]0 ||
-                (attributes & Removed) != [uint32]0) return "HOLD_AMBIGUOUS";
-            return (attributes & Enabled) != [uint32]0 ?
+            if (!present) return attributes == 0u ? "ABSENT" : "HOLD_AMBIGUOUS";
+            if ((attributes & ~KnownPrivilegeFlags) != 0u ||
+                (attributes & Removed) != 0u) return "HOLD_AMBIGUOUS";
+            return (attributes & Enabled) != 0u ?
                 "PRESENT_ENABLED" : "PRESENT_DISABLED";
         }
 
@@ -108,7 +108,7 @@ namespace LdwA0TokenReadOnlyFixture {
 
                 bool found = false;
                 bool duplicate = false;
-                uint attributes = [uint32]0;
+                uint attributes = 0u;
                 for (int i = 0; i < count; i++) {
                     int offset = 4 + i * 12;
                     uint low = unchecked((uint)Marshal.ReadInt32(memory, offset));
