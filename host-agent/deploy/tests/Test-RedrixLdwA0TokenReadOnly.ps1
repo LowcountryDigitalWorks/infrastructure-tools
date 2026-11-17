@@ -29,10 +29,10 @@ namespace LdwA0TokenReadOnlyFixture {
     }
 
     public static class Probe {
-        private const uint TokenQuery = 0x0008u;
+        private const uint TokenQuery = 0x000[uint32]8;
         private const int TokenPrivileges = 3;
-        private const uint Enabled = 0x00000002u;
-        private const uint Removed = 0x00000004u;
+        private const uint Enabled = 0x0000000[uint32]2;
+        private const uint Removed = 0x0000000[uint32]4;
         private const uint KnownPrivilegeFlags = 0x80000007u;
 
         [DllImport("kernel32.dll")]
@@ -61,10 +61,10 @@ namespace LdwA0TokenReadOnlyFixture {
 
         public static string Classify(bool present, uint attributes, bool duplicate) {
             if (duplicate) return "HOLD_AMBIGUOUS";
-            if (!present) return attributes == 0u ? "ABSENT" : "HOLD_AMBIGUOUS";
-            if ((attributes & ~KnownPrivilegeFlags) != 0u ||
-                (attributes & Removed) != 0u) return "HOLD_AMBIGUOUS";
-            return (attributes & Enabled) != 0u ?
+            if (!present) return attributes == [uint32]0 ? "ABSENT" : "HOLD_AMBIGUOUS";
+            if ((attributes & ~KnownPrivilegeFlags) != [uint32]0 ||
+                (attributes & Removed) != [uint32]0) return "HOLD_AMBIGUOUS";
+            return (attributes & Enabled) != [uint32]0 ?
                 "PRESENT_ENABLED" : "PRESENT_DISABLED";
         }
 
@@ -108,7 +108,7 @@ namespace LdwA0TokenReadOnlyFixture {
 
                 bool found = false;
                 bool duplicate = false;
-                uint attributes = 0u;
+                uint attributes = [uint32]0;
                 for (int i = 0; i < count; i++) {
                     int offset = 4 + i * 12;
                     uint low = unchecked((uint)Marshal.ReadInt32(memory, offset));
@@ -136,20 +136,19 @@ function Assert-A0([bool]$Condition, [string]$Code) {
     if (-not $Condition) { throw ('A0_TOKEN_ASSERT_' + $Code) }
 }
 
-$type = [LdwA0TokenReadOnlyFixture.Probe]
-Assert-A0 (($type::Classify($false, 0u, $false)) -ceq 'ABSENT') 'ABSENT'
-Assert-A0 (($type::Classify($true, 0u, $false)) -ceq 'PRESENT_DISABLED') 'PRESENT_DISABLED'
-Assert-A0 (($type::Classify($true, 1u, $false)) -ceq 'PRESENT_DISABLED') 'DISABLED_BY_DEFAULT'
-Assert-A0 (($type::Classify($true, 2u, $false)) -ceq 'PRESENT_ENABLED') 'PRESENT_ENABLED'
-Assert-A0 (($type::Classify($true, 0x80000002u, $false)) -ceq 'PRESENT_ENABLED') 'USED_FOR_ACCESS_FLAG'
-Assert-A0 (($type::Classify($true, 4u, $false)) -ceq 'HOLD_AMBIGUOUS') 'REMOVED_REFUSED'
-Assert-A0 (($type::Classify($true, 8u, $false)) -ceq 'HOLD_AMBIGUOUS') 'UNKNOWN_FLAG_REFUSED'
-Assert-A0 (($type::Classify($false, 2u, $false)) -ceq 'HOLD_AMBIGUOUS') 'ABSENT_WITH_FLAGS_REFUSED'
-Assert-A0 (($type::Classify($true, 2u, $true)) -ceq 'HOLD_AMBIGUOUS') 'DUPLICATE_REFUSED'
+Assert-A0 (([LdwA0TokenReadOnlyFixture.Probe]::Classify($false, [uint32]0, $false)) -ceq 'ABSENT') 'ABSENT'
+Assert-A0 (([LdwA0TokenReadOnlyFixture.Probe]::Classify($true, [uint32]0, $false)) -ceq 'PRESENT_DISABLED') 'PRESENT_DISABLED'
+Assert-A0 (([LdwA0TokenReadOnlyFixture.Probe]::Classify($true, [uint32]1, $false)) -ceq 'PRESENT_DISABLED') 'DISABLED_BY_DEFAULT'
+Assert-A0 (([LdwA0TokenReadOnlyFixture.Probe]::Classify($true, [uint32]2, $false)) -ceq 'PRESENT_ENABLED') 'PRESENT_ENABLED'
+Assert-A0 (([LdwA0TokenReadOnlyFixture.Probe]::Classify($true, [uint32]2147483650, $false)) -ceq 'PRESENT_ENABLED') 'USED_FOR_ACCESS_FLAG'
+Assert-A0 (([LdwA0TokenReadOnlyFixture.Probe]::Classify($true, [uint32]4, $false)) -ceq 'HOLD_AMBIGUOUS') 'REMOVED_REFUSED'
+Assert-A0 (([LdwA0TokenReadOnlyFixture.Probe]::Classify($true, [uint32]8, $false)) -ceq 'HOLD_AMBIGUOUS') 'UNKNOWN_FLAG_REFUSED'
+Assert-A0 (([LdwA0TokenReadOnlyFixture.Probe]::Classify($false, [uint32]2, $false)) -ceq 'HOLD_AMBIGUOUS') 'ABSENT_WITH_FLAGS_REFUSED'
+Assert-A0 (([LdwA0TokenReadOnlyFixture.Probe]::Classify($true, [uint32]2, $true)) -ceq 'HOLD_AMBIGUOUS') 'DUPLICATE_REFUSED'
 
-$live = $type::Observe()
+$live = [LdwA0TokenReadOnlyFixture.Probe]::Observe()
 Assert-A0 ($live -cin @('ABSENT','PRESENT_DISABLED','PRESENT_ENABLED','HOLD_AMBIGUOUS')) 'LIVE_CLASSIFICATION_BOUNDED'
-$system = $type::IsSystemIdentity()
+$system = [LdwA0TokenReadOnlyFixture.Probe]::IsSystemIdentity()
 Assert-A0 ($system -is [bool]) 'SYSTEM_IDENTITY_BOUNDED'
 Write-Output ('REDRIX_A0_TOKEN_READ_ONLY=PASS assertions=' + $script:checks)
 Write-Output ('REDRIX_A0_TOKEN_RESTORE=' + $live)
