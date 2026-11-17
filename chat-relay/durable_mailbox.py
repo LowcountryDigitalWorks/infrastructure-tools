@@ -363,7 +363,12 @@ class DurableMailbox:
         if not directory.is_absolute():
             raise DurableRefused("DURABLE_PATH_REFUSED")
         parent = directory.parent
-        self._refuse_link(parent)
+        # A direct-parent check misses a link or junction one or more
+        # components above it. Inspect every ancestor (including the root).
+        # This is static fail-closed screening, NOT an atomic path-to-open
+        # identity guarantee for SQLite's pathname-based VFS.
+        for ancestor in (parent, *parent.parents):
+            self._refuse_link(ancestor)
         if not parent.is_dir():
             raise DurableRefused("DURABLE_PATH_REFUSED")
         if directory.exists() or directory.is_symlink():
@@ -389,7 +394,11 @@ class DurableMailbox:
             os.close(fd)
             os.chmod(self._db_path, 0o600)
         self._require_private(self._db_path, 0o600)
-        header = self._db_path.read_bytes()[:16]
+        try:
+            with self._db_path.open("rb") as db_header:
+                header = db_header.read(16)
+        except OSError:
+            raise DurableRefused("DURABLE_PATH_REFUSED") from None
         if header and not header.startswith(b"SQLite format 3\x00"):
             raise DurableRefused("DURABLE_CORRUPT")
         try:
@@ -528,7 +537,10 @@ class DurableMailbox:
             info = os.lstat(path)
         except OSError:
             raise DurableRefused("DURABLE_PATH_REFUSED") from None
-        if stat.S_ISLNK(info.st_mode):
+        if (stat.S_ISLNK(info.st_mode) or (
+            getattr(info, "st_file_attributes", 0) &
+            getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        )):
             raise DurableRefused("DURABLE_PATH_REFUSED")
 
     def _refuse_widened(self, path: Path, expected: int) -> None:

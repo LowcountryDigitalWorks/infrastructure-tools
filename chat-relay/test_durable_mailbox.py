@@ -8,6 +8,8 @@ import threading
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from durable_mailbox import (
     OPT_IN, STATUS_NOTICE, DurableMailbox, DurableRefused,
@@ -477,6 +479,59 @@ class DurableMailboxTests(unittest.TestCase):
                     DurableRefused, "DURABLE_TAMPER",
                     lambda: self.open(directory=directory),
                 )
+
+    def test_m3_static_grandparent_symlink_refused(self):
+        # The earlier immediate-parent check accepted a linked grandparent.
+        real_parent = Path(self.tmp.name) / "m3_real"
+        real_parent.mkdir()
+        nested = real_parent / "nested"
+        nested.mkdir()
+        alias = Path(self.tmp.name) / "m3_alias"
+        try:
+            os.symlink(real_parent, alias, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("directory symlink creation unavailable on this host")
+        self.assert_code(
+            DurableRefused, "DURABLE_PATH_REFUSED",
+            lambda: self.open(directory=alias / "nested" / "journal"),
+        )
+        self.assertFalse((nested / "journal").exists())
+
+    def test_m3_static_reparse_attribute_refused(self):
+        # Synthetic Windows FILE_ATTRIBUTE_REPARSE_POINT, not a real junction.
+        flagged_parent = Path(self.tmp.name) / "m3_flagged"
+        flagged_parent.mkdir()
+        original_lstat = os.lstat
+
+        def tagged_lstat(path, *args, **kwargs):
+            result = original_lstat(path, *args, **kwargs)
+            if Path(path) == flagged_parent:
+                return SimpleNamespace(
+                    st_mode=result.st_mode, st_file_attributes=0x400
+                )
+            return result
+
+        with patch("durable_mailbox.os.lstat", side_effect=tagged_lstat):
+            self.assert_code(
+                DurableRefused, "DURABLE_PATH_REFUSED",
+                lambda: self.open(directory=flagged_parent / "journal"),
+            )
+        self.assertFalse((flagged_parent / "journal").exists())
+
+    def test_l1_header_reopen_never_reads_whole_database(self):
+        directory = self.directory("l1_bounded_header")
+        box = self.open(directory=directory)
+        mid, _ = self.send(box)
+        box.close()
+        # A whole-file read for 16-byte SQLite magic must fail this test.
+        with patch.object(
+            Path, "read_bytes",
+            side_effect=AssertionError("unbounded SQLite header read"),
+        ):
+            reopened = self.open(directory=directory)
+            self.assertEqual(
+                reopened.receive("ir02")["messages"][0]["message_id"], mid
+            )
 
     def test_schema_version_mismatch_fails_closed(self):
         box = self.open(directory=self.directory("schema"))

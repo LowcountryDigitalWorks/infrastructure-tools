@@ -36,3 +36,18 @@ remains opt-in, synthetic/public and UNMERGED until independent acceptance.
 - **Time/expiry:** messages have a 15-minute TTL. Expiry garbage-collection removes rows and their UUID tombstones; after expiry a duplicate UUID can become a new message. A forward wall-clock jump can permanently expire messages, and the persisted high-water mark prevents clock rollback from extending that lifetime. Replies require an extant compatible prior message; replies after tombstone deletion may be refused.
 - **Platform identity:** POSIX mode 0700/0600 checks do **not** establish Windows NTFS DACL ownership or reparse-point protection. This source uses Python pathname-based SQLite open; even a clean symlink inspection does not alone prove an ancestor path or DB object cannot be swapped between check and SQLite open. Windows and POSIX M3 path/identity, junction/symlink race and protected-ACL proof remain **NOT ACCEPTED**. Do not deploy persistent adapter based only on synthetic M1/H1 test success.
 - **Delivery semantics:** a journal write reports IN_MAILBOX, not an automatic wake of any other ChatGPT conversation or proof that an authorized receiver executed a task. Manual or tool polling remains required until a separately proven orchestration receiver exists.
+
+## Source-only static path checks (partial M3 mitigation)
+
+The draft checks every directory ancestor for a POSIX symbolic link or a
+Windows-reported reparse-point attribute, before creating or opening the
+journal. A synthetic reparse-attribute fixture and an actual grandparent-link
+negative test cover this *static* screening. Database magic is read with a
+16-byte bounded read rather than materializing the entire local file.
+
+**The M3 runtime/security hold remains:** these pathname-based checks are not
+atomic with SQLite's later filename-based open; directory/file rename races,
+Windows NTFS DACL/owner enforcement, junction substitution and live handle-
+identity verification have not been proven. Source-only tests cannot authorize
+a persistent host deployment. Valid whole-database snapshot replay also
+remains outside the in-database HMAC's rollback protection.
