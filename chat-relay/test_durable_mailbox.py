@@ -533,6 +533,23 @@ class DurableMailboxTests(unittest.TestCase):
                 reopened.receive("ir02")["messages"][0]["message_id"], mid
             )
 
+    def test_l1_windows_unc_network_and_namespace_paths_refused(self):
+        # Path on Linux parses this spelling as relative and refuses it;
+        # Windows must refuse BEFORE any network share is touched.
+        examples = (
+            "\\\\ldw-synthetic-host\\synthetic-share\\journal",
+            "\\\\?\\UNC\\ldw-synthetic-host\\synthetic-share\\journal",
+            "\\\\.\\C:\\synthetic-journal",
+        )
+        for spelling in examples:
+            with self.subTest(spelling=spelling):
+                self.assert_code(
+                    DurableRefused, "DURABLE_PATH_REFUSED",
+                    lambda spelling=spelling: self.open(
+                        directory=Path(spelling)
+                    ),
+                )
+
     def test_schema_version_mismatch_fails_closed(self):
         box = self.open(directory=self.directory("schema"))
         box.close()

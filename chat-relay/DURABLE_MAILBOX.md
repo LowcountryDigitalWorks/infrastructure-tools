@@ -51,3 +51,12 @@ Windows NTFS DACL/owner enforcement, junction substitution and live handle-
 identity verification have not been proven. Source-only tests cannot authorize
 a persistent host deployment. Valid whole-database snapshot replay also
 remains outside the in-database HMAC's rollback protection.
+
+## Local path admission (source-only L1 guard)
+
+Absolute Windows UNC shares and device/extended namespace paths are refused
+before an SMB/network path is queried. POSIX journal paths must already be
+absolute and remain subject to statically checked ancestors. This guards only
+trusted-caller input, not mounted network paths that look local, filesystem
+rename/reparse races, Windows NTFS owner/DACL verification or SQLite VFS binding.
+The full durable adapter remains DRAFT/HOLD for M3 and whole-snapshot rollback.

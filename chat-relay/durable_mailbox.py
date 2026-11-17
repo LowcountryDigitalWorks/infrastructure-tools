@@ -362,6 +362,10 @@ class DurableMailbox:
     def _private_directory(self, directory: Path) -> Path:
         if not directory.is_absolute():
             raise DurableRefused("DURABLE_PATH_REFUSED")
+        # Windows UNC roots and Win32 extended device namespaces are not
+        # local journal storage. Refuse before probing any parent/SMB path.
+        if os.name == "nt" and directory.drive.startswith("\\\\"):
+            raise DurableRefused("DURABLE_PATH_REFUSED")
         parent = directory.parent
         # A direct-parent check misses a link or junction one or more
         # components above it. Inspect every ancestor (including the root).
