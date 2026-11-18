@@ -138,8 +138,8 @@ function Get-InheritedEveryoneReadAttributes([string]$Path) {
     return $false
 }
 
-$root = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath())
-    ('ldw-a0-acl-propagation-' + [Guid]::NewGuid().ToString('N'))))
+$tempLeaf = 'ldw-a0-acl-propagation-' + [Guid]::NewGuid().ToString('N')
+$root = [IO.Path]::GetFullPath((Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath $tempLeaf))
 $programData = [IO.Path]::GetFullPath(
     [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData))
 if ([string]::IsNullOrWhiteSpace($programData) -or
