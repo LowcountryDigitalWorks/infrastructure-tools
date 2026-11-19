@@ -10,6 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+DEFAULT_EXE = str((Path("/synthetic-windows") / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe").resolve())
+
 from gate_c_host_g0_readonly import (
     CLASSIFICATION, POWERSHELL_PROBE, RAW_KEYS, SCHEMA,
     _native_system_powershell, collect_g0_snapshot, main,
@@ -33,7 +35,7 @@ def fake_runner(output, *, rc=0):
     return lambda command, **opts: SimpleNamespace(returncode=rc, stdout=output, stderr="ignored synthetic error")
 
 
-def run(payload=None, *, rc=0, runner=None, platform="win32", executable="/synthetic-windows/System32/WindowsPowerShell/v1.0/powershell.exe"):
+def run(payload=None, *, rc=0, runner=None, platform="win32", executable=DEFAULT_EXE):
     if runner is None:
         if payload is None:
             payload = snapshot()
@@ -98,7 +100,7 @@ class G0ReadOnlyTests(unittest.TestCase):
                 self.restype = None
             def __call__(self, buffer, length):
                 self.expected_len = length
-                buffer.value = "/synthetic-windows/System32"
+                buffer.value = str(Path("/synthetic-windows/System32").resolve())
                 return len(buffer.value)
         api = Api()
         class Dll:
@@ -109,7 +111,7 @@ class G0ReadOnlyTests(unittest.TestCase):
         with patch.object(module.ctypes, "WinDLL", fake_win_dll, create=True):
             value = _native_system_powershell()
         self.assertEqual(calls, [("kernel32.dll", 0x800)])
-        self.assertEqual(value, "/synthetic-windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+        self.assertEqual(value, str(Path("/synthetic-windows/System32").resolve() / "WindowsPowerShell" / "v1.0" / "powershell.exe"))
 
     def test_native_powershell_api_failure_holds(self):
         import gate_c_host_g0_readonly as module
@@ -124,7 +126,7 @@ class G0ReadOnlyTests(unittest.TestCase):
         r = run(runner=inspect)
         self.assertEqual(len(calls), 1)
         cmd, opts = calls[0]
-        self.assertEqual(cmd[0], str(Path("/synthetic-windows") / "System32/WindowsPowerShell/v1.0/powershell.exe"))
+        self.assertEqual(cmd[0], DEFAULT_EXE)
         self.assertEqual(cmd[1:4], ["-NoLogo", "-NoProfile", "-NonInteractive"])
         self.assertEqual(cmd[-2:], ["-Command", POWERSHELL_PROBE])
         self.assertNotIn("shell", opts)
@@ -137,14 +139,14 @@ class G0ReadOnlyTests(unittest.TestCase):
         # PowerShell executable is resolved from OS GetSystemDirectoryW,
         # not a user-supplied PATH or SystemRoot variable.
         import gate_c_host_g0_readonly as module
-        with patch.object(module, "_native_system_powershell", return_value="/synthetic-windows/System32/WindowsPowerShell/v1.0/powershell.exe"):
+        with patch.object(module, "_native_system_powershell", return_value=DEFAULT_EXE):
             with patch.dict("os.environ", {"SystemRoot": "/malicious", "PATH": "/malicious"}):
                 calls = []
                 def run_it(cmd, **kw):
                     calls.append(cmd)
                     return SimpleNamespace(returncode=0, stdout=json.dumps(snapshot()), stderr="")
                 r = collect_g0_snapshot(platform_tag="win32", runner=run_it)
-        self.assertEqual(calls[0][0], "/synthetic-windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+        self.assertEqual(calls[0][0], DEFAULT_EXE)
         self.assert_not_authorized(r)
 
     def test_powershell_script_has_only_read_functions(self):
