@@ -90,6 +90,92 @@ function Assert-D0SourcePathBoundary {
     return $true
 }
 
+# This root check is an intentionally conservative, point-in-time DACL
+# snapshot. It does not hold handles or prove absence of namespace races.
+function Assert-D0ProgramFilesRootDescriptor {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][string]$Sddl)
+    try { $sd=[Security.AccessControl.RawSecurityDescriptor]::new($Sddl) }
+    catch { throw 'D0_ROOT_DESCRIPTOR_INVALID' }
+    $ti='S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+    $privileged=@('S-1-5-18','S-1-5-32-544',$ti)
+    if ($null -eq $sd.Owner -or $privileged -cnotcontains $sd.Owner.Value) {
+        throw 'D0_ROOT_OWNER_UNTRUSTED'
+    }
+    if ($null -eq $sd.Group -or $privileged -cnotcontains $sd.Group.Value) {
+        throw 'D0_ROOT_GROUP_UNTRUSTED'
+    }
+    if (($sd.ControlFlags -band
+        [Security.AccessControl.ControlFlags]::DiscretionaryAclPresent) -eq 0 -or
+        $null -eq $sd.DiscretionaryAcl -or $sd.DiscretionaryAcl.Count -eq 0) {
+        throw 'D0_ROOT_DACL_MISSING_OR_EMPTY'
+    }
+    # FILE_ADD_FILE | FILE_ADD_SUBDIR | FILE_WRITE_EA | FILE_DELETE_CHILD |
+    # FILE_WRITE_ATTRIBUTES | DELETE | WRITE_DAC | WRITE_OWNER |
+    # GENERIC_ALL | GENERIC_WRITE. Even InheritOnly low-trust ACEs
+    # are refused: they could affect a newly created unprotected child.
+    $danger=[int64]0x500D0156
+    $safeReaders=@('S-1-5-32-545','S-1-5-11','S-1-1-0',
+        'S-1-15-2-1','S-1-15-2-2')
+    foreach($ace in $sd.DiscretionaryAcl) {
+        if ($ace -isnot [Security.AccessControl.CommonAce] -or
+            $ace.IsCallback -or
+            $ace.AceQualifier -ne [Security.AccessControl.AceQualifier]::AccessAllowed) {
+            throw 'D0_ROOT_ACE_TYPE_OR_DENY_REFUSED'
+        }
+        $sid=$ace.SecurityIdentifier.Value
+        if ($sid -ceq 'S-1-3-0') {
+            if (([int64]$ace.AceFlags -band 0x08) -eq 0) {
+                throw 'D0_ROOT_CREATOR_OWNER_NOT_INHERIT_ONLY'
+            }
+            continue
+        }
+        if ($privileged -ccontains $sid) { continue }
+        if ($safeReaders -cnotcontains $sid) {
+            throw 'D0_ROOT_ACE_UNKNOWN_IDENTITY'
+        }
+        if (([int64]$ace.AccessMask -band $danger) -ne 0) {
+            throw 'D0_ROOT_ACE_DANGEROUS_RIGHTS'
+        }
+    }
+    return $true
+}
+
+function Assert-D0SourceAncestorDaclSnapshot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][string]$RootSddl,
+        [Parameter(Mandatory=$true)][string]$IntermediateSddl,
+        [Parameter(Mandatory=$true)][string]$LeafSddl
+    )
+    [void](Assert-D0ProgramFilesRootDescriptor -Sddl $RootSddl)
+    try { [void](Assert-D0ExactProtectedDescriptor -Sddl $IntermediateSddl) }
+    catch { throw ('D0_INTERMEDIATE_' + $_.Exception.Message) }
+    try { [void](Assert-D0ExactProtectedDescriptor -Sddl $LeafSddl) }
+    catch { throw ('D0_LEAF_' + $_.Exception.Message) }
+    return $true
+}
+
+function Assert-D0SourceAncestorDaclChain {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][string]$ProgramFilesRoot,
+        [Parameter(Mandatory=$true)][string]$CandidateRoot
+    )
+    [void](Assert-D0SourcePathBoundary -ProgramFilesRoot $ProgramFilesRoot -CandidateRoot $CandidateRoot)
+    $base=[IO.Path]::GetFullPath($ProgramFilesRoot).TrimEnd('\')
+    $intermediate=[IO.Path]::Combine($base,'LowcountryDigitalWorks')
+    $leaf=[IO.Path]::Combine($intermediate,'RedrixD0')
+    # No in-memory hash, owner-writable checkout or caller-provided expected
+    # SDDL is trusted as an installer approval. Get-Acl is read-only but
+    # pathname-based, and cannot defeat active hostile directory races.
+    $baseAcl=Get-Acl -LiteralPath $base -ErrorAction Stop
+    $intermediateAcl=Get-Acl -LiteralPath $intermediate -ErrorAction Stop
+    $leafAcl=Get-Acl -LiteralPath $leaf -ErrorAction Stop
+    return (Assert-D0SourceAncestorDaclSnapshot -RootSddl $baseAcl.Sddl `
+        -IntermediateSddl $intermediateAcl.Sddl -LeafSddl $leafAcl.Sddl)
+}
+
 function Get-D0FirstInstallSourcePlan {
     [CmdletBinding()]
     param()
@@ -122,10 +208,8 @@ function Get-D0FirstInstallSourcePlan {
     }
     $leaf=[IO.Path]::Combine($known,'LowcountryDigitalWorks','RedrixD0')
     try {
-        [void](Assert-D0SourcePathBoundary -ProgramFilesRoot $known -CandidateRoot $leaf)
-        $acl=Get-Acl -LiteralPath $leaf -ErrorAction Stop
-        [void](Assert-D0ExactProtectedDescriptor -Sddl $acl.Sddl -Kind StagingDirectory)
-        $result.source_validation='DIRECTORY_DACL_SNAPSHOT_ONLY'
+        [void](Assert-D0SourceAncestorDaclChain -ProgramFilesRoot $known -CandidateRoot $leaf)
+        $result.source_validation='ANCESTOR_AND_LEAF_DACL_SNAPSHOT_ONLY'
         # No externally accepted signer/pin, no at-create source verification
         # and no trusted source publisher are currently installed. This is
         # intentionally NOT a success/Go signal, even with a perfect ACL.
@@ -148,4 +232,4 @@ function Get-D0FirstInstallSourcePlan {
     return [pscustomobject]$result
 }
 
-Export-ModuleMember -Function Assert-D0ExactProtectedDescriptor,Assert-D0SourcePathBoundary,Get-D0FirstInstallSourcePlan
+Export-ModuleMember -Function Assert-D0ExactProtectedDescriptor,Assert-D0SourcePathBoundary,Assert-D0ProgramFilesRootDescriptor,Assert-D0SourceAncestorDaclSnapshot,Assert-D0SourceAncestorDaclChain,Get-D0FirstInstallSourcePlan
