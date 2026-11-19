@@ -188,7 +188,14 @@ def collect_g0_snapshot(
     if type(completed.returncode) is not int or completed.returncode != 0:
         return _blocked("HOLD_PROBE_FAILED")
     raw = completed.stdout
-    if not isinstance(raw, str) or len(raw.encode("utf-8")) > 2048:
+    if not isinstance(raw, str):
+        return _blocked("HOLD_INVALID_PROBE_OUTPUT")
+    try:
+        raw_size = len(raw.encode("utf-8"))
+    except UnicodeError:
+        # A malformed child stream must not escape the sanitized HOLD result.
+        return _blocked("HOLD_INVALID_PROBE_OUTPUT")
+    if raw_size > 2048:
         return _blocked("HOLD_INVALID_PROBE_OUTPUT")
     try:
         parsed = json.loads(raw, object_pairs_hook=_pairs_unique)
