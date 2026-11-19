@@ -12,8 +12,8 @@ $script:FixedPredicate = 'https://slsa.dev/provenance/v1'
 function Test-RedrixD0EvidenceHold {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory=$true)][object]$Evidence,
-        [Parameter(Mandatory=$true)][object]$ResearchOnlyExpected
+        [Parameter(Mandatory=$true)][AllowNull()][object]$Evidence,
+        [Parameter(Mandatory=$true)][AllowNull()][object]$ResearchOnlyExpected
     )
     # The caller can propose expected SHA bytes, so even a positive comparison
     # is NEVER independent acceptance, a signed verification, or physical authority.
