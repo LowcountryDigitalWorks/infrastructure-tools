@@ -103,6 +103,75 @@ foreach ($forbidden in @('RegisterTaskDefinition(','.Run(', 'Set-Acl','Remove-It
     Assert-D0 (-not $moduleText.Contains($forbidden)) ('MODULE_NO_MUTATOR_'+ $forbidden)
     Assert-D0 (-not $entryText.Contains($forbidden)) ('ENTRY_NO_MUTATOR_' + $forbidden)
 }
+# Next strict source gate: all three OS-source path DACL levels, not leaf-only.
+# SDDL values here are a pure synthetic data contract: no SYSTEM owner is
+# assigned on the hosted runner or any real ProgramFiles directory.
+$ti='S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+$rootGood=('O:'+$ti+'G:'+$ti+'D:PAI(A;OICI;FA;;;'+$ti+
+    ')(A;OICIIO;GA;;;CO)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'+
+    '(A;OICI;0x1200a9;;;BU)(A;OICI;0x1200a9;;;S-1-15-2-1)')
+Assert-D0 (Assert-D0ProgramFilesRootDescriptor -Sddl $rootGood) 'ROOT_BASELINE_READ_ONLY_ACES'
+Assert-D0 (Assert-D0SourceAncestorDaclSnapshot -RootSddl $rootGood `
+    -IntermediateSddl $good -LeafSddl $good) 'THREE_LEVEL_SDDL_VALID_LAB_ONLY'
+$rootChildDelete=$rootGood.Replace('(A;OICI;0x1200a9;;;BU)','(A;OICI;0x1200e9;;;BU)')
+Assert-Refused { Assert-D0ProgramFilesRootDescriptor -Sddl $rootChildDelete } 'D0_ROOT_ACE_DANGEROUS_RIGHTS'
+$rootBuDelete=$rootGood.Replace('(A;OICI;0x1200a9;;;BU)','(A;OICI;0x1300a9;;;BU)')
+Assert-Refused { Assert-D0ProgramFilesRootDescriptor -Sddl $rootBuDelete } 'D0_ROOT_ACE_DANGEROUS_RIGHTS'
+$rootBuWriteDac=$rootGood.Replace('(A;OICI;0x1200a9;;;BU)','(A;OICI;0x1600a9;;;BU)')
+Assert-Refused { Assert-D0ProgramFilesRootDescriptor -Sddl $rootBuWriteDac } 'D0_ROOT_ACE_DANGEROUS_RIGHTS'
+$rootBuWriteOwner=$rootGood.Replace('(A;OICI;0x1200a9;;;BU)','(A;OICI;0x1a00a9;;;BU)')
+Assert-Refused { Assert-D0ProgramFilesRootDescriptor -Sddl $rootBuWriteOwner } 'D0_ROOT_ACE_DANGEROUS_RIGHTS'
+$rootBuAddSubdir=$rootGood.Replace('(A;OICI;0x1200a9;;;BU)','(A;OICI;0x1200ad;;;BU)')
+Assert-Refused { Assert-D0ProgramFilesRootDescriptor -Sddl $rootBuAddSubdir } 'D0_ROOT_ACE_DANGEROUS_RIGHTS'
+$rootBuGenericWrite=$rootGood.Replace('(A;OICI;0x1200a9;;;BU)','(A;OICI;0x40000000;;;BU)')
+Assert-Refused { Assert-D0ProgramFilesRootDescriptor -Sddl $rootBuGenericWrite } 'D0_ROOT_ACE_DANGEROUS_RIGHTS'
+$rootBuIO=$rootGood.Replace('(A;OICI;0x1200a9;;;BU)','(A;OICIIO;FA;;;BU)')
+Assert-Refused { Assert-D0ProgramFilesRootDescriptor -Sddl $rootBuIO } 'D0_ROOT_ACE_DANGEROUS_RIGHTS'
+$rootOwnerBu=$rootGood.Replace(('O:'+$ti),'O:BU')
+Assert-Refused { Assert-D0ProgramFilesRootDescriptor -Sddl $rootOwnerBu } 'D0_ROOT_OWNER_UNTRUSTED'
+$rootGroupBu=$rootGood.Replace(('G:'+$ti),'G:BU')
+Assert-Refused { Assert-D0ProgramFilesRootDescriptor -Sddl $rootGroupBu } 'D0_ROOT_GROUP_UNTRUSTED'
+$rootCOImmediate=$rootGood.Replace('(A;OICIIO;GA;;;CO)','(A;OICI;GA;;;CO)')
+Assert-Refused { Assert-D0ProgramFilesRootDescriptor -Sddl $rootCOImmediate } 'D0_ROOT_CREATOR_OWNER_NOT_INHERIT_ONLY'
+$rootForeignService=$rootGood.Replace(('(A;OICI;FA;;;'+$ti+')'),
+    '(A;OICI;FA;;;S-1-5-80-1-2-3-4-5)')
+Assert-Refused { Assert-D0ProgramFilesRootDescriptor -Sddl $rootForeignService } 'D0_ROOT_ACE_UNKNOWN_IDENTITY'
+$rootDeny=$rootGood.Replace('(A;OICI;0x1200a9;;;BU)','(D;OICI;0x1200a9;;;BU)')
+Assert-Refused { Assert-D0ProgramFilesRootDescriptor -Sddl $rootDeny } 'D0_ROOT_ACE_TYPE_OR_DENY_REFUSED'
+Assert-Refused { Assert-D0ProgramFilesRootDescriptor -Sddl 'O:BAG:BAD:' } 'D0_ROOT_DACL_MISSING_OR_EMPTY'
+Assert-Refused { Assert-D0SourceAncestorDaclSnapshot -RootSddl $rootChildDelete `
+    -IntermediateSddl $good -LeafSddl $good } 'D0_ROOT_ACE_DANGEROUS_RIGHTS'
+Assert-Refused { Assert-D0SourceAncestorDaclSnapshot -RootSddl $rootGood `
+    -IntermediateSddl 'O:BAG:BAD:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)' `
+    -LeafSddl $good } 'D0_INTERMEDIATE_D0_DACL_UNPROTECTED_OR_MISSING'
+Assert-Refused { Assert-D0SourceAncestorDaclSnapshot -RootSddl $rootGood `
+    -IntermediateSddl 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200e9;;;BU)' `
+    -LeafSddl $good } 'D0_INTERMEDIATE_D0_DACL_NOT_EXACT_TWO_ACE'
+Assert-Refused { Assert-D0SourceAncestorDaclSnapshot -RootSddl $rootGood `
+    -IntermediateSddl $good `
+    -LeafSddl 'O:BUG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)' } 'D0_LEAF_D0_SOURCE_OWNER_UNTRUSTED'
+# Live Get-Acl traversal in a newly created TEMP tree must refuse:
+# its ordinary user-owned/inherited root is not a privileged ProgramFiles root.
+$ancestorFixture=Join-Path ([IO.Path]::GetTempPath()) ('ldw-d0-ancestor-'+[Guid]::NewGuid().ToString('N'))
+$ancestorLeaf=Join-Path $ancestorFixture 'LowcountryDigitalWorks/RedrixD0'
+try {
+    [void][IO.Directory]::CreateDirectory($ancestorLeaf)
+    $refused=$false
+    try {
+        [void](Assert-D0SourceAncestorDaclChain -ProgramFilesRoot $ancestorFixture -CandidateRoot $ancestorLeaf)
+    }
+    catch {
+        if ($_.Exception.Message -cmatch '^D0_') { $refused=$true }
+        else { throw }
+    }
+    Assert-D0 $refused 'REAL_TEMP_CHAIN_NOT_MISLABELED_TRUSTED_ROOT'
+}
+finally {
+    if(Test-Path -LiteralPath $ancestorFixture -PathType Container) {
+        Remove-Item -LiteralPath $ancestorFixture -Recurse -Force -ErrorAction Stop
+    }
+}
+
 Write-Output ('REDRIX_D0_FIRST_INSTALL_SOURCE_GATE_TEMP=PASS assertions=' + $script:Assertions)
 Write-Output 'REDRIX_D0_FIRST_INSTALL_SOURCE_AUTHENTICATED=FALSE'
 Write-Output 'REDRIX_D0_FIRST_INSTALL_PHYSICAL_SYSTEM_TASK=NOT_INSTALLED'
