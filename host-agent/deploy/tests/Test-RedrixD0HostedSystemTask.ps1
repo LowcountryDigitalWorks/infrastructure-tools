@@ -35,8 +35,8 @@ function Assert-D0([bool]$Condition, [string]$Code) {
 }
 function Assert-StrictTaskDescriptor([string]$Sddl) {
     $raw = [Security.AccessControl.RawSecurityDescriptor]::new($Sddl)
-    Assert-D0 ($raw.Owner.Value -ceq 'S-1-5-18') 'TASK_OWNER_SYSTEM'
-    Assert-D0 ($raw.Group.Value -ceq 'S-1-5-18') 'TASK_GROUP_SYSTEM'
+    Assert-D0 ($raw.Owner.Value -ceq 'S-1-5-32-544') 'TASK_OWNER_ADMINISTRATORS'
+    Assert-D0 ($raw.Group.Value -ceq 'S-1-5-32-544') 'TASK_GROUP_ADMINISTRATORS'
     Assert-D0 ((($raw.ControlFlags -band
         [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected) -ne 0)) 'TASK_DACL_PROTECTED'
     Assert-D0 ($raw.DiscretionaryAcl.Count -eq 2) 'TASK_EXACTLY_TWO_ACES'
@@ -73,7 +73,7 @@ $probe = 'if([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -cne 
 $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probe))
 $expectedArgs = '-NoLogo -NoProfile -NonInteractive -EncodedCommand ' + $encoded
 $taskName = 'LDW-REDRIX-D0-HOSTED-ONLY-' + [Guid]::NewGuid().ToString('N')
-$taskSddl = 'O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)'
+$taskSddl = 'O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)'
 
 $service = $null
 $folder = $null
@@ -111,11 +111,14 @@ try {
     Assert-D0 ($definition.Actions.Count -eq 1) 'ONE_ACTION_BEFORE'
     Assert-D0 ($definition.Principal.LogonType -eq 5) 'SERVICE_ACCOUNT_BEFORE'
     Assert-D0 ($definition.Principal.RunLevel -eq 1) 'HIGHEST_RUNLEVEL_BEFORE'
-    # TASK_CREATE=2: CREATE ONLY, never modify/replace an existing task.
+    # TASK_CREATE=2 and TASK_DONT_ADD_PRINCIPAL_ACE=0x10:
+    # create-only with NO automatic added duplicate principal ACE.
+    # Task object owner is Administrators; execution principal is SYSTEM.
+    # This is distinct from the later frozen journal owner+group SYSTEM.
     # TASK_LOGON_SERVICE_ACCOUNT=5: no stored task password.
     $script:Phase = 'REGISTER_FIXED_SYSTEM_TASK'
     $installed = $folder.RegisterTaskDefinition(
-        $taskName, $definition, 2, 'SYSTEM', $null, 5, $taskSddl)
+        $taskName, $definition, 0x12, 'SYSTEM', $null, 5, $taskSddl)
     Assert-D0 ($null -ne $installed) 'CREATE_RETURNED_HANDLE'
     $script:Phase = 'READBACK_REGISTERED_TASK'
     $task = $folder.GetTask($taskName)
