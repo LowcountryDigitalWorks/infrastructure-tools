@@ -81,10 +81,13 @@ $installed = $null
 $ran = $false
 $cleanupVerified = $false
 $sourceComplete = $false
+$script:Phase = 'BEFORE_SERVICE'
 try {
+    $script:Phase = 'CONNECT_TASK_SCHEDULER'
     $service = New-Object -ComObject 'Schedule.Service'
     $service.Connect()
     $folder = $service.GetFolder('\')
+    $script:Phase = 'CREATE_TASK_DEFINITION'
     $definition = $service.NewTask(0)
     $definition.RegistrationInfo.Description =
         'LDW D0 source research: one hosted-only no-trigger SYSTEM identity proof, always disposable.'
@@ -110,9 +113,11 @@ try {
     Assert-D0 ($definition.Principal.RunLevel -eq 1) 'HIGHEST_RUNLEVEL_BEFORE'
     # TASK_CREATE=2: CREATE ONLY, never modify/replace an existing task.
     # TASK_LOGON_SERVICE_ACCOUNT=5: no stored task password.
+    $script:Phase = 'REGISTER_FIXED_SYSTEM_TASK'
     $installed = $folder.RegisterTaskDefinition(
         $taskName, $definition, 2, 'SYSTEM', $null, 5, $taskSddl)
     Assert-D0 ($null -ne $installed) 'CREATE_RETURNED_HANDLE'
+    $script:Phase = 'READBACK_REGISTERED_TASK'
     $task = $folder.GetTask($taskName)
     Assert-D0 ($task.Name -ceq $taskName) 'EXACT_TASK_NAME'
     Assert-D0 ($task.Definition.Triggers.Count -eq 0) 'NO_TRIGGERS_AFTER'
@@ -130,8 +135,10 @@ try {
 
     # No ambient scheduler; explicitly invoke the fixed read-only SYSTEM
     # identity check ONLY on this ephemeral hosted runner.
+    $script:Phase = 'RUN_FIXED_SYSTEM_IDENTITY_TASK'
     $run = $task.Run($null)
     Assert-D0 ($null -ne $run) 'RUNNING_HANDLE'
+    $script:Phase = 'WAIT_FIXED_SYSTEM_IDENTITY_TASK'
     $runningObserved = $false
     $completedObserved = $false
     $deadline = [DateTime]::UtcNow.AddSeconds(25)
@@ -153,13 +160,19 @@ try {
     $ran = $true
     $sourceComplete = $true
 }
+catch {
+    Write-Output ('REDRIX_D0_HOSTED_SYSTEM_TASK_FAILURE_PHASE=' + $script:Phase)
+    throw
+}
 finally {
+    Write-Output 'REDRIX_D0_HOSTED_SYSTEM_TASK_CLEANUP=START'
     if ($null -ne $folder) {
         # Only this unpredictable fixture-owned name. No registry-wide
         # cleanup, no touch to existing V1 or protected CI/JIT tasks.
         $existing = $null
         try { $existing = $folder.GetTask($taskName) }
         catch [Runtime.InteropServices.COMException] { $existing = $null }
+        catch [IO.FileNotFoundException] { $existing = $null }
         if ($null -ne $existing) {
             if ([int]$existing.State -eq 4) { $existing.Stop(0) }
             $folder.DeleteTask($taskName, 0)
@@ -170,6 +183,7 @@ finally {
         }
         $cleanupVerified = -not $found
     }
+    Write-Output ('REDRIX_D0_HOSTED_SYSTEM_TASK_CLEANUP_VERIFIED=' + $cleanupVerified)
 }
 Assert-D0 $sourceComplete 'REGISTER_RUN_COMPLETED'
 Assert-D0 $ran 'ACTUAL_RUN_COMPLETED'
