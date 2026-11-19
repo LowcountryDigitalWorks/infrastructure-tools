@@ -6,14 +6,13 @@ import json
 import sys
 import unittest
 from contextlib import redirect_stdout
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from gate_c_host_g0_readonly import (
     CLASSIFICATION, POWERSHELL_PROBE, RAW_KEYS, SCHEMA,
-    collect_g0_snapshot, main,
+    _native_system_powershell, collect_g0_snapshot, main,
 )
 
 
@@ -34,12 +33,12 @@ def fake_runner(output, *, rc=0):
     return lambda command, **opts: SimpleNamespace(returncode=rc, stdout=output, stderr="ignored synthetic error")
 
 
-def run(payload=None, *, rc=0, runner=None, platform="win32", system_root="/synthetic-windows"):
+def run(payload=None, *, rc=0, runner=None, platform="win32", executable="/synthetic-windows/System32/WindowsPowerShell/v1.0/powershell.exe"):
     if runner is None:
         if payload is None:
             payload = snapshot()
         runner = fake_runner(json.dumps(payload), rc=rc)
-    return collect_g0_snapshot(platform_tag=platform, system_root=system_root, runner=runner)
+    return collect_g0_snapshot(platform_tag=platform, powershell_locator=lambda: executable, runner=runner)
 
 
 class G0ReadOnlyTests(unittest.TestCase):
@@ -77,19 +76,45 @@ class G0ReadOnlyTests(unittest.TestCase):
     def test_non_windows_does_not_invoke_runner(self):
         def fail(*a, **kw):
             self.fail("Non-Windows platform called Windows command")
-        r = collect_g0_snapshot(platform_tag="linux", system_root="/synthetic-windows", runner=fail)
+        r = collect_g0_snapshot(platform_tag="linux", powershell_locator=lambda: self.fail("Non-Windows location lookup"), runner=fail)
         self.assertEqual(r["disposition"], "HOLD_NOT_WINDOWS")
         self.assert_not_authorized(r)
 
-    def test_missing_system_root_fails_without_runner(self):
+    def test_missing_system_powershell_fails_without_runner(self):
         def fail(*a, **kw):
             self.fail("Missing root invoked Windows command")
         for bad in ("", "relative", None):
             with self.subTest(bad=bad):
-                with patch.dict("os.environ", {}, clear=True):
-                    r = collect_g0_snapshot(platform_tag="win32", system_root=bad, runner=fail)
+                r = collect_g0_snapshot(platform_tag="win32", powershell_locator=lambda: bad, runner=fail)
                 self.assertIn(r["disposition"], {"HOLD_SYSTEM_DIRECTORY_UNAVAILABLE"})
                 self.assert_not_authorized(r)
+
+    def test_native_powershell_resolver_uses_kernel32_system_directory(self):
+        import gate_c_host_g0_readonly as module
+        calls = []
+        class Api:
+            def __init__(self):
+                self.argtypes = None
+                self.restype = None
+            def __call__(self, buffer, length):
+                self.expected_len = length
+                buffer.value = "/synthetic-windows/System32"
+                return len(buffer.value)
+        api = Api()
+        class Dll:
+            GetSystemDirectoryW = api
+        def fake_win_dll(name, *, winmode):
+            calls.append((name, winmode))
+            return Dll()
+        with patch.object(module.ctypes, "WinDLL", fake_win_dll, create=True):
+            value = _native_system_powershell()
+        self.assertEqual(calls, [("kernel32.dll", 0x800)])
+        self.assertEqual(value, "/synthetic-windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+
+    def test_native_powershell_api_failure_holds(self):
+        import gate_c_host_g0_readonly as module
+        with patch.object(module.ctypes, "WinDLL", side_effect=OSError("no OS api"), create=True):
+            self.assertIsNone(_native_system_powershell())
 
     def test_runner_called_once_with_bounded_fixed_read_only_script(self):
         calls = []
@@ -106,6 +131,20 @@ class G0ReadOnlyTests(unittest.TestCase):
         self.assertTrue(opts["capture_output"])
         self.assertEqual(opts["timeout"], 12)
         self.assertIs(opts["check"], False)
+        self.assert_not_authorized(r)
+
+    def test_environment_does_not_control_executable_path(self):
+        # PowerShell executable is resolved from OS GetSystemDirectoryW,
+        # not a user-supplied PATH or SystemRoot variable.
+        import gate_c_host_g0_readonly as module
+        with patch.object(module, "_native_system_powershell", return_value="/synthetic-windows/System32/WindowsPowerShell/v1.0/powershell.exe"):
+            with patch.dict("os.environ", {"SystemRoot": "/malicious", "PATH": "/malicious"}):
+                calls = []
+                def run_it(cmd, **kw):
+                    calls.append(cmd)
+                    return SimpleNamespace(returncode=0, stdout=json.dumps(snapshot()), stderr="")
+                r = collect_g0_snapshot(platform_tag="win32", runner=run_it)
+        self.assertEqual(calls[0][0], "/synthetic-windows/System32/WindowsPowerShell/v1.0/powershell.exe")
         self.assert_not_authorized(r)
 
     def test_powershell_script_has_only_read_functions(self):
