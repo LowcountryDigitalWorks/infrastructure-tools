@@ -36,16 +36,14 @@ function Assert-D0ExactProtectedDescriptor {
         }
         if ($seen.ContainsKey($sid)) { throw 'D0_ACE_DUPLICATE' }
         $seen[$sid]=$true
-        if ($ace.AccessMask -ne [int][Security.AccessControl.FileSystemRights]::FullControl) {
+        # Compare the documented file FullControl mask numerically. Explicit
+        # enum-to-int casts can throw on native WinPS5.1 PowerShell binder.
+        if ([int64]$ace.AccessMask -ne 0x001F01FF) {
             throw 'D0_ACE_RIGHTS_DRIFT'
         }
-        $expectedFlags = if ($Kind -ceq 'SystemTask') {
-            [Security.AccessControl.AceFlags]::None
-        } else {
-            [Security.AccessControl.AceFlags]::ContainerInherit -bor
-                [Security.AccessControl.AceFlags]::ObjectInherit
-        }
-        if ($ace.AceFlags -ne $expectedFlags) { throw 'D0_ACE_INHERITANCE_DRIFT' }
+        # 0=no inheritance for Task Scheduler object; OI|CI=3 on directory.
+        $expectedFlags = if ($Kind -ceq 'SystemTask') { 0 } else { 3 }
+        if ([int64]$ace.AceFlags -ne $expectedFlags) { throw 'D0_ACE_INHERITANCE_DRIFT' }
     }
     if ($seen.Count -ne 2) { throw 'D0_ACE_SET_DRIFT' }
     return $true
