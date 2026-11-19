@@ -199,6 +199,18 @@ class G0ReadOnlyTests(unittest.TestCase):
         self.assertEqual(r["disposition"], "HOLD_INVALID_PROBE_OUTPUT")
         self.assert_not_authorized(r)
 
+
+    def test_unpaired_surrogate_output_fails_closed_without_reflection(self):
+        # A synthetic child stream can contain malformed Unicode. This used
+        # to raise UnicodeEncodeError before the JSON parser could reject it.
+        for raw in ("\ud800", "\udc00", '{"domain_joined_hint":"\ud800"}'):
+            with self.subTest(raw=ascii(raw)):
+                result = run(runner=fake_runner(raw))
+                self.assertEqual(result["disposition"], "HOLD_INVALID_PROBE_OUTPUT")
+                self.assert_not_authorized(result)
+                self.assertNotIn("domain_joined_hint", result.get("error", ""))
+
+
     def test_unknown_fields_rejected_without_reflection(self):
         r = run(snapshot(hostname="private-machine-id", password="secret"))
         self.assertEqual(r["disposition"], "HOLD_INVALID_PROBE_OUTPUT")
