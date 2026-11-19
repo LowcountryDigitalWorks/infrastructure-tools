@@ -6,8 +6,8 @@ establishes the protected host and owner signer required by Gate C.
 """
 from __future__ import annotations
 
+import ctypes
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -131,10 +131,29 @@ def _blocked(reason: str) -> dict[str, Any]:
     }
 
 
+def _native_system_powershell() -> str | None:
+    """Resolve PowerShell using Windows' system directory, never PATH/SystemRoot.
+
+    This is still user-mode discovery, not a protected process attestation.
+    """
+    try:
+        dll = ctypes.WinDLL("kernel32.dll", winmode=0x00000800)
+        get_directory = dll.GetSystemDirectoryW
+        get_directory.argtypes = [ctypes.c_wchar_p, ctypes.c_uint]
+        get_directory.restype = ctypes.c_uint
+        buffer = ctypes.create_unicode_buffer(512)
+        length = get_directory(buffer, len(buffer))
+        if type(length) is int and 0 < length < len(buffer):
+            return str(Path(buffer.value) / "WindowsPowerShell" / "v1.0" / "powershell.exe")
+    except (AttributeError, OSError, TypeError, ValueError, OverflowError):
+        pass
+    return None
+
+
 def collect_g0_snapshot(
     *,
     platform_tag: str | None = None,
-    system_root: str | None = None,
+    powershell_locator: Callable[[], str | None] | None = None,
     runner: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """Return sanitized hints. Injection points are for offline tests only.
@@ -145,10 +164,13 @@ def collect_g0_snapshot(
     platform = sys.platform if platform_tag is None else platform_tag
     if platform != "win32":
         return _blocked("HOLD_NOT_WINDOWS")
-    root = os.environ.get("SystemRoot") if system_root is None else system_root
-    if not isinstance(root, str) or not root or not Path(root).is_absolute():
+    locate = _native_system_powershell if powershell_locator is None else powershell_locator
+    try:
+        executable = locate()
+    except (OSError, TypeError, ValueError, AttributeError):
         return _blocked("HOLD_SYSTEM_DIRECTORY_UNAVAILABLE")
-    executable = str(Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe")
+    if not isinstance(executable, str) or not executable or not Path(executable).is_absolute():
+        return _blocked("HOLD_SYSTEM_DIRECTORY_UNAVAILABLE")
     run = subprocess.run if runner is None else runner
     try:
         # This is one fixed read-only command. Never use shell=True or a
