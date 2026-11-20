@@ -19,6 +19,9 @@ CLASSIFICATION = "DATA_ONLY_POLICY_SOURCE_UNVERIFIED"
 POWERSHELL_PROBE = r'''
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+# Bind CimCmdlets to the Windows PowerShell system module path, never a user module.
+# The caller supplies an explicit, non-inherited minimal child environment.
+Import-Module -Name (Join-Path $PSHOME 'Modules\CimCmdlets\CimCmdlets.psd1') -ErrorAction Stop
 $domain = 'UNKNOWN'
 $feature = 'UNKNOWN'
 $policyKey = 'UNAVAILABLE'
@@ -57,7 +60,7 @@ try {
     } finally { $reg.Close() }
 } catch { $policyKey = 'UNAVAILABLE'; $policyCount = 0 }
 try {
-    $path = Join-Path $env:SystemRoot 'System32\GroupPolicy\Machine\Registry.pol'
+    $path = Join-Path ([Environment]::SystemDirectory) 'GroupPolicy\Machine\Registry.pol'
     $gpoFile = if (Test-Path -LiteralPath $path -PathType Leaf -ErrorAction Stop) { 'PRESENT' } else { 'ABSENT' }
 } catch { $gpoFile = 'UNAVAILABLE' }
 try {
@@ -150,6 +153,30 @@ def _native_system_powershell() -> str | None:
     return None
 
 
+def _trusted_child_environment(executable: str) -> dict[str, str] | None:
+    """Fixed environment from the OS-selected Windows PowerShell path.
+
+    No inherited caller PATH, SystemRoot, windir or PSModulePath. This does
+    not attest to protected system integrity or grant Gate C authority.
+    """
+    path = Path(executable)
+    if (path.name.casefold() != "powershell.exe"
+            or path.parent.name.casefold() != "v1.0"
+            or path.parent.parent.name.casefold() != "windowspowershell"
+            or path.parent.parent.parent.name.casefold() not in {"system32", "syswow64"}):
+        return None
+    system_dir = path.parent.parent.parent
+    windows_dir = system_dir.parent
+    if not windows_dir.is_absolute():
+        return None
+    return {
+        "SystemRoot": str(windows_dir),
+        "windir": str(windows_dir),
+        "PSModulePath": str(path.parent / "Modules"),
+        "PATH": str(system_dir),
+    }
+
+
 def collect_g0_snapshot(
     *,
     platform_tag: str | None = None,
@@ -171,6 +198,9 @@ def collect_g0_snapshot(
         return _blocked("HOLD_SYSTEM_DIRECTORY_UNAVAILABLE")
     if not isinstance(executable, str) or not executable or not Path(executable).is_absolute():
         return _blocked("HOLD_SYSTEM_DIRECTORY_UNAVAILABLE")
+    child_env = _trusted_child_environment(executable)
+    if child_env is None:
+        return _blocked("HOLD_SYSTEM_DIRECTORY_UNAVAILABLE")
     run = subprocess.run if runner is None else runner
     try:
         # This is one fixed read-only command. Never use shell=True or a
@@ -182,6 +212,7 @@ def collect_g0_snapshot(
             text=True,
             timeout=12,
             check=False,
+            env=child_env,
         )
     except (OSError, subprocess.SubprocessError, ValueError, TypeError):
         return _blocked("HOLD_PROBE_UNAVAILABLE")

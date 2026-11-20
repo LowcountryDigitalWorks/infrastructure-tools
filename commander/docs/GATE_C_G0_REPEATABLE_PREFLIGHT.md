@@ -12,6 +12,8 @@ python commander/prototype/gate_c_host_g0_readonly.py
 
 The module invokes one fixed, no-profile, non-interactive Windows PowerShell command (never `shell=True`) and reads only bounded local operating-system signals:
 
+The wrapper creates a minimal explicit process environment from the OS-selected system PowerShell path (`SystemRoot`, `windir`, `PATH`, `PSModulePath`), never inherited from caller variables. The fixed probe imports `CimCmdlets` from the actual `$PSHOME` system module path and checks local `Registry.pol` using `[Environment]::SystemDirectory` instead of inherited `SystemRoot`. Missing trusted executable layout or failed system module import returns sanitized HOLD. These user-mode hints do not prove an OS/ACL protected source or feature/policy authority.
+
 | Signal | Read method | Sanitized categories |
 | --- | --- | --- |
 | Joined to a Windows domain | `Win32_ComputerSystem.PartOfDomain` | `YES`, `NO`, `UNKNOWN` |

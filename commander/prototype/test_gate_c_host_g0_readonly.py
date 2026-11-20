@@ -149,6 +149,47 @@ class G0ReadOnlyTests(unittest.TestCase):
         self.assertEqual(calls[0][0], DEFAULT_EXE)
         self.assert_not_authorized(r)
 
+    def test_hostile_parent_environment_is_never_inherited(self):
+        import os
+        observed = []
+        malicious = {
+            "SystemRoot": "/attacker/windows",
+            "windir": "/attacker/windows",
+            "PSModulePath": "/attacker/modules",
+            "PATH": "/attacker/bin",
+            "PSExecutionPolicyPreference": "bypass",
+        }
+        def inspect(command, **kwargs):
+            observed.append(kwargs["env"])
+            return SimpleNamespace(returncode=0, stdout=json.dumps(snapshot()), stderr="")
+        with patch.dict(os.environ, malicious):
+            result = run(runner=inspect)
+        self.assertEqual(len(observed), 1)
+        env = observed[0]
+        system = str(Path(DEFAULT_EXE).parents[2])
+        self.assertEqual(env, {
+            "SystemRoot": str(Path(DEFAULT_EXE).parents[3]),
+            "windir": str(Path(DEFAULT_EXE).parents[3]),
+            "PSModulePath": str(Path(DEFAULT_EXE).parent / "Modules"),
+            "PATH": system,
+        })
+        self.assertFalse(any(v.startswith("/attacker") for v in env.values()))
+        self.assertNotIn("PSExecutionPolicyPreference", env)
+        self.assert_not_authorized(result)
+
+    def test_non_system_powershell_layout_fails_before_runner(self):
+        def forbid(*args, **kwargs):
+            self.fail("Untrusted executable layout executed a process")
+        result = run(executable="/attacker/untrusted/powershell.exe", runner=forbid)
+        self.assertEqual(result["disposition"], "HOLD_SYSTEM_DIRECTORY_UNAVAILABLE")
+        self.assert_not_authorized(result)
+
+    def test_powershell_probe_binds_system_module_and_path_without_parent_env(self):
+        self.assertIn("Import-Module -Name (Join-Path $PSHOME 'Modules\\CimCmdlets\\CimCmdlets.psd1')", POWERSHELL_PROBE)
+        self.assertIn("Join-Path ([Environment]::SystemDirectory)", POWERSHELL_PROBE)
+        self.assertNotIn("$env:SystemRoot", POWERSHELL_PROBE)
+        self.assertNotIn("$env:PSModulePath", POWERSHELL_PROBE)
+
     def test_powershell_script_has_only_read_functions(self):
         for s in ("Get-CimInstance", "Registry64", "OpenSubKey", "Test-Path", "ConvertTo-Json", "IsInRole"):
             self.assertIn(s, POWERSHELL_PROBE)
