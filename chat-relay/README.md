@@ -15,8 +15,12 @@ This delivers a bidirectional, role-authenticated, owner-controlled local messag
 - 15-minute TTL using a process-monotonic expiration clock (wall-clock only for display metadata), high-water expiration guard against backward timer movement, max 128 retained messages, max 8 KiB body. No persistence or cross-restart replay guarantee. Valid replies must reference an existing message addressed to the current sender by the proposed reply recipient.
 - Maximum 8 concurrently admitted HTTP client workers, 2-second socket idle timeout and 4-second absolute socket connection deadline (including incomplete unauthenticated headers/bodies). The local server refuses excess connections instead of spawning unbounded threads.
 - UUID replay is idempotent even after acknowledgement until expiry; changed content with the same UUID fails 409.
-- In-memory only: no disk queues, external traffic, bearer/body logging, general shell, credentials or customer data.
+- In-memory only by default: no disk queues, external traffic, bearer/body logging, general shell, credentials or customer data. The default `Mailbox` is unchanged.
 - Only synthetic/public non-sensitive messages are within this proof scope.
+
+## Optional restart journal (not the default)
+
+`durable_mailbox.py` is a separate opt-in adapter. It is not used by `relay.py`, the loopback listener, Site, or MCP. A trusted caller must pass `opt_in="local-sqlite-synthetic-public"` and a private directory. The journal can replay synthetic public messages across a process restart, including acknowledgement and reply-to, until the persisted wall-clock TTL. It does not store the master secret or role tokens, does not open a socket, and does not mean `CHAT_STARTED` or `IR_PASS`. See `DURABLE_MAILBOX.md`. Deployment remains unauthorized.
 
 ## Run the synthetic tests
 
