@@ -46,6 +46,13 @@ jobs:
             throw "PowerShell parser reported $($allErrors.Count) error(s)."
           }
 
+      - name: REDRIX D0 GitHub-hosted SYSTEM task disposable proof (Windows PowerShell 5.1)
+        if: ${{ runner.environment == 'github-hosted' }}
+        shell: powershell
+        env:
+          REDRIX_D0_SYNTHETIC_RUNNER_CLASS: ${{ runner.environment }}
+        run: powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./host-agent/deploy/tests/Test-RedrixD0HostedSystemTask.ps1
+
       - name: Run deployment contract tests
         shell: pwsh
         run: pwsh ./host-agent/deploy/tests/Test-DeploymentContracts.ps1
