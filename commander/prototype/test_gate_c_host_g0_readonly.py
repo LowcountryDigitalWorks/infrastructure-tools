@@ -158,6 +158,7 @@ class G0ReadOnlyTests(unittest.TestCase):
             "PSModulePath": "/attacker/modules",
             "PATH": "/attacker/bin",
             "PSExecutionPolicyPreference": "bypass",
+            "PSModuleAnalysisCachePath": "/attacker/cache",
         }
         def inspect(command, **kwargs):
             observed.append(kwargs["env"])
@@ -171,10 +172,24 @@ class G0ReadOnlyTests(unittest.TestCase):
             "SystemRoot": str(Path(DEFAULT_EXE).parents[3]),
             "windir": str(Path(DEFAULT_EXE).parents[3]),
             "PSModulePath": str(Path(DEFAULT_EXE).parent / "Modules"),
+            "PSModuleAnalysisCachePath": "NUL",
             "PATH": system,
         })
         self.assertFalse(any(v.startswith("/attacker") for v in env.values()))
         self.assertNotIn("PSExecutionPolicyPreference", env)
+        self.assert_not_authorized(result)
+
+    def test_powershell_module_analysis_file_cache_is_disabled(self):
+        import os
+        seen = []
+        def inspect(command, **kwargs):
+            seen.append(kwargs["env"].copy())
+            return SimpleNamespace(returncode=0, stdout=json.dumps(snapshot()), stderr="")
+        with patch.dict(os.environ, {"PSModuleAnalysisCachePath": "/attacker/cache"}):
+            result = run(runner=inspect)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]["PSModuleAnalysisCachePath"], "NUL")
+        self.assertNotIn("/attacker/cache", json.dumps(seen[0]))
         self.assert_not_authorized(result)
 
     def test_non_system_powershell_layout_fails_before_runner(self):

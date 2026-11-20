@@ -173,6 +173,7 @@ def _trusted_child_environment(executable: str) -> dict[str, str] | None:
         "SystemRoot": str(windows_dir),
         "windir": str(windows_dir),
         "PSModulePath": str(path.parent / "Modules"),
+        "PSModuleAnalysisCachePath": "NUL",
         "PATH": str(system_dir),
     }
 
@@ -205,6 +206,7 @@ def collect_g0_snapshot(
     try:
         # This is one fixed read-only command. Never use shell=True or a
         # command supplied by the model, an issue, file, or the caller.
+        # Output is size-validated AFTER capture, not bounded at pipe-read time.
         completed = run(
             [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", POWERSHELL_PROBE],
             stdin=subprocess.DEVNULL,
