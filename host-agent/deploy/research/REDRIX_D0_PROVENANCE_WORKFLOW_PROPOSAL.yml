@@ -1,0 +1,55 @@
+# SOURCE-ONLY DESIGN; intentionally outside .github/workflows.
+# NOT an installed GitHub Actions workflow or a verified source release.
+# If approved later: require fresh security review of the exact activated file.
+name: REDRIX D0 source provenance probe (no install or release authority)
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  source-only-provenance:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'LowcountryDigitalWorks/infrastructure-tools' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Read exact repository source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Make immutable source research probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "LowcountryDigitalWorks/infrastructure-tools"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          mkdir -p dist
+          # Fixed accepted-main read-only/in-memory research files ONLY.
+          # NOT any current PR335/PR336 draft SYSTEM worker or real installer.
+          LC_ALL=C tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+            -cf dist/redrix-d0-source-probe.tar \
+            host-agent/deploy/Test-RedrixLdwParentAclReadiness.ps1 \
+            host-agent/deploy/RedrixLdwParentAclMigrationTransaction.ps1 \
+            host-agent/deploy/RedrixLdwParentAclSyntheticTarget.ps1
+          sha256sum dist/redrix-d0-source-probe.tar
+      - name: Attest exact probe subject (no install)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4 tag resolved 2026-11-19
+        with:
+          subject-path: dist/redrix-d0-source-probe.tar
+      - name: Retain only probe artifact for explicit external verification
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: redrix-d0-source-probe
+          path: dist/redrix-d0-source-probe.tar
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0

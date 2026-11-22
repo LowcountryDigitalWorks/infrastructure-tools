@@ -115,6 +115,10 @@ jobs:
         shell: powershell
         run: powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./host-agent/deploy/tests/Test-RedrixD0FirstInstallSourceGate.ps1
 
+      - name: REDRIX D0 inert attestation evidence HOLD contract (Windows PowerShell 5.1)
+        shell: powershell
+        run: powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./host-agent/deploy/tests/Test-RedrixD0AttestationEvidenceHold.ps1
+
       - name: Validate REDRIX LDW parent ACL read-only preflight contract (Windows PowerShell 5.1)
         shell: powershell
         run: powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./host-agent/deploy/tests/Test-RedrixLdwParentAclReadinessContracts.ps1
