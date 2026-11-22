@@ -93,7 +93,13 @@ jobs:
 
             $sdkBin = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Windows Kits\10\bin'
             $makeAppx = @(Get-ChildItem -LiteralPath $sdkBin -Filter makeappx.exe -Recurse -File -ErrorAction Stop |
-              Where-Object { $_.Directory.Name -eq 'x64' } | Sort-Object FullName -Descending | Select-Object -First 1)
+              Where-Object { $_.Directory.Name -eq 'x64' } |
+              ForEach-Object {
+                [version]$sdkVersion = $null
+                if ([version]::TryParse($_.Directory.Parent.Name, [ref]$sdkVersion)) {
+                  $_ | Add-Member -NotePropertyName SdkVersion -NotePropertyValue $sdkVersion -PassThru
+                }
+              } | Sort-Object SdkVersion -Descending | Select-Object -First 1)
             if ($makeAppx.Count -ne 1) { throw 'MSIX_PROOF_SDK_MAKEAPPX_NOT_FOUND' }
             & $makeAppx[0].FullName pack /d $payload /p $msix /o
             if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $msix -PathType Leaf)) { throw 'MSIX_PROOF_PACK_FAILED' }
@@ -102,7 +108,7 @@ jobs:
             $zip = [IO.Compression.ZipFile]::OpenRead($msix)
             try {
               $names = @($zip.Entries | ForEach-Object FullName)
-              foreach ($required in @('AppxManifest.xml', 'LDW.HostAgent.Windows.exe', 'Assets/Square44.png', 'Assets/Square150.png')) {
+              foreach ($required in @('AppxManifest.xml', 'LDW.HostAgent.Windows.exe', 'Assets/Square44.png', 'Assets/Square50.png', 'Assets/Square150.png')) {
                 if ($names -notcontains $required) { throw "MSIX_PROOF_CONTENT_MISSING: $required" }
               }
             } finally { $zip.Dispose() }
