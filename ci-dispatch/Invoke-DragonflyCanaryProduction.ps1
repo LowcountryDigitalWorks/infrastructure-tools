@@ -18,7 +18,14 @@ function Invoke-LdwDragonflyCanaryGhWrite {
         [Parameter(Mandatory)][ValidateSet('POST','DELETE')][string]$Method,
         [object]$Body
     )
+    # ValidateSet is case-insensitive; refuse aliases before ANY gh.exe resolution.
+    # The exact transport verbs, not caller casing, define the closed operation.
+    if ($Method -cnotin @('POST','DELETE')) { throw 'DRAGONFLY_CANARY_API_METHOD_NONCANONICAL' }
     if ($Method -ceq 'POST') {
+        # No independently accepted protected LDW01 issuer/source generation exists.
+        # This concrete POST entry must not mint JIT material from caller HeadSha.
+        # A later reviewed issuer+pre-mint controller change must replace this HOLD.
+        throw 'DRAGONFLY_CANARY_WORKFLOW_SOURCE_UNBOUND'
         if ($Path -cne ('repos/' + $script:Repository + '/actions/runners/generate-jitconfig') -or $null -eq $Body) {
             throw 'DRAGONFLY_CANARY_API_WRITE_SCOPE_REFUSED'
         }
@@ -99,6 +106,11 @@ try {
     if ([string]::IsNullOrWhiteSpace($env:ProgramData) -or -not [IO.Path]::IsPathRooted($env:ProgramData)) {
         throw 'DRAGONFLY_CANARY_PROGRAMDATA_INVALID'
     }
+
+    # Deny before the very first provider GET, runtime import or dispatch action.
+    # The CLI's HeadSha is caller-supplied and cannot attest an approved release.
+    # This source-only guard is intentionally not an A4 or Gate B acceptance path.
+    throw 'DRAGONFLY_CANARY_WORKFLOW_SOURCE_UNBOUND'
 
     Import-Module (Join-Path $PSScriptRoot 'DragonflyCanary.psm1') -Force
     Import-Module (Join-Path $PSScriptRoot 'DragonflyCanaryRuntime.psm1') -Force
