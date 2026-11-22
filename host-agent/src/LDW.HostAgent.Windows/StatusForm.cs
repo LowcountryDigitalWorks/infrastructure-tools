@@ -9,9 +9,24 @@ internal sealed class StatusForm : Form
     private static readonly Color CypressTeal = Color.FromArgb(47, 118, 111);
     private static readonly Color WarmOyster = Color.FromArgb(243, 239, 230);
     private static readonly Color SoftWhite = Color.FromArgb(247, 248, 246);
-    private static readonly Color Border = Color.FromArgb(218, 224, 226);
+    // Canonical Tidal Framework surface tokens: website design/tokens.css.
+    private static readonly Color Border = Color.FromArgb(214, 222, 218);
     private static readonly Color BodyText = Color.FromArgb(37, 54, 67);
-    private static readonly Color MutedText = Color.FromArgb(91, 105, 116);
+    private static readonly Color MutedText = Color.FromArgb(85, 101, 109);
+    // Use installed Manrope only; never install, embed, or download fonts for this tray.
+    // Segoe UI preserves native Windows DPI and accessibility fallback.
+    private static readonly string OwnerFontFamily = ResolveOwnerFontFamily();
+
+    private static string ResolveOwnerFontFamily()
+    {
+        var installed = FontFamily.Families;
+        foreach (var candidate in new[] { "Manrope Variable", "Manrope" })
+        {
+            if (installed.Any(f => string.Equals(f.Name, candidate, StringComparison.OrdinalIgnoreCase)))
+                return candidate;
+        }
+        return "Segoe UI";
+    }
 
     private readonly Action _refresh;
     private readonly Action _copyDiagnostics;
@@ -44,14 +59,14 @@ internal sealed class StatusForm : Form
     private readonly Label _title = new()
     {
         AutoSize = true,
-        Font = new Font("Segoe UI", 17, FontStyle.Bold),
+        Font = new Font(OwnerFontFamily, 17, FontStyle.Bold),
         ForeColor = EstuaryNavy,
         Text = "LDW Host Agent"
     };
     private readonly Label _machine = new()
     {
         AutoSize = true,
-        Font = new Font("Segoe UI", 9.5f, FontStyle.Regular),
+        Font = new Font(OwnerFontFamily, 9.5f, FontStyle.Regular),
         ForeColor = MutedText,
         Padding = new Padding(0, 1, 0, 0)
     };
@@ -60,7 +75,7 @@ internal sealed class StatusForm : Form
         AutoSize = false,
         Size = new Size(132, 34),
         TextAlign = ContentAlignment.MiddleCenter,
-        Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+        Font = new Font(OwnerFontFamily, 9.5f, FontStyle.Bold),
         BorderStyle = BorderStyle.FixedSingle,
         Margin = new Padding(12, 2, 0, 0),
         AccessibleName = "Overall Host Agent state"
@@ -71,14 +86,14 @@ internal sealed class StatusForm : Form
         Dock = DockStyle.Fill,
         MaximumSize = new Size(760, 0),
         ForeColor = BodyText,
-        Font = new Font("Segoe UI", 10f, FontStyle.Regular),
+        Font = new Font(OwnerFontFamily, 10f, FontStyle.Regular),
         Padding = new Padding(0, 7, 0, 0)
     };
     private readonly Label _refreshed = new()
     {
         AutoSize = true,
         ForeColor = MutedText,
-        Font = new Font("Segoe UI", 8.75f),
+        Font = new Font(OwnerFontFamily, 8.75f),
         TextAlign = ContentAlignment.MiddleLeft,
         Anchor = AnchorStyles.Left
     };
@@ -104,7 +119,7 @@ internal sealed class StatusForm : Form
         ClientSize = GetInitialClientSize();
         MinimumSize = new Size(620, 500);
         BackColor = SoftWhite;
-        Font = new Font("Segoe UI", 9.25f);
+        Font = new Font(OwnerFontFamily, 9.25f);
         KeyPreview = true;
 
         _brandImage = TrayIconFactory.CreateBrandBitmap(44);
@@ -396,7 +411,7 @@ internal sealed class StatusForm : Form
             Dock = DockStyle.Top,
             Height = 31,
             Padding = new Padding(11, 6, 10, 0),
-            Font = new Font("Segoe UI", 9.75f, FontStyle.Bold),
+            Font = new Font(OwnerFontFamily, 9.75f, FontStyle.Bold),
             ForeColor = EstuaryNavy,
             BackColor = SoftWhite,
             UseMnemonic = false
@@ -468,7 +483,7 @@ internal sealed class StatusForm : Form
             Text = name,
             AutoSize = true,
             Anchor = AnchorStyles.Left,
-            Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+            Font = new Font(OwnerFontFamily, 9.5f, FontStyle.Bold),
             ForeColor = BodyText,
             Margin = new Padding(0, 3, 10, 0)
         };
@@ -477,7 +492,7 @@ internal sealed class StatusForm : Form
             Text = stateWord,
             AutoSize = true,
             Anchor = AnchorStyles.Left,
-            Font = new Font("Segoe UI", 9.25f, FontStyle.Bold),
+            Font = new Font(OwnerFontFamily, 9.25f, FontStyle.Bold),
             ForeColor = ColorFor(color),
             Margin = new Padding(0, 3, 10, 0),
             AccessibleName = $"State: {stateWord}"
@@ -487,7 +502,7 @@ internal sealed class StatusForm : Form
             Text = summary,
             AutoSize = true,
             Dock = DockStyle.Fill,
-            Font = new Font("Segoe UI", 9f),
+            Font = new Font(OwnerFontFamily, 9f),
             ForeColor = MutedText,
             Margin = new Padding(0, 3, 0, 0),
             MaximumSize = new Size(420, 0)
@@ -515,7 +530,7 @@ internal sealed class StatusForm : Form
             Padding = new Padding(14)
         };
         card.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        card.Controls.Add(new Label { AutoSize = true, Text = title, Font = new Font("Segoe UI", 10.25f, FontStyle.Bold), ForeColor = EstuaryNavy }, 0, 0);
+        card.Controls.Add(new Label { AutoSize = true, Text = title, Font = new Font(OwnerFontFamily, 10.25f, FontStyle.Bold), ForeColor = EstuaryNavy }, 0, 0);
         card.Controls.Add(new Label { AutoSize = true, Text = message, MaximumSize = new Size(720, 0), ForeColor = MutedText, Margin = new Padding(0, 5, 0, 0) }, 0, 1);
         return card;
     }
@@ -587,7 +602,7 @@ internal sealed class StatusForm : Form
             MinimumSize = new Size(520, 360),
             AutoScaleMode = AutoScaleMode.Dpi,
             BackColor = SoftWhite,
-            Font = new Font("Segoe UI", 9.25f)
+            Font = new Font(OwnerFontFamily, 9.25f)
         };
         using var dialogIcon = TrayIconFactory.Create(_live?.Snapshot.Color ?? StatusColor.Gray);
         dialog.Icon = dialogIcon;
@@ -601,7 +616,7 @@ internal sealed class StatusForm : Form
         {
             AutoSize = true,
             Text = "Sanitized technical telemetry",
-            Font = new Font("Segoe UI", 11, FontStyle.Bold),
+            Font = new Font(OwnerFontFamily, 11, FontStyle.Bold),
             ForeColor = EstuaryNavy,
             Margin = new Padding(0, 0, 0, 9)
         }, 0, 0);
@@ -637,7 +652,7 @@ internal sealed class StatusForm : Form
         {
             Text = text,
             AutoSize = true,
-            MinimumSize = new Size(0, 34),
+            MinimumSize = new Size(0, 44),
             Padding = new Padding(10, 3, 10, 3),
             FlatStyle = FlatStyle.Flat,
             BackColor = primary ? CypressTeal : Color.White,
