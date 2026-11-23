@@ -1,0 +1,60 @@
+{
+  "schema": "ldw.ci.host2.assignment.d0",
+  "schemaVersion": 1,
+  "binding": "NONE_RUNTIME_INERT_DESIGN_FIXTURE",
+  "authority": "NOT_AUTHORITATIVE_NO_DISPATCH_NO_CLAIM_NO_PROVISION",
+  "promotion": "DISABLED_NO_AUTOMATIC_PROMOTION",
+  "allowlist": {
+    "hostIds": ["officepc"],
+    "legacyHostIds": ["ldw01"],
+    "legacyHostLabels": ["ldw01"],
+    "nonMatchingRunnerClasses": ["trusted-private-persistent", "host1-persistent-ldw01-ci-01"],
+    "operations": ["CLAIM", "START", "CLEANUP"],
+    "profileIds": [
+      "ci10-accepted-synthetic",
+      "ci10-bo-secret-scan",
+      "ci10-royal-dashboard-deploy",
+      "ci10-royal-dashboard-release-gate-pr"
+    ],
+    "receiptKinds": ["D0_SYNTHETIC_DESIGN_RECEIPT"],
+    "runnerClasses": ["isolated-jit-ephemeral"]
+  },
+  "profiles": [
+    {
+      "enabled": false,
+      "fallbackHost": null,
+      "generation": 0,
+      "primaryHost": "officepc",
+      "profileId": "ci10-accepted-synthetic",
+      "receipt": null,
+      "requiredProvenance": null
+    },
+    {
+      "enabled": false,
+      "fallbackHost": null,
+      "generation": 0,
+      "primaryHost": "officepc",
+      "profileId": "ci10-bo-secret-scan",
+      "receipt": null,
+      "requiredProvenance": null
+    },
+    {
+      "enabled": false,
+      "fallbackHost": null,
+      "generation": 0,
+      "primaryHost": "officepc",
+      "profileId": "ci10-royal-dashboard-deploy",
+      "receipt": null,
+      "requiredProvenance": null
+    },
+    {
+      "enabled": false,
+      "fallbackHost": null,
+      "generation": 0,
+      "primaryHost": "officepc",
+      "profileId": "ci10-royal-dashboard-release-gate-pr",
+      "receipt": null,
+      "requiredProvenance": null
+    }
+  ]
+}
