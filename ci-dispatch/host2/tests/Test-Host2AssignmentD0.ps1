@@ -137,13 +137,57 @@ $mutated2 = Read-Host2AssignmentD0Contract
 Assert-Throws { Test-Host2AssignmentD0ContractShape -Contract $mutated2 } 'D0_PROFILE_FALLBACK' 'fallback refused'
 $mutated3 = Read-Host2AssignmentD0Contract
 $mutated3['allowlist']['profileIds'] += 'ci10-extra'
-Assert-Throws { Test-Host2AssignmentD0ContractShape -Contract $mutated3 } 'D0_ALLOWLIST_PROFILE_COUNT|D0_PROFILE_COUNT' 'extra profile refused'
+Assert-Throws { Test-Host2AssignmentD0ContractShape -Contract $mutated3 } 'D0_ALLOWLIST_PROFILE_IDS|D0_PROFILE_COUNT' 'extra profile refused'
 
 # 9. Strict JSON: duplicate keys, trailing commas and comments rejected without file I/O.
 Assert-Throws { ConvertFrom-Host2AssignmentD0Json -RawJson '{"schema":"a","schema":"b"}' } 'DUPLICATE_JSON_KEY' 'duplicate json key'
 Assert-Throws { ConvertFrom-Host2AssignmentD0Json -RawJson '{"schema":"a",}' } 'D0_JSON_REJECTED' 'trailing comma'
 Assert-Throws { ConvertFrom-Host2AssignmentD0Json -RawJson '{/* c */"schema":"a"}' } 'D0_JSON_REJECTED' 'comment in json'
 Assert-True ((ConvertFrom-Host2AssignmentD0Json -RawJson '{"a":1}')['a'] -eq 1) 'strict simple json parse'
+
+
+# 9b. Typed and malformed evidence fail-closed negatives.
+$badAuthority = Read-Host2AssignmentD0Contract
+$badAuthority['authority'] = 'NOT_AUTHORITATIVE_BUT_AUTHORITATIVE'
+Assert-Throws { Test-Host2AssignmentD0ContractShape -Contract $badAuthority } 'D0_CONTRACT_AUTHORITY' 'exact authority'
+$badPromotion = Read-Host2AssignmentD0Contract
+$badPromotion['promotion'] = 'DISABLED_BUT_ENABLED'
+Assert-Throws { Test-Host2AssignmentD0ContractShape -Contract $badPromotion } 'D0_CONTRACT_PROMOTION' 'exact promotion'
+$badSchema = Read-Host2AssignmentD0Contract
+$badSchema['schemaVersion'] = '1'
+Assert-Throws { Test-Host2AssignmentD0ContractShape -Contract $badSchema } 'D0_CONTRACT_SCHEMA_VERSION' 'no numeric string schema'
+$badBoolean = Read-Host2AssignmentD0Contract
+$badBoolean['profiles'][0]['enabled'] = 0
+Assert-Throws { Test-Host2AssignmentD0ContractShape -Contract $badBoolean } 'D0_PROFILE_ENABLED' 'strict disabled boolean'
+$badFixtureGen = Read-Host2AssignmentD0Contract
+$badFixtureGen['profiles'][0]['generation'] = '0'
+Assert-Throws { Test-Host2AssignmentD0ContractShape -Contract $badFixtureGen } 'D0_PROFILE_GENERATION' 'strict fixture generation'
+$badOps = Read-Host2AssignmentD0Contract
+$badOps['allowlist']['operations'] += 'DISPATCH'
+Assert-Throws { Test-Host2AssignmentD0ContractShape -Contract $badOps } 'D0_ALLOWLIST_OPERATIONS' 'closed operations'
+$badRunner = Read-Host2AssignmentD0Contract
+$badRunner['allowlist']['runnerClasses'] += 'trusted-private-persistent'
+Assert-Throws { Test-Host2AssignmentD0ContractShape -Contract $badRunner } 'D0_ALLOWLIST_RUNNER_CLASSES' 'closed runners'
+Assert-True (-not (Get-Command Read-Host2AssignmentD0Contract).Parameters.ContainsKey('Path')) 'no arbitrary fixture path parameter'
+$badGenerations = @(
+    @{ label='text'; value='abc' },
+    @{ label='fraction'; value=1.5 },
+    @{ label='array'; value=@() },
+    @{ label='null'; value=$null },
+    @{ label='overflow'; value=[decimal]99999999999999999999 }
+)
+foreach ($case in $badGenerations) {
+    $receipt = [ordered]@{}
+    foreach ($key in $script:receipt.Keys) { $receipt[$key] = $script:receipt[$key] }
+    $receipt['generation'] = $case.value
+    Assert-Deny (Decide @{ Receipt=$receipt }) 'RECEIPT_MALFORMED' "invalid receipt $($case.label)"
+    $provenance = [ordered]@{}
+    foreach ($key in $script:provenance.Keys) { $provenance[$key] = $script:provenance[$key] }
+    $provenance['generation'] = $case.value
+    Assert-Deny (Decide @{ Provenance=$provenance }) 'PROVENANCE_MALFORMED' "invalid provenance $($case.label)"
+    Assert-Deny (Decide @{ ExpectedGeneration=$case.value }) 'GENERATION_MALFORMED' "invalid expected $($case.label)"
+}
+Assert-Deny (Decide @{ ActiveControllerCount='abc' }) 'CONTROLLER_COUNT_MALFORMED' 'invalid controller count'
 
 # 10. Static inertness proof: no runtime-capable cmdlet or shell token in the module.
 $moduleText = [IO.File]::ReadAllText($module)

@@ -55,6 +55,8 @@ because every profile is disabled. There is no ALLOW result and no promotion pat
 4. Runtime proof would be a separate, narrowly scoped synthetic JIT with exact-owned
    cleanup — never a migration of protected BO/Royal consumers.
 
+The fixed fixture reader refuses a reparse-point file. These checks are design-only, not immutable host/provenance acceptance. The synthetic negatives cover invalid generation and coerced schema types.
+
 Running the contract tests (PowerShell 7 only, no policy bypass, local fixture only):
 
 ```powershell
