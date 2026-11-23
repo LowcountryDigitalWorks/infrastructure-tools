@@ -73,12 +73,14 @@ try {
 
     # Build only from the immutable git-archive materialization. All bin/obj intermediates
     # therefore live below the random temporary materialization rather than the working tree.
+    # Map the physical materialization path to a stable compiler source root.
     & dotnet publish $project -c Release -r win-x64 --self-contained true `
         -p:PublishSingleFile=true `
         -p:IncludeNativeLibrariesForSelfExtract=true `
         -p:DebugType=None `
         -p:DebugSymbols=false `
         -p:EnableCompressionInSingleFile=true `
+        "-p:PathMap=$materialized=/_/" `
         -o $publish
     if ($LASTEXITCODE -ne 0) { throw 'HOST_AGENT_WINDOWS_PACKAGE_PUBLISH_FAILED' }
 
