@@ -26,6 +26,10 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      - name: REDRIX handle-relative journal TEMP-only native API fixture (Windows PowerShell 5.1)
+        shell: powershell
+        run: powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./host-agent/deploy/tests/Test-RedrixNtHandleRelativeJournalFixture.ps1
+
       - name: Set up .NET 10
         uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
@@ -124,6 +128,7 @@ jobs:
       - name: REDRIX LDW parent ACL migration transaction rehearsal (Windows PowerShell 5.1)
         shell: powershell
         run: powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./host-agent/deploy/tests/Test-RedrixLdwParentAclMigrationTransaction.ps1
+
 
       - name: Run tray autostart contract tests
         shell: pwsh
