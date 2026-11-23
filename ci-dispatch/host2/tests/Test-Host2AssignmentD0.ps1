@@ -177,14 +177,14 @@ $badGenerations = @(
     @{ label='overflow'; value=[decimal]99999999999999999999 }
 )
 foreach ($case in $badGenerations) {
-    $receipt = [ordered]@{}
-    foreach ($key in $script:receipt.Keys) { $receipt[$key] = $script:receipt[$key] }
-    $receipt['generation'] = $case.value
-    Assert-Deny (Decide @{ Receipt=$receipt }) 'RECEIPT_MALFORMED' "invalid receipt $($case.label)"
-    $provenance = [ordered]@{}
-    foreach ($key in $script:provenance.Keys) { $provenance[$key] = $script:provenance[$key] }
-    $provenance['generation'] = $case.value
-    Assert-Deny (Decide @{ Provenance=$provenance }) 'PROVENANCE_MALFORMED' "invalid provenance $($case.label)"
+    $caseReceipt = [ordered]@{}
+    foreach ($key in $script:receipt.Keys) { $caseReceipt[$key] = $script:receipt[$key] }
+    $caseReceipt['generation'] = $case.value
+    Assert-Deny (Decide @{ Receipt=$caseReceipt }) 'RECEIPT_MALFORMED' "invalid receipt $($case.label)"
+    $caseProvenance = [ordered]@{}
+    foreach ($key in $script:provenance.Keys) { $caseProvenance[$key] = $script:provenance[$key] }
+    $caseProvenance['generation'] = $case.value
+    Assert-Deny (Decide @{ Provenance=$caseProvenance }) 'PROVENANCE_MALFORMED' "invalid provenance $($case.label)"
     Assert-Deny (Decide @{ ExpectedGeneration=$case.value }) 'GENERATION_MALFORMED' "invalid expected $($case.label)"
 }
 Assert-Deny (Decide @{ ActiveControllerCount='abc' }) 'CONTROLLER_COUNT_MALFORMED' 'invalid controller count'
