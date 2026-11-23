@@ -180,6 +180,18 @@ function New-OfficePcAdminEvidenceReportFromSnapshot {
     if ($elevated) {
         $secureBootState = Get-OfficePcAdminSecureBootState -Value $Snapshot.SecureBootState
         $secureBootDetail = Get-OfficePcAdminEvidenceDetail -Value $Snapshot.SecureBootDetail
+        # A positive or negative result is admissible only with authoritative detail.
+        if ($secureBootState -in @('ENABLED', 'DISABLED') -and $secureBootDetail -cne 'AUTHORITATIVE') {
+            $secureBootState = 'UNKNOWN'
+        }
+        # The only accepted non-authoritative state/detail pairing is the known unsupported result.
+        if ($secureBootState -ceq 'UNSUPPORTED' -and $secureBootDetail -cne 'NON_UEFI_OR_UNSUPPORTED') {
+            $secureBootState = 'UNKNOWN'
+        }
+        # AUTHORITATIVE detail cannot coexist with an UNKNOWN or other state.
+        if ($secureBootDetail -ceq 'AUTHORITATIVE' -and $secureBootState -notin @('ENABLED', 'DISABLED')) {
+            $secureBootDetail = 'UNKNOWN'
+        }
     }
 
     $vmState = 'UNKNOWN'
@@ -189,9 +201,30 @@ function New-OfficePcAdminEvidenceReportFromSnapshot {
     if ($elevated) {
         $vmState = Get-OfficePcAdminVmInventoryState -Value $Snapshot.VmInventoryState
         $vmDetail = Get-OfficePcAdminEvidenceDetail -Value $Snapshot.VmDetail
-        if ($vmState -eq 'OBSERVED') {
+        # OBSERVED requires authoritative detail; AUTHORITATIVE detail requires OBSERVED.
+        if ($vmState -ceq 'OBSERVED' -and $vmDetail -cne 'AUTHORITATIVE') {
+            $vmState = 'UNKNOWN'
+        }
+        if ($vmDetail -ceq 'AUTHORITATIVE' -and $vmState -cne 'OBSERVED') {
+            $vmDetail = 'UNKNOWN'
+        }
+        if ($vmState -ceq 'OBSERVED' -and $vmDetail -ceq 'AUTHORITATIVE') {
             $vmTotal = ConvertTo-OfficePcAdminBoundedCount -Value $Snapshot.VmCountTotal
             $statusCounts = New-OfficePcAdminStatusCounts -Counts $Snapshot.VmStatusCounts
+            if ($null -eq $vmTotal -or $null -eq $statusCounts) {
+                $vmState = 'UNKNOWN'
+                $vmTotal = $null
+                $statusCounts = $null
+            }
+            else {
+                $bucketSum = 0
+                foreach ($key in $statusCounts.Keys) { $bucketSum += [int] $statusCounts[$key] }
+                if ($bucketSum -ne $vmTotal) {
+                    $vmState = 'UNKNOWN'
+                    $vmTotal = $null
+                    $statusCounts = $null
+                }
+            }
         }
     }
 
