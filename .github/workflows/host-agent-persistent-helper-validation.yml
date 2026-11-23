@@ -26,6 +26,10 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      - name: REDRIX A0 directory-handle ancestor identity TEMP-only proof (WinPS 5.1)
+        shell: powershell
+        run: powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./host-agent/deploy/tests/Test-RedrixLdwAncestorIdentityTemp.ps1
+
       - name: Set up .NET 10
         uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
