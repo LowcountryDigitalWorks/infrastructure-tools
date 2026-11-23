@@ -64,12 +64,14 @@ Merge only after influence-clean **H0/M0** source review on the exact PR HEAD. T
 - Under a **non-elevated** shell it fails closed: `secure_boot.state=UNKNOWN`, `hyperv_vm.inventory_state=UNKNOWN`, `jit_authorized=false`. An access-denied or unsupported result is a distinct sanitized `detail` code, never a raw exception message.
 - Output keeps `classification=INVENTORY_ONLY_NOT_ADMISSION`, `jit_authorized=false`, `host_reserve_mib=null`, `guest_mib_proposed=null`, `runtime_blocked=true`. No reserve, guest size, or admission is implied.
 
-**Owner invocation — only AFTER the exact PR HEAD passes independent H0/M0 source review and acceptance, and only for a one-off owner-sanctioned read on OfficePC.** Start from an **already-elevated** owner PowerShell session using the normal site execution policy (do **not** use `ExecutionPolicy Bypass`); the script does not request elevation:
+**Owner invocation — only AFTER the exact PR HEAD passes independent H0/M0 source review and acceptance, and only for a one-off owner-sanctioned read on OfficePC.** Start from an **already-elevated** owner **PowerShell 7 (`pwsh`)** session using the normal site execution policy (do **not** use `ExecutionPolicy Bypass`); the script does not request elevation. Use `pwsh`, not Windows PowerShell 5.1: on OfficePC the 5.1 effective policy is Restricted, while the approved PowerShell 7 session is RemoteSigned.
 
 ```powershell
-# Pin the accepted exact commit after review. Elevated owner shell; READ ONLY.
-powershell -NoProfile -File .\host-inventory\Get-OfficePcAdminEvidence.ps1 -Output Json
+# Pin the accepted exact commit after review. Already-elevated PowerShell 7 owner shell; READ ONLY.
+pwsh -NoProfile -File .\host-inventory\Get-OfficePcAdminEvidence.ps1 -Output Json
 ```
+
+No rerun is needed for the admin facts the owner already recorded at [#86 comment 7092741505](https://github.com/LowcountryDigitalWorks/infrastructure-tools/issues/86#issuecomment-7092741505) (VM enumeration PASS, zero registered/running VMs, Secure Boot DISABLED). This command is only for a future, separately sanctioned one-off read if fresh facts are explicitly requested.
 
 Save stdout JSON to a private operator location and attach only the script blob SHA-256 and exact HEAD to #86. Do not commit the JSON, VM output, or any host-private detail to this public repository. WinRE recovery state is intentionally `UNVERIFIED` because no trustworthy preinstalled read-only command emits it without private paths.
 
