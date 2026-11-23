@@ -96,17 +96,32 @@ Assert-True ($null -eq $nonElevated.hyperv_vm.status_counts) 'non elevated vm co
 
 # 5. Only category keys survive; arbitrary injected keys (e.g. VM names) are discarded.
 $leaky = New-OfficePcAdminSyntheticSnapshot
-$leaky.VmStatusCounts = @{ Running = 1; 'name-of-a-private-vm' = 99; Other = 2 }
+$leaky.VmStatusCounts = @{ Running = 1; 'name-of-a-private-vm' = 99; Other = 1 }
 $leakyReport = New-OfficePcAdminEvidenceReportFromSnapshot -Snapshot $leaky
 $keys = @($leakyReport.hyperv_vm.status_counts.Keys)
 Assert-True (($keys -join ',') -eq 'Running,Off,Saved,Paused,Other') 'status keys whitelist'
-Assert-True ($leakyReport.hyperv_vm.status_counts.Other -eq 2) 'other count kept'
+Assert-True ($leakyReport.hyperv_vm.status_counts.Other -eq 1) 'other count kept'
+Assert-True ($leakyReport.hyperv_vm.vm_count_total -eq 2) 'valid total retained after identity key discard'
 
-# 6. Error state whitelisting.
-$unsupported = New-OfficePcAdminSyntheticSnapshot -SecureBootState 'ENABLED' -SecureBootDetail 'ACCESS_DENIED'
-$unsupportedReport = New-OfficePcAdminEvidenceReportFromSnapshot -Snapshot $unsupported
-Assert-True ($unsupportedReport.secure_boot.state -eq 'ENABLED') 'injected state still maps by whitelist'
-Assert-True ($unsupportedReport.secure_boot.detail -eq 'ACCESS_DENIED') 'injected detail maps'
+# 6. Error state whitelisting and contradictory detail fail closed.
+$inconsistentSecureBoot = New-OfficePcAdminSyntheticSnapshot -SecureBootState 'ENABLED' -SecureBootDetail 'ACCESS_DENIED'
+$inconsistentSecureBootReport = New-OfficePcAdminEvidenceReportFromSnapshot -Snapshot $inconsistentSecureBoot
+Assert-True ($inconsistentSecureBootReport.secure_boot.state -eq 'UNKNOWN') 'injected ENABLED with ACCESS_DENIED forces unknown'
+Assert-True ($inconsistentSecureBootReport.secure_boot.detail -eq 'ACCESS_DENIED') 'sanitized error detail preserved'
+$inconsistentVm = New-OfficePcAdminSyntheticSnapshot -VmInventoryState 'OBSERVED' -VmDetail 'ACCESS_DENIED'
+$inconsistentVmReport = New-OfficePcAdminEvidenceReportFromSnapshot -Snapshot $inconsistentVm
+Assert-True ($inconsistentVmReport.hyperv_vm.inventory_state -eq 'UNKNOWN') 'injected OBSERVED with ACCESS_DENIED forces unknown'
+Assert-True ($inconsistentVmReport.hyperv_vm.detail -eq 'ACCESS_DENIED') 'vm sanitized error detail preserved'
+Assert-True ($null -eq $inconsistentVmReport.hyperv_vm.vm_count_total) 'inconsistent vm total nulled'
+Assert-True ($null -eq $inconsistentVmReport.hyperv_vm.status_counts) 'inconsistent vm status counts nulled'
+$contradictoryAuthoritative = New-OfficePcAdminSyntheticSnapshot -SecureBootState 'UNKNOWN' -SecureBootDetail 'AUTHORITATIVE' -VmInventoryState 'UNKNOWN' -VmDetail 'AUTHORITATIVE'
+$contradictoryReport = New-OfficePcAdminEvidenceReportFromSnapshot -Snapshot $contradictoryAuthoritative
+Assert-True ($contradictoryReport.secure_boot.state -eq 'UNKNOWN') 'authoritative with unknown secure boot state stays unknown'
+Assert-True ($contradictoryReport.secure_boot.detail -eq 'UNKNOWN') 'authoritative detail cleared on unknown state'
+Assert-True ($contradictoryReport.hyperv_vm.inventory_state -eq 'UNKNOWN') 'authoritative with unknown vm state stays unknown'
+Assert-True ($contradictoryReport.hyperv_vm.detail -eq 'UNKNOWN') 'vm authoritative detail cleared on unknown state'
+$wrongUnsupportedPairing = New-OfficePcAdminSyntheticSnapshot -SecureBootState 'UNSUPPORTED' -SecureBootDetail 'ACCESS_DENIED'
+Assert-True ((New-OfficePcAdminEvidenceReportFromSnapshot -Snapshot $wrongUnsupportedPairing).secure_boot.state -eq 'UNKNOWN') 'unsupported state requires known pairing'
 $bogus = New-OfficePcAdminSyntheticSnapshot -SecureBootState 'ROGUE' -SecureBootDetail 'ROGUE'
 $bogusReport = New-OfficePcAdminEvidenceReportFromSnapshot -Snapshot $bogus
 Assert-True ($bogusReport.secure_boot.state -eq 'UNKNOWN') 'bogus state fails closed'
@@ -121,6 +136,20 @@ Assert-True ($null -eq (ConvertTo-OfficePcAdminBoundedCount -Value -1)) 'reject 
 Assert-True ($null -eq (ConvertTo-OfficePcAdminBoundedCount -Value 100001)) 'reject overflow count'
 Assert-True ((ConvertTo-OfficePcAdminBoundedCount -Value ([uint32] 7)) -eq 7) 'accept uint count'
 Assert-True ((ConvertTo-OfficePcAdminTriState -Value $null) -eq 'UNKNOWN') 'null tri-state'
+
+# 7b. Count total must equal the sum of the five status buckets.
+$countMismatch = New-OfficePcAdminEvidenceReportFromSnapshot -Snapshot (New-OfficePcAdminSyntheticSnapshot -VmCountTotal 99999)
+Assert-True ($countMismatch.hyperv_vm.inventory_state -eq 'UNKNOWN') 'count mismatch forces vm unknown'
+Assert-True ($null -eq $countMismatch.hyperv_vm.vm_count_total) 'count mismatch nulls total'
+Assert-True ($null -eq $countMismatch.hyperv_vm.status_counts) 'count mismatch nulls status counts'
+$hostileCounts = New-OfficePcAdminSyntheticSnapshot
+$hostileCounts.VmStatusCounts = @{ Running = '12'; Off = 1; Saved = 0; Paused = 0; Other = 0 }
+$hostileCountsReport = New-OfficePcAdminEvidenceReportFromSnapshot -Snapshot $hostileCounts
+Assert-True ($hostileCountsReport.hyperv_vm.inventory_state -eq 'UNKNOWN') 'hostile status count rejected by sum check'
+Assert-True ($null -eq $hostileCountsReport.hyperv_vm.status_counts) 'hostile status count nulled'
+$zeroCounts = New-OfficePcAdminEvidenceReportFromSnapshot -Snapshot (New-OfficePcAdminSyntheticSnapshot -VmCountTotal 0 -VmStatusCounts @{ Running = 0; Off = 0; Saved = 0; Paused = 0; Other = 0 })
+Assert-True ($zeroCounts.hyperv_vm.inventory_state -eq 'OBSERVED') 'consistent zero-inventory counts accepted'
+Assert-True ($zeroCounts.hyperv_vm.vm_count_total -eq 0) 'zero total preserved'
 
 # 8. Determinism and sanitizer on the serialized report.
 $json = $base | ConvertTo-Json -Depth 6 -Compress
