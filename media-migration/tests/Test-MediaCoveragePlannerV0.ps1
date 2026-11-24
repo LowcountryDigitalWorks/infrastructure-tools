@@ -101,12 +101,68 @@ $negProofsJson = @"
 ]
 "@
 
+# L1 negative fixture: copy-class proofs with a missing or JSON-null size_bytes.
+# Both must be refused; an absent proof size is never a match.
+$sizeProofInventoryJson = @"
+[
+ {"source_volume_id":"VOL-SYNTH-A","approved_root_id":"ROOT-A","relative_path":"sizeproof/missing.bin","size_bytes":100,"excluded":false},
+ {"source_volume_id":"VOL-SYNTH-A","approved_root_id":"ROOT-A","relative_path":"sizeproof/null.bin","size_bytes":200,"excluded":false}
+]
+"@
+
+$sizeProofProofsJson = @"
+[
+ {"source_volume_id":"VOL-SYNTH-A","approved_root_id":"ROOT-A","relative_path":"sizeproof/missing.bin","proof_tier":"full_hash_pair","torrent_state":"not_applicable","piece_proof_valid":false,"preallocated_only":false,"source_stable":true,"changed_since_copy":false,"destination_path":"stage/missing.bin"},
+ {"source_volume_id":"VOL-SYNTH-A","approved_root_id":"ROOT-A","relative_path":"sizeproof/null.bin","proof_tier":"full_hash_pair","torrent_state":"not_applicable","piece_proof_valid":false,"preallocated_only":false,"source_stable":true,"changed_since_copy":false,"destination_path":"stage/null.bin","size_bytes":null}
+]
+"@
+
+# L2 negative fixture: one approved_root_id spanning two distinct volumes is
+# ambiguous and must be refused rather than merged in root_summary.
+$crossVolumeRootsJson = @"
+[
+ {"approved_root_id":"ROOT-XVOL","source_volume_id":"VOL-X1"},
+ {"approved_root_id":"ROOT-XVOL","source_volume_id":"VOL-X2"}
+]
+"@
+
+$crossVolumeInventoryJson = @"
+[
+ {"source_volume_id":"VOL-X1","approved_root_id":"ROOT-XVOL","relative_path":"crossvol/one.bin","size_bytes":100,"excluded":false},
+ {"source_volume_id":"VOL-X2","approved_root_id":"ROOT-XVOL","relative_path":"crossvol/two.bin","size_bytes":200,"excluded":false}
+]
+"@
+
+# Windows reserved-name aliases on both path normalizers: single-quoted
+# here-strings so the trailing-$ device names stay literal.
+$reservedInventoryJson = @'
+[
+ {"source_volume_id":"VOL-SYNTH-A","approved_root_id":"ROOT-A","relative_path":"reserved/conin$.txt/child.bin","size_bytes":100,"excluded":false},
+ {"source_volume_id":"VOL-SYNTH-A","approved_root_id":"ROOT-A","relative_path":"reserved/lpt².foo/child.bin","size_bytes":200,"excluded":false},
+ {"source_volume_id":"VOL-SYNTH-A","approved_root_id":"ROOT-A","relative_path":"reserved/dest1.bin","size_bytes":300,"excluded":false},
+ {"source_volume_id":"VOL-SYNTH-A","approved_root_id":"ROOT-A","relative_path":"reserved/dest2.bin","size_bytes":400,"excluded":false}
+]
+'@
+
+$reservedProofsJson = @'
+[
+ {"source_volume_id":"VOL-SYNTH-A","approved_root_id":"ROOT-A","relative_path":"reserved/dest1.bin","proof_tier":"full_hash_pair","torrent_state":"not_applicable","piece_proof_valid":false,"preallocated_only":false,"source_stable":true,"changed_since_copy":false,"destination_path":"stage/conout$.txt/x.bin","size_bytes":300},
+ {"source_volume_id":"VOL-SYNTH-A","approved_root_id":"ROOT-A","relative_path":"reserved/dest2.bin","proof_tier":"full_hash_pair","torrent_state":"not_applicable","piece_proof_valid":false,"preallocated_only":false,"source_stable":true,"changed_since_copy":false,"destination_path":"stage/COM¹.foo/x.bin","size_bytes":400}
+]
+'@
+
 $sep = [string][char]31
 $roots = $rootsJson.Replace('<<SEP>>', $sep) | ConvertFrom-Json
 $inventory = $inventoryJson.Replace('<<SEP>>', $sep) | ConvertFrom-Json
 $proofs = $proofsJson.Replace('<<SEP>>', $sep) | ConvertFrom-Json
 $negInventory = $negInventoryJson.Replace('<<SEP>>', $sep) | ConvertFrom-Json
 $negProofs = $negProofsJson.Replace('<<SEP>>', $sep) | ConvertFrom-Json
+$sizeProofInventory = $sizeProofInventoryJson | ConvertFrom-Json
+$sizeProofProofs = $sizeProofProofsJson | ConvertFrom-Json
+$crossVolumeRoots = $crossVolumeRootsJson | ConvertFrom-Json
+$crossVolumeInventory = $crossVolumeInventoryJson | ConvertFrom-Json
+$reservedInventory = $reservedInventoryJson | ConvertFrom-Json
+$reservedProofs = $reservedProofsJson | ConvertFrom-Json
 
 $module = Join-Path (Split-Path $PSScriptRoot -Parent) 'MediaCoveragePlannerV0.psm1'
 Import-Module $module -Force -ErrorAction Stop
@@ -260,6 +316,37 @@ Assert-D0Coverage ($ov.root_reconciled -eq $true) 'L3_ROOT_RECONCILED'
 Assert-D0Coverage ($ov.input_bytes -eq [int64]9223372036854775807) 'L3_INPUT_BYTES'
 Assert-D0Coverage (@($ov.entries).Count -eq 2) 'L3_ENTRIES'
 Assert-D0Coverage ($ov.fail_closed -eq $true) 'L3_FAIL_CLOSED'
+
+# ---------- L1/L2/WIN remaining negatives ----------
+$s = Get-LdwMediaCoverage -Inventory $sizeProofInventory -ApprovedRoots $roots -Proofs $sizeProofProofs
+$sb = $s.buckets
+Assert-D0Coverage ($s.input_files -eq 2) 'L1_SIZE_ABSENT_INPUT_FILES'
+Assert-D0Coverage ($s.input_bytes -eq 300) 'L1_SIZE_ABSENT_INPUT_BYTES'
+Assert-D0Coverage ($sb.COLLISION_ERROR.count -eq 2) 'L1_SIZE_ABSENT_COLLISION'
+Assert-D0Coverage ($sb.FULLY_VERIFIED.count -eq 0) 'L1_SIZE_ABSENT_NO_PROMOTION'
+Assert-D0Coverage ((Get-ReasonCount $s 'PROOF_SIZE_MISMATCH') -eq 2) 'L1_SIZE_ABSENT_REASON'
+Assert-D0Coverage ($s.fail_closed -eq $true) 'L1_SIZE_ABSENT_FAIL_CLOSED'
+
+$x = Get-LdwMediaCoverage -Inventory $crossVolumeInventory -ApprovedRoots $crossVolumeRoots -Proofs @()
+$xb = $x.buckets
+Assert-D0Coverage ($x.input_files -eq 2) 'L2_CROSSVOL_INPUT_FILES'
+Assert-D0Coverage ($x.input_bytes -eq 300) 'L2_CROSSVOL_INPUT_BYTES'
+Assert-D0Coverage ($xb.COLLISION_ERROR.count -eq 2) 'L2_CROSSVOL_COLLISION'
+Assert-D0Coverage ($xb.FULLY_VERIFIED.count -eq 0) 'L2_CROSSVOL_NO_PROMOTION'
+Assert-D0Coverage ((Get-ReasonCount $x 'AMBIGUOUS_ROOT_IDENTITY') -eq 2) 'L2_CROSSVOL_REASON'
+Assert-D0Coverage ($x.root_identity_ambiguous_count -eq 1) 'L2_CROSSVOL_AMBIGUOUS_COUNT'
+Assert-D0Coverage ($x.fail_closed -eq $true) 'L2_CROSSVOL_FAIL_CLOSED'
+Assert-D0Coverage ($x.root_reconciled -eq $true) 'L2_CROSSVOL_ROOT_RECONCILED'
+
+$w = Get-LdwMediaCoverage -Inventory $reservedInventory -ApprovedRoots $roots -Proofs $reservedProofs
+$wb = $w.buckets
+Assert-D0Coverage ($w.input_files -eq 4) 'WIN_RESERVED_INPUT_FILES'
+Assert-D0Coverage ($w.input_bytes -eq 1000) 'WIN_RESERVED_INPUT_BYTES'
+Assert-D0Coverage ($wb.COLLISION_ERROR.count -eq 4) 'WIN_RESERVED_COLLISION'
+Assert-D0Coverage ($wb.FULLY_VERIFIED.count -eq 0) 'WIN_RESERVED_NO_PROMOTION'
+Assert-D0Coverage ((Get-ReasonCount $w 'MALFORMED_SOURCE_KEY') -eq 2) 'WIN_RESERVED_SOURCE_ALIASES'
+Assert-D0Coverage ((Get-ReasonCount $w 'MISSING_DESTINATION') -eq 2) 'WIN_RESERVED_DEST_ALIASES'
+Assert-D0Coverage ($w.fail_closed -eq $true) 'WIN_RESERVED_FAIL_CLOSED'
 
 # ---------- Determinism ----------
 $r2 = Get-LdwMediaCoverage -Inventory $inventory -ApprovedRoots $roots -Proofs $proofs

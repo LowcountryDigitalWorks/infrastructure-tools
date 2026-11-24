@@ -4,7 +4,7 @@ Set-StrictMode -Version Latest
 
 $script:PlannerSchema = 'media-coverage-planner-v0'
 $script:Sep = [string][char]31
-$script:WinReserved = @('CON','PRN','AUX','NUL','COM1','COM2','COM3','COM4','COM5','COM6','COM7','COM8','COM9','LPT1','LPT2','LPT3','LPT4','LPT5','LPT6','LPT7','LPT8','LPT9')
+$script:WinReserved = @('CON','PRN','AUX','NUL','CONIN$','CONOUT$','COM1','COM2','COM3','COM4','COM5','COM6','COM7','COM8','COM9','LPT1','LPT2','LPT3','LPT4','LPT5','LPT6','LPT7','LPT8','LPT9','COM¹','COM²','COM³','LPT¹','LPT²','LPT³')
 $script:Buckets = @(
     'FULLY_VERIFIED',
     'LEGACY_MANIFEST_ONLY',
@@ -52,7 +52,8 @@ function Add-LdwInt64 {
 }
 
 # M2: Windows path-alias guard applied to EVERY source/destination component:
-# trailing dot or space aliases, and reserved device names with any extension.
+# trailing dot or space aliases, and reserved device names (including CONIN$/CONOUT$
+# and superscript COM/LPT forms) matched with case and extension aliases.
 function Test-LdwWinSafeComponent {
     param([string]$Component)
     if ([string]::IsNullOrEmpty($Component)) { return $false }
@@ -151,6 +152,7 @@ function Get-LdwMediaCoverage {
 
     $approved = @{}
     $approvedDuplicate = @{}
+    $rootVolumeSet = @{}
     foreach ($r in $ApprovedRoots) {
         $rid = ConvertTo-LdwNormId (Get-MediaField $r 'approved_root_id')
         $vid = ConvertTo-LdwNormId (Get-MediaField $r 'source_volume_id')
@@ -158,7 +160,14 @@ function Get-LdwMediaCoverage {
             $k = $rid + $sep + $vid
             if ($approved.ContainsKey($k)) { $approvedDuplicate[$k] = $true }
             else { $approved[$k] = $rid }
+            # L2: an approved_root_id must not span more than one source volume.
+            if (-not $rootVolumeSet.ContainsKey($rid)) { $rootVolumeSet[$rid] = @{} }
+            $rootVolumeSet[$rid][$vid] = $true
         }
+    }
+    $rootIdentityAmbiguous = @{}
+    foreach ($rid in $rootVolumeSet.Keys) {
+        if (@($rootVolumeSet[$rid].Keys).Count -gt 1) { $rootIdentityAmbiguous[$rid] = $true }
     }
 
     # L2: per-approved-root aggregates are seeded for EVERY approved root,
@@ -274,6 +283,9 @@ function Get-LdwMediaCoverage {
         elseif ($approvedDuplicate.ContainsKey($rid + $sep + $vid)) {
             $bucket = 'COLLISION_ERROR'; $reason = 'DUPLICATE_APPROVED_ROOT'
         }
+        elseif ($rootIdentityAmbiguous.ContainsKey($rid)) {
+            $bucket = 'COLLISION_ERROR'; $reason = 'AMBIGUOUS_ROOT_IDENTITY'
+        }
         elseif (-not $approved.ContainsKey($rid + $sep + $vid)) {
             $bucket = 'COLLISION_ERROR'; $reason = 'WRONG_ROOT_VOLUME'
         }
@@ -309,6 +321,7 @@ function Get-LdwMediaCoverage {
             $identityOk = Test-LdwProofDestinationIdentity -Proof $p
 
             # L1: copy-class proofs MUST carry an explicit, exact size_bytes.
+            # A missing or JSON-null size_bytes is refused exactly like a mismatch.
             $proofSizeOk = $true
             if ($null -ne $p -and $copyClass) {
                 $psRaw = Get-MediaField $p 'size_bytes'
@@ -407,7 +420,8 @@ function Get-LdwMediaCoverage {
         root_reconciled = [bool]($rootCountSum -eq @($Inventory).Count -and $rootByteSum -eq $inputBytes)
         overflow_refused = [bool]$overflowRefused
         duplicate_approved_root_count = [int]$approvedDuplicate.Count
-        fail_closed = [bool]($counts['COLLISION_ERROR'] -gt 0 -or $orphanProofCount -gt 0 -or $overflowRefused -or $approvedDuplicate.Count -gt 0)
+        root_identity_ambiguous_count = [int]$rootIdentityAmbiguous.Count
+        fail_closed = [bool]($counts['COLLISION_ERROR'] -gt 0 -or $orphanProofCount -gt 0 -or $overflowRefused -or $approvedDuplicate.Count -gt 0 -or $rootIdentityAmbiguous.Count -gt 0)
         orphan_proof_count = [int]$orphanProofCount
         input_files = [int]@($Inventory).Count
         input_bytes = $inputBytes
