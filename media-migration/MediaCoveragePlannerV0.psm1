@@ -4,6 +4,7 @@ Set-StrictMode -Version Latest
 
 $script:PlannerSchema = 'media-coverage-planner-v0'
 $script:Sep = [string][char]31
+$script:WinReserved = @('CON','PRN','AUX','NUL','COM1','COM2','COM3','COM4','COM5','COM6','COM7','COM8','COM9','LPT1','LPT2','LPT3','LPT4','LPT5','LPT6','LPT7','LPT8','LPT9')
 $script:Buckets = @(
     'FULLY_VERIFIED',
     'LEGACY_MANIFEST_ONLY',
@@ -38,6 +39,29 @@ function Test-LdwStrictBool {
     return @{ ok = $false; value = $false }
 }
 
+$script:Int64Max = [int64]9223372036854775807
+$script:Int64Min = [int64](-9223372036854775807 - 1)
+
+# Checked Int64 addition: PowerShell silently promotes Int64 overflow to double.
+# A $null return means overflow; every caller fails closed.
+function Add-LdwInt64 {
+    param([int64]$A, [int64]$B)
+    if ($B -gt 0 -and $A -gt ($script:Int64Max - $B)) { return $null }
+    if ($B -lt 0 -and $A -lt ($script:Int64Min - $B)) { return $null }
+    return [int64]($A + $B)
+}
+
+# M2: Windows path-alias guard applied to EVERY source/destination component:
+# trailing dot or space aliases, and reserved device names with any extension.
+function Test-LdwWinSafeComponent {
+    param([string]$Component)
+    if ([string]::IsNullOrEmpty($Component)) { return $false }
+    if ($Component.EndsWith('.') -or $Component.EndsWith(' ')) { return $false }
+    $base = $Component.Split('.')[0].TrimEnd(' ', '.').ToUpperInvariant()
+    if ($script:WinReserved -contains $base) { return $false }
+    return $true
+}
+
 function ConvertTo-LdwNormId {
     param($Value)
     if ($null -eq $Value) { return '' }
@@ -64,6 +88,7 @@ function ConvertTo-LdwNormRelativePath {
     if ($parts.Count -eq 0) { return '' }
     foreach ($x in $parts) {
         if ($x -eq '' -or $x -eq '.' -or $x -eq '..') { return '' }
+        if (-not (Test-LdwWinSafeComponent -Component $x)) { return '' }
         if ($x.Contains($script:Sep)) { return '' }
     }
     return (($parts -join '/').ToLowerInvariant())
@@ -86,6 +111,7 @@ function ConvertTo-LdwNormDestination {
     if ($parts.Count -eq 0) { return '' }
     foreach ($x in $parts) {
         if ($x -eq '' -or $x -eq '.' -or $x -eq '..') { return '' }
+        if (-not (Test-LdwWinSafeComponent -Component $x)) { return '' }
         if ($x.Contains(':') -or $x.Contains($script:Sep)) { return '' }
         if ($x -match '[\x00-\x1f\x7f-\x9f]') { return '' }
     }
@@ -121,12 +147,35 @@ function Get-LdwMediaCoverage {
         [Parameter(Mandatory=$true)][AllowEmptyCollection()][object[]]$Proofs
     )
     $sep = $script:Sep
+    $overflowRefused = $false
 
     $approved = @{}
+    $approvedDuplicate = @{}
     foreach ($r in $ApprovedRoots) {
         $rid = ConvertTo-LdwNormId (Get-MediaField $r 'approved_root_id')
         $vid = ConvertTo-LdwNormId (Get-MediaField $r 'source_volume_id')
-        if ($rid -ne '' -and $vid -ne '') { $approved[$rid + $sep + $vid] = $true }
+        if ($rid -ne '' -and $vid -ne '') {
+            $k = $rid + $sep + $vid
+            if ($approved.ContainsKey($k)) { $approvedDuplicate[$k] = $true }
+            else { $approved[$k] = $rid }
+        }
+    }
+
+    # L2: per-approved-root aggregates are seeded for EVERY approved root,
+    # including zero-count roots, plus an explicit unattributed bucket.
+    $rootOrder = New-Object 'System.Collections.Generic.List[string]'
+    $rootCount = @{}
+    $rootBytes = @{}
+    $rootBuckets = @{}
+    foreach ($rid in @($approved.Values) + '__unattributed__') {
+        if (-not $rootCount.ContainsKey($rid)) {
+            $rb = @{}
+            foreach ($b in $script:Buckets) { $rb[$b] = 0 }
+            $rootOrder.Add($rid)
+            $rootCount[$rid] = 0
+            $rootBytes[$rid] = [int64]0
+            $rootBuckets[$rid] = $rb
+        }
     }
 
     $proofByKey = @{}
@@ -192,13 +241,21 @@ function Get-LdwMediaCoverage {
         $size = [int64]0
         $sizeOk = $false
         if ($rawSize -is [int] -or $rawSize -is [long]) { $size = [int64]$rawSize; if ($size -gt 0) { $sizeOk = $true } }
-        if ($sizeOk) { $inputBytes += $size }
+        $inputByteOk = $true
+        if ($sizeOk) {
+            $na = Add-LdwInt64 -A $inputBytes -B $size
+            if ($null -eq $na) { $overflowRefused = $true; $inputByteOk = $false }
+            else { $inputBytes = $na }
+        }
 
-        # Strict booleans for the inventory exclusion marker.
+        # M1: excluded must be PRESENT and a strict boolean on every inventory row.
+        # Missing/null/wrong-typed markers fail closed; never default to false.
         $excluded = $false
         $excludedOk = $true
         $excludedRaw = Get-MediaField $i 'excluded'
-        if ($null -ne $excludedRaw) {
+        if ($null -eq $excludedRaw) {
+            $excludedOk = $false
+        } else {
             $bv = Test-LdwStrictBool -Value $excludedRaw
             if ($bv.ok) { $excluded = $bv.value } else { $excludedOk = $false }
         }
@@ -207,11 +264,15 @@ function Get-LdwMediaCoverage {
         $reason = ''
         $dest = ''
 
-        if ($sourceDuplicate.ContainsKey($key)) {
+        if (-not $inputByteOk) { $bucket = 'COLLISION_ERROR'; $reason = 'INT64_OVERFLOW' }
+        elseif ($sourceDuplicate.ContainsKey($key)) {
             $bucket = 'COLLISION_ERROR'; $reason = 'DUPLICATE_SOURCE_KEY'
         }
         elseif ($vid -eq '' -or $rid -eq '' -or $rel -eq '') {
             $bucket = 'COLLISION_ERROR'; $reason = 'MALFORMED_SOURCE_KEY'
+        }
+        elseif ($approvedDuplicate.ContainsKey($rid + $sep + $vid)) {
+            $bucket = 'COLLISION_ERROR'; $reason = 'DUPLICATE_APPROVED_ROOT'
         }
         elseif (-not $approved.ContainsKey($rid + $sep + $vid)) {
             $bucket = 'COLLISION_ERROR'; $reason = 'WRONG_ROOT_VOLUME'
@@ -247,15 +308,15 @@ function Get-LdwMediaCoverage {
 
             $identityOk = Test-LdwProofDestinationIdentity -Proof $p
 
+            # L1: copy-class proofs MUST carry an explicit, exact size_bytes.
             $proofSizeOk = $true
-            if ($null -ne $p) {
+            if ($null -ne $p -and $copyClass) {
                 $psRaw = Get-MediaField $p 'size_bytes'
-                if ($null -ne $psRaw) {
-                    if ($psRaw -is [int] -or $psRaw -is [long]) {
-                        $ps = [int64]$psRaw
-                        if ($ps -le 0 -or $ps -ne $size) { $proofSizeOk = $false }
-                    } else { $proofSizeOk = $false }
-                }
+                if ($null -eq $psRaw) { $proofSizeOk = $false }
+                elseif ($psRaw -is [int] -or $psRaw -is [long]) {
+                    $ps = [int64]$psRaw
+                    if ($ps -le 0 -or $ps -ne $size) { $proofSizeOk = $false }
+                } else { $proofSizeOk = $false }
             }
 
             $destDuplicate = ($copyClass -and $dest -ne '' -and $destCount.ContainsKey($dest) -and $destCount[$dest] -gt 1)
@@ -284,7 +345,27 @@ function Get-LdwMediaCoverage {
         }
 
         $counts[$bucket]++
-        if ($sizeOk) { $bytes[$bucket] += $size }
+        if ($sizeOk -and $inputByteOk) {
+            $nb = Add-LdwInt64 -A $bytes[$bucket] -B $size
+            if ($null -eq $nb) { $overflowRefused = $true } else { $bytes[$bucket] = $nb }
+        }
+
+        # L2: attribute every row to exactly one approved root (or unattributed).
+        $rk = if ($rid -ne '') { $rid } else { '__unattributed__' }
+        if (-not $rootCount.ContainsKey($rk)) {
+            $rb = @{}
+            foreach ($b in $script:Buckets) { $rb[$b] = 0 }
+            $rootOrder.Add($rk)
+            $rootCount[$rk] = 0
+            $rootBytes[$rk] = [int64]0
+            $rootBuckets[$rk] = $rb
+        }
+        $rootCount[$rk]++
+        if ($sizeOk -and $inputByteOk) {
+            $nr = Add-LdwInt64 -A $rootBytes[$rk] -B $size
+            if ($null -eq $nr) { $overflowRefused = $true } else { $rootBytes[$rk] = $nr }
+        }
+        $rootBuckets[$rk][$bucket]++
         $entries.Add([pscustomobject]@{
             source_key = $key
             bucket = $bucket
@@ -299,18 +380,39 @@ function Get-LdwMediaCoverage {
     $summary = @{}
     foreach ($b in $script:Buckets) {
         $sumCount += [int]$counts[$b]
-        $sumBytes += [int64]$bytes[$b]
+        $ns = Add-LdwInt64 -A $sumBytes -B ([int64]$bytes[$b])
+        if ($null -eq $ns) { $overflowRefused = $true } else { $sumBytes = $ns }
         $summary[$b] = [pscustomobject]@{ count = [int]$counts[$b]; bytes = [int64]$bytes[$b] }
     }
+
+    $rootCountSum = 0
+    $rootByteSum = [int64]0
+    $rootOut = @{}
+    foreach ($rk in $rootOrder) {
+        $rootCountSum += [int]$rootCount[$rk]
+        $nr = Add-LdwInt64 -A $rootByteSum -B ([int64]$rootBytes[$rk])
+        if ($null -eq $nr) { $overflowRefused = $true } else { $rootByteSum = $nr }
+        $rbo = @{}
+        foreach ($b in $script:Buckets) { $rbo[$b] = [int]$rootBuckets[$rk][$b] }
+        $rootOut[$rk] = [pscustomobject]@{ count = [int]$rootCount[$rk]; bytes = [int64]$rootBytes[$rk]; buckets = [pscustomobject]$rbo }
+    }
+
     return [pscustomobject]@{
         schema = $script:PlannerSchema
+        evidence_status = 'UNVALIDATED_ASSERTIONS_ONLY'
+        private_data_authorization = 'NONE'
+        bucket_labels_are_assertions = $true
         reconciled = [bool]($sumCount -eq @($Inventory).Count -and $sumBytes -eq $inputBytes)
         reconciled_scope = 'internal_partition_only_not_external_completeness'
-        fail_closed = [bool]($counts['COLLISION_ERROR'] -gt 0 -or $orphanProofCount -gt 0)
+        root_reconciled = [bool]($rootCountSum -eq @($Inventory).Count -and $rootByteSum -eq $inputBytes)
+        overflow_refused = [bool]$overflowRefused
+        duplicate_approved_root_count = [int]$approvedDuplicate.Count
+        fail_closed = [bool]($counts['COLLISION_ERROR'] -gt 0 -or $orphanProofCount -gt 0 -or $overflowRefused -or $approvedDuplicate.Count -gt 0)
         orphan_proof_count = [int]$orphanProofCount
         input_files = [int]@($Inventory).Count
         input_bytes = $inputBytes
         buckets = [pscustomobject]$summary
+        root_summary = [pscustomobject]$rootOut
         entries = $entries.ToArray()
     }
 }

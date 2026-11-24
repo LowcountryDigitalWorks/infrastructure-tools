@@ -6,15 +6,15 @@ Governing item: infrastructure-tools#341 (PLAN ONLY - no Plex cutover, source de
 
 ## Scope
 
-A single pure function, Get-LdwMediaCoverage, classifies a complete approved inventory into nine mutually exclusive buckets. It accepts only in-memory objects, performs no file, volume, process, network, database or torrent-client access, and emits sanitized counts, bytes, per-entry bucket and reason. It does not rank, promote, copy, delete or authorize anything.
+A single pure function, Get-LdwMediaCoverage, classifies a complete approved inventory into nine mutually exclusive buckets. It accepts only in-memory objects, performs no file, volume, process, network, database or torrent-client access, and emits sanitized counts, bytes, per-entry bucket and reason. It does not rank, promote, copy, delete or authorize anything. Every emitted bucket label, reason and aggregate is an explicitly **unvalidated assertion** about the supplied synthetic input (`evidence_status=UNVALIDATED_ASSERTIONS_ONLY`, `bucket_labels_are_assertions=true`, `private_data_authorization=NONE`), never validated evidence.
 
 ## Identity and reconciliation
 
-- Source key = normalized source_volume_id, normalized approved_root_id, normalized relative path. IDs and paths must be strings; control characters (including separator byte 0x1f), path separators inside IDs, absolute/drive/UNC forms, ADS colons, dot and dotdot components, repeated/trailing separators are refused. Normalization is lowercase with slash path form.
+- Source key = normalized source_volume_id, normalized approved_root_id, normalized relative path. IDs and paths must be strings; control characters (including separator byte 0x1f), path separators inside IDs, absolute/drive/UNC forms, ADS colons, dot and dotdot components, repeated/trailing separators are refused. Normalization is lowercase with slash path form. **M2:** every source and destination path component additionally fails closed on Windows path aliases: a trailing dot or space, or a reserved device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`) matched case-insensitively and with any extension suffix, normalizes to empty and therefore COLLISION_ERROR. This covers `a.bin.`, `a.bin space`, `.. space`, `CON.txt` and `lpt9.foo`.
 - Destination uniqueness is checked over copy-class proofs only, after a strict relative canonicalizer: drive roots, absolute/UNC paths, `.`/`..` components, ADS colons, controls, separator injection, repeated/trailing separators, and reparse/link/odd-identity metadata flags are refused. Canonical equivalents such as `stage/a.bin`, `STAGE\\A.BIN` and `stage\\a.bin` collapse to one key; a repeated destination marks every affected entry COLLISION_ERROR.
-- Untrusted booleans (`piece_proof_valid`, `source_stable`, `changed_since_copy`, `preallocated_only`, `excluded`) are parsed strictly as typed booleans or exact `true`/`false` strings only. PowerShell truthiness is never used: a text `false` never counts true; malformed or wrong-typed values are COLLISION_ERROR.
-- A proof `size_bytes`, when present, must be a positive integer matching the inventory size. A proof key with no corresponding inventory source is counted in `orphan_proof_count`; it is never silently ignored.
-- Every inventory row yields exactly one entry. `reconciled` means only that bucket counts and bytes sum to input totals; `reconciled_scope` states explicitly that this is **not** independent proof of full external inventory. `fail_closed` is true when any COLLISION_ERROR or orphan proof exists.
+- Untrusted booleans (`piece_proof_valid`, `source_stable`, `changed_since_copy`, `preallocated_only`) are parsed strictly as typed booleans or exact `true`/`false` strings only. PowerShell truthiness is never used: a text `false` never counts true; malformed or wrong-typed values are COLLISION_ERROR. **M1:** the inventory `excluded` marker must be PRESENT and a valid strict boolean on every row; missing, null or wrong-typed values are COLLISION_ERROR and are never promoted to FULLY_VERIFIED or any accept bucket.
+- **L1:** every copy-class proof (`full_hash_pair`, `full_hash_pair_plus_pieces`, `legacy_manifest`, `raw_dest_sha256`) MUST carry a present, positive-integer `size_bytes` exactly equal to the inventory size; missing, null, zero, negative, wrong-typed or mismatched proof size is COLLISION_ERROR. Non-copy-class proofs are unaffected. A proof key with no corresponding inventory source is counted in `orphan_proof_count`; it is never silently ignored.
+- Every inventory row yields exactly one entry. `reconciled` means only that bucket counts and bytes sum to input totals; `reconciled_scope` states explicitly that this is **not** independent proof of full external inventory. **L2:** `root_summary` reports count, bytes and per-bucket counts for every normalized approved root, including zero-count roots (plus an `__unattributed__` bucket), and `root_reconciled` is exact over the same input totals. Two approved roots that normalize to the same id+volume are refused: `duplicate_approved_root_count` is set and every row for that root is COLLISION_ERROR. `fail_closed` is true on any COLLISION_ERROR, orphan proof, overflow or duplicate approved root. **L3:** all Int64 sums (`input_bytes`, per-bucket bytes, per-root bytes and reconciliation totals) use checked addition; overflow sets `overflow_refused=true` and the affected row becomes COLLISION_ERROR with reason `INT64_OVERFLOW` instead of silently promoting to a double or wrapping.
 - Source/root allowlists are not weakened. A raw destination SHA-256 can only produce RAW_PENDING; it can never produce FULLY_VERIFIED.
 
 ## Buckets
@@ -29,7 +29,7 @@ A single pure function, Get-LdwMediaCoverage, classifies a complete approved inv
 | INCOMPLETE_TORRENT | Incomplete or preallocated-only torrent; excluded regardless of byte length. |
 | UNKNOWN_OR_AMBIGUOUS_TORRENT | Unknown or attribution-ambiguous torrent, or unproven pieces; excluded. |
 | OTHER_EXCLUDED | Explicit exclusion marker. |
-| COLLISION_ERROR | Structural refusal: duplicate source/destination/proof key, wrong root/volume, malformed key, bad size, malformed boolean, unsafe destination identity, proof size mismatch, unstable source, missing destination. |
+| COLLISION_ERROR | Structural refusal: duplicate source/destination/proof key, duplicate approved root, wrong root/volume, malformed key or Windows alias/reserved-device component, bad size, missing/malformed boolean, unsafe destination identity, missing/mismatched proof size, unstable source, missing destination, Int64 overflow. |
 
 Duplicate source policy is explicit and fail-closed: **both** occurrences of a duplicated source key are COLLISION_ERROR. The prior test expectation of preserving one occurrence was wrong and has been corrected.
 
@@ -39,26 +39,17 @@ Input order is preserved; there is no clock, environment, randomness or culture-
 
 ## Synthetic fixtures
 
-The embedded made-up JSON uses tokens such as VOL-SYNTH-A, ROOT-A and fixture/alpha.bin; no real paths, volume serials, torrent IDs, media titles, manifests or qB/Plex data appear anywhere. The planner reads no files; fixtures are parsed from in-memory literals. A main fixture covers all nine buckets and a negative fixture covers strict-boolean strings/types, 0x1f separator injection, dot-path components, absolute/UNC/ADS/control destinations, reparse metadata, proof size mismatch, destination canonicalization collisions, orphan proofs, and the raw-destination hash boundary. Control bytes are inserted from char 0x1f at runtime, never stored literally in source.
+The embedded made-up JSON uses tokens such as VOL-SYNTH-A, ROOT-A and fixture/alpha.bin; no real paths, volume serials, torrent IDs, media titles, manifests or qB/Plex data appear anywhere. The planner reads no files; fixtures are parsed from in-memory literals. A main fixture covers all nine buckets and a negative fixture covers strict-boolean strings/types, 0x1f separator injection, dot-path components, absolute/UNC/ADS/control destinations, reparse metadata, proof size mismatch, destination canonicalization collisions, orphan proofs, and the raw-destination hash boundary. Control bytes are inserted from char 0x1f at runtime, never stored literally in source. A third edge fixture adds explicit missing/null `excluded` promotion negatives, Windows trailing-dot/space and `.. space` aliases, reserved device names with extension suffixes on both source and destination components, duplicate normalized approved roots and a zero-count root. A fourth overflow fixture uses `[int64]::MaxValue` plus one to exercise the L3 boundary. All original fixture expectations are retained with mandatory fields made explicit.
 
 ## Validation evidence
 
-A local synthetic-only run on an isolated internal C: TEMP folder with the exact source blobs, after a fresh no-writer check (no copy process, no chain lock, no STOP, no instance locks), completed with:
-
-```
-MEDIA_COVERAGE_PLANNER_V0=PASS assertions=53
-MEDIA_COVERAGE_PLANNER_PRIVATE_OPERATION=NOT_AUTHORIZED
-MEDIA_COVERAGE_PLANNER_PLANNER_IO=NONE
-EXIT_CODE=0
-```
-
-No media, E:/P:, qB/Plex, network, service, or workflow access occurred. Hosted checks are reviewed only as they run naturally on the exact head; none was manually triggered.
+This exact correction was authored and committed through the authenticated GitHub REST API only. **No local test, build, checkout, media scan or controller command was executed in this correction, and no test result is claimed for these exact blobs.** The embedded synthetic fixtures and assertions are source-only and must be re-reviewed and allowed to run naturally in hosted checks on the exact new head; no hosted check was manually triggered. All fixture tokens are invented; no private data was read or transmitted.
 
 ## Non-authorization
 
 - Does not access private manifests, P: or E: volumes, Plex/qB data, running writers, locks or checkpoints.
 - Does not authorize copying, cutover, source mutation, service/ACL/task changes, or promotion of RAW_PENDING or LEGACY_MANIFEST_ONLY to FULLY_VERIFIED.
-- No private data was read; the only local execution was the embedded synthetic fixture test described above. No workflow file was modified.
+- No private data was read or transmitted in this correction. No workflow, runtime or CI/JIT file was modified; no hosted check was manually triggered.
 
 ## Acceptance gates for any later private operation (none satisfied here)
 
