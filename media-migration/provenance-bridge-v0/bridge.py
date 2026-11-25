@@ -4,6 +4,16 @@ All inputs are untrusted assertions. A matched binding is a shape-consistent
 claim only, not independent provenance or proof of data integrity. v0 refuses
 hybrids and non-ASCII/ambiguous Windows paths rather than pretending to resolve
 filesystem aliases. Not approved for private or production data.
+
+INPUT CONTRACT: JSON-compatible values only (dict/list/str/int/bool/None).
+No arbitrary user-defined objects, custom __hash__/__eq__, callables, or other
+Python-specific values are accepted or relied upon. Field names are bounded
+strings; scalar values are bounded by the regexes/limits below.
+
+`observed_at` is syntax/calendar-validated only. It is never a freshness,
+recency, clock, or proof signal. MATCHED_METADATA_ASSERTION_ONLY means the
+caller-supplied metadata shape matched, not that the metadata is current or
+independently proven. A stale well-formed date never confers freshness.
 """
 import re
 from collections import Counter, defaultdict
@@ -14,6 +24,10 @@ COMPONENT = re.compile(r'[A-Za-z0-9_(). -]{1,255}', re.ASCII)
 RESERVED = re.compile(r'(?:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\..*)?', re.I | re.ASCII)
 MAX_ROWS = 10000
 MAX_SIZE = 2**63 - 1
+MAX_FIELD_NAME = 80
+BINDING_FIELDS = frozenset({'internal_id', 'kind', 'full_id'})
+MEMBER_FIELDS = frozenset({'internal_id','kind','full_id','volume','root','path','index','size','pad','completion','validation','observed_at'})
+STAGED_FIELDS = frozenset({'volume','root','path','size','tier','internal_id','kind','full_id','index'})
 
 def token(value):
     return type(value) is str and TOKEN.fullmatch(value) is not None
@@ -32,7 +46,22 @@ def identity(record):
 def size(value):
     return type(value) is int and 0 <= value <= MAX_SIZE
 
+def exact_fields(record, expected):
+    """Exact dict shape: count guard first, then bounded string keys, then set().
+
+    Only JSON-compatible inputs are in contract. An oversized mapping is
+    rejected by len() before any key traversal/allocation; a non-string or
+    over-long key is rejected before set() is constructed.
+    """
+    if type(record) is not dict or len(record) != len(expected):
+        return False
+    for name in record:
+        if type(name) is not str or len(name) > MAX_FIELD_NAME:
+            return False
+    return set(record) == expected
+
 def stamp(value):
+    """Syntax/calendar only; no freshness, clock, recency, or proof inference."""
     if type(value) is not str or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z', value, re.ASCII):
         return False
     try:
@@ -54,8 +83,14 @@ def classify(bindings, members, staged):
     """Separate binding/member/staged assertions; returns one HOLD per staged row.
 
     No prefix matching, implicit v2 truncation, hybrid support, disk access, or
-    proof promotion. Strictly bounded fixture input. Globally reject malformed
-    bindings/member records so incomplete input never produces a positive claim.
+    proof promotion. Strictly bounded fixture input of JSON-compatible values.
+    Globally reject malformed bindings/member records so incomplete input never
+    produces a positive claim. A malformed staged *shape* also globally HOLDs,
+    so a malformed neighbor is never silently discarded from duplicate/root/index
+    accounting while its neighbor is marked matched. Well-formed rows retain
+    their exact individual reason codes. `observed_at` is validated for
+    syntax/calendar only; stale dates never add freshness or proof. Every row
+    remains HOLD/PENDING/UNVALIDATED_ASSERTIONS_ONLY.
     """
     def result(reason, claim=False):
         return {'status': 'HOLD', 'reason': reason, 'metadata_claim': claim,
@@ -67,7 +102,7 @@ def classify(bindings, members, staged):
     by_internal = {}
     by_full = {}
     for b in bindings:
-        if type(b) is not dict or set(b) != {'internal_id', 'kind', 'full_id'} or not token(b.get('internal_id')) or not identity(b):
+        if not exact_fields(b, BINDING_FIELDS) or not token(b.get('internal_id')) or not identity(b):
             return all_hold('INVALID_BINDING')
         i, full = b['internal_id'], identity(b)
         if i in by_internal or full in by_full:
@@ -76,9 +111,8 @@ def classify(bindings, members, staged):
     by_key = defaultdict(list)
     member_indexes = set()
     root_volumes = defaultdict(set)
-    fields = {'internal_id','kind','full_id','volume','root','path','index','size','pad','completion','validation','observed_at'}
     for m in members:
-        if type(m) is not dict or set(m) != fields or not token(m.get('internal_id')) or not identity(m) or not key(m) or not size(m.get('index')) or not size(m.get('size')) or type(m.get('pad')) is not bool or not stamp(m.get('observed_at')):
+        if not exact_fields(m, MEMBER_FIELDS) or not token(m.get('internal_id')) or not identity(m) or not key(m) or not size(m.get('index')) or not size(m.get('size')) or type(m.get('pad')) is not bool or not stamp(m.get('observed_at')):
             return all_hold('INVALID_MEMBER')
         if type(m['completion']) is not str or m['completion'] not in ('complete','incomplete','unknown') or type(m['validation']) is not str or m['validation'] not in ('verified','seed','no_verify','unknown'):
             return all_hold('INVALID_MEMBER_STATE')
@@ -91,20 +125,23 @@ def classify(bindings, members, staged):
         k = key(m)
         root_volumes[k[1]].add(k[0])
         by_key[k].append(m)
-    staged_keys = [key(s) if type(s) is dict else None for s in staged]
+    def staged_shape(s):
+        if not exact_fields(s, STAGED_FIELDS):
+            return None
+        if not token(s.get('internal_id')) or not size(s.get('index')) or not size(s.get('size')):
+            return None
+        return key(s)
+    staged_keys = [staged_shape(s) for s in staged]
+    if any(k is None for k in staged_keys):
+        return all_hold('INVALID_STAGED')
     for k in staged_keys:
-        if k is not None:
-            root_volumes[k[1]].add(k[0])
+        root_volumes[k[1]].add(k[0])
     counts = Counter(staged_keys)
-    staged_indexes = Counter((s['internal_id'], s['index']) for s in staged
-                             if type(s) is dict and token(s.get('internal_id')) and size(s.get('index')))
+    staged_indexes = Counter((s['internal_id'], s['index']) for s in staged)
     output = []
-    allowed = {'volume','root','path','size','tier','internal_id','kind','full_id','index'}
     for s, k in zip(staged, staged_keys):
         reason = None
-        if type(s) is not dict or set(s) != allowed or not k or not size(s.get('size')) or not size(s.get('index')) or not token(s.get('internal_id')):
-            reason = 'INVALID_STAGED'
-        elif not identity(s):
+        if not identity(s):
             reason = 'FULL_ID_REQUIRED'
         elif s['tier'] != 'COPIED_PENDING_VERIFICATION':
             reason = 'UNSUPPORTED_TIER'

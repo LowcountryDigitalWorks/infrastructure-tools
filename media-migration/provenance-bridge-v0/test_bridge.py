@@ -1,11 +1,22 @@
 import unittest
 from bridge import classify
 
+# All fixtures are JSON-compatible values only (dict/list/str/int/bool/None).
+# No custom objects with __hash__/__eq__ or other Python-specific values are
+# used: the input contract does not assume arbitrary user-defined methods.
+
 def fixture(n=0, kind='v1'):
     full = format(n+1, '0%dx' % (40 if kind=='v1' else 64))
     identity = dict(internal_id=f't{n}', kind=kind, full_id=full)
     common = dict(**identity, volume='vol1', root='root1', path=f'fixture/file{n}.bin', size=1024, index=0)
     return identity, dict(**common, pad=False, completion='complete', validation='verified', observed_at='2026-11-24T12:00:00Z'), dict(**common, tier='COPIED_PENDING_VERIFICATION')
+
+def oversized(record, extra=4096):
+    """Genuinely oversized dict built only from JSON-compatible values."""
+    out = dict(record)
+    for i in range(extra):
+        out[f'x{i}'] = i
+    return out
 
 class BridgeTests(unittest.TestCase):
     def check(self,b,m,s,reason):
@@ -82,5 +93,33 @@ class BridgeTests(unittest.TestCase):
         b,m,s=fixture(); r=classify([b],[m],[s])[0]; self.assertNotIn(s['path'],str(r)); self.assertNotIn(s['full_id'],str(r))
     def test_bound(self):
         with self.assertRaises(ValueError): classify([None]*10001,[],[])
+    # --- reviewed correction regressions (HOLD semantics unchanged) ---
+    def test_oversized_binding_dict(self):
+        b,m,s=fixture(); self.check([oversized(b)],[m],[s],'INVALID_BINDING')
+    def test_oversized_member_dict(self):
+        b,m,s=fixture(); self.check([b],[oversized(m)],[s],'INVALID_MEMBER')
+    def test_oversized_staged_dict(self):
+        b,m,s=fixture(); self.check([b],[m],[oversized(s)],'INVALID_STAGED')
+    def test_non_string_key_rejected(self):
+        b,m,s=fixture(); bad=dict(b); del bad['kind']; bad[1]='v1'
+        self.check([bad],[m],[s],'INVALID_BINDING')
+    def test_malformed_staged_neighbor_global_hold(self):
+        # Same canonical key and member as the good row; malformed shape must
+        # globally HOLD both rather than be dropped so the neighbor matches.
+        b,m,s=fixture(); bad=dict(s, size='1024')
+        self.check([b],[m],[s,bad],'INVALID_STAGED')
+    def test_exact_match_output_preserved(self):
+        b,m,s=fixture()
+        self.assertEqual(classify([b],[m],[s]),[{'status': 'HOLD', 'reason': 'MATCHED_METADATA_ASSERTION_ONLY', 'metadata_claim': True, 'content_proof': 'PENDING', 'authority': 'UNVALIDATED_ASSERTIONS_ONLY'}])
+    def test_stale_date_shape_only_no_freshness(self):
+        b,m,s=fixture(); m['observed_at']='1999-01-01T00:00:00Z'
+        r=classify([b],[m],[s])[0]
+        self.assertEqual(r['reason'],'MATCHED_METADATA_ASSERTION_ONLY')
+        self.assertTrue(r['metadata_claim'])
+        self.assertEqual(r['content_proof'],'PENDING')
+        self.assertEqual(r['authority'],'UNVALIDATED_ASSERTIONS_ONLY')
+        self.assertNotIn('freshness',r)
+        self.assertNotIn('proof',r)
+        self.assertNotIn('observed_at',r)
 
 if __name__=='__main__': unittest.main()
