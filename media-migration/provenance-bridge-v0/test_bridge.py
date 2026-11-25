@@ -1,4 +1,5 @@
 import unittest
+import bridge
 from bridge import classify
 
 # Fixtures use JSON-compatible values only. Hostile objects below are test-only
@@ -166,5 +167,29 @@ class BridgeTests(unittest.TestCase):
             b,m,s=fixture(kind=kind)
             self.assertEqual(classify([b],[m],[s]),[{'status': 'HOLD', 'reason': 'MATCHED_METADATA_ASSERTION_ONLY', 'metadata_claim': True, 'content_proof': 'PENDING', 'authority': 'UNVALIDATED_ASSERTIONS_ONLY'}])
         self.assertEqual(Hostile.hits, [])
+    # --- sole-public-API contract (direct helper calls are unsupported) ---
+    def test_all_declares_sole_public_api(self):
+        self.assertEqual(bridge.__all__, ['classify'])
+    def test_no_public_callable_helpers(self):
+        defined = [(n,v) for n,v in vars(bridge).items()
+                   if callable(v) and getattr(v,'__module__',None)=='bridge']
+        public = [n for n,v in defined if not n.startswith('_')]
+        self.assertEqual(public, ['classify'])
+        helpers = [n for n,v in defined if n.startswith('_')]
+        self.assertTrue(helpers)
+        self.assertTrue(all(n.startswith('_') for n in helpers))
+    def test_wildcard_import_exposes_only_classify(self):
+        ns = {}
+        exec('from bridge import *', ns)
+        public = [n for n in ns if not n.startswith('__')]
+        self.assertEqual(public, ['classify'])
+    def test_classify_still_enforces_contract(self):
+        b,m,s=fixture()
+        r=classify([b],[m],[s])
+        self.assertEqual(len(r),1)
+        self.assertEqual(r[0]['status'],'HOLD')
+        self.assertEqual(r[0]['content_proof'],'PENDING')
+        self.assertEqual(r[0]['authority'],'UNVALIDATED_ASSERTIONS_ONLY')
+        self.assertEqual(r[0]['reason'],'MATCHED_METADATA_ASSERTION_ONLY')
 
 if __name__=='__main__': unittest.main()

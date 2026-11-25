@@ -5,13 +5,23 @@ claim only, not independent provenance or proof of data integrity. v0 refuses
 hybrids and non-ASCII/ambiguous Windows paths rather than pretending to resolve
 filesystem aliases. Not approved for private or production data.
 
-INPUT CONTRACT: JSON-compatible values only (dict/list/str/int/bool/None).
-No arbitrary user-defined objects, custom __hash__/__eq__, callables, or other
-Python-specific values are accepted or relied upon. Field names are bounded
-strings; scalar values are bounded by the regexes/limits below. Every value
-comparison, hash, string operation and container access is preceded by an exact
-type/length guard (``type(x) is T``, never ``isinstance``), so a hostile object's
-hooks can never be invoked. Malformed input is always fail-closed.
+SOLE PUBLIC API: ``classify`` (declared in ``__all__``). All other module names,
+including the underscore-prefixed helpers, are internal implementation details
+and are UNSUPPORTED for direct calls. The guarantees below apply ONLY to data
+that passes through ``classify``'s exact field validation; direct calls to
+helpers accept arbitrary caller-supplied arguments and are outside the contract.
+The underscore prefix is a naming convention, NOT a security boundary: Python
+does not enforce privacy, so no claim is made that private names themselves
+prevent direct access or that hostile arguments to direct helper calls are safe.
+
+INPUT CONTRACT (via ``classify``): JSON-compatible values only
+(dict/list/str/int/bool/None). No arbitrary user-defined objects, custom
+__hash__/__eq__, callables, or other Python-specific values are accepted or
+relied upon. Field names are bounded strings; scalar values are bounded by the
+regexes/limits below. Inside ``classify``, every value comparison, hash, string
+operation and container access is preceded by an exact type/length guard
+(``type(x) is T``, never ``isinstance``), so a hostile object's hooks can never
+be invoked on the supported path. Malformed input is always fail-closed.
 
 `observed_at` is syntax/calendar-validated only. It is never a freshness,
 recency, clock, or proof signal. MATCHED_METADATA_ASSERTION_ONLY means the
@@ -21,6 +31,8 @@ independently proven. A stale well-formed date never confers freshness.
 import re
 from collections import Counter, defaultdict
 from datetime import datetime
+
+__all__ = ['classify']
 
 TOKEN = re.compile(r'[A-Za-z0-9_-]{1,80}', re.ASCII)
 COMPONENT = re.compile(r'[A-Za-z0-9_(). -]{1,255}', re.ASCII)
@@ -33,29 +45,29 @@ BINDING_FIELDS = frozenset({'internal_id', 'kind', 'full_id'})
 MEMBER_FIELDS = frozenset({'internal_id','kind','full_id','volume','root','path','index','size','pad','completion','validation','observed_at'})
 STAGED_FIELDS = frozenset({'volume','root','path','size','tier','internal_id','kind','full_id','index'})
 
-def token(value):
+def _token(value):
     return type(value) is str and TOKEN.fullmatch(value) is not None
 
-def digest(value, n):
+def _digest(value, n):
     return type(value) is str and re.fullmatch(r'[0-9a-f]{%d}' % n, value) is not None
 
-def identity(record):
+def _identity(record):
     """Exact-string kind guard before any comparison; return None fail-closed."""
     if type(record) is not dict:
         return None
     kind = record.get('kind')
     if type(kind) is not str or len(kind) != 2:
         return None
-    if kind == 'v1' and digest(record.get('full_id'), 40):
+    if kind == 'v1' and _digest(record.get('full_id'), 40):
         return kind, record['full_id']
-    if kind == 'v2' and digest(record.get('full_id'), 64):
+    if kind == 'v2' and _digest(record.get('full_id'), 64):
         return kind, record['full_id']
     return None
 
-def size(value):
+def _size(value):
     return type(value) is int and 0 <= value <= MAX_SIZE
 
-def exact_fields(record, expected):
+def _exact_fields(record, expected):
     """Exact dict shape: count guard first, then bounded string keys, then set().
 
     Only JSON-compatible inputs are in contract. An oversized mapping is
@@ -70,7 +82,7 @@ def exact_fields(record, expected):
             return False
     return set(record) == expected
 
-def stamp(value):
+def _stamp(value):
     """Syntax/calendar only; no freshness, clock, recency, or proof inference."""
     if type(value) is not str or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z', value, re.ASCII):
         return False
@@ -80,12 +92,12 @@ def stamp(value):
     except ValueError:
         return False
 
-def key(record):
+def _key(record):
     """All container/string accesses below are on exact built-in types only."""
     if type(record) is not dict:
         return None
     volume, root, path = (record.get(x) for x in ('volume', 'root', 'path'))
-    if not token(volume) or not token(root) or type(path) is not str or not 0 < len(path) <= 1024:
+    if not _token(volume) or not _token(root) or type(path) is not str or not 0 < len(path) <= 1024:
         return None
     parts = path.replace('\\', '/').split('/')
     if any(not COMPONENT.fullmatch(p) or p in ('.', '..') or p[0] == ' ' or p[-1] in ' .' or RESERVED.fullmatch(p) or RESERVED.fullmatch(p.split('.')[0].rstrip(' ')) for p in parts):
@@ -117,9 +129,9 @@ def classify(bindings, members, staged):
     by_internal = {}
     by_full = {}
     for b in bindings:
-        if not exact_fields(b, BINDING_FIELDS) or not token(b.get('internal_id')) or not identity(b):
+        if not _exact_fields(b, BINDING_FIELDS) or not _token(b.get('internal_id')) or not _identity(b):
             return all_hold('INVALID_BINDING')
-        i, full = b['internal_id'], identity(b)
+        i, full = b['internal_id'], _identity(b)
         if i in by_internal or full in by_full:
             return all_hold('DUPLICATE_OR_CONFLICTING_BINDING')
         by_internal[i], by_full[full] = full, i
@@ -127,31 +139,31 @@ def classify(bindings, members, staged):
     member_indexes = set()
     root_volumes = defaultdict(set)
     for m in members:
-        if not exact_fields(m, MEMBER_FIELDS) or not token(m.get('internal_id')) or not identity(m) or not key(m) or not size(m.get('index')) or not size(m.get('size')) or type(m.get('pad')) is not bool or not stamp(m.get('observed_at')):
+        if not _exact_fields(m, MEMBER_FIELDS) or not _token(m.get('internal_id')) or not _identity(m) or not _key(m) or not _size(m.get('index')) or not _size(m.get('size')) or type(m.get('pad')) is not bool or not _stamp(m.get('observed_at')):
             return all_hold('INVALID_MEMBER')
         if type(m['completion']) is not str or m['completion'] not in ('complete','incomplete','unknown') or type(m['validation']) is not str or m['validation'] not in ('verified','seed','no_verify','unknown'):
             return all_hold('INVALID_MEMBER_STATE')
-        if by_internal.get(m['internal_id']) != identity(m):
+        if by_internal.get(m['internal_id']) != _identity(m):
             return all_hold('MEMBER_BINDING_CONFLICT')
         idx = (m['internal_id'], m['index'])
         if idx in member_indexes:
             return all_hold('DUPLICATE_MEMBER_INDEX')
         member_indexes.add(idx)
-        k = key(m)
+        k = _key(m)
         root_volumes[k[1]].add(k[0])
         by_key[k].append(m)
     def staged_shape(s):
-        if not exact_fields(s, STAGED_FIELDS):
+        if not _exact_fields(s, STAGED_FIELDS):
             return None
-        if not token(s.get('internal_id')) or not size(s.get('index')) or not size(s.get('size')):
+        if not _token(s.get('internal_id')) or not _size(s.get('index')) or not _size(s.get('size')):
             return None
         # Exact type/bound guards before the later tier comparison and before
-        # identity() compares kind; no host object hook can be reached.
+        # _identity() compares kind; no host object hook can be reached.
         if type(s.get('kind')) is not str or type(s.get('full_id')) is not str:
             return None
         if type(s.get('tier')) is not str or len(s.get('tier')) > MAX_TIER_LEN:
             return None
-        return key(s)
+        return _key(s)
     staged_keys = [staged_shape(s) for s in staged]
     if any(k is None for k in staged_keys):
         return all_hold('INVALID_STAGED')
@@ -162,7 +174,7 @@ def classify(bindings, members, staged):
     output = []
     for s, k in zip(staged, staged_keys):
         reason = None
-        if not identity(s):
+        if not _identity(s):
             reason = 'FULL_ID_REQUIRED'
         elif s['tier'] != 'COPIED_PENDING_VERIFICATION':
             reason = 'UNSUPPORTED_TIER'
@@ -170,13 +182,13 @@ def classify(bindings, members, staged):
             reason = 'ROOT_VOLUME_CONFLICT'
         elif counts[k] != 1 or len(by_key[k]) > 1 or staged_indexes[(s['internal_id'], s['index'])] != 1:
             reason = 'AMBIGUOUS_CANONICAL_KEY'
-        elif by_internal.get(s['internal_id']) != identity(s):
+        elif by_internal.get(s['internal_id']) != _identity(s):
             reason = 'NO_EXACT_BINDING'
         elif not by_key[k]:
             reason = 'NO_MEMBER'
         else:
             m = by_key[k][0]
-            if m['internal_id'] != s['internal_id'] or identity(m) != identity(s) or m['index'] != s['index']:
+            if m['internal_id'] != s['internal_id'] or _identity(m) != _identity(s) or m['index'] != s['index']:
                 reason = 'MEMBER_ID_CONFLICT'
             elif m['size'] != s['size']:
                 reason = 'SIZE_CONFLICT'
