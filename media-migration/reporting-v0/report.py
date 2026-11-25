@@ -21,6 +21,9 @@ nine mutually exclusive asserted bucket count/byte pairs. ``entries``,
 optional bridge input is a separate aggregate only (total rows and
 metadata-shape-match count); raw rows and positional joins are rejected. The
 caller's sanitization and root completeness are never assumed or re-derived.
+``root_reconciled`` must be exactly True as a CALLER ASSERTION about claimed
+internal root arithmetic; False, missing, or non-bool values fail closed. True
+does NOT establish independent or external root completeness.
 
 OUTPUT: a deterministic fixed-label assertion aggregate. Bucket labels are
 assertions — including FULLY_VERIFIED — never promotion evidence. Evidence is
@@ -139,6 +142,10 @@ def _planner(value, reasons):
     # An explicit True is required; False, non-bool, or hostile values fail.
     if value['bucket_labels_are_assertions'] is not True:
         reasons.add('CONTRACT_CONSTANT_MISMATCH')
+    # Internal root arithmetic is caller-asserted only: require True, but never
+    # convert it into an independent/external completeness claim.
+    if value['root_reconciled'] is not True:
+        reasons.add('ROOT_RECONCILED_ASSERTION_REQUIRED')
 
     fields = {}
     for name in _BOOL_FIELDS:

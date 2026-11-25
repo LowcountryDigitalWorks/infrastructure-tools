@@ -28,7 +28,7 @@ Exact top-level field set — no missing or extra keys:
 | `bucket_labels_are_assertions` | bool, must be `True` |
 | `reconciled` | bool |
 | `reconciled_scope` | exact string `internal_partition_only_not_external_completeness` |
-| `root_reconciled` | bool |
+| `root_reconciled` | bool, must be `True` (caller assertion of internal root arithmetic only) |
 | `overflow_refused` | bool |
 | `duplicate_approved_root_count` | int, 0..2^63-1 |
 | `root_identity_ambiguous_count` | int, 0..2^63-1 |
@@ -48,7 +48,10 @@ Explicitly rejected anywhere in the envelope: `entries`, `root_summary`,
 `source_key`, `destination_path`, `path(s)`, `internal_id`, `full_id`,
 `volume`, `root`, `rows`, `bindings`, `members`, `staged`, `record(s)`,
 `observed_at`, and any other extra key. Caller sanitization and root
-completeness are never assumed or re-derived.
+completeness are never assumed or re-derived. `root_reconciled=True` is only a
+caller assertion about claimed internal root arithmetic; `False`, missing, or
+non-bool values fail closed with no trusted counts. `True` never establishes
+independent or external root completeness, which remains `UNKNOWN`.
 
 ## Optional bridge aggregate input
 

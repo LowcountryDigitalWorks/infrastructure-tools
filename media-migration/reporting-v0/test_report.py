@@ -221,6 +221,32 @@ class ReportTests(unittest.TestCase):
         p['bucket_labels_are_assertions'] = False
         self.assert_fail(build_report(p), 'CONTRACT_CONSTANT_MISMATCH')
 
+    def test_root_reconciled_false_fails_closed(self):
+        p = planner_fixture()
+        p['root_reconciled'] = False
+        r = build_report(p)
+        self.assert_fail(r, 'ROOT_RECONCILED_ASSERTION_REQUIRED')
+        self.assertEqual(r['counts'], 'NOT_PROVIDED')
+        self.assertEqual(r['buckets'], 'NOT_PROVIDED')
+        self.assertEqual(r['bridge_aggregate'], 'NOT_EVALUATED')
+
+    def test_root_reconciled_non_bool_fails_closed(self):
+        p = planner_fixture()
+        p['root_reconciled'] = 1
+        r = build_report(p)
+        self.assert_fail(r, 'FIELD_TYPE_INVALID')
+        self.assertIn('ROOT_RECONCILED_ASSERTION_REQUIRED', r['reason_codes'])
+        self.assertEqual(r['counts'], 'NOT_PROVIDED')
+
+    def test_root_reconciled_true_is_assertion_only(self):
+        r = self.valid()
+        self.assertEqual(r['report_status'], 'VALID_ASSERTION_AGGREGATE')
+        self.assertEqual(r['external_completeness'], 'UNKNOWN')
+        self.assertEqual(r['independent_proof'], 'UNKNOWN')
+        self.assertEqual(r['freshness'], 'UNKNOWN')
+        self.assertEqual(r['reconciled_scope'],
+                         'internal_partition_only_not_external_completeness')
+
     def test_overflow_refused_fails_closed(self):
         p = planner_fixture()
         p['overflow_refused'] = True
