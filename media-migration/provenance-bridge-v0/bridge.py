@@ -8,7 +8,10 @@ filesystem aliases. Not approved for private or production data.
 INPUT CONTRACT: JSON-compatible values only (dict/list/str/int/bool/None).
 No arbitrary user-defined objects, custom __hash__/__eq__, callables, or other
 Python-specific values are accepted or relied upon. Field names are bounded
-strings; scalar values are bounded by the regexes/limits below.
+strings; scalar values are bounded by the regexes/limits below. Every value
+comparison, hash, string operation and container access is preceded by an exact
+type/length guard (``type(x) is T``, never ``isinstance``), so a hostile object's
+hooks can never be invoked. Malformed input is always fail-closed.
 
 `observed_at` is syntax/calendar-validated only. It is never a freshness,
 recency, clock, or proof signal. MATCHED_METADATA_ASSERTION_ONLY means the
@@ -25,6 +28,7 @@ RESERVED = re.compile(r'(?:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\..*)?', re.I | 
 MAX_ROWS = 10000
 MAX_SIZE = 2**63 - 1
 MAX_FIELD_NAME = 80
+MAX_TIER_LEN = 64
 BINDING_FIELDS = frozenset({'internal_id', 'kind', 'full_id'})
 MEMBER_FIELDS = frozenset({'internal_id','kind','full_id','volume','root','path','index','size','pad','completion','validation','observed_at'})
 STAGED_FIELDS = frozenset({'volume','root','path','size','tier','internal_id','kind','full_id','index'})
@@ -36,7 +40,12 @@ def digest(value, n):
     return type(value) is str and re.fullmatch(r'[0-9a-f]{%d}' % n, value) is not None
 
 def identity(record):
+    """Exact-string kind guard before any comparison; return None fail-closed."""
+    if type(record) is not dict:
+        return None
     kind = record.get('kind')
+    if type(kind) is not str or len(kind) != 2:
+        return None
     if kind == 'v1' and digest(record.get('full_id'), 40):
         return kind, record['full_id']
     if kind == 'v2' and digest(record.get('full_id'), 64):
@@ -51,7 +60,8 @@ def exact_fields(record, expected):
 
     Only JSON-compatible inputs are in contract. An oversized mapping is
     rejected by len() before any key traversal/allocation; a non-string or
-    over-long key is rejected before set() is constructed.
+    over-long key is rejected before set() is constructed. No custom hash or
+    equality hook can run on any field name.
     """
     if type(record) is not dict or len(record) != len(expected):
         return False
@@ -71,6 +81,9 @@ def stamp(value):
         return False
 
 def key(record):
+    """All container/string accesses below are on exact built-in types only."""
+    if type(record) is not dict:
+        return None
     volume, root, path = (record.get(x) for x in ('volume', 'root', 'path'))
     if not token(volume) or not token(root) or type(path) is not str or not 0 < len(path) <= 1024:
         return None
@@ -84,6 +97,8 @@ def classify(bindings, members, staged):
 
     No prefix matching, implicit v2 truncation, hybrid support, disk access, or
     proof promotion. Strictly bounded fixture input of JSON-compatible values.
+    Every compared scalar is type/length-guarded before comparison, so no
+    user-defined equality/hash/str hook can influence a shape-only match.
     Globally reject malformed bindings/member records so incomplete input never
     produces a positive claim. A malformed staged *shape* also globally HOLDs,
     so a malformed neighbor is never silently discarded from duplicate/root/index
@@ -129,6 +144,12 @@ def classify(bindings, members, staged):
         if not exact_fields(s, STAGED_FIELDS):
             return None
         if not token(s.get('internal_id')) or not size(s.get('index')) or not size(s.get('size')):
+            return None
+        # Exact type/bound guards before the later tier comparison and before
+        # identity() compares kind; no host object hook can be reached.
+        if type(s.get('kind')) is not str or type(s.get('full_id')) is not str:
+            return None
+        if type(s.get('tier')) is not str or len(s.get('tier')) > MAX_TIER_LEN:
             return None
         return key(s)
     staged_keys = [staged_shape(s) for s in staged]

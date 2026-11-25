@@ -1,9 +1,17 @@
 import unittest
 from bridge import classify
 
-# All fixtures are JSON-compatible values only (dict/list/str/int/bool/None).
-# No custom objects with __hash__/__eq__ or other Python-specific values are
-# used: the input contract does not assume arbitrary user-defined methods.
+# Fixtures use JSON-compatible values only. Hostile objects below are test-only
+# probes: they assert that no custom __eq__/__ne__/__hash__/__str__/__repr__ hook
+# is ever invoked by the validator, which stays fail-closed on exact-type guards.
+
+class Hostile:
+    hits = []
+    def __eq__(self, other): Hostile.hits.append('eq'); return True
+    def __ne__(self, other): Hostile.hits.append('ne'); return False
+    def __hash__(self): Hostile.hits.append('hash'); return 1
+    def __str__(self): Hostile.hits.append('str'); return 'v1'
+    def __repr__(self): Hostile.hits.append('repr'); return 'v1'
 
 def fixture(n=0, kind='v1'):
     full = format(n+1, '0%dx' % (40 if kind=='v1' else 64))
@@ -24,6 +32,15 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(len(r),len(s))
         self.assertTrue(all(x['status']=='HOLD' and x['content_proof']=='PENDING' and x['authority']=='UNVALIDATED_ASSERTIONS_ONLY' for x in r))
         self.assertTrue(all(x['reason']==reason for x in r),r)
+    def hostile(self,b,m,s,reasons):
+        """Fail-closed result with zero custom-object hook invocations."""
+        allowed = (reasons,) if isinstance(reasons,str) else reasons
+        Hostile.hits.clear()
+        r=classify(b,m,s)
+        self.assertEqual(Hostile.hits, [], 'custom object hook was invoked')
+        self.assertEqual(len(r),len(s))
+        self.assertTrue(all(x['status']=='HOLD' and x['content_proof']=='PENDING' and x['authority']=='UNVALIDATED_ASSERTIONS_ONLY' for x in r))
+        self.assertTrue(all(x['reason'] in allowed for x in r),r)
     def test_v1_v2(self):
         for kind in ('v1','v2'):
             b,m,s=fixture(kind=kind); self.check([b],[m],[s],'MATCHED_METADATA_ASSERTION_ONLY')
@@ -93,7 +110,7 @@ class BridgeTests(unittest.TestCase):
         b,m,s=fixture(); r=classify([b],[m],[s])[0]; self.assertNotIn(s['path'],str(r)); self.assertNotIn(s['full_id'],str(r))
     def test_bound(self):
         with self.assertRaises(ValueError): classify([None]*10001,[],[])
-    # --- reviewed correction regressions (HOLD semantics unchanged) ---
+    # --- previous reviewed corrections (HOLD semantics unchanged) ---
     def test_oversized_binding_dict(self):
         b,m,s=fixture(); self.check([oversized(b)],[m],[s],'INVALID_BINDING')
     def test_oversized_member_dict(self):
@@ -104,8 +121,6 @@ class BridgeTests(unittest.TestCase):
         b,m,s=fixture(); bad=dict(b); del bad['kind']; bad[1]='v1'
         self.check([bad],[m],[s],'INVALID_BINDING')
     def test_malformed_staged_neighbor_global_hold(self):
-        # Same canonical key and member as the good row; malformed shape must
-        # globally HOLD both rather than be dropped so the neighbor matches.
         b,m,s=fixture(); bad=dict(s, size='1024')
         self.check([b],[m],[s,bad],'INVALID_STAGED')
     def test_exact_match_output_preserved(self):
@@ -121,5 +136,35 @@ class BridgeTests(unittest.TestCase):
         self.assertNotIn('freshness',r)
         self.assertNotIn('proof',r)
         self.assertNotIn('observed_at',r)
+    # --- final M1 hostile-object audit regressions ---
+    def test_hostile_kind_binding(self):
+        b,m,s=fixture(); b['kind']=Hostile(); self.hostile([b],[m],[s],'INVALID_BINDING')
+    def test_hostile_kind_member(self):
+        b,m,s=fixture(); m['kind']=Hostile(); self.hostile([b],[m],[s],'INVALID_MEMBER')
+    def test_hostile_kind_staged(self):
+        b,m,s=fixture(); s['kind']=Hostile(); self.hostile([b],[m],[s],'INVALID_STAGED')
+    def test_hostile_tier_staged(self):
+        b,m,s=fixture(); s['tier']=Hostile(); self.hostile([b],[m],[s],'INVALID_STAGED')
+    def test_hostile_compared_scalar_fields_never_invoked(self):
+        b,m,s=fixture()
+        for record, cls, expected in ((b,'binding','INVALID_BINDING'),(m,'member',('INVALID_MEMBER','INVALID_MEMBER_STATE')),(s,'staged','INVALID_STAGED')):
+            for field in tuple(record):
+                bad=dict(record); bad[field]=Hostile()
+                if cls=='binding': self.hostile([bad],[m],[s],expected)
+                elif cls=='member': self.hostile([b],[bad],[s],expected)
+                else: self.hostile([b],[m],[bad],expected)
+    def test_hostile_field_names_never_invoked(self):
+        b,m,s=fixture()
+        for record, cls, expected in ((b,'binding','INVALID_BINDING'),(m,'member','INVALID_MEMBER'),(s,'staged','INVALID_STAGED')):
+            bad=dict(record); del bad[next(iter(bad))]; bad[Hostile()]='v1'
+            if cls=='binding': self.hostile([bad],[m],[s],expected)
+            elif cls=='member': self.hostile([b],[bad],[s],expected)
+            else: self.hostile([b],[m],[bad],expected)
+    def test_valid_fixture_parity(self):
+        Hostile.hits.clear()
+        for kind in ('v1','v2'):
+            b,m,s=fixture(kind=kind)
+            self.assertEqual(classify([b],[m],[s]),[{'status': 'HOLD', 'reason': 'MATCHED_METADATA_ASSERTION_ONLY', 'metadata_claim': True, 'content_proof': 'PENDING', 'authority': 'UNVALIDATED_ASSERTIONS_ONLY'}])
+        self.assertEqual(Hostile.hits, [])
 
 if __name__=='__main__': unittest.main()
