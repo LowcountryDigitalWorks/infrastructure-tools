@@ -137,8 +137,8 @@ $crossVolumeInventoryJson = @"
 # here-strings so the trailing-$ device names stay literal.
 $reservedInventoryJson = @'
 [
- {"source_volume_id":"VOL-SYNTH-A","approved_root_id":"ROOT-A","relative_path":"reserved/conin$.txt/child.bin","size_bytes":100,"excluded":false},
- {"source_volume_id":"VOL-SYNTH-A","approved_root_id":"ROOT-A","relative_path":"reserved/lpt².foo/child.bin","size_bytes":200,"excluded":false},
+ {"source_volume_id":"VOL-SYNTH-B","approved_root_id":"ROOT-A","relative_path":"reserved/conin$.txt/child.bin","size_bytes":100,"excluded":false},
+ {"source_volume_id":"VOL-SYNTH-C","approved_root_id":"ROOT-A","relative_path":"reserved/lpt².foo/child.bin","size_bytes":200,"excluded":false},
  {"source_volume_id":"VOL-SYNTH-A","approved_root_id":"ROOT-A","relative_path":"reserved/dest1.bin","size_bytes":300,"excluded":false},
  {"source_volume_id":"VOL-SYNTH-A","approved_root_id":"ROOT-A","relative_path":"reserved/dest2.bin","size_bytes":400,"excluded":false}
 ]
@@ -251,10 +251,10 @@ $edgeRootsJson = @"
 $edgeInventoryJson = @"
 [
  {"source_volume_id":"VOL-SYNTH-A","approved_root_id":"ROOT-A","relative_path":"edge/a.bin.","size_bytes":100,"excluded":false},
- {"source_volume_id":"VOL-SYNTH-A","approved_root_id":"ROOT-A","relative_path":"edge/b.bin space","size_bytes":200,"excluded":false},
- {"source_volume_id":"VOL-SYNTH-A","approved_root_id":"ROOT-A","relative_path":"edge/.. space","size_bytes":300,"excluded":false},
- {"source_volume_id":"VOL-SYNTH-A","approved_root_id":"ROOT-A","relative_path":"edge/CON.txt/child.bin","size_bytes":400,"excluded":false},
- {"source_volume_id":"VOL-SYNTH-A","approved_root_id":"ROOT-A","relative_path":"edge/lpt9.foo/child.bin","size_bytes":500,"excluded":false},
+ {"source_volume_id":"VOL-SYNTH-B","approved_root_id":"ROOT-A","relative_path":"edge/b.bin\u0020","size_bytes":200,"excluded":false},
+ {"source_volume_id":"VOL-SYNTH-C","approved_root_id":"ROOT-A","relative_path":"edge/..\u0020","size_bytes":300,"excluded":false},
+ {"source_volume_id":"VOL-SYNTH-D","approved_root_id":"ROOT-A","relative_path":"edge/CON.txt/child.bin","size_bytes":400,"excluded":false},
+ {"source_volume_id":"VOL-SYNTH-E","approved_root_id":"ROOT-A","relative_path":"edge/lpt9.foo/child.bin","size_bytes":500,"excluded":false},
  {"source_volume_id":"VOL-SYNTH-A","approved_root_id":"ROOT-A","relative_path":"edge/miss.bin","size_bytes":600},
  {"source_volume_id":"VOL-SYNTH-A","approved_root_id":"ROOT-A","relative_path":"edge/null.bin","size_bytes":700,"excluded":null},
  {"source_volume_id":"VOL-SYNTH-A","approved_root_id":"ROOT-A","relative_path":"edge/destalias.bin","size_bytes":800,"excluded":false},
@@ -347,6 +347,26 @@ Assert-D0Coverage ($wb.FULLY_VERIFIED.count -eq 0) 'WIN_RESERVED_NO_PROMOTION'
 Assert-D0Coverage ((Get-ReasonCount $w 'MALFORMED_SOURCE_KEY') -eq 2) 'WIN_RESERVED_SOURCE_ALIASES'
 Assert-D0Coverage ((Get-ReasonCount $w 'MISSING_DESTINATION') -eq 2) 'WIN_RESERVED_DEST_ALIASES'
 Assert-D0Coverage ($w.fail_closed -eq $true) 'WIN_RESERVED_FAIL_CLOSED'
+
+# ---------- Positive control: literal interior spaces are valid lexical shape ----------
+# The word `space` below is literal text, NOT a trailing-space alias. These rows must
+# keep a non-empty normalized source key and must never be refused as Windows aliases.
+$interiorSpaceInventoryJson = @'
+[
+ {"source_volume_id":"VOL-SYNTH-A","approved_root_id":"ROOT-A","relative_path":"edge/b.bin space","size_bytes":100,"excluded":false},
+ {"source_volume_id":"VOL-SYNTH-A","approved_root_id":"ROOT-A","relative_path":"edge/.. space","size_bytes":200,"excluded":false}
+]
+'@
+$interiorSpaceInventory = $interiorSpaceInventoryJson | ConvertFrom-Json
+$sp = Get-LdwMediaCoverage -Inventory $interiorSpaceInventory -ApprovedRoots $roots -Proofs @()
+$spb = $sp.buckets
+Assert-D0Coverage ($sp.input_files -eq 2) 'INTERIOR_SPACE_INPUT_FILES'
+Assert-D0Coverage ($sp.input_bytes -eq 300) 'INTERIOR_SPACE_INPUT_BYTES'
+Assert-D0Coverage ((Get-ReasonCount $sp 'MALFORMED_SOURCE_KEY') -eq 0) 'INTERIOR_SPACE_NOT_ALIAS_REFUSAL'
+Assert-D0Coverage (@($sp.entries | Where-Object { ($_.source_key.Split([char]31))[2] -eq '' }).Count -eq 0) 'INTERIOR_SPACE_NONEMPTY_KEY'
+Assert-D0Coverage ($spb.UNKNOWN_OR_AMBIGUOUS_TORRENT.count -eq 2) 'INTERIOR_SPACE_NO_PROOF_UNKNOWN'
+Assert-D0Coverage ($spb.FULLY_VERIFIED.count -eq 0) 'INTERIOR_SPACE_NO_PROMOTION'
+Assert-D0Coverage ($sp.reconciled -eq $true) 'INTERIOR_SPACE_RECONCILED'
 
 # ---------- Determinism ----------
 $r2 = Get-LdwMediaCoverage -Inventory $inventory -ApprovedRoots $roots -Proofs $proofs
